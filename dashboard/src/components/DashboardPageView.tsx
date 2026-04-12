@@ -34,9 +34,8 @@ import {
   StreakWidget,
 } from "./dashboard/ExtraWidgets";
 import HealthWidget from "./dashboard/HealthWidget";
-import RateLimitWidget from "./dashboard/RateLimitWidget";
-import ReceiptWidget from "./dashboard/ReceiptWidget";
 import { DEPT_COLORS, useNow, type TFunction } from "./dashboard/model";
+import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 
@@ -342,10 +341,14 @@ export default function DashboardPageView({
 
         <div className="space-y-4 min-w-0">
           <HealthWidget t={t} />
-          <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
-          <ReceiptWidget t={t} />
         </div>
       </div>
+
+      <TokenAnalyticsSection
+        t={t}
+        numberFormatter={numberFormatter}
+        onOpenSettings={onOpenSettings}
+      />
 
       <section className="space-y-4">
         <SectionHeader

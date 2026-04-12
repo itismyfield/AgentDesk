@@ -1786,6 +1786,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
         ep(
             "GET",
+            "/api/token-analytics",
+            "analytics",
+            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns",
+        )
+        .with_params([(
+            "period",
+            ParamDoc {
+                location: "query",
+                kind: "string",
+                required: false,
+                description: "Analytics window",
+                enum_values: None,
+                default: None,
+            }
+            .with_enum(&["7d", "30d", "90d"])
+            .with_default("30d"),
+        )]),
+        ep(
+            "GET",
             "/api/skills-trend",
             "analytics",
             "Skill usage trend by day",

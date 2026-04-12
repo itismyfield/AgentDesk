@@ -8,12 +8,13 @@ import type {
   Office,
   DispatchedSession,
   DashboardStats,
+  TokenAnalyticsResponse,
   RoundTableMeeting,
   SkillCatalogEntry,
   TaskDispatch,
 } from "../types";
 
-export type { AuditLogEntry, KanbanCard, KanbanRepoSource } from "../types";
+export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsResponse } from "../types";
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -408,6 +409,10 @@ export async function createDispatch(body: {
 export async function getStats(officeId?: string): Promise<DashboardStats> {
   const q = officeId ? `?officeId=${officeId}` : "";
   return request(`/api/stats${q}`);
+}
+
+export async function getTokenAnalytics(period: "7d" | "30d" | "90d" = "30d"): Promise<TokenAnalyticsResponse> {
+  return request(`/api/token-analytics?period=${period}`);
 }
 
 // ── Kanban & Dispatches ──

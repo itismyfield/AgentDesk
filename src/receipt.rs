@@ -1,6 +1,6 @@
 //! Token usage receipt: JSONL log parsing, cost calculation, and HTML rendering.
 
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -65,9 +65,64 @@ pub struct AgentShare {
     pub percentage: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenAnalyticsData {
+    pub period: String,
+    pub period_label: String,
+    pub days: u32,
+    pub generated_at: String,
+    pub summary: TokenAnalyticsSummary,
+    pub receipt: ReceiptData,
+    pub daily: Vec<DailyTokenUsage>,
+    pub heatmap: Vec<TokenHeatmapCell>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenAnalyticsSummary {
+    pub total_tokens: u64,
+    pub total_cost: f64,
+    pub cache_discount: f64,
+    pub total_messages: u64,
+    pub total_sessions: u64,
+    pub active_days: u32,
+    pub average_daily_tokens: u64,
+    pub peak_day: Option<TokenPeakDay>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenPeakDay {
+    pub date: String,
+    pub total_tokens: u64,
+    pub cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyTokenUsage {
+    pub date: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_tokens: u64,
+    pub cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenHeatmapCell {
+    pub date: String,
+    pub week_index: usize,
+    pub weekday: u32,
+    pub total_tokens: u64,
+    pub cost: f64,
+    pub level: u8,
+    pub future: bool,
+}
+
 // ── Internal types ─────────────────────────────────────────────
 
+#[derive(Clone)]
 struct UsageRecord {
+    timestamp: DateTime<Utc>,
     model: String,
     input_tokens: u64,
     output_tokens: u64,
@@ -75,6 +130,7 @@ struct UsageRecord {
     cache_creation_tokens: u64,
     provider: String,
     agent: String,
+    session_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -84,6 +140,15 @@ struct ModelAccum {
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
     provider: String,
+}
+
+#[derive(Default)]
+struct DailyAccum {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cost: f64,
 }
 
 struct Pricing {
@@ -150,6 +215,25 @@ fn no_cache_cost(acc: &ModelAccum, p: &Pricing) -> f64 {
     all_input as f64 * p.input_per_m / 1e6 + acc.output_tokens as f64 * p.output_per_m / 1e6
 }
 
+fn record_total_tokens(record: &UsageRecord) -> u64 {
+    record.input_tokens
+        + record.output_tokens
+        + record.cache_read_tokens
+        + record.cache_creation_tokens
+}
+
+fn record_cost(record: &UsageRecord) -> f64 {
+    let pricing = pricing_for(&record.model);
+    let acc = ModelAccum {
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        cache_read_tokens: record.cache_read_tokens,
+        cache_creation_tokens: record.cache_creation_tokens,
+        provider: record.provider.clone(),
+    };
+    actual_cost(&acc, &pricing)
+}
+
 fn parse_codex_usage(v: &Value) -> Option<CodexTokenUsage> {
     Some(CodexTokenUsage {
         input_tokens: v.get("input_tokens")?.as_u64()?,
@@ -182,8 +266,15 @@ fn codex_usage_delta(
     }
 }
 
-fn codex_usage_record(model: String, agent: String, usage: CodexTokenUsage) -> UsageRecord {
+fn codex_usage_record(
+    model: String,
+    agent: String,
+    session_id: Option<String>,
+    timestamp: DateTime<Utc>,
+    usage: CodexTokenUsage,
+) -> UsageRecord {
     UsageRecord {
+        timestamp,
         model,
         input_tokens: usage.input_tokens.saturating_sub(usage.cached_input_tokens),
         output_tokens: usage.output_tokens,
@@ -191,6 +282,7 @@ fn codex_usage_record(model: String, agent: String, usage: CodexTokenUsage) -> U
         cache_creation_tokens: 0,
         provider: "Codex".into(),
         agent,
+        session_id,
     }
 }
 
@@ -461,6 +553,7 @@ fn parse_claude(
         }
 
         let rec = UsageRecord {
+            timestamp: ts,
             model: model.into(),
             input_tokens: usage
                 .get("input_tokens")
@@ -480,6 +573,7 @@ fn parse_claude(
                 .unwrap_or(0),
             provider: "Claude".into(),
             agent: agent_name.clone().unwrap_or_else(|| "claude".into()),
+            session_id: sid.clone(),
         };
 
         // Use requestId to deduplicate — last entry wins (cumulative usage)
@@ -513,6 +607,7 @@ fn parse_codex(
     // final total to recover that turn's actual usage.
     let mut previous_total: Option<CodexTokenUsage> = None;
     let mut pending_total: Option<CodexTokenUsage> = None;
+    let mut pending_timestamp: Option<DateTime<Utc>> = None;
 
     let Ok(file) = fs::File::open(path) else {
         return (records, 0, None);
@@ -559,10 +654,13 @@ fn parse_codex(
                     records.push(codex_usage_record(
                         current_model.clone(),
                         agent_name.clone().unwrap_or_else(|| "codex".into()),
+                        sid.clone(),
+                        pending_timestamp.take().unwrap_or_else(Utc::now),
                         delta,
                     ));
                 }
             }
+            pending_timestamp = None;
             if let Some(m) = v
                 .get("payload")
                 .and_then(|p| p.get("model"))
@@ -606,6 +704,7 @@ fn parse_codex(
 
         // Overwrite the turn's pending total — only the final in-range snapshot matters.
         pending_total = Some(total_usage);
+        pending_timestamp = Some(ts);
     }
     if let Some(total) = pending_total.take() {
         let delta = codex_usage_delta(total, previous_total);
@@ -613,6 +712,8 @@ fn parse_codex(
             records.push(codex_usage_record(
                 current_model,
                 agent_name.unwrap_or_else(|| "codex".into()),
+                sid.clone(),
+                pending_timestamp.unwrap_or_else(Utc::now),
                 delta,
             ));
         }
@@ -656,49 +757,54 @@ pub fn ratelimit_window_start(conn: &rusqlite::Connection) -> Option<DateTime<Ut
 
 // ── Collection entry point ─────────────────────────────────────
 
-pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> ReceiptData {
+fn scan_usage_records(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<UsageRecord> {
     let home = dirs::home_dir().unwrap_or_default();
     let claude_files = find_jsonl(&home.join(".claude").join("projects"));
     let codex_files = find_jsonl(&home.join(".codex").join("sessions"));
     let ws_map = build_workspace_map();
 
     let mut all: Vec<UsageRecord> = Vec::new();
-    let mut total_msgs = 0u64;
-    let mut sessions = HashSet::new();
-
-    // Per-provider stats tracking
-    let mut prov_msgs: HashMap<String, u64> = HashMap::new();
-    let mut prov_sessions: HashMap<String, HashSet<String>> = HashMap::new();
 
     for f in &claude_files {
-        let (recs, msgs, sid) = parse_claude(f, start, end, &ws_map);
-        if !recs.is_empty() {
-            total_msgs += msgs;
-            *prov_msgs.entry("Claude".into()).or_default() += msgs;
-            if let Some(s) = sid {
-                sessions.insert(s.clone());
-                prov_sessions.entry("Claude".into()).or_default().insert(s);
-            }
-            all.extend(recs);
-        }
+        let (recs, _, _) = parse_claude(f, start, end, &ws_map);
+        all.extend(recs);
     }
     for f in &codex_files {
-        let (recs, msgs, sid) = parse_codex(f, start, end, &ws_map);
-        if !recs.is_empty() {
-            total_msgs += msgs;
-            *prov_msgs.entry("Codex".into()).or_default() += msgs;
-            if let Some(s) = sid {
-                sessions.insert(s.clone());
-                prov_sessions.entry("Codex".into()).or_default().insert(s);
-            }
-            all.extend(recs);
+        let (recs, _, _) = parse_codex(f, start, end, &ws_map);
+        all.extend(recs);
+    }
+    all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    all
+}
+
+fn build_receipt_data(
+    records: &[UsageRecord],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    period_label: &str,
+) -> ReceiptData {
+    let mut total_msgs = 0u64;
+    let mut sessions = HashSet::new();
+    let mut prov_msgs: HashMap<String, u64> = HashMap::new();
+    let mut prov_sessions: HashMap<String, HashSet<String>> = HashMap::new();
+    for record in records {
+        total_msgs += 1;
+        *prov_msgs.entry(record.provider.clone()).or_default() += 1;
+        if let Some(session_id) = record.session_id.as_ref().filter(|value| !value.is_empty()) {
+            sessions.insert(session_id.clone());
+            prov_sessions
+                .entry(record.provider.clone())
+                .or_default()
+                .insert(session_id.clone());
         }
     }
 
     // Aggregate by model
-    let mut map: HashMap<String, ModelAccum> = HashMap::new();
-    for r in &all {
-        let acc = map.entry(r.model.clone()).or_default();
+    let mut map: HashMap<(String, String), ModelAccum> = HashMap::new();
+    for r in records {
+        let acc = map
+            .entry((r.provider.clone(), r.model.clone()))
+            .or_default();
         acc.input_tokens += r.input_tokens;
         acc.output_tokens += r.output_tokens;
         acc.cache_read_tokens += r.cache_read_tokens;
@@ -711,8 +817,8 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
     // Sort by cost descending
     let mut entries: Vec<_> = map.into_iter().collect();
     entries.sort_by(|a, b| {
-        let ca = actual_cost(&a.1, &pricing_for(&a.0));
-        let cb = actual_cost(&b.1, &pricing_for(&b.0));
+        let ca = actual_cost(&a.1, &pricing_for(&a.0.1));
+        let cb = actual_cost(&b.1, &pricing_for(&b.0.1));
         cb.partial_cmp(&ca).unwrap_or(cmp::Ordering::Equal)
     });
 
@@ -720,7 +826,7 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
     let mut grand_sub = 0.0f64;
     let mut grand_total = 0.0f64;
 
-    for (model, acc) in &entries {
+    for ((provider, model), acc) in &entries {
         let p = pricing_for(model);
         let cost = actual_cost(acc, &p);
         let sub = no_cache_cost(acc, &p);
@@ -739,7 +845,7 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
                 + acc.cache_creation_tokens,
             cost,
             cost_without_cache: sub,
-            provider: acc.provider.clone(),
+            provider: provider.clone(),
         });
     }
 
@@ -747,19 +853,11 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
     // Key: (agent, provider) → (tokens, cost)
     let mut ap_tokens: HashMap<(String, String), u64> = HashMap::new();
     let mut ap_costs: HashMap<(String, String), f64> = HashMap::new();
-    for r in &all {
-        let tok = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
+    for r in records {
+        let tok = record_total_tokens(r);
         let key = (r.agent.clone(), r.provider.clone());
         *ap_tokens.entry(key.clone()).or_default() += tok;
-        let p = pricing_for(&r.model);
-        let acc = ModelAccum {
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            cache_read_tokens: r.cache_read_tokens,
-            cache_creation_tokens: r.cache_creation_tokens,
-            provider: String::new(),
-        };
-        *ap_costs.entry(key).or_default() += actual_cost(&acc, &p);
+        *ap_costs.entry(key).or_default() += record_cost(r);
     }
     // Collapse to per-agent for the combined receipt
     let mut agent_tokens: HashMap<String, u64> = HashMap::new();
@@ -880,6 +978,192 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
             },
         },
         providers,
+    }
+}
+
+fn build_daily_usage(
+    records: &[UsageRecord],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Vec<DailyTokenUsage> {
+    let start_date = start.with_timezone(&Local).date_naive();
+    let end_date = end.with_timezone(&Local).date_naive();
+    let mut by_date: HashMap<chrono::NaiveDate, DailyAccum> = HashMap::new();
+
+    for record in records {
+        let day = record.timestamp.with_timezone(&Local).date_naive();
+        if day < start_date || day > end_date {
+            continue;
+        }
+        let entry = by_date.entry(day).or_default();
+        entry.input_tokens += record.input_tokens;
+        entry.output_tokens += record.output_tokens;
+        entry.cache_read_tokens += record.cache_read_tokens;
+        entry.cache_creation_tokens += record.cache_creation_tokens;
+        entry.cost += record_cost(record);
+    }
+
+    let mut daily = Vec::new();
+    let days = (end_date - start_date).num_days();
+    for offset in 0..=days {
+        let day = start_date + Duration::days(offset);
+        let accum = by_date.remove(&day).unwrap_or_default();
+        daily.push(DailyTokenUsage {
+            date: day.format("%Y-%m-%d").to_string(),
+            input_tokens: accum.input_tokens,
+            output_tokens: accum.output_tokens,
+            cache_read_tokens: accum.cache_read_tokens,
+            cache_creation_tokens: accum.cache_creation_tokens,
+            total_tokens: accum.input_tokens
+                + accum.output_tokens
+                + accum.cache_read_tokens
+                + accum.cache_creation_tokens,
+            cost: accum.cost,
+        });
+    }
+    daily
+}
+
+fn heatmap_level(value: u64, quantiles: &[u64; 3]) -> u8 {
+    if value == 0 {
+        0
+    } else if value <= quantiles[0] {
+        1
+    } else if value <= quantiles[1] {
+        2
+    } else if value <= quantiles[2] {
+        3
+    } else {
+        4
+    }
+}
+
+fn build_heatmap(records: &[UsageRecord], end: DateTime<Utc>) -> Vec<TokenHeatmapCell> {
+    let end_date = end.with_timezone(&Local).date_naive();
+    let week_start = end_date - Duration::days(end_date.weekday().num_days_from_monday() as i64);
+    let start_date = week_start - Duration::days(12 * 7);
+    let mut by_date: HashMap<chrono::NaiveDate, (u64, f64)> = HashMap::new();
+
+    for record in records {
+        let day = record.timestamp.with_timezone(&Local).date_naive();
+        if day < start_date || day > week_start + Duration::days(6) {
+            continue;
+        }
+        let entry = by_date.entry(day).or_insert((0, 0.0));
+        entry.0 += record_total_tokens(record);
+        entry.1 += record_cost(record);
+    }
+
+    let mut positive = Vec::new();
+    for week in 0..13 {
+        for weekday in 0..7 {
+            let day = start_date + Duration::days((week * 7 + weekday) as i64);
+            if day <= end_date {
+                positive.push(by_date.get(&day).map(|value| value.0).unwrap_or(0));
+            }
+        }
+    }
+    positive.retain(|value| *value > 0);
+    positive.sort_unstable();
+    let quantiles = if positive.is_empty() {
+        [0, 0, 0]
+    } else {
+        let last = positive.len() - 1;
+        [
+            positive[last / 4],
+            positive[(last * 2) / 4],
+            positive[(last * 3) / 4],
+        ]
+    };
+
+    let mut cells = Vec::with_capacity(91);
+    for week in 0..13 {
+        for weekday in 0..7 {
+            let day = start_date + Duration::days((week * 7 + weekday) as i64);
+            let future = day > end_date;
+            let (tokens, cost) = by_date.get(&day).copied().unwrap_or((0, 0.0));
+            cells.push(TokenHeatmapCell {
+                date: day.format("%Y-%m-%d").to_string(),
+                week_index: week,
+                weekday: weekday as u32,
+                total_tokens: if future { 0 } else { tokens },
+                cost: if future { 0.0 } else { cost },
+                level: if future {
+                    0
+                } else {
+                    heatmap_level(tokens, &quantiles)
+                },
+                future,
+            });
+        }
+    }
+    cells
+}
+
+pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> ReceiptData {
+    let records = scan_usage_records(start, end);
+    build_receipt_data(&records, start, end, period_label)
+}
+
+pub fn collect_token_analytics(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    period_label: &str,
+    period: &str,
+) -> TokenAnalyticsData {
+    let end_date = end.with_timezone(&Local).date_naive();
+    let heatmap_week_start =
+        end_date - Duration::days(end_date.weekday().num_days_from_monday() as i64);
+    let heatmap_start_local = heatmap_week_start - Duration::days(12 * 7);
+    let heatmap_start = Local
+        .from_local_datetime(&heatmap_start_local.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|| start - Duration::days(84));
+
+    let records = scan_usage_records(heatmap_start, end);
+    let filtered: Vec<UsageRecord> = records
+        .iter()
+        .filter(|record| record.timestamp >= start)
+        .cloned()
+        .collect();
+    let receipt = build_receipt_data(&filtered, start, end, period_label);
+    let daily = build_daily_usage(&filtered, start, end);
+    let active_days = daily.iter().filter(|day| day.total_tokens > 0).count() as u32;
+    let total_tokens: u64 = receipt.models.iter().map(|model| model.total_tokens).sum();
+    let average_daily_tokens = if daily.is_empty() {
+        0
+    } else {
+        total_tokens / daily.len() as u64
+    };
+    let peak_day = daily.iter().max_by(|left, right| {
+        left.total_tokens
+            .cmp(&right.total_tokens)
+            .then_with(|| left.date.cmp(&right.date))
+    });
+
+    TokenAnalyticsData {
+        period: period.to_string(),
+        period_label: period_label.to_string(),
+        days: daily.len() as u32,
+        generated_at: end.with_timezone(&Local).to_rfc3339(),
+        summary: TokenAnalyticsSummary {
+            total_tokens,
+            total_cost: receipt.total,
+            cache_discount: receipt.cache_discount,
+            total_messages: receipt.stats.total_messages,
+            total_sessions: receipt.stats.total_sessions,
+            active_days,
+            average_daily_tokens,
+            peak_day: peak_day.map(|day| TokenPeakDay {
+                date: day.date.clone(),
+                total_tokens: day.total_tokens,
+                cost: day.cost,
+            }),
+        },
+        receipt,
+        daily,
+        heatmap: build_heatmap(&records, end),
     }
 }
 

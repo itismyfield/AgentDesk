@@ -42,6 +42,7 @@ export {
   getAgentSkills,
   getSkillRanking,
   getHealth,
+  getTokenAnalytics,
   getDiscordBindings,
   getCronJobs,
   getMachineStatus,
@@ -134,6 +135,7 @@ export type {
   HealthResponse,
   HealthProviderStatus,
   HealthDispatchOutboxStats,
+  TokenAnalyticsResponse,
   TimelineEvent,
   PipelineConfigResponse,
 } from "./client";
