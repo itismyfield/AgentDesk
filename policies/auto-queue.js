@@ -2,9 +2,13 @@ function _autoQueueHasValue(value) {
   return value !== null && value !== undefined && !(typeof value === "string" && value.trim() === "");
 }
 
+function _autoQueueLogContextKeys() {
+  return ["run_id", "entry_id", "card_id", "dispatch_id", "thread_group", "batch_phase", "slot_index", "agent_id"];
+}
+
 function _mergeAutoQueueLogContext(target, source) {
   if (!source) return target;
-  var keys = ["run_id", "entry_id", "card_id", "dispatch_id", "thread_group", "batch_phase", "slot_index"];
+  var keys = _autoQueueLogContextKeys();
   for (var i = 0; i < keys.length; i++) {
     var key = keys[i];
     if (!_autoQueueHasValue(target[key]) && _autoQueueHasValue(source[key])) {
@@ -17,7 +21,7 @@ function _mergeAutoQueueLogContext(target, source) {
 function _loadAutoQueueEntryLogContext(entryId) {
   if (!_autoQueueHasValue(entryId)) return null;
   var rows = agentdesk.db.query(
-    "SELECT run_id, id as entry_id, kanban_card_id as card_id, dispatch_id, " +
+    "SELECT run_id, id as entry_id, kanban_card_id as card_id, dispatch_id, agent_id, " +
     "COALESCE(thread_group, 0) as thread_group, COALESCE(batch_phase, 0) as batch_phase, slot_index " +
     "FROM auto_queue_entries WHERE id = ? LIMIT 1",
     [entryId]
@@ -35,7 +39,10 @@ function _loadAutoQueueDispatchLogContext(dispatchId) {
     "td.id as dispatch_id, " +
     "COALESCE(e.thread_group, CAST(json_extract(COALESCE(td.context, '{}'), '$.thread_group') AS INTEGER)) as thread_group, " +
     "COALESCE(e.batch_phase, CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
-    "COALESCE(e.slot_index, CAST(json_extract(COALESCE(td.context, '{}'), '$.slot_index') AS INTEGER)) as slot_index " +
+    "COALESCE(e.slot_index, CAST(json_extract(COALESCE(td.context, '{}'), '$.slot_index') AS INTEGER)) as slot_index, " +
+    "COALESCE(e.agent_id, json_extract(COALESCE(td.context, '{}'), '$.agent_id'), " +
+    "json_extract(COALESCE(td.context, '{}'), '$.target_agent_id'), " +
+    "json_extract(COALESCE(td.context, '{}'), '$.source_agent_id')) as agent_id " +
     "FROM task_dispatches td " +
     "LEFT JOIN auto_queue_entries e ON e.dispatch_id = td.id " +
     "WHERE td.id = ? LIMIT 1",
@@ -46,21 +53,23 @@ function _loadAutoQueueDispatchLogContext(dispatchId) {
 
 function _normalizeAutoQueueLogContext(context) {
   var merged = {};
+  var hydratedEntryId = null;
   _mergeAutoQueueLogContext(merged, context || {});
   if (_autoQueueHasValue(merged.entry_id)) {
+    hydratedEntryId = merged.entry_id;
     _mergeAutoQueueLogContext(merged, _loadAutoQueueEntryLogContext(merged.entry_id));
   }
   if (_autoQueueHasValue(merged.dispatch_id)) {
     _mergeAutoQueueLogContext(merged, _loadAutoQueueDispatchLogContext(merged.dispatch_id));
   }
-  if (_autoQueueHasValue(merged.entry_id)) {
+  if (_autoQueueHasValue(merged.entry_id) && merged.entry_id !== hydratedEntryId) {
     _mergeAutoQueueLogContext(merged, _loadAutoQueueEntryLogContext(merged.entry_id));
   }
   return merged;
 }
 
 function _formatAutoQueueLogContext(context) {
-  var orderedKeys = ["run_id", "entry_id", "card_id", "dispatch_id", "thread_group", "batch_phase", "slot_index"];
+  var orderedKeys = _autoQueueLogContextKeys();
   var parts = [];
   for (var i = 0; i < orderedKeys.length; i++) {
     var key = orderedKeys[i];

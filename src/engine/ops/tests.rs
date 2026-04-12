@@ -585,6 +585,99 @@ fn test_review_entry_slice_blocks_raw_db_reintroduction() {
     );
 }
 
+#[test]
+fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('ag-queue', 'Queue Agent', '111', '222')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ('card-log', 'Queue Card', 'in_progress', 'ag-queue', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-log', 'itismyfield/AgentDesk', 'ag-queue', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 'implementation', 'dispatched', 'Queue Dispatch', ?4, datetime('now'), datetime('now'))",
+            rusqlite::params![
+                "dispatch-log",
+                "card-log",
+                "ag-queue",
+                r#"{"entry_id":"entry-log","agent_id":"ag-queue"}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status, thread_group, batch_phase, slot_index) \
+             VALUES ('entry-log', 'run-log', 'card-log', 'ag-queue', 'dispatch-log', 'dispatched', 2, 3, 4)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js");
+    let policy = fs::read_to_string(&policy_path).expect("auto-queue policy must be readable");
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let _: rquickjs::Value = ctx.eval(r#"agentdesk.registerPolicy = function(_) {};"#).unwrap();
+        let _: rquickjs::Value = ctx.eval(policy.as_str()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                (function() {
+                    var tracked = [];
+                    var originalQuery = agentdesk.db.query;
+                    agentdesk.db.query = function(sql, params) {
+                        if (sql.indexOf("FROM auto_queue_entries") >= 0 || sql.indexOf("FROM task_dispatches") >= 0) {
+                            tracked.push(sql);
+                        }
+                        return originalQuery.call(agentdesk.db, sql, params);
+                    };
+
+                    var ctx = _normalizeAutoQueueLogContext({
+                        entry_id: "entry-log",
+                        dispatch_id: "dispatch-log"
+                    });
+
+                    return JSON.stringify({
+                        ctx: ctx,
+                        query_count: tracked.length,
+                        formatted: _formatAutoQueueLogContext(ctx)
+                    });
+                })()
+                "#,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["ctx"]["agent_id"], "ag-queue");
+        assert_eq!(parsed["ctx"]["run_id"], "run-log");
+        assert_eq!(parsed["ctx"]["thread_group"], 2);
+        assert_eq!(parsed["query_count"], 2);
+
+        let formatted = parsed["formatted"].as_str().unwrap_or("");
+        assert!(
+            formatted.contains("agent_id=ag-queue"),
+            "formatted context must include agent_id: {formatted}"
+        );
+    });
+}
+
 /// #128: JS setStatus("in_progress") sets started_at.
 /// With pipeline coalesce mode: preserves existing started_at.
 /// Without pipeline (fallback): resets to now.
