@@ -39,9 +39,12 @@ pub enum EntryStatusUpdateError {
 #[derive(Debug, Clone)]
 struct EntryStatusRow {
     run_id: String,
+    card_id: String,
     status: String,
     dispatch_id: Option<String>,
     slot_index: Option<i64>,
+    thread_group: i64,
+    batch_phase: i64,
     completed_at: Option<String>,
 }
 
@@ -54,9 +57,20 @@ pub fn update_entry_status_on_conn(
 ) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
     let current = load_entry_status_row(conn, entry_id)?;
     let normalized = normalize_entry_status(new_status)?;
+    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+        .run(&current.run_id)
+        .entry(entry_id)
+        .card(&current.card_id)
+        .maybe_dispatch(current.dispatch_id.as_deref())
+        .thread_group(current.thread_group)
+        .batch_phase(current.batch_phase)
+        .maybe_slot_index(current.slot_index);
 
     if !is_allowed_entry_transition(&current.status, normalized) {
-        tracing::warn!(
+        crate::auto_queue_log!(
+            warn,
+            "entry_status_transition_blocked",
+            log_ctx.clone(),
             "[auto-queue] blocked invalid entry transition {} {} -> {} (source: {})",
             entry_id,
             current.status,
@@ -677,7 +691,7 @@ pub fn first_pending_entry_for_group(
     run_id: &str,
     thread_group: i64,
     current_phase: Option<i64>,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, i64)> {
     let mut stmt = conn
         .prepare(
             "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)
@@ -700,8 +714,12 @@ pub fn first_pending_entry_for_group(
     .and_then(|rows| {
         rows.filter_map(|row| row.ok())
             .find_map(|(entry_id, card_id, agent_id, batch_phase)| {
-                batch_phase_is_eligible(batch_phase, current_phase)
-                    .then_some((entry_id, card_id, agent_id))
+                batch_phase_is_eligible(batch_phase, current_phase).then_some((
+                    entry_id,
+                    card_id,
+                    agent_id,
+                    batch_phase,
+                ))
             })
     })
 }
@@ -886,17 +904,27 @@ fn load_entry_status_row(
     entry_id: &str,
 ) -> Result<EntryStatusRow, EntryStatusUpdateError> {
     conn.query_row(
-        "SELECT run_id, status, dispatch_id, slot_index, completed_at
+        "SELECT run_id,
+                kanban_card_id,
+                status,
+                dispatch_id,
+                slot_index,
+                COALESCE(thread_group, 0),
+                COALESCE(batch_phase, 0),
+                completed_at
          FROM auto_queue_entries
          WHERE id = ?1",
         [entry_id],
         |row| {
             Ok(EntryStatusRow {
                 run_id: row.get(0)?,
-                status: row.get(1)?,
-                dispatch_id: row.get(2)?,
-                slot_index: row.get(3)?,
-                completed_at: row.get(4)?,
+                card_id: row.get(1)?,
+                status: row.get(2)?,
+                dispatch_id: row.get(3)?,
+                slot_index: row.get(4)?,
+                thread_group: row.get(5)?,
+                batch_phase: row.get(6)?,
+                completed_at: row.get(7)?,
             })
         },
     )
@@ -981,7 +1009,10 @@ pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result
     }
 
     if let Err(error) = queue_run_completion_notify_on_conn(conn, run_id) {
-        tracing::warn!(
+        crate::auto_queue_log!(
+            warn,
+            "run_completion_notify_failed",
+            crate::services::auto_queue::AutoQueueLogContext::new().run(run_id),
             "[auto-queue] failed to queue completion notify for run {}: {}",
             run_id,
             error
