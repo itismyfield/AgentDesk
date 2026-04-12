@@ -22,6 +22,10 @@ cargo build
 # Build (release — optimized for size, LTO enabled)
 cargo build --release
 
+# Runtime build/promotion entrypoint (release only)
+./scripts/build-release.sh
+./scripts/promote-release.sh
+
 # Run the server (loads agentdesk.yaml from working dir or ~/.agentdesk/)
 cargo run
 
@@ -32,10 +36,13 @@ cd dashboard && npm run build                # production build → dist/
 
 # Dashboard deploy (IMPORTANT: server serves from dashboard/dist/, NOT dashboard/)
 scripts/deploy-dashboard.sh release           # build + deploy to ~/.adk/release/dashboard/dist/
-scripts/deploy-dashboard.sh dev               # build + symlink to ~/.adk/dev/dashboard/dist/
 ```
 
 **Dashboard deploy path**: The server serves static files from `$RUNTIME_ROOT/dashboard/dist/` (see `src/server/mod.rs`). Never copy build output to `dashboard/` root — always target `dashboard/dist/`.
+
+**Runtime policy**: release only. Do not use `scripts/deploy-dev.sh` as a build or restart entrypoint, and do not start `dcserver` from `~/.adk/dev`. `scripts/deploy-dev.sh` is a cleanup shim for removing stray dev artifacts.
+
+**Signing guidance**: local operators may use ad-hoc signing during release promotion when Developer ID signing is unavailable, and should clear `com.apple.quarantine` on promoted macOS artifacts when needed. Keep signing policy in deploy scripts and operator docs, not hardcoded in Rust source.
 
 ## CLI Subcommands
 

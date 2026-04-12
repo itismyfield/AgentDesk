@@ -154,8 +154,6 @@ home_dir="${{HOME:-{home_dir}}}"
 candidates=(
   "$home_dir/.adk/release/bin/agentdesk"
   "$home_dir/.adk/release/agentdesk"
-  "$home_dir/.adk/dev/bin/agentdesk"
-  "$home_dir/.adk/dev/agentdesk"
 )
 
 for candidate in "${{candidates[@]}}"; do
@@ -892,11 +890,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn agentdesk_cli_wrapper_script_prefers_release_before_dev() {
+    fn agentdesk_cli_wrapper_script_uses_release_only_candidates() {
         let script = agentdesk_cli_wrapper_script(Path::new("/tmp/agentdesk-home"));
-        let release_idx = script.find(".adk/release/bin/agentdesk").unwrap();
-        let dev_idx = script.find(".adk/dev/bin/agentdesk").unwrap();
-        assert!(release_idx < dev_idx);
+        assert!(script.contains(".adk/release/bin/agentdesk"));
+        assert!(script.contains(".adk/release/agentdesk"));
+        assert!(!script.contains(".adk/dev/bin/agentdesk"));
         assert!(script.contains("exec \"$candidate\" \"$@\""));
     }
 

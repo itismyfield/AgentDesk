@@ -297,6 +297,18 @@ fn save_runtime_bot_settings(token: &str, settings: &DiscordBotSettings) {
         return;
     };
 
+    let yaml_manages_bot = config_path_for_write()
+        .map(|config_path| {
+            let config = if config_path.is_file() {
+                crate::config::load_from_path(&config_path).unwrap_or_default()
+            } else {
+                crate::config::Config::default()
+            };
+            resolved_config_bot_name(&config, token).is_some()
+        })
+        .unwrap_or(false);
+    let legacy_metadata =
+        find_bot_settings_entry(obj, token).and_then(|(_, entry)| entry.as_object().cloned());
     let key = discord_token_hash(token);
     obj.retain(|existing_key, existing_entry| {
         if existing_key == &key {
@@ -309,13 +321,92 @@ fn save_runtime_bot_settings(token: &str, settings: &DiscordBotSettings) {
             .unwrap_or(true)
     });
 
-    if !settings.channel_model_overrides.is_empty() {
-        obj.insert(
-            key,
-            serde_json::json!({
-                "channel_model_overrides": settings.channel_model_overrides,
-            }),
+    if yaml_manages_bot {
+        if !settings.channel_model_overrides.is_empty() {
+            obj.insert(
+                key,
+                serde_json::json!({
+                    "channel_model_overrides": settings.channel_model_overrides,
+                }),
+            );
+        }
+    } else {
+        let mut entry = legacy_metadata.unwrap_or_default();
+        entry.insert("token".to_string(), serde_json::json!(token));
+        entry.insert(
+            "provider".to_string(),
+            serde_json::json!(settings.provider.as_str()),
         );
+        match settings
+            .agent
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(agent) => {
+                entry.insert("agent".to_string(), serde_json::json!(agent));
+            }
+            None => {
+                entry.remove("agent");
+            }
+        }
+        if settings.allowed_channel_ids.is_empty() {
+            entry.remove("allowed_channel_ids");
+        } else {
+            entry.insert(
+                "allowed_channel_ids".to_string(),
+                serde_json::json!(settings.allowed_channel_ids),
+            );
+        }
+        if settings.allowed_user_ids.is_empty() {
+            entry.remove("allowed_user_ids");
+        } else {
+            entry.insert(
+                "allowed_user_ids".to_string(),
+                serde_json::json!(settings.allowed_user_ids),
+            );
+        }
+        if settings.allowed_bot_ids.is_empty() {
+            entry.remove("allowed_bot_ids");
+        } else {
+            entry.insert(
+                "allowed_bot_ids".to_string(),
+                serde_json::json!(settings.allowed_bot_ids),
+            );
+        }
+        if settings.allowed_tools.is_empty() {
+            entry.remove("allowed_tools");
+        } else {
+            entry.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(normalize_allowed_tools(&settings.allowed_tools)),
+            );
+        }
+        if settings.allow_all_users {
+            entry.insert("allow_all_users".to_string(), serde_json::json!(true));
+        } else {
+            entry.remove("allow_all_users");
+        }
+        match settings.owner_user_id {
+            Some(owner_user_id) => {
+                entry.insert(
+                    "owner_user_id".to_string(),
+                    serde_json::json!(owner_user_id),
+                );
+            }
+            None => {
+                entry.remove("owner_user_id");
+            }
+        }
+        if settings.channel_model_overrides.is_empty() {
+            entry.remove("channel_model_overrides");
+        } else {
+            entry.insert(
+                "channel_model_overrides".to_string(),
+                serde_json::json!(settings.channel_model_overrides),
+            );
+        }
+        obj.insert(key, serde_json::Value::Object(entry));
     }
 
     if obj.is_empty() {
@@ -527,7 +618,10 @@ fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u6
 }
 
 fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
-    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         None => None,
         Some(value) if value.eq_ignore_ascii_case("auto") => Some("auto"),
         Some(value) if value.eq_ignore_ascii_case("file") => Some("file"),
@@ -607,7 +701,10 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
 }
 
 fn resolve_mem0_profile(raw: Option<&str>) -> String {
-    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+    match raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         None => DEFAULT_MEM0_PROFILE.to_string(),
         Some(value)
             if KNOWN_MEM0_PROFILES
@@ -2358,6 +2455,72 @@ agents:
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.owner_user_id, Some(42));
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_preserves_legacy_launch_metadata_without_yaml_match() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "legacy-token";
+            let key = discord_token_hash(token);
+            let path = settings_dir.join("bot_settings.json");
+            let json = serde_json::json!({
+                "legacy_alias": {
+                    "token": token,
+                    "provider": "codex",
+                    "agent": "codex",
+                    "allowed_channel_ids": [123],
+                    "owner_user_id": 7
+                }
+            });
+            fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+            let mut settings = load_bot_settings(token);
+            settings
+                .channel_model_overrides
+                .insert("123".to_string(), "gpt-5.4".to_string());
+            save_bot_settings(token, &settings);
+
+            let raw = fs::read_to_string(&path).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let entry = saved.get(&key).unwrap();
+            assert_eq!(
+                entry.get("token").and_then(|value| value.as_str()),
+                Some(token)
+            );
+            assert_eq!(
+                entry.get("provider").and_then(|value| value.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                entry.get("agent").and_then(|value| value.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                entry
+                    .get("allowed_channel_ids")
+                    .and_then(|value| value.as_array())
+                    .map(|ids| ids.len()),
+                Some(1)
+            );
+            assert_eq!(
+                entry.get("owner_user_id").and_then(|value| value.as_u64()),
+                Some(7)
+            );
+            assert_eq!(
+                entry
+                    .get("channel_model_overrides")
+                    .and_then(|value| value.get("123"))
+                    .and_then(|value| value.as_str()),
+                Some("gpt-5.4")
+            );
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].token, token);
+            assert_eq!(configs[0].provider, ProviderKind::Codex);
         });
     }
 
