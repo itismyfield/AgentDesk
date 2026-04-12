@@ -792,4 +792,17 @@ mod tests {
         assert!(!prompt.contains("`search_memory`"));
         assert!(!prompt.contains("`add_memories`"));
     }
+
+    #[test]
+    fn test_shared_prompt_declares_discord_response_style_rules() {
+        let shared_prompt = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("config/agents/_shared.prompt.md"),
+        )
+        .expect("shared prompt file should exist");
+
+        assert!(shared_prompt.contains("## Discord Response Style"));
+        assert!(shared_prompt.contains("`⏳ 대기 중...`"));
+        assert!(shared_prompt.contains("raw 로그, JSON, 반복 출력은 그대로 덤프하지 않는다"));
+    }
 }
