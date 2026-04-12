@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import * as api from "../../api";
 import { localeName } from "../../i18n";
@@ -291,7 +291,10 @@ export default function PipelineVisualEditor({
   }
 
   const selectedAgentName = selectedAgentLabel(agents, locale, selectedAgentId);
-  const graph = pipelineDraft ? buildPipelineGraph(pipelineDraft, compactGraph) : null;
+  const graph = useMemo(
+    () => (pipelineDraft ? buildPipelineGraph(pipelineDraft, compactGraph) : null),
+    [compactGraph, pipelineDraft],
+  );
   const selectedState =
     selection?.kind === "state" && pipelineDraft
       ? pipelineDraft.states.find((state) => state.id === selection.stateId) ?? null
@@ -304,12 +307,24 @@ export default function PipelineVisualEditor({
     selection?.kind === "transition" ? selection.index : -1;
   const selectedTransitionGates = selectedTransition?.gates ?? [];
 
+  const pipelineDraftSignature = useMemo(
+    () => (pipelineDraft ? JSON.stringify(pipelineDraft) : null),
+    [pipelineDraft],
+  );
+  const savedPipelineSignature = useMemo(
+    () => (savedPipeline ? JSON.stringify(savedPipeline) : null),
+    [savedPipeline],
+  );
+  const stageDraftSignature = useMemo(() => JSON.stringify(stageDrafts), [stageDrafts]);
+  const savedStageDraftSignature = useMemo(
+    () => JSON.stringify(savedStageDrafts),
+    [savedStageDrafts],
+  );
   const pipelineChanged =
-    !!pipelineDraft &&
-    !!savedPipeline &&
-    JSON.stringify(pipelineDraft) !== JSON.stringify(savedPipeline);
-  const stagesChanged =
-    JSON.stringify(stageDrafts) !== JSON.stringify(savedStageDrafts);
+    pipelineDraftSignature !== null &&
+    savedPipelineSignature !== null &&
+    pipelineDraftSignature !== savedPipelineSignature;
+  const stagesChanged = stageDraftSignature !== savedStageDraftSignature;
   const activeLayers = [
     layers.default ? "default" : null,
     layers.repo ? "repo" : null,

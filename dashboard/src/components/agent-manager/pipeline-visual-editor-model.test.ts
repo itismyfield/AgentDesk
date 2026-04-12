@@ -165,4 +165,52 @@ describe("pipeline-visual-editor-model", () => {
     expect(desktop.columns).toBe(4);
     expect(desktop.nodes[1].x).toBeGreaterThan(desktop.nodes[0].x);
   });
+
+  it("routes upward transitions from the source top edge", () => {
+    const pipeline = makePipeline();
+    pipeline.transitions.push({
+      from: "review",
+      to: "in_progress",
+      type: "gated",
+      gates: ["review_passed"],
+    });
+
+    const graph = buildPipelineGraph(pipeline, false);
+    const edge = graph.edges.at(-1);
+    const fromNode = graph.nodes.find((node) => node.id === "review");
+    const toNode = graph.nodes.find((node) => node.id === "in_progress");
+
+    expect(edge).toBeTruthy();
+    expect(fromNode).toBeTruthy();
+    expect(toNode).toBeTruthy();
+    expect(edge?.path.startsWith(`M ${fromNode!.x + fromNode!.width / 2} ${fromNode!.y}`)).toBe(
+      true,
+    );
+    expect(
+      edge?.path.endsWith(`${toNode!.x + toNode!.width / 2} ${toNode!.y + toNode!.height}`),
+    ).toBe(true);
+    expect(edge?.labelY).toBeLessThan(fromNode!.y);
+  });
+
+  it("renders self-loop transitions as looped bezier paths", () => {
+    const pipeline = makePipeline();
+    pipeline.transitions.push({
+      from: "review",
+      to: "review",
+      type: "free",
+      gates: [],
+    });
+
+    const graph = buildPipelineGraph(pipeline, false);
+    const edge = graph.edges.at(-1);
+    const reviewNode = graph.nodes.find((node) => node.id === "review");
+
+    expect(edge).toBeTruthy();
+    expect(reviewNode).toBeTruthy();
+    expect(edge?.path.split("C")).toHaveLength(3);
+    expect(edge?.path.endsWith(`${reviewNode!.x + reviewNode!.width / 2} ${reviewNode!.y}`)).toBe(
+      true,
+    );
+    expect(edge?.labelY).toBeLessThan(reviewNode!.y);
+  });
 });
