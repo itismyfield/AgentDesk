@@ -6016,10 +6016,10 @@ async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
     assert_eq!(entry_status, "dispatched");
 }
 
-/// #162: A card in 'backlog' (non-dispatchable) state must be silently walked
-/// to the dispatchable state via free transitions before dispatch creation.
-/// The walk must use the canonical reducer path (ApplyClock, AuditLog, etc.)
-/// and NOT raw SQL.
+/// #162/#500: A card in 'backlog' (non-dispatchable) state must be walked
+/// to the dispatchable state via canonical transitions before dispatch creation.
+/// The walk must preserve the same requested-state hook side-effects as a
+/// manual transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     crate::pipeline::ensure_loaded();
@@ -6032,6 +6032,13 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
 
     {
         let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET description = ?1
+             WHERE id = 'card-walk-bl'",
+            ["DoD: keep auto-queue walk hook parity and preserve activation behavior."],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
              VALUES ('run-walk', 'test-repo', 'agent-walk', 'active')",
@@ -6096,6 +6103,112 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     assert_eq!(
         dispatch_count, 1,
         "exactly one dispatch must be created for the walked card"
+    );
+
+    let metadata: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = 'card-walk-bl'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata_json: serde_json::Value =
+        serde_json::from_str(metadata.as_deref().expect("walk must persist metadata")).unwrap();
+    assert_eq!(
+        metadata_json["preflight_status"], "clear",
+        "requested-state preflight hook must run during auto-queue walk"
+    );
+}
+
+/// #500: If the requested-state hook decides the card is already applied,
+/// activate() must respect that side-effect instead of creating a new dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_walk_respects_requested_hook_skip() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-walk-skip");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-walk-skip", 1632, "backlog", "agent-walk-skip");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at, completed_at
+            ) VALUES (
+                'dispatch-walk-skip', 'card-walk-skip', 'agent-walk-skip', 'implementation', 'completed',
+                'Existing implementation', datetime('now'), datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-walk-skip', 'test-repo', 'agent-walk-skip', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-walk-skip', 'run-walk-skip', 'card-walk-skip', 'agent-walk-skip', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "agent_id": "agent-walk-skip",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 0,
+        "activate must not create a new dispatch when requested-state preflight skips the card"
+    );
+
+    let conn = db.lock().unwrap();
+    let (card_status, entry_status): (String, String) = conn
+        .query_row(
+            "SELECT
+                (SELECT status FROM kanban_cards WHERE id = 'card-walk-skip'),
+                (SELECT status FROM auto_queue_entries WHERE id = 'entry-walk-skip')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(card_status, "done");
+    assert_eq!(entry_status, "skipped");
+
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-walk-skip'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dispatch_count, 1,
+        "hook-driven skip must not create an additional dispatch"
     );
 }
 
