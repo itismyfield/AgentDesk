@@ -209,36 +209,80 @@ pub(super) fn create_git_worktree(
     Ok((wt_path, branch))
 }
 
-/// Clean up a git worktree after session ends.
-pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
-    let ts = chrono::Local::now().format("%H:%M:%S");
+fn git_upstream_base_ref(repo_path: &str) -> String {
+    let check = std::process::Command::new("git")
+        .args(["-C", repo_path, "rev-parse", "--verify", "origin/main"])
+        .output();
+    if let Ok(out) = check
+        && out.status.success()
+    {
+        return "origin/main".to_string();
+    }
+    "main".to_string()
+}
 
+fn worktree_has_local_changes(wt_info: &WorktreeInfo) -> Result<bool, String> {
     let status = std::process::Command::new("git")
         .args(["-C", &wt_info.worktree_path, "status", "--porcelain"])
-        .output();
-    let has_changes = match &status {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => false,
-    };
+        .output()
+        .map_err(|e| format!("git status failed: {e}"))?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr).trim().to_string();
+        return Err(format!("git status failed: {stderr}"));
+    }
+    Ok(!status.stdout.is_empty())
+}
 
-    // Check if branch has new commits
+fn worktree_has_unmerged_commits(wt_info: &WorktreeInfo) -> Result<bool, String> {
+    let base_ref = git_upstream_base_ref(&wt_info.original_path);
     let diff = std::process::Command::new("git")
         .args([
             "-C",
             &wt_info.original_path,
             "log",
             "--oneline",
-            &format!("HEAD..{}", wt_info.branch_name),
+            &format!("{base_ref}..{}", wt_info.branch_name),
         ])
-        .output();
-    let has_commits = match &diff {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => false,
+        .output()
+        .map_err(|e| format!("git log failed: {e}"))?;
+    if !diff.status.success() {
+        let stderr = String::from_utf8_lossy(&diff.stderr).trim().to_string();
+        return Err(format!("git log failed: {stderr}"));
+    }
+    Ok(!diff.stdout.is_empty())
+}
+
+/// Clean up a git worktree after session ends.
+pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+
+    let has_changes = match worktree_has_local_changes(wt_info) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "  [{ts}] ⚠ Could not inspect worktree {} for cleanup: {} — preserving",
+                wt_info.worktree_path,
+                err
+            );
+            return;
+        }
+    };
+
+    let has_commits = match worktree_has_unmerged_commits(wt_info) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "  [{ts}] ⚠ Could not inspect branch {} for cleanup: {} — preserving",
+                wt_info.branch_name,
+                err
+            );
+            return;
+        }
     };
 
     if has_changes || has_commits {
         tracing::info!(
-            "  [{ts}] 🌿 Worktree {} has changes/commits — keeping for manual merge",
+            "  [{ts}] 🌿 Worktree {} has changes/unmerged commits — preserving until merge cleanup",
             wt_info.worktree_path
         );
         tracing::info!(
@@ -678,6 +722,55 @@ pub(super) async fn resolve_thread_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(repo_dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {}", args, e));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn branch_exists(repo_dir: &Path, branch: &str) -> bool {
+        Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(repo_dir)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn setup_git_repo_with_origin() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        run_git(origin.path(), &["init", "--bare"]);
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        (repo, origin)
+    }
 
     #[test]
     fn synthetic_thread_channel_name_round_trips() {
@@ -760,5 +853,130 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("/db/workspace"));
+    }
+
+    #[test]
+    fn cleanup_git_worktree_preserves_branch_until_origin_main_contains_commit() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-543");
+        let branch = "wt/fix-543";
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &worktree_dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fix: preserve worktree (#543)",
+            ],
+        );
+
+        // Simulate local main advancing before auto-merge pushes to origin.
+        run_git(repo_dir, &["merge", "--ff-only", branch]);
+
+        cleanup_git_worktree(&WorktreeInfo {
+            original_path: repo_dir.to_string_lossy().to_string(),
+            worktree_path: worktree_dir.to_string_lossy().to_string(),
+            branch_name: branch.to_string(),
+        });
+
+        assert!(worktree_dir.exists(), "worktree should be preserved");
+        assert!(
+            branch_exists(repo_dir, branch),
+            "branch should stay until origin/main contains it"
+        );
+    }
+
+    #[test]
+    fn cleanup_git_worktree_removes_branch_once_origin_main_contains_commit() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-merged");
+        let branch = "wt/fix-merged";
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &worktree_dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fix: merged worktree (#543)",
+            ],
+        );
+        run_git(repo_dir, &["merge", "--ff-only", branch]);
+        run_git(repo_dir, &["push", "origin", "main"]);
+
+        cleanup_git_worktree(&WorktreeInfo {
+            original_path: repo_dir.to_string_lossy().to_string(),
+            worktree_path: worktree_dir.to_string_lossy().to_string(),
+            branch_name: branch.to_string(),
+        });
+
+        assert!(
+            !worktree_dir.exists(),
+            "merged worktree should be cleaned up"
+        );
+        assert!(
+            !branch_exists(repo_dir, branch),
+            "merged branch should be deleted after cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_git_worktree_preserves_when_git_inspection_fails() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-inspect-fail");
+        let branch = "wt/fix-inspect-fail";
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+
+        cleanup_git_worktree(&WorktreeInfo {
+            original_path: repo_dir
+                .join("missing-parent")
+                .to_string_lossy()
+                .to_string(),
+            worktree_path: worktree_dir.to_string_lossy().to_string(),
+            branch_name: branch.to_string(),
+        });
+
+        assert!(
+            worktree_dir.exists(),
+            "worktree should remain when cleanup cannot verify merge state"
+        );
+        assert!(
+            branch_exists(repo_dir, branch),
+            "branch should remain when cleanup cannot verify merge state"
+        );
     }
 }
