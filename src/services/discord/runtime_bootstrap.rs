@@ -497,6 +497,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         api_port,
         db,
         engine,
+        health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
     });
 

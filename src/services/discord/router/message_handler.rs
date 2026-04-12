@@ -65,6 +65,62 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
+async fn send_restore_notification(
+    shared: &Arc<SharedData>,
+    fallback_http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    restored_session_id: Option<&str>,
+) {
+    let sid_full = restored_session_id.unwrap_or("?");
+    let sid_short: String = sid_full.chars().take(8).collect();
+    let restore_msg = format!(
+        "📋 세션 복원: {} (session: {})",
+        provider.as_str(),
+        sid_short
+    );
+
+    if let Some(registry) = shared.health_registry() {
+        match super::super::health::resolve_bot_http(registry.as_ref(), "notify").await {
+            Ok(notify_http) => match channel_id.say(&*notify_http, &restore_msg).await {
+                Ok(_) => return,
+                Err(err) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ Restore notify send failed in channel {}: {} — falling back to provider bot",
+                        channel_id,
+                        err
+                    );
+                }
+            },
+            Err((status, body)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ Restore notify bot unavailable in channel {}: {} {} — falling back to provider bot",
+                    channel_id,
+                    status,
+                    body
+                );
+            }
+        }
+    } else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ Restore notify bot unavailable in channel {}: health registry dropped — falling back to provider bot",
+            channel_id
+        );
+    }
+
+    if let Err(err) = channel_id.say(fallback_http, &restore_msg).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ Restore fallback send failed in channel {}: {}",
+            channel_id,
+            err
+        );
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DispatchContextHints {
     worktree_path: Option<String>,
@@ -647,14 +703,14 @@ pub(in crate::services::discord) async fn handle_text_message(
                 }
                 memento_context_loaded = true;
                 // Notify: session restored — send immediately (before agent response)
-                let sid_full = restored.as_deref().unwrap_or("?");
-                let sid_short: String = sid_full.chars().take(8).collect();
-                let restore_msg = format!(
-                    "📋 세션 복원: {} (session: {})",
-                    provider.as_str(),
-                    sid_short
-                );
-                let _ = channel_id.say(&ctx.http, &restore_msg).await;
+                send_restore_notification(
+                    shared,
+                    &ctx.http,
+                    channel_id,
+                    &provider,
+                    restored.as_deref(),
+                )
+                .await;
             }
             session_id = restored;
         }

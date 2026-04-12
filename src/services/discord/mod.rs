@@ -450,6 +450,9 @@ pub(super) struct SharedData {
     pub(super) db: Option<crate::db::Db>,
     /// Shared policy engine for direct dispatch finalization.
     pub(super) engine: Option<crate::engine::PolicyEngine>,
+    /// Weak reference to the process-wide health registry so turn handlers can
+    /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
+    pub(super) health_registry: std::sync::Weak<health::HealthRegistry>,
     /// Set of registered slash command names (populated at framework setup).
     /// Used by the router to distinguish known slash commands from arbitrary
     /// `/`-prefixed user text that should fall through to the AI provider.
@@ -459,6 +462,10 @@ pub(super) struct SharedData {
 impl SharedData {
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
+    }
+
+    fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
+        self.health_registry.upgrade()
     }
 }
 
