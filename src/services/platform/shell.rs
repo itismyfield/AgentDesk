@@ -390,6 +390,18 @@ pub fn git_branch_name(dir: &str) -> Option<String> {
         .filter(|s| s != "HEAD") // detached HEAD → None
 }
 
+/// Resolve the merge-base SHA between two refs in a git directory.
+pub fn git_merge_base(dir: &str, base_ref: &str, other_ref: &str) -> Option<String> {
+    Command::new("git")
+        .args(["merge-base", base_ref, other_ref])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Worktree info: (path, branch, commit).
 #[derive(Clone)]
 pub struct WorktreeInfo {
@@ -896,6 +908,39 @@ mod tests {
 
         let found = find_latest_commit_for_issue(repo_dir, 269).unwrap();
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn git_merge_base_returns_branch_fork_point_when_main_has_advanced() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let fork_point = git_head_commit(repo_dir).unwrap();
+
+        let wt_dir = repo.path().join("wt-542");
+        let wt_path = wt_dir.to_str().unwrap();
+        Command::new("git")
+            .args(["worktree", "add", "-b", "wt/fix-542", wt_path])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "fix: branch-only change"])
+            .current_dir(wt_path)
+            .output()
+            .unwrap();
+        let branch_commit = git_head_commit(wt_path).unwrap();
+
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "chore: main advanced"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let main_commit = git_head_commit(repo_dir).unwrap();
+
+        let merge_base = git_merge_base(repo_dir, "main", "wt/fix-542").unwrap();
+        assert_eq!(merge_base, fork_point);
+        assert_ne!(merge_base, branch_commit);
+        assert_ne!(merge_base, main_commit);
     }
 
     #[test]
