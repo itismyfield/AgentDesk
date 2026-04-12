@@ -148,6 +148,24 @@ pub fn update_entry_status_on_conn(
         _ => unreachable!(),
     }
 
+    if normalized == ENTRY_STATUS_DISPATCHED {
+        if let Some(previous_dispatch_id) = current
+            .dispatch_id
+            .as_deref()
+            .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
+        {
+            record_entry_dispatch_history_on_conn(
+                conn,
+                entry_id,
+                previous_dispatch_id,
+                trigger_source,
+            )?;
+        }
+        if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+            record_entry_dispatch_history_on_conn(conn, entry_id, dispatch_id, trigger_source)?;
+        }
+    }
+
     record_entry_transition_on_conn(conn, entry_id, &current.status, normalized, trigger_source)?;
 
     if matches!(normalized, ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED) {
@@ -161,6 +179,35 @@ pub fn update_entry_status_on_conn(
         to_status: normalized.to_string(),
         changed: true,
     })
+}
+
+fn record_entry_dispatch_history_on_conn(
+    conn: &Connection,
+    entry_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
+            entry_id, dispatch_id, trigger_source
+        ) VALUES (?1, ?2, ?3)",
+        rusqlite::params![entry_id, dispatch_id, trigger_source],
+    )?;
+    Ok(())
+}
+
+pub fn list_entry_dispatch_history(
+    conn: &Connection,
+    entry_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT dispatch_id
+         FROM auto_queue_entry_dispatch_history
+         WHERE entry_id = ?1
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([entry_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1133,7 +1180,7 @@ fn append_card_filters(
 mod tests {
     use super::{
         ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, EntryStatusUpdateError,
-        EntryStatusUpdateOptions, update_entry_status_on_conn,
+        EntryStatusUpdateOptions, list_entry_dispatch_history, update_entry_status_on_conn,
     };
     use rusqlite::Connection;
 
@@ -1161,6 +1208,14 @@ mod tests {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 dispatched_at DATETIME,
                 completed_at DATETIME
+            );
+            CREATE TABLE auto_queue_entry_dispatch_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id TEXT NOT NULL,
+                dispatch_id TEXT NOT NULL,
+                trigger_source TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(entry_id, dispatch_id)
             );
             CREATE TABLE auto_queue_slots (
                 agent_id TEXT NOT NULL,
@@ -1328,6 +1383,53 @@ mod tests {
         assert!(dispatch_id.is_none());
         assert!(slot_index.is_none());
         assert!(completed_at.is_none());
+    }
+
+    #[test]
+    fn entry_dispatch_history_preserves_previous_dispatch_ids() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-history', 'run-1', 'card-history', 'agent-1', 'pending', 0)",
+            [],
+        )
+        .expect("seed entry");
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-history",
+            ENTRY_STATUS_DISPATCHED,
+            "test_dispatch_initial",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-consult".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("initial dispatch");
+        update_entry_status_on_conn(
+            &conn,
+            "entry-history",
+            ENTRY_STATUS_DISPATCHED,
+            "test_dispatch_resume",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-impl".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("resumed dispatch");
+
+        let history = list_entry_dispatch_history(&conn, "entry-history").expect("history");
+        assert_eq!(history, vec!["dispatch-consult", "dispatch-impl"]);
+
+        let current_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("current dispatch");
+        assert_eq!(current_dispatch_id.as_deref(), Some("dispatch-impl"));
     }
 
     #[test]

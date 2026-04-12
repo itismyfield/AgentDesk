@@ -829,10 +829,24 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             trigger_source  TEXT NOT NULL,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        TEXT NOT NULL REFERENCES auto_queue_entries(id) ON DELETE CASCADE,
+            dispatch_id     TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            trigger_source  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entry_id, dispatch_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
             ON auto_queue_entry_transitions(entry_id);
         CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
-            ON auto_queue_entry_transitions(created_at);",
+            ON auto_queue_entry_transitions(created_at);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_entry
+            ON auto_queue_entry_dispatch_history(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_dispatch
+            ON auto_queue_entry_dispatch_history(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_created
+            ON auto_queue_entry_dispatch_history(created_at);",
     )?;
 
     ensure_auto_queue_column(
@@ -884,6 +898,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
     )?;
     backfill_auto_queue_dispatch_ids(conn)?;
+    backfill_auto_queue_dispatch_history(conn)?;
     ensure_auto_queue_column(
         conn,
         "auto_queue_entries",
@@ -989,6 +1004,57 @@ fn backfill_auto_queue_dispatch_ids(conn: &Connection) -> Result<()> {
               ORDER BY e.created_at DESC LIMIT 1
           );",
     )?;
+    Ok(())
+}
+
+fn backfill_auto_queue_dispatch_history(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
+            entry_id, dispatch_id, trigger_source, created_at
+        )
+        SELECT
+            id,
+            dispatch_id,
+            'schema_backfill_current',
+            COALESCE(dispatched_at, created_at, CURRENT_TIMESTAMP)
+        FROM auto_queue_entries
+        WHERE NULLIF(TRIM(dispatch_id), '') IS NOT NULL;",
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, context, created_at
+         FROM task_dispatches
+         WHERE NULLIF(TRIM(COALESCE(context, '')), '') IS NOT NULL",
+    )?;
+    let dispatches = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+
+    for dispatch in dispatches {
+        let (dispatch_id, context_raw, created_at) = dispatch?;
+        let Ok(context) = serde_json::from_str::<serde_json::Value>(&context_raw) else {
+            continue;
+        };
+        let Some(entry_id) = context
+            .get("entry_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        conn.execute(
+            "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
+                entry_id, dispatch_id, trigger_source, created_at
+            ) VALUES (?1, ?2, 'schema_backfill_context', COALESCE(?3, CURRENT_TIMESTAMP))",
+            rusqlite::params![entry_id, dispatch_id, created_at],
+        )?;
+    }
+
     Ok(())
 }
 

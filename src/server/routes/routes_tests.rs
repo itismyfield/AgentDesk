@@ -3180,6 +3180,14 @@ fn ensure_auto_queue_tables(db: &Db) {
             thread_group    INTEGER DEFAULT 0,
             batch_phase     INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        TEXT NOT NULL,
+            dispatch_id     TEXT NOT NULL,
+            trigger_source  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entry_id, dispatch_id)
+        );
         CREATE TABLE IF NOT EXISTS auto_queue_slots (
             agent_id              TEXT NOT NULL,
             slot_index            INTEGER NOT NULL,

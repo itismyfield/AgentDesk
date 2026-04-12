@@ -72,6 +72,45 @@ fn dispatch_context_worktree_target(
     Ok(Some((path.to_string(), branch)))
 }
 
+fn resolve_parent_dispatch_context(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    context: &serde_json::Value,
+) -> Result<(Option<String>, i64)> {
+    let Some(parent_dispatch_id) =
+        json_string_field(context, "parent_dispatch_id").filter(|value| !value.is_empty())
+    else {
+        return Ok((None, 0));
+    };
+
+    let Some((parent_card_id, parent_chain_depth)) = conn
+        .query_row(
+            "SELECT kanban_card_id, COALESCE(chain_depth, 0)
+             FROM task_dispatches
+             WHERE id = ?1",
+            [parent_dispatch_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    else {
+        anyhow::bail!(
+            "Cannot create dispatch for card {}: parent_dispatch_id '{}' not found",
+            card_id,
+            parent_dispatch_id
+        );
+    };
+
+    if parent_card_id.as_deref() != Some(card_id) {
+        anyhow::bail!(
+            "Cannot create dispatch for card {}: parent_dispatch_id '{}' belongs to a different card",
+            card_id,
+            parent_dispatch_id
+        );
+    }
+
+    Ok((Some(parent_dispatch_id.to_string()), parent_chain_depth + 1))
+}
+
 fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
     let resolved_branch = branch
         .map(str::to_string)
@@ -896,6 +935,9 @@ fn create_dispatch_core_internal(
         }
     }
 
+    let (parent_dispatch_id, chain_depth) =
+        resolve_parent_dispatch_context(&conn, kanban_card_id, context)?;
+
     let context_str = if dispatch_type == "review" {
         build_review_context(db, kanban_card_id, to_agent_id, context)?
     } else {
@@ -976,6 +1018,8 @@ fn create_dispatch_core_internal(
         &effective,
         title,
         &context_str,
+        parent_dispatch_id.as_deref(),
+        chain_depth,
         options,
     )?;
 
@@ -1357,6 +1401,8 @@ fn apply_dispatch_attached_intents(
     effective: &crate::pipeline::PipelineConfig,
     title: &str,
     context_str: &str,
+    parent_dispatch_id: Option<&str>,
+    chain_depth: i64,
     options: DispatchCreateOptions,
 ) -> Result<()> {
     use crate::engine::transition::{
@@ -1407,9 +1453,21 @@ fn apply_dispatch_attached_intents(
     let exec_result = (|| -> anyhow::Result<()> {
         // Insert dispatch row inside the transaction (#155 review fix)
         if let Err(e) = conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, datetime('now'), datetime('now'))",
-            rusqlite::params![dispatch_id, card_id, to_agent_id, dispatch_type, title, context_str],
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                parent_dispatch_id, chain_depth, created_at, updated_at
+            )
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
+            rusqlite::params![
+                dispatch_id,
+                card_id,
+                to_agent_id,
+                dispatch_type,
+                title,
+                context_str,
+                parent_dispatch_id,
+                chain_depth
+            ],
         ) {
             if dispatch_type == "review-decision"
                 && e.to_string().contains("UNIQUE constraint failed")
@@ -2192,6 +2250,14 @@ mod tests {
                 dispatch_id TEXT,
                 dispatched_at DATETIME,
                 completed_at DATETIME
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id TEXT NOT NULL,
+                dispatch_id TEXT NOT NULL,
+                trigger_source TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(entry_id, dispatch_id)
             );",
         )
         .unwrap();

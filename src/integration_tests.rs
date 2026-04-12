@@ -845,6 +845,14 @@ mod tests {
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
                 dispatched_at   DATETIME,
                 completed_at    DATETIME
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id        TEXT NOT NULL,
+                dispatch_id     TEXT NOT NULL,
+                trigger_source  TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(entry_id, dispatch_id)
             );",
         )
         .unwrap();
@@ -4061,17 +4069,21 @@ mod tests {
         assert_eq!(metadata["preflight_status"], "clear");
         assert_eq!(metadata["deps"], "#42");
 
-        let (dispatch_type, dispatch_status): (String, String) = {
+        let (dispatch_type, dispatch_status, parent_dispatch_id): (String, String, Option<String>) = {
             let conn = db.lock().unwrap();
             conn.query_row(
-                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                "SELECT dispatch_type, status, parent_dispatch_id FROM task_dispatches WHERE id = ?1",
                 rusqlite::params![latest_dispatch_id.clone()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
         };
         assert_eq!(dispatch_type, "implementation");
         assert_eq!(dispatch_status, "pending");
+        assert_eq!(
+            parent_dispatch_id.as_deref(),
+            Some(consultation_id.as_str())
+        );
 
         let (entry_status, entry_dispatch_id): (String, String) = {
             let conn = db.lock().unwrap();
@@ -4084,6 +4096,23 @@ mod tests {
         };
         assert_eq!(entry_status, "dispatched");
         assert_eq!(entry_dispatch_id, latest_dispatch_id);
+
+        let history: Vec<String> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT dispatch_id
+                     FROM auto_queue_entry_dispatch_history
+                     WHERE entry_id = 'entry-consult-clear'
+                     ORDER BY id ASC",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|row| row.ok())
+                .collect()
+        };
+        assert_eq!(history, vec![consultation_id, latest_dispatch_id]);
     }
 
     #[cfg(unix)]
