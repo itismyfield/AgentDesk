@@ -32,34 +32,17 @@ pub async fn list_repos(State(_state): State<AppState>) -> Json<serde_json::Valu
     }
 
     // viewer login
-    let viewer_login = match github::run_gh(&["api", "user", "--jq", ".login"]) {
-        Ok(s) => s.trim().to_string(),
+    let viewer_login = match github::viewer_login() {
+        Ok(value) => value,
         Err(_) => "unknown".to_string(),
     };
 
     // repos
-    let repos = match github::run_gh(&[
-        "api",
-        "user/repos",
-        "--paginate",
-        "--jq",
-        r#"[.[] | {nameWithOwner: .full_name, updatedAt: .updated_at, isPrivate: .private, viewerPermission: .permissions.admin}]"#,
-    ]) {
-        Ok(raw) => {
-            // gh --paginate with --jq outputs one JSON array per page, separated by newlines.
-            // Merge them into a single array.
-            let mut all: Vec<serde_json::Value> = Vec::new();
-            for line in raw.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(line) {
-                    all.extend(arr);
-                }
-            }
-            serde_json::Value::Array(all)
-        }
+    let repos = match github::list_dashboard_repos() {
+        Ok(repos) => match serde_json::to_value(repos) {
+            Ok(value) => value,
+            Err(_) => serde_json::Value::Array(vec![]),
+        },
         Err(_) => serde_json::Value::Array(vec![]),
     };
 
@@ -99,20 +82,11 @@ pub async fn list_issues(
     let state_filter = params.state.unwrap_or_else(|| "open".to_string());
     let limit = params.limit.unwrap_or(20);
 
-    let issues = match github::run_gh(&[
-        "issue",
-        "list",
-        "--repo",
-        &repo,
-        "--state",
-        &state_filter,
-        "--limit",
-        &limit.to_string(),
-        "--json",
-        "number,title,body,state,url,labels,assignees,createdAt,updatedAt",
-    ]) {
-        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
-            .unwrap_or(serde_json::Value::Array(vec![])),
+    let issues = match github::list_issue_summaries(&repo, &state_filter, limit) {
+        Ok(entries) => match serde_json::to_value(entries) {
+            Ok(value) => value,
+            Err(_) => serde_json::Value::Array(vec![]),
+        },
         Err(_) => serde_json::Value::Array(vec![]),
     };
 
