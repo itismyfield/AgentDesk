@@ -18,6 +18,11 @@ pub struct TimelineQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TranscriptQuery {
+    pub limit: Option<usize>,
+}
+
 const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
 const TURN_CAPTURE_TAIL_LINES: usize = 60;
 const TURN_OUTPUT_MAX_CHARS: usize = 4000;
@@ -1038,6 +1043,48 @@ pub async fn agent_timeline(
     (StatusCode::OK, Json(json!({"events": events})))
 }
 
+/// GET /api/agents/:id/transcripts?limit=10
+pub async fn agent_transcripts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<TranscriptQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    if !agent_exists(&conn, &id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        );
+    }
+
+    match crate::db::session_transcripts::list_transcripts_for_agent(
+        &conn,
+        &id,
+        params.limit.unwrap_or(8),
+    ) {
+        Ok(transcripts) => (
+            StatusCode::OK,
+            Json(json!({
+                "agent_id": id,
+                "transcripts": transcripts,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
+    }
+}
+
 /// POST /api/agents/:id/signal
 /// Agent sends a status signal (e.g., "blocked" with reason).
 pub async fn agent_signal(
@@ -1107,6 +1154,10 @@ pub async fn agent_signal(
 mod tests {
     use super::*;
     use crate::db::Db;
+    use crate::db::session_transcripts::{
+        PersistSessionTranscript, SessionTranscriptEvent, SessionTranscriptEventKind,
+        persist_turn_on_conn,
+    };
     use crate::engine::PolicyEngine;
 
     fn test_db() -> Db {
@@ -1149,6 +1200,67 @@ mod tests {
             body["sessions"][0]["thread_channel_id"],
             serde_json::Value::String("1485506232256168011".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn agent_transcripts_returns_structured_events() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let mut conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('agent-transcript', 'Transcript Agent', 'codex', 'idle', 0)",
+                [],
+            )
+            .unwrap();
+
+            let events = vec![SessionTranscriptEvent {
+                kind: SessionTranscriptEventKind::ToolUse,
+                tool_name: Some("Bash".to_string()),
+                summary: Some("cargo test".to_string()),
+                content: "cargo test --no-run".to_string(),
+                status: Some("success".to_string()),
+                is_error: false,
+            }];
+            persist_turn_on_conn(
+                &mut conn,
+                PersistSessionTranscript {
+                    turn_id: "discord:agent-transcript:1",
+                    session_key: Some("host:agent-transcript"),
+                    channel_id: Some("chan-1"),
+                    agent_id: Some("agent-transcript"),
+                    provider: Some("codex"),
+                    dispatch_id: None,
+                    user_message: "verify build",
+                    assistant_message: "build verified",
+                    events: &events,
+                    duration_ms: Some(4200),
+                },
+            )
+            .unwrap();
+        }
+
+        let (status, Json(body)) = agent_transcripts(
+            State(state),
+            Path("agent-transcript".to_string()),
+            Query(TranscriptQuery { limit: Some(5) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["agent_id"],
+            serde_json::Value::String("agent-transcript".to_string())
+        );
+        assert_eq!(
+            body["transcripts"][0]["turn_id"],
+            "discord:agent-transcript:1"
+        );
+        assert_eq!(body["transcripts"][0]["duration_ms"], 4200);
+        assert_eq!(body["transcripts"][0]["events"][0]["kind"], "tool_use");
+        assert_eq!(body["transcripts"][0]["events"][0]["tool_name"], "Bash");
     }
 
     #[test]

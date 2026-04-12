@@ -1,9 +1,78 @@
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, params};
-#[cfg(test)]
-use serde::Serialize;
+use rusqlite::{Connection, Row, params};
+use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTranscriptEventKind {
+    User,
+    Assistant,
+    Thinking,
+    ToolUse,
+    ToolResult,
+    Result,
+    Error,
+    Task,
+    System,
+}
+
+impl SessionTranscriptEventKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Thinking => "thinking",
+            Self::ToolUse => "tool_use",
+            Self::ToolResult => "tool_result",
+            Self::Result => "result",
+            Self::Error => "error",
+            Self::Task => "task",
+            Self::System => "system",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptEvent {
+    pub kind: SessionTranscriptEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+impl SessionTranscriptEvent {
+    fn search_text(&self) -> String {
+        let mut parts = Vec::new();
+        parts.push(self.kind.label().to_string());
+        if let Some(tool_name) = self.tool_name.as_deref().map(str::trim)
+            && !tool_name.is_empty()
+        {
+            parts.push(tool_name.to_string());
+        }
+        if let Some(summary) = self.summary.as_deref().map(str::trim)
+            && !summary.is_empty()
+        {
+            parts.push(summary.to_string());
+        }
+        let content = self.content.trim();
+        if !content.is_empty() {
+            parts.push(content.to_string());
+        }
+        if self.is_error {
+            parts.push("error".to_string());
+        }
+        parts.join("\n")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PersistSessionTranscript<'a> {
@@ -15,6 +84,26 @@ pub struct PersistSessionTranscript<'a> {
     pub dispatch_id: Option<&'a str>,
     pub user_message: &'a str,
     pub assistant_message: &'a str,
+    pub events: &'a [SessionTranscriptEvent],
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionTranscriptRecord {
+    pub id: i64,
+    pub turn_id: String,
+    pub session_key: Option<String>,
+    pub channel_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub kanban_card_id: Option<String>,
+    pub dispatch_title: Option<String>,
+    pub user_message: String,
+    pub assistant_message: String,
+    pub events: Vec<SessionTranscriptEvent>,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
 }
 
 #[cfg(test)]
@@ -52,7 +141,8 @@ pub fn persist_turn_on_conn(
 
     let user_message = entry.user_message.trim();
     let assistant_message = entry.assistant_message.trim();
-    if user_message.is_empty() && assistant_message.is_empty() {
+    let events = normalize_events(entry.events);
+    if user_message.is_empty() && assistant_message.is_empty() && events.is_empty() {
         return Ok(false);
     }
 
@@ -71,7 +161,8 @@ pub fn persist_turn_on_conn(
             .flatten()
         })
     });
-    let search_document = build_search_document(user_message, assistant_message);
+    let events_json = serde_json::to_string(&events)?;
+    let search_document = build_search_document(user_message, assistant_message, &events);
 
     let tx = conn.transaction()?;
     tx.execute(
@@ -83,8 +174,10 @@ pub fn persist_turn_on_conn(
             provider,
             dispatch_id,
             user_message,
-            assistant_message
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            assistant_message,
+            events_json,
+            duration_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(turn_id) DO UPDATE SET
             session_key = excluded.session_key,
             channel_id = excluded.channel_id,
@@ -92,7 +185,9 @@ pub fn persist_turn_on_conn(
             provider = excluded.provider,
             dispatch_id = excluded.dispatch_id,
             user_message = excluded.user_message,
-            assistant_message = excluded.assistant_message",
+            assistant_message = excluded.assistant_message,
+            events_json = excluded.events_json,
+            duration_ms = excluded.duration_ms",
         params![
             turn_id,
             session_key,
@@ -102,6 +197,8 @@ pub fn persist_turn_on_conn(
             dispatch_id,
             user_message,
             assistant_message,
+            events_json,
+            entry.duration_ms,
         ],
     )?;
 
@@ -123,6 +220,93 @@ pub fn persist_turn_on_conn(
     tx.commit()?;
 
     Ok(true)
+}
+
+pub fn list_transcripts_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let limit = limit.clamp(1, 100) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT st.id,
+                st.turn_id,
+                st.session_key,
+                st.channel_id,
+                st.agent_id,
+                st.provider,
+                st.dispatch_id,
+                td.kanban_card_id,
+                td.title,
+                st.user_message,
+                st.assistant_message,
+                st.events_json,
+                st.duration_ms,
+                st.created_at
+         FROM session_transcripts st
+         LEFT JOIN task_dispatches td
+           ON td.id = st.dispatch_id
+         WHERE st.agent_id = ?1
+            OR (st.agent_id IS NULL AND td.to_agent_id = ?1)
+         ORDER BY st.created_at DESC, st.id DESC
+         LIMIT ?2",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, limit], session_transcript_record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn list_transcripts_for_card(
+    conn: &Connection,
+    card_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let limit = limit.clamp(1, 100) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT st.id,
+                st.turn_id,
+                st.session_key,
+                st.channel_id,
+                st.agent_id,
+                st.provider,
+                st.dispatch_id,
+                td.kanban_card_id,
+                td.title,
+                st.user_message,
+                st.assistant_message,
+                st.events_json,
+                st.duration_ms,
+                st.created_at
+         FROM session_transcripts st
+         JOIN task_dispatches td
+           ON td.id = st.dispatch_id
+         WHERE td.kanban_card_id = ?1
+         ORDER BY st.created_at DESC, st.id DESC
+         LIMIT ?2",
+    )?;
+
+    let rows = stmt.query_map(params![card_id, limit], session_transcript_record_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn session_transcript_record_from_row(row: &Row<'_>) -> rusqlite::Result<SessionTranscriptRecord> {
+    let events_json: Option<String> = row.get(11)?;
+    Ok(SessionTranscriptRecord {
+        id: row.get(0)?,
+        turn_id: row.get(1)?,
+        session_key: row.get(2)?,
+        channel_id: row.get(3)?,
+        agent_id: row.get(4)?,
+        provider: row.get(5)?,
+        dispatch_id: row.get(6)?,
+        kanban_card_id: row.get(7)?,
+        dispatch_title: row.get(8)?,
+        user_message: row.get(9)?,
+        assistant_message: row.get(10)?,
+        events: parse_events_json(events_json.as_deref()),
+        duration_ms: row.get(12)?,
+        created_at: row.get(13)?,
+    })
 }
 
 #[cfg(test)]
@@ -191,13 +375,82 @@ pub fn build_match_query(raw_query: &str) -> Option<String> {
     None
 }
 
-fn build_search_document(user_message: &str, assistant_message: &str) -> String {
-    match (user_message.is_empty(), assistant_message.is_empty()) {
-        (false, false) => format!("user:\n{user_message}\n\nassistant:\n{assistant_message}"),
-        (false, true) => format!("user:\n{user_message}"),
-        (true, false) => format!("assistant:\n{assistant_message}"),
-        (true, true) => String::new(),
+fn build_search_document(
+    user_message: &str,
+    assistant_message: &str,
+    events: &[SessionTranscriptEvent],
+) -> String {
+    let mut sections = Vec::new();
+    if !user_message.is_empty() {
+        sections.push(format!("user:\n{user_message}"));
     }
+    if !assistant_message.is_empty() {
+        sections.push(format!("assistant:\n{assistant_message}"));
+    }
+    for event in events {
+        let text = event.search_text();
+        if !text.trim().is_empty() {
+            sections.push(text);
+        }
+    }
+    sections.join("\n\n")
+}
+
+fn parse_events_json(raw: Option<&str>) -> Vec<SessionTranscriptEvent> {
+    raw.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            serde_json::from_str::<Vec<SessionTranscriptEvent>>(trimmed).ok()
+        }
+    })
+    .map(|events| normalize_events(&events))
+    .unwrap_or_default()
+}
+
+fn normalize_events(events: &[SessionTranscriptEvent]) -> Vec<SessionTranscriptEvent> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let mut normalized = event.clone();
+            normalized.content = normalized.content.trim().to_string();
+            normalized.summary = normalized
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            normalized.tool_name = normalized
+                .tool_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            normalized.status = normalized
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+
+            if normalized.content.is_empty()
+                && normalized.summary.is_none()
+                && normalized.tool_name.is_none()
+                && !matches!(
+                    normalized.kind,
+                    SessionTranscriptEventKind::Thinking
+                        | SessionTranscriptEventKind::Result
+                        | SessionTranscriptEventKind::Error
+                        | SessionTranscriptEventKind::System
+                )
+            {
+                return None;
+            }
+
+            Some(normalized)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -263,9 +516,20 @@ mod tests {
                 dispatch_id: Some("dispatch-1"),
                 user_message: "old question",
                 assistant_message: "old answer",
+                events: &[],
+                duration_ms: None,
             },
         )
         .unwrap();
+
+        let new_events = vec![SessionTranscriptEvent {
+            kind: SessionTranscriptEventKind::ToolUse,
+            tool_name: Some("Read".to_string()),
+            summary: Some("src/config.rs".to_string()),
+            content: "{\"file_path\":\"src/config.rs\"}".to_string(),
+            status: Some("success".to_string()),
+            is_error: false,
+        }];
 
         persist_turn_on_conn(
             &mut conn,
@@ -278,6 +542,8 @@ mod tests {
                 dispatch_id: Some("dispatch-1"),
                 user_message: "new question",
                 assistant_message: "new answer",
+                events: &new_events,
+                duration_ms: Some(3210),
             },
         )
         .unwrap();
@@ -289,14 +555,18 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
-        let assistant_message: String = conn
+        let (assistant_message, events_json, duration_ms): (String, String, Option<i64>) = conn
             .query_row(
-                "SELECT assistant_message FROM session_transcripts WHERE turn_id = 'discord:1:2'",
+                "SELECT assistant_message, events_json, duration_ms
+                 FROM session_transcripts
+                 WHERE turn_id = 'discord:1:2'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(assistant_message, "new answer");
+        assert!(events_json.contains("src/config.rs"));
+        assert_eq!(duration_ms, Some(3210));
     }
 
     #[test]
@@ -315,6 +585,14 @@ mod tests {
                 [],
             )
             .unwrap();
+            let events = vec![SessionTranscriptEvent {
+                kind: SessionTranscriptEventKind::Thinking,
+                tool_name: None,
+                summary: Some("FTS5 검색 설계".to_string()),
+                content: "검색 전략을 정리합니다.".to_string(),
+                status: Some("info".to_string()),
+                is_error: false,
+            }];
             persist_turn_on_conn(
                 &mut conn,
                 PersistSessionTranscript {
@@ -326,6 +604,8 @@ mod tests {
                     dispatch_id: Some("dispatch-2"),
                     user_message: "FTS5 검색 구현 상태 알려줘",
                     assistant_message: "session transcript 검색 API를 추가했습니다.",
+                    events: &events,
+                    duration_ms: Some(9000),
                 },
             )
             .unwrap();
@@ -336,5 +616,80 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].agent_id.as_deref(), Some("agent-2"));
         assert!(hits[0].snippet.contains("FTS5") || hits[0].snippet.contains("검색"));
+    }
+
+    #[test]
+    fn list_transcripts_for_card_returns_parsed_events() {
+        let db = crate::db::test_db();
+        {
+            let mut conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-card', 'Agent Card')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+                 VALUES ('card-1', 'Card 1', 'in_progress', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+                 ) VALUES (
+                    'dispatch-card-1', 'card-1', 'agent-card', 'implementation', 'completed',
+                    'Card Dispatch', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+
+            let events = vec![
+                SessionTranscriptEvent {
+                    kind: SessionTranscriptEventKind::ToolUse,
+                    tool_name: Some("Bash".to_string()),
+                    summary: Some("cargo test".to_string()),
+                    content: "cargo test".to_string(),
+                    status: Some("running".to_string()),
+                    is_error: false,
+                },
+                SessionTranscriptEvent {
+                    kind: SessionTranscriptEventKind::Result,
+                    tool_name: None,
+                    summary: Some("done".to_string()),
+                    content: "done".to_string(),
+                    status: Some("success".to_string()),
+                    is_error: false,
+                },
+            ];
+            persist_turn_on_conn(
+                &mut conn,
+                PersistSessionTranscript {
+                    turn_id: "discord:3:4",
+                    session_key: Some("host:tmux-3"),
+                    channel_id: Some("3"),
+                    agent_id: Some("agent-card"),
+                    provider: Some("codex"),
+                    dispatch_id: Some("dispatch-card-1"),
+                    user_message: "Run tests",
+                    assistant_message: "Tests completed",
+                    events: &events,
+                    duration_ms: Some(12000),
+                },
+            )
+            .unwrap();
+        }
+
+        let conn = db.read_conn().unwrap();
+        let transcripts = list_transcripts_for_card(&conn, "card-1", 10).unwrap();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(
+            transcripts[0].dispatch_title.as_deref(),
+            Some("Card Dispatch")
+        );
+        assert_eq!(transcripts[0].kanban_card_id.as_deref(), Some("card-1"));
+        assert_eq!(transcripts[0].events.len(), 2);
+        assert_eq!(transcripts[0].duration_ms, Some(12000));
     }
 }

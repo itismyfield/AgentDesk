@@ -45,6 +45,11 @@ pub struct PutStageItem {
     pub parallel_with: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TranscriptQuery {
+    pub limit: Option<usize>,
+}
+
 // ── Dashboard v2 handlers ─────────────────────────────────────
 
 /// GET /api/pipeline/stages?repo=...&agent_id=...
@@ -426,6 +431,56 @@ pub async fn get_card_history(
     (StatusCode::OK, Json(json!({"history": history})))
 }
 
+/// GET /api/pipeline/cards/{cardId}/transcripts?limit=10
+pub async fn get_card_transcripts(
+    State(state): State<AppState>,
+    Path(card_id): Path<String>,
+    Query(params): Query<TranscriptQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let card_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kanban_cards WHERE id = ?1",
+            [&card_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    if !card_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "card not found"})),
+        );
+    }
+
+    match crate::db::session_transcripts::list_transcripts_for_card(
+        &conn,
+        &card_id,
+        params.limit.unwrap_or(10),
+    ) {
+        Ok(transcripts) => (
+            StatusCode::OK,
+            Json(json!({
+                "card_id": card_id,
+                "transcripts": transcripts,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
+    }
+}
+
 // ── Pipeline Config Hierarchy (#135) ─────────────────────────
 
 /// Query params for effective pipeline resolution.
@@ -769,4 +824,107 @@ fn extended_stage_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_jso
         "max_retries": row.get::<_, Option<i64>>(12)?,
         "parallel_with": row.get::<_, Option<String>>(13)?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::db::session_transcripts::{
+        PersistSessionTranscript, SessionTranscriptEvent, SessionTranscriptEventKind,
+        persist_turn_on_conn,
+    };
+    use crate::engine::PolicyEngine;
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    fn test_engine(db: &Db) -> PolicyEngine {
+        let config = crate::config::Config::default();
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_card_transcripts_returns_linked_turns() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let mut conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('agent-card-transcript', 'Card Transcript Agent', 'codex', 'idle', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+                 VALUES ('card-transcript-1', 'Transcript Card', 'in_progress', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+                 ) VALUES (
+                    'dispatch-card-transcript-1', 'card-transcript-1', 'agent-card-transcript',
+                    'implementation', 'completed', 'Transcript Dispatch', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+
+            let events = vec![SessionTranscriptEvent {
+                kind: SessionTranscriptEventKind::Result,
+                tool_name: None,
+                summary: Some("done".to_string()),
+                content: "viewer wired".to_string(),
+                status: Some("success".to_string()),
+                is_error: false,
+            }];
+            persist_turn_on_conn(
+                &mut conn,
+                PersistSessionTranscript {
+                    turn_id: "discord:card-transcript:1",
+                    session_key: Some("host:card-transcript"),
+                    channel_id: Some("chan-card"),
+                    agent_id: Some("agent-card-transcript"),
+                    provider: Some("codex"),
+                    dispatch_id: Some("dispatch-card-transcript-1"),
+                    user_message: "wire transcript viewer",
+                    assistant_message: "wired",
+                    events: &events,
+                    duration_ms: Some(6100),
+                },
+            )
+            .unwrap();
+        }
+
+        let (status, Json(body)) = get_card_transcripts(
+            State(state),
+            Path("card-transcript-1".to_string()),
+            Query(TranscriptQuery { limit: Some(5) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["card_id"],
+            serde_json::Value::String("card-transcript-1".to_string())
+        );
+        assert_eq!(
+            body["transcripts"][0]["turn_id"],
+            "discord:card-transcript:1"
+        );
+        assert_eq!(
+            body["transcripts"][0]["dispatch_title"],
+            "Transcript Dispatch"
+        );
+        assert_eq!(body["transcripts"][0]["events"][0]["kind"], "result");
+        assert_eq!(body["transcripts"][0]["duration_ms"], 6100);
+    }
 }

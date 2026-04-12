@@ -694,6 +694,16 @@ export async function getCardPipelineStatus(cardId: string): Promise<{
   return request(`/api/pipeline/cards/${cardId}`);
 }
 
+export async function getCardTranscripts(
+  cardId: string,
+  limit = 10,
+): Promise<SessionTranscript[]> {
+  const data = await request<{ transcripts: SessionTranscript[] }>(
+    `/api/pipeline/cards/${cardId}/transcripts?limit=${limit}`,
+  );
+  return data.transcripts;
+}
+
 export async function getTaskDispatches(filters?: {
   status?: string;
   from_agent_id?: string;
@@ -820,6 +830,53 @@ export async function stopAgentTurn(
   return request(`/api/agents/${agentId}/turn/stop`, {
     method: "POST",
   });
+}
+
+export type SessionTranscriptEventKind =
+  | "user"
+  | "assistant"
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | "result"
+  | "error"
+  | "task"
+  | "system";
+
+export interface SessionTranscriptEvent {
+  kind: SessionTranscriptEventKind;
+  tool_name?: string | null;
+  summary?: string | null;
+  content: string;
+  status?: string | null;
+  is_error: boolean;
+}
+
+export interface SessionTranscript {
+  id: number;
+  turn_id: string;
+  session_key: string | null;
+  channel_id: string | null;
+  agent_id: string | null;
+  provider: string | null;
+  dispatch_id: string | null;
+  kanban_card_id: string | null;
+  dispatch_title: string | null;
+  user_message: string;
+  assistant_message: string;
+  events: SessionTranscriptEvent[];
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export async function getAgentTranscripts(
+  agentId: string,
+  limit = 8,
+): Promise<SessionTranscript[]> {
+  const data = await request<{ transcripts: SessionTranscript[] }>(
+    `/api/agents/${agentId}/transcripts?limit=${limit}`,
+  );
+  return data.transcripts;
 }
 
 // ── Agent Skills ──

@@ -978,6 +978,8 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
             dispatch_id       TEXT,
             user_message      TEXT NOT NULL DEFAULT '',
             assistant_message TEXT NOT NULL DEFAULT '',
+            events_json       TEXT NOT NULL DEFAULT '[]',
+            duration_ms       INTEGER,
             created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
@@ -992,6 +994,10 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
             tokenize = 'unicode61'
         );",
     )?;
+    let _ = conn.execute_batch(
+        "ALTER TABLE session_transcripts ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]';",
+    );
+    let _ = conn.execute_batch("ALTER TABLE session_transcripts ADD COLUMN duration_ms INTEGER;");
     migrate_legacy_session_transcripts_agent_fk(conn)?;
     Ok(())
 }
@@ -1027,6 +1033,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id       TEXT,
             user_message      TEXT NOT NULL DEFAULT '',
             assistant_message TEXT NOT NULL DEFAULT '',
+            events_json       TEXT NOT NULL DEFAULT '[]',
+            duration_ms       INTEGER,
             created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
          );
          INSERT INTO session_transcripts (
@@ -1039,6 +1047,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id,
             user_message,
             assistant_message,
+            events_json,
+            duration_ms,
             created_at
          )
          SELECT
@@ -1051,6 +1061,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id,
             user_message,
             assistant_message,
+            COALESCE(events_json, '[]'),
+            duration_ms,
             created_at
          FROM session_transcripts_legacy;
          DROP TABLE session_transcripts_legacy;
@@ -1269,6 +1281,8 @@ mod tests {
             )
             .unwrap();
         assert!(!table_sql.contains("REFERENCES agents"));
+        assert!(table_sql.contains("events_json"));
+        assert!(table_sql.contains("duration_ms"));
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_transcripts", [], |row| {
@@ -1276,6 +1290,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+
+        let events_json: String = conn
+            .query_row(
+                "SELECT events_json FROM session_transcripts WHERE turn_id = 'discord:legacy:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events_json, "[]");
 
         let fts_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_transcripts_fts", [], |row| {

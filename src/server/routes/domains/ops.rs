@@ -40,6 +40,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(pipeline::get_card_history),
             )
             .route(
+                "/pipeline/cards/{cardId}/transcripts",
+                get(pipeline::get_card_transcripts),
+            )
+            .route(
                 "/pipeline/config/default",
                 get(pipeline::get_default_pipeline),
             )

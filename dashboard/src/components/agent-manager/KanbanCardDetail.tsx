@@ -4,6 +4,7 @@ import type { KanbanReview } from "../../api";
 import PipelineProgress from "./PipelineProgress";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
+import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import { localeName } from "../../i18n";
 import type {
   Agent,
@@ -541,6 +542,25 @@ export default function KanbanCardDetail({
           setEditor={setEditor}
           tr={tr}
         />
+
+        <div
+          className="rounded-2xl border overflow-hidden"
+          style={{
+            borderColor: "var(--th-border-subtle)",
+            backgroundColor: "rgba(255,255,255,0.02)",
+          }}
+        >
+          <TurnTranscriptPanel
+            source={{
+              type: "card",
+              id: selectedCard.id,
+              refreshSeed: `${selectedCard.latest_dispatch_id ?? ""}:${selectedCard.updated_at}`,
+            }}
+            tr={tr}
+            isKo={locale === "ko"}
+            title={tr("연결된 턴 트랜스크립트", "Linked Turn Transcript")}
+          />
+        </div>
 
         {canRedispatchCard(selectedCard) && (
           <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>

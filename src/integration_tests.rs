@@ -273,6 +273,8 @@ mod tests {
                 dispatch_id: Some(dispatch_id),
                 user_message: "Implement the task",
                 assistant_message: message,
+                events: &[],
+                duration_ms: None,
             },
         )
         .unwrap();

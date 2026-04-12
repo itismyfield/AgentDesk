@@ -157,6 +157,8 @@ fn persist_recovered_transcript(
             dispatch_id,
             user_message: &state.user_text,
             assistant_message,
+            events: &[],
+            duration_ms: None,
         },
     ) {
         Ok(_) => true,
