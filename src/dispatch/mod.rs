@@ -1673,11 +1673,6 @@ pub fn query_dispatch_row(
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
 }
 
-pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
-    let _ = dispatch_id;
-    false
-}
-
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
     let _ = channel_id;
     false

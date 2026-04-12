@@ -438,6 +438,12 @@ mod tests {
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                     ["test_http_last", JSON.stringify({ url: url, body: body })]
                 );
+                if (url.indexOf("/force-kill") !== -1) {
+                    return {
+                        ok: true,
+                        tmux_killed: true
+                    };
+                }
                 return {
                     ok: true,
                     new_deadline_ms: Date.now() + (((body && body.extend_secs) || 0) * 1000)

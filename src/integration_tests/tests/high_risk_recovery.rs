@@ -872,3 +872,116 @@ mod delayed_worker {
         assert!(messages[2].1.contains("경과: 121분 (120분 단계)"));
     }
 }
+
+mod idle_session_cleanup {
+    use super::*;
+
+    #[test]
+    fn scenario_492_idle_session_without_active_dispatch_force_kills_once_after_60_minutes() {
+        let policies_dir = setup_timeouts_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        let session_key = "host:idle-492-no-dispatch";
+
+        seed_agent(&db);
+        set_kv(&db, "server_port", "8791");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1', 'codex', 'idle', datetime('now', '-181 minutes'), datetime('now', '-181 minutes'))",
+                [session_key],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        let url = http_last["url"].as_str().unwrap_or("");
+        assert!(url.contains("/api/sessions/"));
+        assert!(url.contains("host%3Aidle-492-no-dispatch"));
+        assert!(url.ends_with("/force-kill"));
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "channel:111");
+        assert!(
+            messages[0]
+                .1
+                .contains("idle 60분 경과 (active_dispatch_id 없음)")
+        );
+    }
+
+    #[test]
+    fn scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl() {
+        let policies_dir = setup_timeouts_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        let session_key = "host:idle-492-active-dispatch";
+
+        seed_agent(&db);
+        set_kv(&db, "server_port", "8791");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1', 'codex', 'idle', 'dispatch-492', datetime('now', '-61 minutes'), datetime('now', '-61 minutes'))",
+                [session_key],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            kv_value(&db, "test_http_count"),
+            None,
+            "active dispatch rows must not be reaped by the 60-minute idle TTL"
+        );
+        assert!(message_outbox_rows(&db).is_empty());
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE sessions
+                 SET last_heartbeat = datetime('now', '-181 minutes'),
+                     created_at = datetime('now', '-181 minutes')
+                 WHERE session_key = ?1",
+                [session_key],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        let url = http_last["url"].as_str().unwrap_or("");
+        assert!(url.contains("host%3Aidle-492-active-dispatch"));
+        assert!(url.ends_with("/force-kill"));
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "channel:111");
+        assert!(messages[0].1.contains("idle 180분 경과 (safety TTL)"));
+    }
+}
