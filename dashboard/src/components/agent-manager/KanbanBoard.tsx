@@ -120,7 +120,7 @@ export default function KanbanBoard({
               className="flex w-full items-center gap-2 text-left"
             >
               <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
-                {tr("최근 완료", "Recent Completions")}
+                {tr("완료 일감", "Completed Work")}
               </span>
               <span className="rounded-full px-1.5 py-0.5 text-xs font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
                 {recentDoneCards.length}
@@ -132,11 +132,7 @@ export default function KanbanBoard({
             {recentDoneOpen && (
               <div className="mt-2 space-y-1.5">
                 {pageCards.map((card) => {
-                  const statusDef = COLUMN_DEFS.find((c) => c.status === card.status);
-                  const agentName = getAgentLabel(card.assignee_agent_id);
-                  const completedDate = card.completed_at
-                    ? new Date(card.completed_at).toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })
-                    : "";
+                  const cardNumber = card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`;
                   return (
                     <button
                       key={card.id}
@@ -144,18 +140,22 @@ export default function KanbanBoard({
                       className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
                       style={{ background: "rgba(148,163,184,0.06)" }}
                     >
-                      <span
-                        className="shrink-0 rounded-full px-1.5 py-0.5 text-xs font-semibold"
-                        style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
-                      >
-                        {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
+                      <span className="shrink-0 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
+                        {cardNumber}
                       </span>
-                      {card.github_issue_number && (
-                        <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>
-                      )}
                       <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                      <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
-                      <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
+                      {card.github_issue_url && (
+                        <a
+                          href={card.github_issue_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 text-xs hover:underline"
+                          onClick={(event) => event.stopPropagation()}
+                          style={{ color: "#93c5fd" }}
+                        >
+                          GH
+                        </a>
+                      )}
                     </button>
                   );
                 })}
@@ -231,32 +231,11 @@ export default function KanbanBoard({
                     backlogIssues={backlogIssues}
                     backlogCount={backlogCount}
                     tr={tr}
-                    locale={locale}
                     compactBoard={compactBoard}
                     initialLoading={initialLoading}
                     loadingIssues={loadingIssues}
-                    draggingCardId={draggingCardId}
-                    dragOverStatus={dragOverStatus}
-                    dragOverCardId={dragOverCardId}
-                    closingIssueNumber={closingIssueNumber}
-                    assigningIssue={assigningIssue}
-                    dispatchMap={dispatchMap}
-                    dispatches={dispatches}
-                    repoSources={repoSources}
-                    selectedRepo={selectedRepo}
-                    getAgentLabel={getAgentLabel}
-                    resolveAgentFromLabels={resolveAgentFromLabels}
                     onCardClick={onCardClick}
                     onBacklogIssueClick={onBacklogIssueClick}
-                    onSetDraggingCardId={setDraggingCardId}
-                    onSetDragOverStatus={setDragOverStatus}
-                    onSetDragOverCardId={setDragOverCardId}
-                    onDrop={onDrop}
-                    onCloseIssue={onCloseIssue}
-                    onDirectAssignIssue={onDirectAssignIssue}
-                    onOpenAssignModal={onOpenAssignModal}
-                    onUpdateCardStatus={onUpdateCardStatus}
-                    onSetActionError={setActionError}
                   />
                 );
               })}

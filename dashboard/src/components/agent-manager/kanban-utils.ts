@@ -31,6 +31,23 @@ export const COLUMN_DEFS: Array<{
   { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
 ];
 
+export const BOARD_COLUMN_DEFS: Array<{
+  status: KanbanCardStatus;
+  labelKo: string;
+  labelEn: string;
+  accent: string;
+}> = [
+  { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
+  { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: "#0ea5e9" },
+  { status: "requested", labelKo: "요청됨", labelEn: "Requested", accent: "#8b5cf6" },
+  { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
+  { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
+  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#e879f9" },
+  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#c084fc" },
+  { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: "#fb7185" },
+  { status: "done", labelKo: "완료 일감", labelEn: "Completed Work", accent: "#22c55e" },
+];
+
 export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done"]);
 export const QA_STATUSES = new Set<KanbanCardStatus>(["qa_pending", "qa_in_progress", "qa_failed"]);
 export const PRIORITY_OPTIONS: KanbanCardPriority[] = ["low", "medium", "high", "urgent"];
@@ -76,6 +93,12 @@ export const IN_PROGRESS_STALE_MS = 60 * 60 * 1000;
 
 export function isReviewCard(card: KanbanCard): boolean {
   return !!(card.latest_dispatch_type && REVIEW_DISPATCH_TYPES.has(card.latest_dispatch_type));
+}
+
+export function getBoardColumnStatus(status: KanbanCardStatus): KanbanCardStatus {
+  if (status === "blocked") return "in_progress";
+  if (status === "pending_decision") return "review";
+  return status;
 }
 
 export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en: string) => string): string {
