@@ -128,99 +128,25 @@ export default function ControlCenterView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b" style={{ borderColor: "var(--th-border)" }}>
-        <div className="px-4 pt-4 sm:hidden">
-          <div
-            className="rounded-xl border px-3 py-2 text-xs"
-            style={{
-              borderColor: "rgba(96,165,250,0.32)",
-              background: "rgba(96,165,250,0.08)",
-              color: "var(--th-text-muted)",
-            }}
-          >
-            {t("설정은 조직 관리와 시스템 설정으로 분리되어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.", "Settings are split between organization work and system settings. Use desktop for bulk editing work.")}
-          </div>
-        </div>
-
-        <div className="px-4 py-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                {t("설정", "Settings")}
-              </h2>
-              <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>
-                {t("조직 편집과 런타임 설정을 분리해 운영 표면을 단순화합니다.", "Separate organization editing from runtime settings so the admin surface stays coherent.")}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full px-2.5 py-1" style={{ background: "rgba(59,130,246,0.12)", color: "#60a5fa" }}>
-                {t("선택 오피스", "Selected Office")}: {selectedOfficeName}
-              </span>
-              <span className="rounded-full px-2.5 py-1" style={{ background: "rgba(16,185,129,0.12)", color: "#34d399" }}>
-                {t("활성 세션", "Live Sessions")}: {activeSessionCount}
-              </span>
-              <span className="rounded-full px-2.5 py-1" style={{ background: "rgba(245,158,11,0.12)", color: "#f59e0b" }}>
-                {t("조직 자산", "Org Surface")}: {agents.length}/{departments.length}/{offices.length}
-              </span>
-            </div>
-          </div>
-
-          {recentNotifications.length > 0 && (
-            <div className="mt-3 space-y-2">
-              {recentNotifications.map((notification) => (
-                <div
-                  key={notification.id}
-                  className="flex items-start gap-2 rounded-xl border px-3 py-2 text-xs"
-                  style={{
-                    borderColor: `${NOTIFICATION_TYPE_COLORS[notification.type]}44`,
-                    background: `color-mix(in srgb, ${NOTIFICATION_TYPE_COLORS[notification.type]} 10%, var(--th-surface))`,
-                    color: "var(--th-text)",
-                  }}
-                >
-                  <span
-                    className="mt-1 h-2 w-2 shrink-0 rounded-full"
-                    style={{ background: NOTIFICATION_TYPE_COLORS[notification.type] }}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="break-words leading-relaxed">{notification.message}</p>
-                  </div>
-                  <button
-                    onClick={() => onDismissNotification(notification.id)}
-                    className="shrink-0 rounded-md px-2 py-1 text-[10px]"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {t("닫기", "Dismiss")}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto px-4 pb-4">
+      <div className="flex items-center gap-2 border-b px-4 py-2" style={{ borderColor: "var(--th-border)" }}>
+        <h2 className="text-sm font-semibold shrink-0" style={{ color: "var(--th-text-heading)" }}>
+          {t("설정", "Settings")}
+        </h2>
+        <div className="flex gap-1 overflow-x-auto">
           {sections.map((section) => (
             <button
               key={section.id}
               onClick={() => onControlTabChange(section.id)}
-              className="min-w-[180px] rounded-2xl border px-4 py-3 text-left transition-colors"
+              className="rounded-lg px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors"
               style={{
-                borderColor: controlTab === section.id ? "rgba(99,102,241,0.44)" : "rgba(148,163,184,0.18)",
-                background: controlTab === section.id ? "rgba(99,102,241,0.12)" : "var(--th-surface)",
+                background: controlTab === section.id ? "rgba(99,102,241,0.16)" : "transparent",
+                color: controlTab === section.id ? "#a5b4fc" : "var(--th-text-muted)",
               }}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold" style={{ color: controlTab === section.id ? "#a5b4fc" : "var(--th-text-heading)" }}>
-                  {isKo ? section.labelKo : section.labelEn}
-                </div>
-                {section.count !== undefined && (
-                  <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ background: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
-                    {section.count}
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 text-xs leading-relaxed" style={{ color: "var(--th-text-muted)" }}>
-                {isKo ? section.descriptionKo : section.descriptionEn}
-              </div>
+              {isKo ? section.labelKo : section.labelEn}
+              {section.count !== undefined && (
+                <span className="ml-1 opacity-60">{section.count}</span>
+              )}
             </button>
           ))}
         </div>
