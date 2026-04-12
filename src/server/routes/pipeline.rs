@@ -862,8 +862,8 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-                 VALUES ('card-transcript-1', 'Transcript Card', 'in_progress', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, github_issue_number, created_at, updated_at)
+                 VALUES ('card-transcript-1', 'Transcript Card', 'in_progress', 525, datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -924,6 +924,8 @@ mod tests {
             body["transcripts"][0]["dispatch_title"],
             "Transcript Dispatch"
         );
+        assert_eq!(body["transcripts"][0]["card_title"], "Transcript Card");
+        assert_eq!(body["transcripts"][0]["github_issue_number"], 525);
         assert_eq!(body["transcripts"][0]["events"][0]["kind"], "result");
         assert_eq!(body["transcripts"][0]["duration_ms"], 6100);
     }
