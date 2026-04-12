@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod auto_queue;
 pub mod kanban;
+pub mod memento_feedback_stats;
 pub(crate) mod schema;
 pub mod session_transcripts;
 

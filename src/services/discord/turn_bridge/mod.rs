@@ -1,6 +1,7 @@
 mod completion_guard;
 mod context_window;
 mod memory_lifecycle;
+mod recall_feedback;
 mod recovery_text;
 mod retry_state;
 mod skill_usage;
@@ -42,6 +43,7 @@ use memory_lifecycle::{
     optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
     spawn_memory_reflect_task, take_memento_reflect_request,
 };
+use recall_feedback::{analyze_recall_feedback_turn, submit_pending_feedbacks};
 use retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
 };
@@ -1363,13 +1365,18 @@ pub(super) fn spawn_turn_bridge(
             super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port).await;
         }
 
+        let turn_id = should_persist_transcript
+            .then(|| format!("discord:{}:{}", channel_id.get(), user_msg_id.get()));
+        let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
+        let recall_feedback_analysis =
+            should_persist_transcript.then(|| analyze_recall_feedback_turn(&transcript_events));
+
         if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
-            let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
             let channel_id_text = channel_id.get().to_string();
             if let Err(e) = crate::db::session_transcripts::persist_turn(
                 db,
                 crate::db::session_transcripts::PersistSessionTranscript {
-                    turn_id: &turn_id,
+                    turn_id: turn_id.as_deref().unwrap_or_default(),
                     session_key: adk_session_key.as_deref(),
                     channel_id: Some(channel_id_text.as_str()),
                     agent_id: None,
@@ -1419,6 +1426,55 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let mut auto_feedback_count = 0usize;
+        if let Some(analysis) = recall_feedback_analysis.as_ref()
+            && !analysis.pending_feedbacks.is_empty()
+        {
+            let submit_result = submit_pending_feedbacks(
+                &capture_memory_settings,
+                session_id_to_persist.as_deref(),
+                analysis.pending_feedbacks.clone(),
+            )
+            .await;
+            auto_feedback_count = submit_result.submitted_count;
+            accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                .saturating_add(submit_result.token_usage.input_tokens);
+            accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                .saturating_add(submit_result.token_usage.output_tokens);
+            for error in submit_result.errors {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!("  [{ts}] ⚠ failed to auto-submit recall tool_feedback: {error}");
+            }
+        }
+
+        if let (Some(db), Some(turn_id), Some(analysis)) = (
+            shared_owned.db.as_ref(),
+            turn_id.as_deref(),
+            recall_feedback_analysis.as_ref(),
+        ) && analysis.recall_count > 0
+        {
+            let stat = crate::db::memento_feedback_stats::MementoFeedbackTurnStat {
+                turn_id: turn_id.to_string(),
+                stat_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+                agent_id: memory_role_id.clone(),
+                provider: provider.as_str().to_string(),
+                recall_count: i64::try_from(analysis.recall_count).unwrap_or(i64::MAX),
+                manual_tool_feedback_count: i64::try_from(analysis.manual_feedback_count)
+                    .unwrap_or(i64::MAX),
+                manual_covered_recall_count: i64::try_from(analysis.manual_covered_recall_count)
+                    .unwrap_or(i64::MAX),
+                auto_tool_feedback_count: i64::try_from(auto_feedback_count).unwrap_or(i64::MAX),
+                covered_recall_count: i64::try_from(
+                    analysis.covered_recall_count_after(auto_feedback_count),
+                )
+                .unwrap_or(i64::MAX),
+            };
+            if let Err(error) = crate::db::memento_feedback_stats::upsert_turn_stat(db, &stat) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!("  [{ts}] ⚠ failed to persist memento feedback stats: {error}");
+            }
+        }
+
         let mut background_memory_task = None;
         if let Some(reflect_request) = reflect_request {
             background_memory_task = Some(spawn_memory_reflect_task(
@@ -1430,7 +1486,7 @@ pub(super) fn spawn_turn_bridge(
         if should_spawn_memory_capture {
             let capture_request = CaptureRequest {
                 provider: provider.clone(),
-                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                role_id: memory_role_id,
                 channel_id: channel_id.get(),
                 session_id: resolve_memory_session_id(
                     session_id_to_persist.as_deref(),
