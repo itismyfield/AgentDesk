@@ -204,7 +204,7 @@ export default function DashboardPageView({
         />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <AchievementWidget t={t} />
+          <AchievementWidget t={t} agents={agents} />
           <MvpWidget agents={agents} t={t} isKo={language === "ko"} />
         </div>
       </section>

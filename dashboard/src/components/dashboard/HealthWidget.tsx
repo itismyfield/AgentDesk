@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getHealth, type HealthResponse } from "../../api";
+import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 import { cx, dashboardBadge, dashboardCard } from "./ui";
 
@@ -14,6 +15,7 @@ interface MetricThreshold {
 interface HealthMetricCard {
   id: string;
   label: string;
+  tooltip: string;
   value: string;
   note: string;
   level: HealthMetricLevel;
@@ -172,6 +174,48 @@ function translatePollState(state: HealthPollState, t: TFunction): string {
   }
 }
 
+export function describeMetricTooltip(metricId: string, t: TFunction): string {
+  switch (metricId) {
+    case "deferred-hooks":
+      return t({
+        ko: "재시도 또는 후처리를 기다리는 hook backlog입니다. 수치가 커질수록 provider 후속 작업이 밀리고 있다는 뜻입니다.",
+        en: "Hooks waiting for retry or post-processing. A larger number means provider follow-up work is backing up.",
+        ja: "再試行または後処理待ちの hook backlog です。数値が大きいほど provider 後続処理が滞っています。",
+        zh: "等待重试或后处理的 hook backlog。数值越大，说明 provider 后续处理越积压。",
+      });
+    case "outbox-age":
+      return t({
+        ko: "아직 전달되지 않은 dispatch outbox 항목 중 가장 오래된 대기 시간입니다. 길어질수록 전송 병목 가능성이 큽니다.",
+        en: "Age of the oldest pending item in the dispatch outbox. Longer values suggest delivery bottlenecks.",
+        ja: "未配信の dispatch outbox 項目のうち最も古い待機時間です。長いほど配信ボトルネックの可能性が高くなります。",
+        zh: "dispatch outbox 中等待时间最长的待处理项时长。越长越可能表示分发瓶颈。",
+      });
+    case "queue-depth":
+      return t({
+        ko: "전역 대기열에 쌓인 작업 수입니다. active/finalizing으로 넘어가기 전 줄 서 있는 카드 규모를 뜻합니다.",
+        en: "Number of jobs queued globally before they move into active or finalizing work.",
+        ja: "グローバル待ち行列に積まれた作業数です。active/finalizing に入る前のカード規模を示します。",
+        zh: "全局等待队列中的任务数，表示进入 active/finalizing 之前排队中的卡片规模。",
+      });
+    case "watchers":
+      return t({
+        ko: "상태를 감시 중인 provider watcher 수입니다. 감시 범위와 연결 추적 폭을 빠르게 보여줍니다.",
+        en: "Number of provider watchers currently monitoring state and connection health.",
+        ja: "状態と接続健全性を監視している provider watcher 数です。",
+        zh: "当前正在监控状态与连接健康度的 provider watcher 数量。",
+      });
+    case "recovery-duration":
+      return t({
+        ko: "복구 중인 채널이나 세션이 머문 시간입니다. 길어질수록 self-healing이 지연되고 있다는 뜻입니다.",
+        en: "How long channels or sessions have remained in recovery. Longer values mean self-healing is dragging out.",
+        ja: "復旧中のチャネルやセッションが留まっている時間です。長いほど self-healing が遅れています。",
+        zh: "通道或会话停留在恢复状态的时间。越长说明自愈过程越拖延。",
+      });
+    default:
+      return "";
+  }
+}
+
 function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[] {
   const deferredHooks = data.deferred_hooks ?? 0;
   const outboxAge = data.outbox_age ?? data.dispatch_outbox?.oldest_pending_age ?? 0;
@@ -184,6 +228,7 @@ function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[
     {
       id: "deferred-hooks",
       label: t({ ko: "Deferred Hooks", en: "Deferred Hooks", ja: "Deferred Hooks", zh: "Deferred Hooks" }),
+      tooltip: describeMetricTooltip("deferred-hooks", t),
       value: formatInteger(deferredHooks),
       note: t({
         ko: deferredHooks > 0 ? `백로그 ${formatInteger(deferredHooks)}건` : "백로그 없음",
@@ -196,6 +241,7 @@ function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[
     {
       id: "outbox-age",
       label: t({ ko: "Outbox Age", en: "Outbox Age", ja: "Outbox Age", zh: "Outbox Age" }),
+      tooltip: describeMetricTooltip("outbox-age", t),
       value: formatDurationCompact(outboxAge),
       note: t({
         ko: `pending ${formatInteger(outboxStats?.pending ?? 0)} · retry ${formatInteger(outboxStats?.retrying ?? 0)} · fail ${formatInteger(outboxStats?.permanent_failures ?? 0)}`,
@@ -208,6 +254,7 @@ function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[
     {
       id: "queue-depth",
       label: t({ ko: "Pending Queue", en: "Pending Queue", ja: "Pending Queue", zh: "Pending Queue" }),
+      tooltip: describeMetricTooltip("queue-depth", t),
       value: formatInteger(queueDepth),
       note: t({
         ko: `active ${formatInteger(data.global_active ?? 0)} · finalizing ${formatInteger(data.global_finalizing ?? 0)}`,
@@ -220,6 +267,7 @@ function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[
     {
       id: "watchers",
       label: t({ ko: "Active Watchers", en: "Active Watchers", ja: "Active Watchers", zh: "Active Watchers" }),
+      tooltip: describeMetricTooltip("watchers", t),
       value: formatInteger(watcherCount),
       note: t({
         ko: `${formatInteger(data.providers?.length ?? 0)} providers 관찰 중`,
@@ -232,6 +280,7 @@ function buildMetricCards(data: HealthResponse, t: TFunction): HealthMetricCard[
     {
       id: "recovery-duration",
       label: t({ ko: "Recovery", en: "Recovery", ja: "Recovery", zh: "Recovery" }),
+      tooltip: describeMetricTooltip("recovery-duration", t),
       value: formatDurationCompact(recoveryDuration),
       note: t({
         ko: `uptime ${formatDurationCompact(data.uptime_secs ?? 0)}`,
@@ -479,9 +528,13 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
                 }}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.16em]" style={{ color: metricTheme.text }}>
-                    {metric.label}
-                  </span>
+                  <div className="min-w-0 flex-1" style={{ color: metricTheme.text }}>
+                    <TooltipLabel
+                      text={metric.label}
+                      tooltip={metric.tooltip}
+                      className="max-w-full flex-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                    />
+                  </div>
                   <span
                     className="mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full"
                     style={{ background: metricTheme.accent, boxShadow: `0 0 10px ${metricTheme.accent}66` }}

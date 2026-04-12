@@ -295,7 +295,7 @@ export default function TokenAnalyticsSection({
               className={cx(dashboardBadge.default, "font-semibold uppercase tracking-[0.18em]")}
               style={{ color: "#fbbf24", background: "rgba(245,158,11,0.12)" }}
             >
-              {t({ ko: "동기화", en: "Syncing", ja: "同期中", zh: "同步中" })}
+              {t({ ko: "토큰 분석 동기화 중", en: "Syncing token analytics", ja: "トークン分析を同期中", zh: "同步 Token 分析中" })}
             </span>
           )}
         </div>
@@ -434,7 +434,7 @@ export default function TokenAnalyticsSection({
           )}
         </div>
 
-        <DailyTrendCard daily={data?.daily ?? []} trendMax={trendMax} t={t} />
+        <DailyTrendCard daily={data?.daily ?? []} trendMax={trendMax} t={t} loading={loading} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -443,14 +443,42 @@ export default function TokenAnalyticsSection({
           segments={segments}
           donutBackground={donutBackground}
           totalTokens={data?.summary.total_tokens ?? 0}
+          loading={loading}
         />
         <AgentSpendCard
           t={t}
           agents={topAgents}
           numberFormatter={numberFormatter}
+          loading={loading}
         />
       </div>
     </section>
+  );
+}
+
+function LoadingIndicator({
+  label,
+  compact = false,
+}: {
+  label: string;
+  compact?: boolean;
+}) {
+  return (
+    <span
+      role="status"
+      aria-label={label}
+      title={label}
+      className={`inline-flex items-center justify-center rounded-full border ${compact ? "h-6 w-6" : "h-8 w-8"}`}
+      style={{
+        color: "#f59e0b",
+        background: "rgba(245,158,11,0.12)",
+        borderColor: "rgba(245,158,11,0.24)",
+      }}
+    >
+      <span
+        className={`${compact ? "h-3 w-3" : "h-3.5 w-3.5"} inline-block animate-spin rounded-full border-2 border-current border-t-transparent`}
+      />
+    </span>
   );
 }
 
@@ -490,10 +518,12 @@ function DailyTrendCard({
   daily,
   trendMax,
   t,
+  loading,
 }: {
   daily: TokenAnalyticsDailyPoint[];
   trendMax: number;
   t: TFunction;
+  loading: boolean;
 }) {
   const legend: TrendLegendItem[] = [
     { key: "input_tokens", color: "#38bdf8", pattern: "diagonal", label: t({ ko: "입력", en: "Input", ja: "入力", zh: "输入" }) },
@@ -526,7 +556,7 @@ function DailyTrendCard({
             })}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
           {legend.map((item) => (
             <span key={item.key} className="inline-flex items-center gap-1.5" style={{ color: "var(--th-text-muted)" }}>
               <span
@@ -539,15 +569,18 @@ function DailyTrendCard({
               {item.label}
             </span>
           ))}
+          {loading ? <LoadingIndicator compact label={t({ ko: "일별 토큰 추이 갱신 중", en: "Refreshing daily token trend", ja: "日次トークン推移を更新中", zh: "刷新每日 Token 趋势" })} /> : null}
         </div>
       </div>
 
       {daily.length === 0 ? (
         <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "표시할 토큰 추이가 없습니다", en: "No token trend to show", ja: "表示する推移がありません", zh: "暂无可显示的趋势" })}
+          {loading
+            ? t({ ko: "토큰 추이를 동기화하는 중입니다", en: "Syncing token trend", ja: "トークン推移を同期中", zh: "正在同步 Token 趋势" })
+            : t({ ko: "표시할 토큰 추이가 없습니다", en: "No token trend to show", ja: "表示する推移がありません", zh: "暂无可显示的趋势" })}
         </div>
       ) : (
-        <div className="mt-4 overflow-hidden">
+        <div className="mt-4 overflow-hidden" style={{ opacity: loading ? 0.58 : 1 }}>
           <div className="min-w-0 overflow-x-auto">
             <div className="flex h-44 items-end gap-px sm:gap-1.5" style={{ minWidth: "min-content" }}>
               {daily.map((day, index) => {
@@ -632,11 +665,13 @@ function ModelDistributionCard({
   segments,
   donutBackground,
   totalTokens,
+  loading,
 }: {
   t: TFunction;
   segments: ModelSegment[];
   donutBackground: string;
   totalTokens: number;
+  loading: boolean;
 }) {
   return (
     <div
@@ -662,17 +697,22 @@ function ModelDistributionCard({
             })}
           </p>
         </div>
-        <span className={dashboardBadge.large} style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}>
-          {formatTokens(totalTokens)}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={dashboardBadge.large} style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}>
+            {formatTokens(totalTokens)}
+          </span>
+          {loading ? <LoadingIndicator compact label={t({ ko: "모델 분포 갱신 중", en: "Refreshing model distribution", ja: "モデル分布を更新中", zh: "刷新模型分布中" })} /> : null}
+        </div>
       </div>
 
       {segments.length === 0 ? (
         <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "모델 분포 데이터가 없습니다", en: "No model distribution data", ja: "モデル分布データがありません", zh: "暂无模型分布数据" })}
+          {loading
+            ? t({ ko: "모델 분포를 동기화하는 중입니다", en: "Syncing model distribution", ja: "モデル分布を同期中", zh: "正在同步模型分布" })
+            : t({ ko: "모델 분포 데이터가 없습니다", en: "No model distribution data", ja: "モデル分布データがありません", zh: "暂无模型分布数据" })}
         </div>
       ) : (
-        <div className="mt-5 grid gap-5 md:grid-cols-[180px_minmax(0,1fr)] md:items-center">
+        <div className="mt-5 grid gap-5 md:grid-cols-[180px_minmax(0,1fr)] md:items-center" style={{ opacity: loading ? 0.58 : 1 }}>
           <div className="mx-auto flex w-full max-w-[180px] items-center justify-center">
             <div
               className="relative h-40 w-40 rounded-full"
@@ -737,10 +777,12 @@ function AgentSpendCard({
   t,
   agents,
   numberFormatter,
+  loading,
 }: {
   t: TFunction;
   agents: ReceiptSnapshotAgentShare[];
   numberFormatter: Intl.NumberFormat;
+  loading: boolean;
 }) {
   const maxCost = Math.max(0.01, ...agents.map((agent) => agent.cost));
 
@@ -768,14 +810,17 @@ function AgentSpendCard({
             })}
           </p>
         </div>
+        {loading ? <LoadingIndicator compact label={t({ ko: "에이전트 비용 비교 갱신 중", en: "Refreshing agent cost comparison", ja: "エージェント別コスト比較を更新中", zh: "刷新代理成本比较中" })} /> : null}
       </div>
 
       {agents.length === 0 ? (
         <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "에이전트 사용량 데이터가 없습니다", en: "No agent usage data", ja: "エージェント使用量データがありません", zh: "暂无代理使用数据" })}
+          {loading
+            ? t({ ko: "에이전트 사용량을 동기화하는 중입니다", en: "Syncing agent usage", ja: "エージェント使用量を同期中", zh: "正在同步代理使用量" })
+            : t({ ko: "에이전트 사용량 데이터가 없습니다", en: "No agent usage data", ja: "エージェント使用量データがありません", zh: "暂无代理使用数据" })}
         </div>
       ) : (
-        <div className="mt-4 space-y-2.5">
+        <div className="mt-4 space-y-2.5" style={{ opacity: loading ? 0.58 : 1 }}>
           {agents.map((agent, index) => (
             <div key={agent.agent} className={dashboardCard.nested} style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}>
               <div className="flex items-center justify-between gap-3">

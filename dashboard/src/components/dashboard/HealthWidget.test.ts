@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   HEALTH_STALE_AFTER_MS,
+  describeMetricTooltip,
   derivePollState,
   describeDegradedReason,
   isHealthResponseEmpty,
@@ -49,5 +50,11 @@ describe("HealthWidget helpers", () => {
   it("humanizes provider and outbox degraded reasons", () => {
     expect(describeDegradedReason("provider:codex:pending_queue_depth:2")).toBe("CODEX queue depth 2");
     expect(describeDegradedReason("dispatch_outbox_oldest_pending_age:61")).toBe("Dispatch outbox age 1m 1s");
+  });
+
+  it("provides per-metric tooltip copy", () => {
+    const t = (messages: { ko: string; en: string; ja: string; zh: string }) => messages.ko;
+    expect(describeMetricTooltip("deferred-hooks", t)).toContain("hook backlog");
+    expect(describeMetricTooltip("outbox-age", t)).toContain("dispatch outbox");
   });
 });

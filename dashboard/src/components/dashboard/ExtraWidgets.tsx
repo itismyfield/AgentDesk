@@ -4,6 +4,7 @@ import * as api from "../../api/client";
 import type { TFunction } from "./model";
 import { getAgentLevel, getAgentTitle } from "../agent-manager/AgentInfoCard";
 import { hasManualInterventionReason, isManualInterventionCard } from "../agent-manager/kanban-utils";
+import AgentAvatar from "../AgentAvatar";
 import { cx, dashboardBadge, dashboardButton, dashboardCard } from "./ui";
 
 // ── CookingHeart Role Board Widget ──
@@ -625,10 +626,29 @@ export function StreakWidget({ agents, t }: StreakWidgetProps) {
 
 interface AchievementWidgetProps {
   t: TFunction;
+  agents: Agent[];
 }
 
-export function AchievementWidget({ t }: AchievementWidgetProps) {
+function fallbackAgentFromAchievement(achievement: api.Achievement): Agent {
+  return {
+    id: achievement.agent_id,
+    name: achievement.agent_name,
+    alias: null,
+    name_ko: achievement.agent_name_ko || achievement.agent_name,
+    department_id: null,
+    avatar_emoji: achievement.avatar_emoji,
+    personality: null,
+    status: "idle",
+    stats_tasks_done: 0,
+    stats_xp: 0,
+    stats_tokens: 0,
+    created_at: 0,
+  };
+}
+
+export function AchievementWidget({ t, agents }: AchievementWidgetProps) {
   const [achievements, setAchievements] = useState<api.Achievement[]>([]);
+  const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
 
   useEffect(() => {
     api.getAchievements().then((d) => setAchievements(d.achievements)).catch(() => {});
@@ -651,23 +671,34 @@ export function AchievementWidget({ t }: AchievementWidgetProps) {
         🏆 {t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" })}
       </h3>
       <div className="space-y-1.5 max-h-48 overflow-y-auto">
-        {achievements.slice(0, 15).map((ach) => (
-          <div
-            key={ach.id}
-            className={cx(dashboardCard.nestedCompact, "flex items-center gap-2")}
-            style={{ background: "var(--th-bg-surface)" }}
-          >
-            <span className="text-base">{badgeIcon[ach.type] || "🎯"}</span>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
-                {ach.avatar_emoji} {ach.agent_name_ko || ach.agent_name}
+        {achievements.slice(0, 15).map((ach) => {
+          const agent = agentMap.get(ach.agent_id) ?? fallbackAgentFromAchievement(ach);
+          return (
+            <div
+              key={ach.id}
+              className={cx(dashboardCard.nestedCompact, "flex items-center gap-2")}
+              style={{ background: "var(--th-bg-surface)" }}
+            >
+              <div className="relative shrink-0">
+                <AgentAvatar agent={agent} agents={agents} size={30} rounded="xl" className="shadow-sm" />
+                <span
+                  className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full text-[10px]"
+                  style={{ background: "rgba(15,23,42,0.82)" }}
+                >
+                  {badgeIcon[ach.type] || "🎯"}
+                </span>
               </div>
-              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {ach.name} — {ach.description}
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
+                  {ach.agent_name_ko || ach.agent_name}
+                </div>
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {ach.name} — {ach.description}
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -696,8 +727,11 @@ export function MvpWidget({ agents, t, isKo }: MvpWidgetProps) {
       }}
     >
       <div className="text-2xl mb-1">🏆</div>
+      <div className="mb-3 flex justify-center">
+        <AgentAvatar agent={mvp} agents={agents} size={56} rounded="2xl" className="shadow-lg" />
+      </div>
       <div className="text-lg font-bold" style={{ color: "var(--th-text)" }}>
-        {mvp.avatar_emoji} {mvp.alias || mvp.name_ko || mvp.name}
+        {mvp.alias || mvp.name_ko || mvp.name}
       </div>
       <div className="text-xs mt-1" style={{ color: "#eab308" }}>
         Lv.{lvInfo.level} {title}

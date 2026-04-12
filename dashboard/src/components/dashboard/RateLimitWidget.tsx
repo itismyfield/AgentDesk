@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 
 interface RateLimitBucket {
@@ -143,6 +144,13 @@ interface RateLimitWidgetProps {
 export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
+  const title = t({ ko: "프로바이더 상태", en: "Provider Status", ja: "プロバイダー状態", zh: "Provider 状态" });
+  const tooltip = t({
+    ko: "Claude/Codex/Gemini provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. STALE은 최근 동기화 결과가 늦어졌다는 뜻입니다.",
+    en: "Quick view of Claude/Codex/Gemini provider bucket usage and cache freshness. STALE means the latest sync result is lagging.",
+    ja: "Claude/Codex/Gemini provider の bucket 使用量と cache freshness を素早く確認します。STALE は直近の同期結果が遅れている状態です。",
+    zh: "快速查看 Claude/Codex/Gemini provider bucket 使用量与缓存新鲜度。STALE 表示最近一次同步结果已落后。",
+  });
 
   useEffect(() => {
     (async () => {
@@ -180,15 +188,19 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
     <div className="game-panel relative overflow-hidden px-3 py-3 sm:px-4 sm:py-3.5">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#60a5fa" }}>
-            {t({ ko: "운영 Weather", en: "OPERATING WEATHER", ja: "運用 WEATHER", zh: "运营 WEATHER" })}
+          <div style={{ color: "#60a5fa" }}>
+            <TooltipLabel
+              text={title}
+              tooltip={tooltip}
+              className="text-[10px] sm:text-xs font-bold uppercase tracking-wider"
+            />
           </div>
           <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
             {t({
-              ko: "Provider 버킷과 stale 캐시 상태",
-              en: "Provider buckets and stale cache status",
-              ja: "Provider バケットと stale キャッシュ状態",
-              zh: "Provider bucket 与 stale cache 状态",
+              ko: "Provider 버킷 사용량과 stale 캐시 상태",
+              en: "Provider bucket utilization and stale cache status",
+              ja: "Provider バケット使用量と stale cache 状態",
+              zh: "Provider bucket 使用量与 stale cache 状态",
             })}
           </div>
         </div>
