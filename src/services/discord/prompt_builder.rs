@@ -85,8 +85,7 @@ fn proactive_memory_guidance(
                      - 현재 채널 힌트: workspace 스코프 이름은 `{workspace_scope}`, 에이전트 스코프 이름은 `{agent_workspace}`, 에이전트 ID는 `{agent_id}`다.\n\
                      - 원칙: 전역이 아니면 `workspace`를 명시하고, 에이전트 전용이 아니면 `agentId`는 `default`를 유지한다.\n\
                      - 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다.\n\
-                     - 피드백: `recall` 결과를 활용한 후 `tool_feedback(tool_name=\"recall\", relevant=true/false, sufficient=true/false, fragment_ids=[...])` 호출. 검색 품질 자동 개선에 필수.\n\
-                     - **파일 메모리 비활성화**: MEMORY.md 및 파일 기반 메모리 시스템을 사용하지 않는다. 모든 기억(장기/단기)은 memento MCP로 저장한다. 장기 기억은 `scope: permanent`, 세션 워킹 메모리는 `scope: session`."
+                     - 피드백: `recall` 결과를 활용한 후 `tool_feedback(tool_name=\"recall\", relevant=true/false, sufficient=true/false, fragment_ids=[...])` 호출. 검색 품질 자동 개선에 필수."
                 ),
             )
         }
