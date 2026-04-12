@@ -19,7 +19,6 @@ use crate::services::memory::{
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
@@ -1394,83 +1393,9 @@ pub(super) fn spawn_turn_bridge(
         inflight_guard.provider.take();
         super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
 
-        // For dispatch-based turns (threads), kill the tmux session after
-        // finalization. Thread sessions are one-shot — keeping claude alive
-        // in "Ready for input" blocks idle detection and the auto-complete pipeline.
-        //
-        // Exception (#145): unified-thread auto-queue runs reuse the same thread
-        // session across multiple entries. Skip kill if the run is still active.
-        #[cfg(unix)]
-        if dispatch_id.is_some() {
-            let should_kill = if let Some(ref did) = dispatch_id {
-                !crate::dispatch::is_unified_thread_active(did)
-            } else {
-                true
-            };
-            if should_kill {
-                if let Some(ref name) = cancel_token
-                    .tmux_session
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-                {
-                    record_tmux_exit_reason(
-                        name,
-                        "dispatch turn completed — killing thread session",
-                    );
-                    let name_c = name.to_string();
-                    let kill_result = tokio::task::spawn_blocking(move || {
-                        crate::services::platform::tmux::kill_session_output(&name_c)
-                    })
-                    .await;
-                    let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
-                    if !kill_ok {
-                        match &kill_result {
-                            Ok(Ok(o)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
-                                    name,
-                                    String::from_utf8_lossy(&o.stderr)
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ tmux kill-session error for {name}: {e}"
-                                );
-                            }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
-                                );
-                            }
-                        }
-                    }
-
-                    // Only delete the DB session row if tmux kill succeeded.
-                    // If kill failed, leave the row so the periodic reaper can retry.
-                    if kill_ok
-                        && let Some(session_key) = super::adk_session::build_adk_session_key(
-                            &shared_owned,
-                            channel_id,
-                            &provider,
-                        )
-                        .await
-                    {
-                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
-                            .await;
-                    }
-                }
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ♻ Skipping tmux kill for unified-thread dispatch {:?} — run still active",
-                    dispatch_id
-                );
-            }
-        }
+        // Dispatch thread sessions now stay alive after finalization so the next
+        // implementation/review/rework turn can warm-resume from the same tmux.
+        // New dispatch arrivals validate the managed tmux session before reuse.
 
         // Finalization complete — decrement counters
         shared_owned

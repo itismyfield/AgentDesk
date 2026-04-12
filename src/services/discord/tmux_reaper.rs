@@ -201,7 +201,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             is_thread && crate::dispatch::is_unified_thread_channel_active(channel_id.get());
 
         if is_thread && !is_unified_active {
-            // Thread sessions: delete from DB entirely (they are one-shot)
+            // Dead/orphan thread sessions: remove the DB row entirely.
             super::adk_session::delete_adk_session(&session_key, api_port).await;
         } else {
             // Fixed-channel sessions or active unified-thread: just mark idle
