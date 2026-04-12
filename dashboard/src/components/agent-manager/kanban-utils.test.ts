@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubComment } from "../../api";
-import { parseGitHubCommentTimeline } from "./kanban-utils";
+import {
+  coalesceGitHubCommentTimeline,
+  parseGitHubCommentTimeline,
+} from "./kanban-utils";
 
-function makeComment(body: string, author = "itismyfield"): GitHubComment {
+function makeComment(
+  body: string,
+  author = "itismyfield",
+  createdAt = "2026-03-23T09:00:00Z",
+): GitHubComment {
   return {
     author: { login: author },
     body,
-    createdAt: "2026-03-23T09:00:00Z",
+    createdAt,
   };
 }
 
@@ -280,5 +287,49 @@ assign_issue 경로가 description을 metadata에만 저장합니다.
       status: "completed",
       title: "#53 작업 완료",
     });
+  });
+});
+
+describe("coalesceGitHubCommentTimeline", () => {
+  it("같은 작성자의 연속 일반 변경 이벤트를 2분 윈도우로 합산한다", () => {
+    const parsed = parseGitHubCommentTimeline([
+      makeComment("상태 변경: ready → in_progress", "alice", "2026-03-23T09:00:00Z"),
+      makeComment("메타데이터 업데이트: priority=high", "alice", "2026-03-23T09:01:10Z"),
+      makeComment("라벨 변경: bug, urgent", "alice", "2026-03-23T09:01:40Z"),
+    ]);
+
+    const coalesced = coalesceGitHubCommentTimeline(parsed);
+
+    expect(coalesced).toHaveLength(1);
+    expect(coalesced[0]).toMatchObject({
+      author: "alice",
+      coalesced: true,
+    });
+    expect(coalesced[0]?.entries).toHaveLength(3);
+  });
+
+  it("에이전트 할당 변경 같은 중요 이벤트는 합산하지 않는다", () => {
+    const parsed = parseGitHubCommentTimeline([
+      makeComment("상태 변경: ready → in_progress", "alice", "2026-03-23T09:00:00Z"),
+      makeComment("에이전트 할당 변경: alice → bob", "alice", "2026-03-23T09:00:40Z"),
+      makeComment("메타데이터 업데이트: priority=high", "alice", "2026-03-23T09:01:20Z"),
+    ]);
+
+    const coalesced = coalesceGitHubCommentTimeline(parsed);
+
+    expect(coalesced).toHaveLength(3);
+    expect(coalesced.every((entry) => !entry.coalesced)).toBe(true);
+  });
+
+  it("2분 윈도우를 넘기면 같은 작성자여도 새 그룹으로 분리한다", () => {
+    const parsed = parseGitHubCommentTimeline([
+      makeComment("상태 변경: ready → in_progress", "alice", "2026-03-23T09:00:00Z"),
+      makeComment("메타데이터 업데이트: priority=high", "alice", "2026-03-23T09:02:30Z"),
+    ]);
+
+    const coalesced = coalesceGitHubCommentTimeline(parsed);
+
+    expect(coalesced).toHaveLength(2);
+    expect(coalesced.every((entry) => !entry.coalesced)).toBe(true);
   });
 });

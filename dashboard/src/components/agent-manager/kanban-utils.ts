@@ -253,6 +253,49 @@ export interface ParsedGitHubComment {
   body: string;
 }
 
+export interface CoalescedGitHubTimelineItem {
+  id: string;
+  kind: GitHubTimelineKind;
+  status: GitHubTimelineStatus;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  entries: ParsedGitHubComment[];
+  coalesced: boolean;
+  highlights: string[];
+}
+
+const TIMELINE_COALESCE_WINDOW_MS = 2 * 60_000;
+
+const TIMELINE_COALESCE_INCLUDE_PATTERNS = [
+  /상태.*(변경|전환|업데이트)/u,
+  /(변경|전환|업데이트).*(상태|메타데이터|우선순위|라벨|체크리스트|태그)/u,
+  /메타데이터.*(변경|수정|업데이트)/u,
+  /우선순위.*(변경|수정|업데이트)/u,
+  /라벨.*(변경|수정|업데이트)/u,
+  /체크리스트.*(변경|수정|업데이트)/u,
+  /\bstatus\b.*(changed|updated|set)/i,
+  /\bmetadata\b.*(changed|updated|set)/i,
+  /\bpriority\b.*(changed|updated|set)/i,
+  /\blabels?\b.*(changed|updated|set)/i,
+  /\bchecklist\b.*(changed|updated|set)/i,
+];
+
+const TIMELINE_COALESCE_EXCLUDE_PATTERNS = [
+  /에이전트.*할당/u,
+  /담당자.*변경/u,
+  /담당 에이전트/u,
+  /할당 변경/u,
+  /assignee/i,
+  /assigned agent/i,
+  /assignment/i,
+  /리뷰 결정/u,
+  /review decision/i,
+  /pm 결정/u,
+  /pm decision/i,
+  /verdict/i,
+];
+
 function cleanMarkdownLine(line: string): string {
   return line
     .replace(/^#+(?:\s+|$)/, "")
@@ -386,6 +429,45 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+function timelineCoalescingText(entry: ParsedGitHubComment): string {
+  return [entry.title, entry.summary ?? "", entry.body].join("\n");
+}
+
+function isTimelineCoalesceEligible(entry: ParsedGitHubComment): boolean {
+  if (entry.kind !== "general") return false;
+  const text = timelineCoalescingText(entry);
+  if (matchesAny(text, TIMELINE_COALESCE_EXCLUDE_PATTERNS)) return false;
+  return matchesAny(text, TIMELINE_COALESCE_INCLUDE_PATTERNS);
+}
+
+function buildCoalescedTimelineItem(
+  entries: ParsedGitHubComment[],
+  index: number,
+): CoalescedGitHubTimelineItem {
+  const first = entries[0];
+  const last = entries[entries.length - 1];
+  const highlights = Array.from(
+    new Set(
+      entries
+        .flatMap((entry) => [entry.title, entry.summary ?? ""])
+        .map((value) => cleanMarkdownLine(value))
+        .filter(Boolean),
+    ),
+  ).slice(0, 3);
+
+  return {
+    id: `${first.author}-${first.createdAt}-${index}`,
+    kind: first.kind,
+    status: first.status,
+    author: first.author,
+    createdAt: first.createdAt,
+    updatedAt: last.createdAt,
+    entries,
+    coalesced: entries.length > 1,
+    highlights,
+  };
+}
+
 export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGitHubComment[] {
   return comments.flatMap<ParsedGitHubComment>((comment) => {
     const body = comment.body.trim();
@@ -495,6 +577,54 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       body,
     }];
   });
+}
+
+export function coalesceGitHubCommentTimeline(
+  entries: ParsedGitHubComment[],
+): CoalescedGitHubTimelineItem[] {
+  const groups: ParsedGitHubComment[][] = [];
+  let currentGroup: ParsedGitHubComment[] = [];
+  let groupStartMs = Number.NaN;
+
+  const flushGroup = () => {
+    if (currentGroup.length === 0) return;
+    groups.push(currentGroup);
+    currentGroup = [];
+    groupStartMs = Number.NaN;
+  };
+
+  for (const entry of entries) {
+    const entryTs = Date.parse(entry.createdAt);
+    const eligible = Number.isFinite(entryTs) && isTimelineCoalesceEligible(entry);
+
+    if (!eligible) {
+      flushGroup();
+      groups.push([entry]);
+      continue;
+    }
+
+    if (currentGroup.length === 0) {
+      currentGroup = [entry];
+      groupStartMs = entryTs;
+      continue;
+    }
+
+    const sameAuthor = currentGroup[0]?.author === entry.author;
+    const withinWindow = entryTs - groupStartMs <= TIMELINE_COALESCE_WINDOW_MS;
+
+    if (sameAuthor && withinWindow) {
+      currentGroup.push(entry);
+      continue;
+    }
+
+    flushGroup();
+    currentGroup = [entry];
+    groupStartMs = entryTs;
+  }
+
+  flushGroup();
+
+  return groups.map((group, index) => buildCoalescedTimelineItem(group, index));
 }
 
 // ---------------------------------------------------------------------------
