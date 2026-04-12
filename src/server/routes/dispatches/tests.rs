@@ -1,5 +1,6 @@
 use super::outbox::{
-    extract_review_verdict, format_dispatch_message, handle_completed_dispatch_followups,
+    DispatchFollowupConfig, extract_review_verdict, format_dispatch_message,
+    handle_completed_dispatch_followups, handle_completed_dispatch_followups_with_config,
     prefix_dispatch_message, use_counter_model_channel,
 };
 use crate::db::Db;
@@ -7,6 +8,13 @@ use crate::engine::PolicyEngine;
 use crate::server::routes::AppState;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::{
+    Json, Router,
+    extract::Path,
+    response::IntoResponse,
+    routing::{get, post},
+};
+use std::sync::{Arc, Mutex};
 
 fn test_db() -> Db {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -18,6 +26,185 @@ fn test_db() -> Db {
 fn test_engine(db: &Db) -> PolicyEngine {
     let config = crate::config::Config::default();
     PolicyEngine::new(&config, db.clone()).unwrap()
+}
+
+#[derive(Default)]
+struct MockDispatchSummaryState {
+    archived: bool,
+    calls: Vec<String>,
+    patch_payloads: Vec<serde_json::Value>,
+    messages: Vec<String>,
+}
+
+struct SummaryRepoFixture {
+    _dir: tempfile::TempDir,
+    path: String,
+    start_commit: String,
+    end_commit: String,
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args))
+}
+
+fn run_git_ok(dir: &std::path::Path, args: &[&str]) {
+    let output = run_git(dir, args);
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={}, stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = run_git(dir, args);
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={}, stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn write_text_file(path: &std::path::Path, content: &str) {
+    std::fs::write(path, content).unwrap_or_else(|err| {
+        panic!("failed to write {}: {err}", path.display());
+    });
+}
+
+fn setup_summary_repo_fixture() -> SummaryRepoFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_path = dir.path().to_path_buf();
+
+    run_git_ok(&repo_path, &["init", "-b", "main"]);
+    write_text_file(&repo_path.join("a.txt"), "alpha\nremove\n");
+    run_git_ok(&repo_path, &["add", "a.txt"]);
+    run_git_ok(
+        &repo_path,
+        &[
+            "-c",
+            "user.name=Dispatch Test",
+            "-c",
+            "user.email=dispatch@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+    );
+    let start_commit = git_stdout(&repo_path, &["rev-parse", "HEAD"]);
+
+    run_git_ok(&repo_path, &["checkout", "-b", "wt/514-summary"]);
+    write_text_file(&repo_path.join("a.txt"), "alpha\nadd\n");
+    write_text_file(&repo_path.join("b.txt"), "beta\n");
+    run_git_ok(&repo_path, &["add", "a.txt", "b.txt"]);
+    run_git_ok(
+        &repo_path,
+        &[
+            "-c",
+            "user.name=Dispatch Test",
+            "-c",
+            "user.email=dispatch@example.com",
+            "commit",
+            "-m",
+            "feature",
+        ],
+    );
+    let end_commit = git_stdout(&repo_path, &["rev-parse", "HEAD"]);
+
+    SummaryRepoFixture {
+        _dir: dir,
+        path: repo_path.to_string_lossy().into_owned(),
+        start_commit,
+        end_commit,
+    }
+}
+
+async fn spawn_dispatch_summary_mock_server(
+    initial_archived: bool,
+) -> (
+    String,
+    Arc<Mutex<MockDispatchSummaryState>>,
+    tokio::task::JoinHandle<()>,
+) {
+    async fn get_channel(
+        State(state): State<Arc<Mutex<MockDispatchSummaryState>>>,
+        Path(thread_id): Path<String>,
+    ) -> impl IntoResponse {
+        let archived = {
+            let mut state = state.lock().unwrap();
+            state.calls.push(format!("GET /channels/{thread_id}"));
+            state.archived
+        };
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": thread_id,
+                "thread_metadata": {
+                    "archived": archived,
+                    "locked": false
+                }
+            })),
+        )
+    }
+
+    async fn patch_channel(
+        State(state): State<Arc<Mutex<MockDispatchSummaryState>>>,
+        Path(thread_id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let mut state = state.lock().unwrap();
+        state.calls.push(format!("PATCH /channels/{thread_id}"));
+        state.patch_payloads.push(body.clone());
+        if let Some(archived) = body.get("archived").and_then(|value| value.as_bool()) {
+            state.archived = archived;
+        }
+        (StatusCode::OK, Json(serde_json::json!({"id": thread_id})))
+    }
+
+    async fn post_message(
+        State(state): State<Arc<Mutex<MockDispatchSummaryState>>>,
+        Path(thread_id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let mut state = state.lock().unwrap();
+        state
+            .calls
+            .push(format!("POST /channels/{thread_id}/messages"));
+        if let Some(content) = body.get("content").and_then(|value| value.as_str()) {
+            state.messages.push(content.to_string());
+        }
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": format!("message-{thread_id}")})),
+        )
+    }
+
+    let state = Arc::new(Mutex::new(MockDispatchSummaryState {
+        archived: initial_archived,
+        ..Default::default()
+    }));
+    let app = Router::new()
+        .route(
+            "/channels/{thread_id}",
+            get(get_channel).patch(patch_channel),
+        )
+        .route("/channels/{thread_id}/messages", post(post_message))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (format!("http://{addr}"), state, handle)
 }
 
 #[test]
@@ -523,6 +710,98 @@ async fn thread_archived_and_cleared_when_card_done() {
         )
         .unwrap();
     assert!(active_thread.is_none());
+}
+
+#[tokio::test]
+async fn completed_work_dispatch_posts_summary_before_archiving_thread() {
+    let fixture = setup_summary_repo_fixture();
+    let (base_url, state, server_handle) = spawn_dispatch_summary_mock_server(true).await;
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, active_thread_id, created_at, updated_at
+            ) VALUES (
+                'card-summary', 'Summary Card', 'done', 'agent-1', 'dispatch-summary', 'thread-summary',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        let context = serde_json::json!({
+            "reviewed_commit": fixture.start_commit,
+            "worktree_path": fixture.path,
+            "branch": "wt/514-summary"
+        });
+        let result = serde_json::json!({
+            "completed_worktree_path": fixture.path,
+            "completed_branch": "wt/514-summary",
+            "completed_commit": fixture.end_commit
+        });
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
+                thread_id, created_at, updated_at, completed_at
+            ) VALUES (
+                'dispatch-summary', 'card-summary', 'agent-1', 'implementation', 'completed', 'Summary Card',
+                ?1, ?2, 'thread-summary', '2026-04-13 12:00:00', '2026-04-13 12:15:00', '2026-04-13 12:15:00'
+            )",
+            rusqlite::params![context.to_string(), result.to_string()],
+        )
+        .unwrap();
+    }
+
+    let config = DispatchFollowupConfig {
+        discord_api_base: base_url,
+        notify_bot_token: Some("notify-token".to_string()),
+        announce_bot_token: Some("announce-token".to_string()),
+    };
+    handle_completed_dispatch_followups_with_config(&db, "dispatch-summary", &config)
+        .await
+        .expect("summary followup should succeed");
+
+    server_handle.abort();
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.calls,
+        vec![
+            "GET /channels/thread-summary",
+            "PATCH /channels/thread-summary",
+            "POST /channels/thread-summary/messages",
+            "PATCH /channels/thread-summary",
+        ]
+    );
+    assert_eq!(state.messages.len(), 1, "summary message should be posted");
+    assert_eq!(
+        state.messages[0],
+        "🔔 완료 요약: 2개 파일, +2/-1, 머지 대기\n소요 시간 15분"
+    );
+    assert_eq!(
+        state.patch_payloads,
+        vec![
+            serde_json::json!({"archived": false}),
+            serde_json::json!({"archived": true}),
+        ]
+    );
+
+    let conn = db.lock().unwrap();
+    let active_thread: Option<String> = conn
+        .query_row(
+            "SELECT active_thread_id FROM kanban_cards WHERE id = 'card-summary'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        active_thread.is_none(),
+        "done-card followup should clear active_thread_id after posting summary"
+    );
 }
 
 /// When an explicit review verdict (improve/rework/reject) completes,
