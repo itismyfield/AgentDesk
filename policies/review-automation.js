@@ -523,7 +523,7 @@ function processVerdict(cardId, verdict, result) {
             [cardId]
           );
         }
-        agentdesk.kanban.setStatus(cardId, reviewPassTarget);
+        agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " skipping pipeline stages (no .rs changes) → " + reviewPassTarget);
       } else {
         // Assign pipeline stage to card
@@ -558,7 +558,7 @@ function processVerdict(cardId, verdict, result) {
             );
             var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
             var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
-            agentdesk.kanban.setStatus(cardId, skipTerminal);
+            agentdesk.kanban.setStatus(cardId, skipTerminal, true);
             return;
           }
           var counterCardInfo = agentdesk.db.query(
@@ -668,7 +668,7 @@ function processVerdict(cardId, verdict, result) {
       }
 
       if (!prDispatched) {
-        agentdesk.kanban.setStatus(cardId, reviewPassTarget);
+        agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
       }
     }
