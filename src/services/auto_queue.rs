@@ -86,6 +86,7 @@ pub struct AutoQueueStatusEntryView {
     pub thread_group: i64,
     pub slot_index: Option<i64>,
     pub batch_phase: i64,
+    pub dispatch_history: Vec<String>,
     pub thread_links: Vec<ThreadLinkView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card_status: Option<String>,
@@ -425,7 +426,11 @@ impl From<AutoQueueRunRecord> for AutoQueueRunView {
 }
 
 impl AutoQueueStatusEntryView {
-    fn from_record(record: StatusEntryRecord, thread_links: Vec<ThreadLinkView>) -> Self {
+    fn from_record(
+        record: StatusEntryRecord,
+        dispatch_history: Vec<String>,
+        thread_links: Vec<ThreadLinkView>,
+    ) -> Self {
         Self {
             id: record.id,
             agent_id: record.agent_id,
@@ -442,6 +447,7 @@ impl AutoQueueStatusEntryView {
             thread_group: record.thread_group,
             slot_index: record.slot_index,
             batch_phase: record.batch_phase,
+            dispatch_history,
             thread_links,
             card_status: record.card_status,
             review_round: record.review_round,
@@ -533,8 +539,19 @@ fn build_entry_view(
         agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
         loaded
     };
+    let dispatch_history =
+        auto_queue::list_entry_dispatch_history(conn, &record.id).map_err(|error| {
+            ServiceError::internal(format!("load entry dispatch history: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("build_entry_view.list_entry_dispatch_history")
+                .with_context("entry_id", &record.id)
+        })?;
     let thread_links = build_entry_thread_links(&record, bindings.as_ref(), guild_id);
-    Ok(AutoQueueStatusEntryView::from_record(record, thread_links))
+    Ok(AutoQueueStatusEntryView::from_record(
+        record,
+        dispatch_history,
+        thread_links,
+    ))
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {

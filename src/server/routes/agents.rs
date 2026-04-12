@@ -1265,6 +1265,60 @@ mod tests {
         assert_eq!(body["transcripts"][0]["events"][0]["tool_name"], "Bash");
     }
 
+    #[tokio::test]
+    async fn agent_transcripts_falls_back_to_session_agent_for_legacy_rows() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('agent-transcript-fallback', 'Transcript Fallback', 'codex', 'idle', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, last_heartbeat)
+                 VALUES ('host:agent-transcript-fallback', 'agent-transcript-fallback', 'codex', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_transcripts (
+                    turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message, events_json
+                 ) VALUES (
+                    'discord:agent-transcript-fallback:1',
+                    'host:agent-transcript-fallback',
+                    'chan-fallback',
+                    NULL,
+                    'codex',
+                    NULL,
+                    'legacy question',
+                    'legacy answer',
+                    '[]'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (status, Json(body)) = agent_transcripts(
+            State(state),
+            Path("agent-transcript-fallback".to_string()),
+            Query(TranscriptQuery { limit: Some(5) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["transcripts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            body["transcripts"][0]["turn_id"],
+            "discord:agent-transcript-fallback:1"
+        );
+        assert_eq!(body["transcripts"][0]["agent_id"], serde_json::Value::Null);
+    }
+
     #[test]
     fn normalize_recent_output_masks_bearer_and_key_assignments() {
         let output = normalize_recent_output(

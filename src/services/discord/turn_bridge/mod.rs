@@ -763,6 +763,9 @@ pub(super) fn spawn_turn_bridge(
                     adk_session_name.as_deref().and_then(
                         crate::services::discord::adk_session::parse_thread_channel_id_from_name,
                     ),
+                    role_binding
+                        .as_ref()
+                        .map(|binding| binding.role_id.as_str()),
                     shared_owned.api_port,
                 )
                 .await;
@@ -831,6 +834,9 @@ pub(super) fn spawn_turn_bridge(
             adk_session_name
                 .as_deref()
                 .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name),
+            role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
             shared_owned.api_port,
         )
         .await;
@@ -1379,7 +1385,9 @@ pub(super) fn spawn_turn_bridge(
                     turn_id: turn_id.as_deref().unwrap_or_default(),
                     session_key: adk_session_key.as_deref(),
                     channel_id: Some(channel_id_text.as_str()),
-                    agent_id: None,
+                    agent_id: role_binding
+                        .as_ref()
+                        .map(|binding| binding.role_id.as_str()),
                     provider: Some(provider.as_str()),
                     dispatch_id: dispatch_id.as_deref(),
                     user_message: &user_text_owned,

@@ -1512,7 +1512,9 @@ pub(super) async fn tmux_output_watcher(
                         turn_id: &turn_id,
                         session_key: state.session_key.as_deref(),
                         channel_id: Some(channel_id_text.as_str()),
-                        agent_id: None,
+                        agent_id: resolve_role_binding(channel_id, state.channel_name.as_deref())
+                            .as_ref()
+                            .map(|binding| binding.role_id.as_str()),
                         provider: Some(provider_kind.as_str()),
                         dispatch_id: resolved_did.as_deref().or(state.dispatch_id.as_deref()),
                         user_message: &state.user_text,
@@ -1697,6 +1699,8 @@ pub(super) async fn tmux_output_watcher(
             let thread_channel_id = channel_name
                 .as_deref()
                 .and_then(super::adk_session::parse_thread_channel_id_from_name);
+            let agent_id = resolve_role_binding(channel_id, channel_name.as_deref())
+                .map(|binding| binding.role_id);
             super::adk_session::post_adk_session_status(
                 session_key.as_deref(),
                 channel_name.as_deref(),
@@ -1708,6 +1712,7 @@ pub(super) async fn tmux_output_watcher(
                 None,
                 None,
                 thread_channel_id,
+                agent_id.as_deref(),
                 shared.api_port,
             )
             .await;
@@ -1831,6 +1836,8 @@ pub(super) async fn tmux_output_watcher(
         let thread_channel_id = channel_name
             .as_deref()
             .and_then(super::adk_session::parse_thread_channel_id_from_name);
+        let agent_id = resolve_role_binding(channel_id, channel_name.as_deref())
+            .map(|binding| binding.role_id);
         super::adk_session::post_adk_session_status(
             session_key.as_deref(),
             channel_name.as_deref(),
@@ -1842,6 +1849,7 @@ pub(super) async fn tmux_output_watcher(
             None, // cwd
             None, // dispatch_id
             thread_channel_id,
+            agent_id.as_deref(),
             api_port,
         )
         .await;
@@ -2302,6 +2310,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
     // Dead sessions that need DB cleanup (idle status report + tmux kill)
     struct DeadSessionCleanup {
+        channel_id: u64,
         channel_name: String,
         session_name: String,
     }
@@ -2437,6 +2446,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             }
             // Schedule DB cleanup + tmux kill for this dead session
             dead_cleanups.push(DeadSessionCleanup {
+                channel_id: channel_id.get(),
                 channel_name: channel_name.clone(),
                 session_name: session_name.to_string(),
             });
@@ -2632,6 +2642,9 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 &provider,
                 &tmux_name,
             );
+            let agent_id =
+                resolve_role_binding(ChannelId::new(dc.channel_id), Some(&dc.channel_name))
+                    .map(|binding| binding.role_id);
 
             super::adk_session::post_adk_session_status(
                 Some(&session_key),
@@ -2644,6 +2657,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 None,
                 None,
                 thread_channel_id,
+                agent_id.as_deref(),
                 api_port,
             )
             .await;

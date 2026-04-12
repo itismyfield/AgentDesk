@@ -8,48 +8,17 @@ use serde_json::json;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
-use crate::db::agents::{AgentChannelBindings, resolve_agent_channel_for_provider_on_conn};
+use crate::db::agents::resolve_agent_channel_for_provider_on_conn;
+use crate::db::session_agent_resolution::{
+    normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
+    parse_thread_channel_name, resolve_agent_id_for_session as resolve_session_agent_id,
+};
 use crate::services::provider::ProviderKind;
-use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
 const STALE_THREAD_SESSION_MAX_AGE_SQL: &str = "-1 hour";
 const STALE_THREAD_SESSION_ACTIVE_DISPATCH_MAX_AGE_SQL: &str = "-3 hours";
-
-/// Extract parent channel name from a thread channel name.
-/// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
-/// is a numeric Discord channel ID (15+ digits).
-/// Returns `(parent_channel_name, thread_id)` if the name matches.
-fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
-    let pos = channel_name.rfind("-t")?;
-    let suffix = &channel_name[pos + 2..];
-    if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
-        Some((&channel_name[..pos], suffix))
-    } else {
-        None
-    }
-}
-
-fn parse_channel_name_from_session_key(session_key: &str) -> Option<String> {
-    let (_, tmux_name) = session_key.split_once(':')?;
-    let (_, channel_name) = parse_provider_and_channel_from_tmux_name(tmux_name)?;
-    Some(channel_name)
-}
-
-fn parse_thread_channel_id_from_session_key(session_key: &str) -> Option<String> {
-    parse_channel_name_from_session_key(session_key).and_then(|channel_name| {
-        parse_thread_channel_name(&channel_name).map(|(_, thread_id)| thread_id.to_string())
-    })
-}
-
-fn normalize_thread_channel_id(thread_channel_id: Option<&str>) -> Option<String> {
-    let trimmed = thread_channel_id?.trim();
-    if trimmed.len() < 15 || !trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
 
 fn load_dispatch_thread_id(conn: &rusqlite::Connection, dispatch_id: &str) -> Option<String> {
     let thread_id: Option<String> = conn
@@ -61,146 +30,6 @@ fn load_dispatch_thread_id(conn: &rusqlite::Connection, dispatch_id: &str) -> Op
         .ok()
         .flatten();
     normalize_thread_channel_id(thread_id.as_deref())
-}
-
-fn normalize_agent_id(agent_id: Option<String>) -> Option<String> {
-    agent_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn resolve_known_agent_id(conn: &rusqlite::Connection, agent_id: Option<String>) -> Option<String> {
-    let agent_id = normalize_agent_id(agent_id)?;
-    let exists = conn
-        .query_row(
-            "SELECT 1 FROM agents WHERE id = ?1 LIMIT 1",
-            [agent_id.as_str()],
-            |_| Ok(()),
-        )
-        .is_ok();
-    exists.then_some(agent_id)
-}
-
-fn resolve_agent_id_from_channel_name(
-    conn: &rusqlite::Connection,
-    channel_name: &str,
-) -> Option<String> {
-    if channel_name.is_empty() {
-        return None;
-    }
-
-    conn.query_row(
-        "SELECT id FROM agents
-         WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1
-            OR discord_channel_cc = ?1 OR discord_channel_cdx = ?1",
-        [channel_name],
-        |row| row.get(0),
-    )
-    .ok()
-    .or_else(|| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-                 FROM agents",
-            )
-            .ok()?;
-        let mut rows = stmt.query([]).ok()?;
-        while let Ok(Some(row)) = rows.next() {
-            let id: String = row.get(0).ok()?;
-            let bindings = AgentChannelBindings {
-                provider: row.get(1).ok()?,
-                discord_channel_id: row.get(2).ok()?,
-                discord_channel_alt: row.get(3).ok()?,
-                discord_channel_cc: row.get(4).ok()?,
-                discord_channel_cdx: row.get(5).ok()?,
-            };
-            if bindings
-                .all_channels()
-                .iter()
-                .any(|channel| channel_name.contains(channel))
-            {
-                return Some(id);
-            }
-        }
-        None
-    })
-}
-
-fn resolve_agent_id_from_dispatch_id(
-    conn: &rusqlite::Connection,
-    dispatch_id: &str,
-) -> Option<String> {
-    let agent_id: Option<String> = conn
-        .query_row(
-            "SELECT to_agent_id FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    resolve_known_agent_id(conn, agent_id)
-}
-
-fn resolve_agent_id_from_thread_channel_id(
-    conn: &rusqlite::Connection,
-    thread_channel_id: &str,
-) -> Option<String> {
-    let thread_channel_id = normalize_thread_channel_id(Some(thread_channel_id))?;
-    resolve_agent_id_from_channel_name(conn, &thread_channel_id)
-        .or_else(|| {
-            let agent_id: Option<String> = conn
-                .query_row(
-                    "SELECT to_agent_id
-                     FROM task_dispatches
-                     WHERE thread_id = ?1
-                       AND NULLIF(TRIM(to_agent_id), '') IS NOT NULL
-                     ORDER BY datetime(created_at) DESC
-                     LIMIT 1",
-                    [thread_channel_id.as_str()],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            resolve_known_agent_id(conn, agent_id)
-        })
-        .or_else(|| {
-            let agent_id: Option<String> = conn
-                .query_row(
-                    "SELECT assigned_agent_id
-                     FROM kanban_cards
-                     WHERE active_thread_id = ?1
-                       AND NULLIF(TRIM(assigned_agent_id), '') IS NOT NULL
-                     ORDER BY datetime(updated_at) DESC
-                     LIMIT 1",
-                    [thread_channel_id.as_str()],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            resolve_known_agent_id(conn, agent_id)
-        })
-}
-
-fn resolve_agent_id_for_session(
-    conn: &rusqlite::Connection,
-    body_name: Option<&str>,
-    session_key_channel_name: Option<&str>,
-    thread_channel_id: Option<&str>,
-    dispatch_id: Option<&str>,
-) -> Option<String> {
-    [body_name, session_key_channel_name]
-        .into_iter()
-        .flatten()
-        .map(|name| {
-            parse_thread_channel_name(name)
-                .map(|(parent, _)| parent)
-                .unwrap_or(name)
-        })
-        .find_map(|channel_name| resolve_agent_id_from_channel_name(conn, channel_name))
-        .or_else(|| dispatch_id.and_then(|value| resolve_agent_id_from_dispatch_id(conn, value)))
-        .or_else(|| {
-            thread_channel_id.and_then(|value| resolve_agent_id_from_thread_channel_id(conn, value))
-        })
 }
 
 fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
@@ -244,6 +73,7 @@ pub struct UpdateDispatchedSessionBody {
 #[allow(dead_code)]
 pub struct HookSessionBody {
     pub session_key: String,
+    pub agent_id: Option<String>,
     pub status: Option<String>,
     pub provider: Option<String>,
     pub session_info: Option<String>,
@@ -435,7 +265,6 @@ pub async fn hook_session(
     // Resolve agent_id from channel name: check discord_channel_id or discord_channel_alt.
     // For thread channels (e.g. "adk-cc-t1485400795435372796"), extract the parent channel
     // name ("adk-cc") and resolve using that.
-    let session_key_channel_name = parse_channel_name_from_session_key(&body.session_key);
     let thread_channel_id = normalize_thread_channel_id(body.thread_channel_id.as_deref())
         .or_else(|| {
             body.name
@@ -450,10 +279,11 @@ pub async fn hook_session(
                 .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
-    let agent_id = resolve_agent_id_for_session(
+    let agent_id = resolve_session_agent_id(
         &conn,
+        body.agent_id.as_deref(),
+        Some(&body.session_key),
         body.name.as_deref(),
-        session_key_channel_name.as_deref(),
         thread_channel_id.as_deref(),
         body.dispatch_id.as_deref(),
     );
@@ -1932,6 +1762,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-1".to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
                 session_info: Some("working".to_string()),
@@ -1952,6 +1783,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-1".to_string(),
+                agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("claude".to_string()),
                 session_info: Some("idle".to_string()),
@@ -2026,6 +1858,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-rework".to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
                 session_info: Some("working".to_string()),
@@ -2046,6 +1879,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-rework".to_string(),
+                agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("claude".to_string()),
                 session_info: Some("idle".to_string()),
@@ -2117,6 +1951,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-review".to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("working".to_string()),
@@ -2137,6 +1972,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-review".to_string(),
+                agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("idle".to_string()),
@@ -2210,6 +2046,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-review-decision".to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("working".to_string()),
@@ -2230,6 +2067,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-review-decision".to_string(),
+                agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("idle".to_string()),
@@ -2622,6 +2460,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796".to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
                 session_info: Some("thread work".to_string()),
@@ -2671,6 +2510,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("thread work".to_string()),
@@ -2735,6 +2575,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("dispatch fallback".to_string()),
@@ -2792,6 +2633,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("dispatch fallback".to_string()),
@@ -2817,6 +2659,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(agent_id, None);
+    }
+
+    #[tokio::test]
+    async fn direct_session_accepts_explicit_agent_id_for_namespaced_session_key() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
+        let session_key = format!("codex/hash123/mac-mini:{tmux_name}");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_alt)
+                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
+                [long_channel],
+            )
+            .unwrap();
+        }
+
+        let (status, body) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.clone(),
+                agent_id: Some("project-skillmanager".to_string()),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("explicit agent".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        let conn = db.lock().unwrap();
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
     }
 
     #[tokio::test]
@@ -2857,6 +2750,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("thread fallback".to_string()),
@@ -2906,6 +2800,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("thread work".to_string()),
@@ -2955,6 +2850,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("direct channel work".to_string()),

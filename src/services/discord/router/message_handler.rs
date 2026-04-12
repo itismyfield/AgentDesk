@@ -1144,6 +1144,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         Some(&current_path),
         dispatch_id.as_deref(),
         adk_thread_channel_id,
+        role_binding
+            .as_ref()
+            .map(|binding| binding.role_id.as_str()),
         shared.api_port,
     )
     .await;

@@ -155,6 +155,20 @@ function _mergeCardMetadata(cardId, patch) {
   return meta;
 }
 
+function _findAutoQueueEntriesByDispatch(dispatchId, liveOnly) {
+  var statusClause = liveOnly
+    ? "e.status IN ('pending', 'dispatched')"
+    : "e.status = 'dispatched'";
+  return agentdesk.db.query(
+    "SELECT DISTINCT e.id, e.agent_id FROM auto_queue_entries e " +
+    "LEFT JOIN auto_queue_entry_dispatch_history h " +
+    "  ON h.entry_id = e.id AND h.dispatch_id = ? " +
+    "WHERE " + statusClause + " " +
+    "  AND (e.dispatch_id = ? OR h.dispatch_id IS NOT NULL)",
+    [dispatchId, dispatchId]
+  );
+}
+
 function _runPreflight(cardId) {
   var card = agentdesk.db.query(
     "SELECT kc.id, kc.title, kc.github_issue_number, kc.github_issue_url, kc.status, kc.description, " +
@@ -376,7 +390,7 @@ var rules = {
     if (!dispatch.kanban_card_id) return;
 
     var cards = agentdesk.db.query(
-      "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+      "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
       [dispatch.kanban_card_id]
     );
     if (cards.length === 0) return;
@@ -413,17 +427,19 @@ var rules = {
           "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
           [JSON.stringify(meta), dispatch.kanban_card_id]
         );
-        var aqEntries = agentdesk.db.query(
-          "SELECT id, agent_id FROM auto_queue_entries WHERE dispatch_id = ? AND status = 'dispatched' LIMIT 1",
-          [dispatch.id]
-        );
+        var aqEntries = _findAutoQueueEntriesByDispatch(dispatch.id, false);
         if (aqEntries.length > 0) {
           try {
             var nextDispatchId = agentdesk.dispatch.create(
               dispatch.kanban_card_id,
               aqEntries[0].agent_id,
               "implementation",
-              card.title || "Implementation"
+              card.title || "Implementation",
+              {
+                auto_queue: true,
+                entry_id: aqEntries[0].id,
+                parent_dispatch_id: dispatch.id
+              }
             );
             if (nextDispatchId) {
               agentdesk.autoQueue.updateEntryStatus(
@@ -465,10 +481,7 @@ var rules = {
         "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
         [JSON.stringify(noopMeta), dispatch.kanban_card_id]
       );
-      var noopEntries = agentdesk.db.query(
-        "SELECT id FROM auto_queue_entries WHERE dispatch_id = ? AND status IN ('pending', 'dispatched')",
-        [dispatch.id]
-      );
+      var noopEntries = _findAutoQueueEntriesByDispatch(dispatch.id, true);
       for (var ne = 0; ne < noopEntries.length; ne++) {
         agentdesk.autoQueue.updateEntryStatus(
           noopEntries[ne].id,

@@ -3,6 +3,7 @@ use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
+use crate::db::session_agent_resolution::resolve_agent_id_for_session;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,17 +153,14 @@ pub fn persist_turn_on_conn(
     let channel_id = normalized_opt(entry.channel_id);
     let provider = normalized_opt(entry.provider);
     let dispatch_id = normalized_opt(entry.dispatch_id);
-    let agent_id = normalized_opt(entry.agent_id).or_else(|| {
-        session_key.as_deref().and_then(|session_key| {
-            conn.query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        })
-    });
+    let agent_id = resolve_agent_id_for_session(
+        conn,
+        entry.agent_id,
+        session_key.as_deref(),
+        None,
+        None,
+        dispatch_id.as_deref(),
+    );
     let events_json = serde_json::to_string(&events)?;
     let search_document = build_search_document(user_message, assistant_message, &events);
 
@@ -248,12 +246,15 @@ pub fn list_transcripts_for_agent(
                 st.duration_ms,
                 st.created_at
          FROM session_transcripts st
+         LEFT JOIN sessions s
+           ON s.session_key = st.session_key
          LEFT JOIN task_dispatches td
            ON td.id = st.dispatch_id
-         LEFT JOIN kanban_cards kc
-           ON kc.id = td.kanban_card_id
-         WHERE st.agent_id = ?1
-            OR (st.agent_id IS NULL AND td.to_agent_id = ?1)
+         WHERE COALESCE(NULLIF(TRIM(st.agent_id), ''), NULLIF(TRIM(s.agent_id), '')) = ?1
+            OR (
+                COALESCE(NULLIF(TRIM(st.agent_id), ''), NULLIF(TRIM(s.agent_id), '')) IS NULL
+                AND td.to_agent_id = ?1
+            )
          ORDER BY st.created_at DESC, st.id DESC
          LIMIT ?2",
     )?;
@@ -628,6 +629,82 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].agent_id.as_deref(), Some("agent-2"));
         assert!(hits[0].snippet.contains("FTS5") || hits[0].snippet.contains("검색"));
+    }
+
+    #[test]
+    fn persist_turn_resolves_agent_from_session_context() {
+        let db = crate::db::test_db();
+        let mut conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name) VALUES ('agent-session', 'Agent Session')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
+             VALUES ('host:tmux-session', 'agent-session', 'claude', 'idle', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        persist_turn_on_conn(
+            &mut conn,
+            PersistSessionTranscript {
+                turn_id: "discord:session:1",
+                session_key: Some("host:tmux-session"),
+                channel_id: Some("session"),
+                agent_id: None,
+                provider: Some("claude"),
+                dispatch_id: None,
+                user_message: "question",
+                assistant_message: "answer",
+                events: &[],
+                duration_ms: None,
+            },
+        )
+        .unwrap();
+
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM session_transcripts WHERE turn_id = 'discord:session:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("agent-session"));
+    }
+
+    #[test]
+    fn list_transcripts_for_agent_falls_back_to_session_agent_id() {
+        let db = crate::db::test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-fallback', 'Agent Fallback')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
+                 VALUES ('host:tmux-fallback', 'agent-fallback', 'codex', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_transcripts (
+                    turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message, events_json
+                 ) VALUES (
+                    'discord:fallback:1', 'host:tmux-fallback', 'fallback', NULL, 'codex', NULL, 'legacy user', 'legacy assistant', '[]'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = db.read_conn().unwrap();
+        let transcripts = list_transcripts_for_agent(&conn, "agent-fallback", 10).unwrap();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].turn_id, "discord:fallback:1");
     }
 
     #[test]
