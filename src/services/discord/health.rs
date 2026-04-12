@@ -767,6 +767,7 @@ impl TestHealthHarness {
             api_port: 8791,
             db: None,
             engine: None,
+            health_registry: Arc::downgrade(&registry),
             known_slash_commands: tokio::sync::OnceCell::new(),
         });
         super::mark_reconcile_complete(&shared);
@@ -1664,5 +1665,17 @@ mod tests {
                 .await,
             "fallback cleanup should clear the active turn",
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_bot_http_reports_missing_notify_bot_token() {
+        let harness = TestHealthHarness::new().await;
+
+        let err = resolve_bot_http(harness.registry().as_ref(), "notify")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, "503 Service Unavailable");
+        assert!(err.1.contains("notify bot not configured"));
     }
 }
