@@ -893,6 +893,20 @@ export async function getDiscordBindings(): Promise<DiscordBinding[]> {
   return data.bindings;
 }
 
+export interface DiscordChannelInfo {
+  id: string;
+  guild_id?: string | null;
+  name?: string | null;
+  parent_id?: string | null;
+  type?: number | null;
+}
+
+export async function getDiscordChannelInfo(
+  channelId: string,
+): Promise<DiscordChannelInfo> {
+  return request(`/api/discord/channels/${channelId}`);
+}
+
 export interface GitHubRepoOption {
   nameWithOwner: string;
   updatedAt: string;
