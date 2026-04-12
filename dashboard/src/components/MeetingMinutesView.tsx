@@ -33,6 +33,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 interface Props {
   meetings: RoundTableMeeting[];
   onRefresh: () => void;
+  embedded?: boolean;
 }
 
 function getDefaultIssueRepo(repos: GitHubRepoOption[], viewerLogin: string): string {
@@ -73,7 +74,7 @@ function getMeetingIssueState(
   return result.ok ? "created" : "failed";
 }
 
-export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
+export default function MeetingMinutesView({ meetings, onRefresh, embedded = false }: Props) {
   const { t, locale } = useI18n();
   const [detailMeeting, setDetailMeeting] = useState<RoundTableMeeting | null>(null);
   const [creatingIssue, setCreatingIssue] = useState<string | null>(null);
@@ -381,25 +382,28 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   return (
     <div
-      className="p-4 sm:p-6 max-w-4xl mx-auto overflow-y-auto overflow-x-hidden h-full pb-40"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className={embedded
+        ? "space-y-4"
+        : "p-4 sm:p-6 max-w-4xl mx-auto overflow-y-auto overflow-x-hidden h-full pb-40"}
+      style={embedded ? undefined : { paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <FileText className="text-amber-400" size={24} />
-          <div>
-            <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
-              {t({ ko: "회의 기록", en: "Meeting Records" })}
-            </h1>
-            <p className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "라운드 테이블 상세와 후속 일감 상태를 함께 관리합니다.", en: "Manage round-table details and follow-up issue status together." })}
-            </p>
+      <div className={`flex items-center justify-between ${embedded ? "" : "mb-6"}`}>
+        {!embedded && (
+          <div className="flex items-center gap-3">
+            <FileText className="text-amber-400" size={24} />
+            <div>
+              <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
+                {t({ ko: "회의 기록", en: "Meeting Records" })}
+              </h1>
+              <p className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                {t({ ko: "라운드 테이블 상세와 후속 일감 상태를 함께 관리합니다.", en: "Manage round-table details and follow-up issue status together." })}
+              </p>
+            </div>
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}>
+              {meetings.length}
+            </span>
           </div>
-          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}>
-            {meetings.length}
-          </span>
-        </div>
+        )}
         <button
           onClick={() => setShowStartForm((v) => !v)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"

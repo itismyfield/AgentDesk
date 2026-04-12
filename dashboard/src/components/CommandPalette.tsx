@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
-import { PALETTE_ROUTES } from "../app/routes";
 
 interface PaletteRoute {
   id: string;
@@ -29,7 +28,7 @@ export default function CommandPalette({
   onNavigate,
   onClose,
   routes,
-  departmentRouteId = "control",
+  departmentRouteId = "settings_organization",
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
