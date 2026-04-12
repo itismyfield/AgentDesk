@@ -531,6 +531,25 @@ mod tests {
         .ok()
     }
 
+    fn escalation_pending_reasons(db: &db::Db, card_id: &str) -> Vec<String> {
+        kv_value(db, &format!("pm_pending:{card_id}"))
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| {
+                value["reasons"].as_array().map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    fn escalation_last_request(db: &db::Db) -> serde_json::Value {
+        let raw = kv_value(db, "test_http_last").expect("test_http_last must exist");
+        serde_json::from_str(&raw).expect("test_http_last must be valid JSON")
+    }
+
     fn relative_local_time(minutes_ago: i64) -> String {
         (chrono::Local::now() - chrono::Duration::minutes(minutes_ago))
             .format("%Y-%m-%d %H:%M:%S")
@@ -582,6 +601,43 @@ mod tests {
             };
             agentdesk.registerPolicy({
                 name: "timeouts-test-overrides",
+                priority: 9999
+            });
+            "#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn setup_escalation_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("policies")
+            .join("00-escalation.js");
+        fs::copy(&source, dir.path().join("00-escalation.js")).unwrap();
+        fs::write(
+            dir.path().join("zz-escalation-test-overrides.js"),
+            r#"
+            agentdesk.http.post = function(url, body) {
+                var countRows = agentdesk.db.query(
+                    "SELECT value FROM kv_meta WHERE key = ?1",
+                    ["test_http_count"]
+                );
+                var nextCount = countRows.length > 0
+                    ? (parseInt(countRows[0].value, 10) || 0) + 1
+                    : 1;
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_http_count", "" + nextCount]
+                );
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_http_last", JSON.stringify({ url: url, body: body })]
+                );
+                return { ok: true };
+            };
+            agentdesk.registerPolicy({
+                name: "escalation-test-overrides",
                 priority: 9999
             });
             "#,
@@ -1335,6 +1391,154 @@ mod tests {
         assert_eq!(
             dispatch_count, 0,
             "preflight timeout skip must not create a side dispatch"
+        );
+    }
+
+    #[test]
+    fn escalation_flush_bundles_suppressed_reasons_and_renotifies_after_cooldown() {
+        let db = test_db();
+        let policy_dir = setup_escalation_policy_dir();
+        let engine = test_engine_with_dir(&db, policy_dir.path());
+        seed_agent(&db);
+        seed_card(&db, "card-escalation", "pending_decision");
+        set_config_key(&db, "server_port", json!(8791));
+
+        engine
+            .eval_js::<String>(
+                r#"(() => { escalate("card-escalation", "reason-a"); flushEscalations(); return "ok"; })()"#,
+            )
+            .unwrap();
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+        assert_eq!(
+            escalation_pending_reasons(&db, "card-escalation"),
+            Vec::<String>::new()
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => { escalate("card-escalation", "reason-a"); flushEscalations(); return "ok"; })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("1"),
+            "same-card alert must be suppressed during cooldown"
+        );
+        assert_eq!(
+            escalation_pending_reasons(&db, "card-escalation"),
+            vec!["reason-a".to_string()]
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => { escalate("card-escalation", "reason-b"); flushEscalations(); return "ok"; })()"#,
+            )
+            .unwrap();
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+        assert_eq!(
+            escalation_pending_reasons(&db, "card-escalation"),
+            vec!["reason-a".to_string(), "reason-b".to_string()]
+        );
+
+        let stale_sent_at = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64)
+            - 601;
+        set_kv(
+            &db,
+            "pm_decision_sent:card-escalation",
+            &json!({
+                "sent_at": stale_sent_at,
+                "status": "pending_decision"
+            })
+            .to_string(),
+        );
+
+        engine
+            .eval_js::<String>(r#"(() => { flushEscalations(); return "ok"; })()"#)
+            .unwrap();
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("2"));
+        assert!(
+            kv_value(&db, "pm_pending:card-escalation").is_none(),
+            "successful resend must clear the pending bundle"
+        );
+
+        let last_request = escalation_last_request(&db);
+        let reasons = last_request["body"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, vec!["reason-a", "reason-b"]);
+    }
+
+    #[test]
+    fn entering_force_only_state_preserves_pending_escalation_bundle() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-force-enter", "requested");
+        set_kv(
+            &db,
+            "pm_pending:card-force-enter",
+            r#"{"title":"Test Card","reasons":["new pending decision"]}"#,
+        );
+        set_kv(
+            &db,
+            "pm_decision_sent:card-force-enter",
+            r#"{"sent_at":123,"status":"requested"}"#,
+        );
+
+        kanban::transition_status_with_opts(
+            &db,
+            &engine,
+            "card-force-enter",
+            "pending_decision",
+            "test",
+            true,
+        )
+        .unwrap();
+
+        assert!(kv_value(&db, "pm_pending:card-force-enter").is_some());
+        assert!(kv_value(&db, "pm_decision_sent:card-force-enter").is_some());
+    }
+
+    #[test]
+    fn leaving_force_only_state_clears_escalation_cooldown_keys() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-force-leave", "pending_decision");
+        set_kv(
+            &db,
+            "pm_pending:card-force-leave",
+            r#"{"title":"Test Card","reasons":["awaiting PM"]}"#,
+        );
+        set_kv(
+            &db,
+            "pm_decision_sent:card-force-leave",
+            r#"{"sent_at":123,"status":"pending_decision"}"#,
+        );
+
+        kanban::transition_status_with_opts(
+            &db,
+            &engine,
+            "card-force-leave",
+            "requested",
+            "test",
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            kv_value(&db, "pm_pending:card-force-leave").is_none(),
+            "resolving a force-only state must clear pending escalation bundle"
+        );
+        assert!(
+            kv_value(&db, "pm_decision_sent:card-force-leave").is_none(),
+            "resolving a force-only state must clear resend cooldown"
         );
     }
 

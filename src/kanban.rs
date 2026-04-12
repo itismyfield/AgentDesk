@@ -40,6 +40,20 @@ pub fn transition_status(
     transition_status_with_opts(db, engine, card_id, new_status, "system", false)
 }
 
+fn clear_escalation_alert_state_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM kv_meta WHERE key IN (?1, ?2)",
+        rusqlite::params![
+            format!("pm_pending:{card_id}"),
+            format!("pm_decision_sent:{card_id}")
+        ],
+    )?;
+    Ok(())
+}
+
 fn transition_status_with_opts_inner<F>(
     db: &Db,
     engine: &PolicyEngine,
@@ -196,6 +210,10 @@ where
             transition::execute_intent_on_conn(&conn, intent)?;
         }
         on_conn_after_intents(&conn)?;
+        if effective.is_force_only_state(&old_status) && !effective.is_force_only_state(new_status)
+        {
+            clear_escalation_alert_state_on_conn(&conn, card_id)?;
+        }
         Ok(())
     })();
     if let Err(e) = exec_result {
