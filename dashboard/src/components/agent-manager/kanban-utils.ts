@@ -94,6 +94,15 @@ export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
 export const REQUEST_TIMEOUT_MS = 45 * 60 * 1000;
 export const IN_PROGRESS_STALE_MS = 60 * 60 * 1000;
 
+export interface CardDwellBadge {
+  label: string;
+  detail: string;
+  tone: "fresh" | "warm" | "stale";
+  textColor: string;
+  backgroundColor: string;
+  borderColor: string;
+}
+
 // ---------------------------------------------------------------------------
 // Pure functions
 // ---------------------------------------------------------------------------
@@ -121,23 +130,35 @@ export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en:
   }
 }
 
-export function formatTs(value: number | null | undefined, locale: UiLanguage): string {
-  if (!value) return "-";
+export function coerceTimestampMs(value: string | number | null | undefined): number | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") {
+    return value < 1e12 ? value * 1000 : value;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export function formatTs(value: string | number | null | undefined, locale: UiLanguage): string {
+  const ts = coerceTimestampMs(value);
+  if (!ts) return "-";
   return new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(value);
+  }).format(ts);
 }
 
 export function formatIso(value: string | number | null | undefined, locale: UiLanguage): string {
-  if (value == null) return "-";
-  if (typeof value === "number") return value ? formatTs(value, locale) : "-";
-  if (!value) return "-";
-  const parsed = new Date(value).getTime();
-  if (Number.isNaN(parsed)) return value;
-  return formatTs(parsed, locale);
+  if (value == null || value === "") return "-";
+  const ts = coerceTimestampMs(value);
+  if (ts != null) return formatTs(ts, locale);
+  return typeof value === "string" ? value : "-";
 }
 
 export function createChecklistItem(label: string, index = 0): KanbanReviewChecklistItem {
@@ -199,6 +220,91 @@ export function formatAgeLabel(ms: number, tr: (ko: string, en: string) => strin
   }
   const days = Math.round(hours / 24);
   return tr(`${days}일`, `${days}d`);
+}
+
+function dwellThresholdsForStatus(status: KanbanCardStatus): { warmMs: number; staleMs: number } {
+  switch (status) {
+    case "requested":
+      return { warmMs: 15 * 60 * 1000, staleMs: REQUEST_TIMEOUT_MS };
+    case "in_progress":
+      return { warmMs: 90 * 60 * 1000, staleMs: 4 * 60 * 60 * 1000 };
+    case "review":
+    case "pending_decision":
+      return { warmMs: 45 * 60 * 1000, staleMs: 2 * 60 * 60 * 1000 };
+    case "blocked":
+      return { warmMs: 30 * 60 * 1000, staleMs: 90 * 60 * 1000 };
+    case "qa_pending":
+    case "qa_in_progress":
+    case "qa_failed":
+      return { warmMs: 60 * 60 * 1000, staleMs: 3 * 60 * 60 * 1000 };
+    case "backlog":
+    case "ready":
+    case "done":
+      return { warmMs: 12 * 60 * 60 * 1000, staleMs: 36 * 60 * 60 * 1000 };
+    default:
+      return { warmMs: 60 * 60 * 1000, staleMs: 3 * 60 * 60 * 1000 };
+  }
+}
+
+export function getCardStateEnteredAt(card: KanbanCard): number | null {
+  switch (card.status) {
+    case "requested":
+      return coerceTimestampMs(card.requested_at ?? card.updated_at ?? card.created_at);
+    case "in_progress":
+      return coerceTimestampMs(card.started_at ?? card.updated_at ?? card.created_at);
+    case "review":
+    case "pending_decision":
+      return coerceTimestampMs(card.review_entered_at ?? card.updated_at ?? card.started_at ?? card.created_at);
+    case "done":
+      return coerceTimestampMs(card.completed_at ?? card.updated_at ?? card.created_at);
+    case "blocked":
+    case "qa_pending":
+    case "qa_in_progress":
+    case "qa_failed":
+    case "ready":
+    case "backlog":
+    default:
+      return coerceTimestampMs(card.updated_at ?? card.created_at);
+  }
+}
+
+export function getCardDwellBadge(
+  card: KanbanCard,
+  now: number,
+  tr: (ko: string, en: string) => string,
+): CardDwellBadge | null {
+  const enteredAt = getCardStateEnteredAt(card);
+  if (enteredAt == null) return null;
+  const elapsed = Math.max(0, now - enteredAt);
+  const { warmMs, staleMs } = dwellThresholdsForStatus(card.status);
+  if (elapsed >= staleMs) {
+    return {
+      label: tr("체류", "Dwell"),
+      detail: formatAgeLabel(elapsed, tr),
+      tone: "stale",
+      textColor: "#fca5a5",
+      backgroundColor: "rgba(239,68,68,0.18)",
+      borderColor: "rgba(239,68,68,0.38)",
+    };
+  }
+  if (elapsed >= warmMs) {
+    return {
+      label: tr("체류", "Dwell"),
+      detail: formatAgeLabel(elapsed, tr),
+      tone: "warm",
+      textColor: "#fde68a",
+      backgroundColor: "rgba(234,179,8,0.18)",
+      borderColor: "rgba(234,179,8,0.34)",
+    };
+  }
+  return {
+    label: tr("체류", "Dwell"),
+    detail: formatAgeLabel(elapsed, tr),
+    tone: "fresh",
+    textColor: "#86efac",
+    backgroundColor: "rgba(34,197,94,0.18)",
+    borderColor: "rgba(34,197,94,0.32)",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -718,15 +824,17 @@ export function getCardDelayBadge(
   tr: (ko: string, en: string) => string,
 ): { label: string; tone: string; detail: string } | null {
   const now = Date.now();
-  if (card.status === "requested" && card.requested_at) {
-    const age = now - card.requested_at;
-    if (age >= REQUEST_TIMEOUT_MS) {
+  if (card.status === "requested") {
+    const requestedAt = coerceTimestampMs(card.requested_at);
+    const age = requestedAt == null ? null : now - requestedAt;
+    if (age != null && age >= REQUEST_TIMEOUT_MS) {
       return { label: tr("수락 지연", "Ack delay"), tone: "#f97316", detail: formatAgeLabel(age, tr) };
     }
   }
-  if (card.status === "in_progress" && card.started_at) {
-    const age = now - card.started_at;
-    if (age >= IN_PROGRESS_STALE_MS) {
+  if (card.status === "in_progress") {
+    const startedAt = coerceTimestampMs(card.started_at);
+    const age = startedAt == null ? null : now - startedAt;
+    if (age != null && age >= IN_PROGRESS_STALE_MS) {
       return { label: tr("정체", "Stalled"), tone: "#f59e0b", detail: formatAgeLabel(age, tr) };
     }
   }

@@ -452,6 +452,7 @@ export interface KanbanCard {
   updated_at: number;
   started_at: number | null;
   requested_at: number | null;
+  review_entered_at?: string | number | null;
   completed_at: number | null;
   latest_dispatch_status?: TaskDispatchStatus | null;
   latest_dispatch_title?: string | null;

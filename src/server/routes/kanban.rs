@@ -19,7 +19,7 @@ pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.sta
     td.result AS d_result, \
     kc.description, kc.blocked_reason, kc.review_notes, kc.review_status, \
     kc.started_at, kc.requested_at, kc.completed_at, kc.pipeline_stage_id, \
-    kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth \
+    kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth, kc.review_entered_at \
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
 /// Latest meaningful activity for in-progress stall detection.
@@ -1590,6 +1590,7 @@ pub(super) fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_js
     let parent_card_id = row.get::<_, Option<String>>(28).unwrap_or(None);
     let sort_order = row.get::<_, i64>(29).unwrap_or(0);
     let depth = row.get::<_, i64>(30).unwrap_or(0);
+    let review_entered_at = row.get::<_, Option<String>>(31).unwrap_or(None);
 
     Ok(json!({
         "id": row.get::<_, String>(0)?,
@@ -1624,6 +1625,7 @@ pub(super) fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_js
         "parent_card_id": parent_card_id,
         "sort_order": sort_order,
         "depth": depth,
+        "review_entered_at": review_entered_at,
         // dispatch join fields
         "latest_dispatch_status": row.get::<_, Option<String>>(13).unwrap_or(None),
         "latest_dispatch_title": row.get::<_, Option<String>>(15).unwrap_or(None),

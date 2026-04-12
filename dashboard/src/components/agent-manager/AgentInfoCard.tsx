@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   formatElapsedCompact,
   getAgentWarnings,
@@ -7,7 +7,6 @@ import {
 } from "../../agent-insights";
 import type {
   Agent,
-  AuditLogEntry,
   Department,
   DispatchedSession,
 } from "../../types";
@@ -21,16 +20,8 @@ import type {
   CronJob,
   AgentSkill,
   DiscordBinding,
-  DiscordChannelInfo,
   AgentOfficeMembership,
 } from "../../api/client";
-import {
-  describeDiscordBinding,
-  describeDiscordTarget,
-  describeDispatchedSession,
-  formatDiscordSummary,
-  isDiscordSnowflake,
-} from "./discord-routing";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -163,6 +154,83 @@ function bindingSourceLabel(source: string): string {
   }
 }
 
+function compactToken(value: string, head = 8, tail = 4): string {
+  if (value.length <= head + tail + 3) return value;
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
+
+interface DetailAccordionProps {
+  title: string;
+  subtitle?: string | null;
+  badge?: string | null;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}
+
+function DetailAccordion({
+  title,
+  subtitle,
+  badge,
+  open,
+  onToggle,
+  children,
+}: DetailAccordionProps) {
+  return (
+    <div
+      className="px-5 py-3"
+      style={{ borderBottom: "1px solid var(--th-card-border)" }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-start justify-between gap-3 text-left"
+        aria-expanded={open}
+      >
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div
+              className="text-xs font-semibold uppercase tracking-widest"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {title}
+            </div>
+            {badge && (
+              <span
+                className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                style={{
+                  background: "rgba(96,165,250,0.12)",
+                  color: "#93c5fd",
+                }}
+              >
+                {badge}
+              </span>
+            )}
+          </div>
+          {subtitle && (
+            <div
+              className="mt-1 text-xs leading-relaxed"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {subtitle}
+            </div>
+          )}
+        </div>
+        <span
+          className="rounded-full px-2 py-1 text-xs font-medium"
+          style={{
+            background: "rgba(148,163,184,0.12)",
+            color: "var(--th-text-muted)",
+          }}
+        >
+          {open ? "▲" : "▼"}
+        </span>
+      </button>
+      {open && <div className="mt-3">{children}</div>}
+    </div>
+  );
+}
+
 export default function AgentInfoCard({
   agent,
   spriteMap,
@@ -183,7 +251,6 @@ export default function AgentInfoCard({
   const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
-  const [discordChannels, setDiscordChannels] = useState<Record<string, DiscordChannelInfo>>({});
   const [loadingBindings, setLoadingBindings] = useState(true);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
@@ -203,11 +270,13 @@ export default function AgentInfoCard({
   const [savingOfficeIds, setSavingOfficeIds] = useState<
     Record<string, boolean>
   >({});
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
-  const [loadingAudit, setLoadingAudit] = useState(true);
   const [timeline, setTimeline] = useState<api.TimelineEvent[]>([]);
   const [loadingTimeline, setLoadingTimeline] = useState(true);
   const [timelineOpen, setTimelineOpen] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(true);
+  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [routingOpen, setRoutingOpen] = useState(false);
+  const [idleSessionsOpen, setIdleSessionsOpen] = useState(false);
 
   const saveAlias = async () => {
     const trimmed = aliasValue.trim();
@@ -232,6 +301,10 @@ export default function AgentInfoCard({
     setAliasValue(agent.alias ?? "");
     setSelectedDeptId(agent.department_id ?? "");
     setSelectedProvider(agent.cli_provider ?? "claude");
+    setTranscriptOpen(true);
+    setSessionsOpen(true);
+    setRoutingOpen(false);
+    setIdleSessionsOpen(false);
   }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
 
   const saveDepartment = async (nextDeptId: string) => {
@@ -352,18 +425,6 @@ export default function AgentInfoCard({
         setLoadingBindings(false);
       });
 
-    setLoadingAudit(true);
-    api
-      .getAuditLogs(8, { entityType: "agent", entityId: agent.id })
-      .then((rows) => {
-        setAuditLogs(rows);
-        setLoadingAudit(false);
-      })
-      .catch(() => {
-        setAuditLogs([]);
-        setLoadingAudit(false);
-      });
-
     setLoadingOffices(true);
     api
       .getAgentOffices(agent.id)
@@ -389,59 +450,6 @@ export default function AgentInfoCard({
       });
   }, [agent.id]);
 
-  useEffect(() => {
-    const queue: string[] = [];
-    const queued = new Set<string>();
-    const enqueue = (value: string | null | undefined) => {
-      if (!isDiscordSnowflake(value) || queued.has(value) || discordChannels[value]) {
-        return;
-      }
-      queued.add(value);
-      queue.push(value);
-    };
-
-    discordBindings.forEach((binding) => {
-      enqueue(binding.channelId);
-      enqueue(binding.counterModelChannelId);
-    });
-    claudeSessions.forEach((session) => enqueue(session.thread_channel_id));
-
-    if (queue.length === 0) return;
-
-    let stale = false;
-    void (async () => {
-      const fetched: Record<string, DiscordChannelInfo> = {};
-      while (queue.length > 0) {
-        const channelId = queue.shift();
-        if (!channelId) continue;
-        try {
-          const info = await api.getDiscordChannelInfo(channelId);
-          if (!info?.id) continue;
-          fetched[info.id] = info;
-          if (
-            isDiscordSnowflake(info.parent_id)
-            && !queued.has(info.parent_id)
-            && !discordChannels[info.parent_id]
-            && !fetched[info.parent_id]
-          ) {
-            queued.add(info.parent_id);
-            queue.push(info.parent_id);
-          }
-        } catch {
-          // Ignore per-channel lookup failures and keep the raw fallback text.
-        }
-      }
-
-      if (!stale && Object.keys(fetched).length > 0) {
-        setDiscordChannels((prev) => ({ ...prev, ...fetched }));
-      }
-    })();
-
-    return () => {
-      stale = true;
-    };
-  }, [agent.id, claudeSessions, discordBindings, discordChannels]);
-
   const statusLabel: Record<string, { ko: string; en: string }> = {
     working: { ko: "근무 중", en: "Working" },
     idle: { ko: "대기", en: "Idle" },
@@ -453,11 +461,12 @@ export default function AgentInfoCard({
     agent.activity_source === "agentdesk"
       ? tr("AgentDesk 작업", "AgentDesk")
       : null;
-  const getDiscordChannel = (channelId: string | null | undefined) =>
-    channelId ? discordChannels[channelId] : undefined;
 
   const workingLinkedSessions = claudeSessions.filter(
     (session) => session.status === "working",
+  );
+  const idleLinkedSessions = claudeSessions.filter(
+    (session) => session.status !== "working",
   );
   const currentWorkSummary = getAgentWorkSummary(agent, {
     linkedSessions: workingLinkedSessions,
@@ -478,15 +487,7 @@ export default function AgentInfoCard({
         agent.session_info,
         ...workingLinkedSessions.flatMap((session) => [
           session.session_info,
-          formatDiscordSummary(
-            describeDispatchedSession(
-              session,
-              getDiscordChannel(session.thread_channel_id),
-              getDiscordChannel(
-                getDiscordChannel(session.thread_channel_id)?.parent_id,
-              ),
-            ),
-          ),
+          session.name,
         ]),
       ].filter((value): value is string => Boolean(value && value.trim())),
     ),
@@ -494,45 +495,124 @@ export default function AgentInfoCard({
   const roleMapBindings = discordBindings.filter(
     (binding) => inferBindingSource(binding) === "role-map",
   );
-  const dbBindings = discordBindings.filter(
-    (binding) => inferBindingSource(binding) !== "role-map",
-  );
-  const sourceOfTruthRows = [
+  const routingChips = [
     {
-      label: tr("DB 레코드", "DB Record"),
-      value: agent.id,
+      label: "DB",
+      value: compactToken(agent.id, 6, 4),
+      fullValue: agent.id,
+      fullLabel: tr("DB 레코드", "DB Record"),
       tone: "#60a5fa",
     },
     {
-      label: tr("Role ID", "Role ID"),
-      value: agent.role_id || tr("없음", "None"),
+      label: "Role",
+      value: agent.role_id
+        ? compactToken(agent.role_id, 8, 4)
+        : tr("없음", "None"),
+      fullValue: agent.role_id || tr("없음", "None"),
+      fullLabel: tr("Role ID", "Role ID"),
       tone: agent.role_id ? "#34d399" : "#94a3b8",
     },
     {
-      label: tr("Launchd 귀속", "Launchd Ownership"),
-      value:
+      label: "Launchd",
+      value: cronJobs.length > 0 ? `${cronJobs.length}` : tr("없음", "None"),
+      fullValue:
         cronJobs.length > 0 ? `${cronJobs.length} job` : tr("없음", "None"),
+      fullLabel: tr("Launchd 귀속", "Launchd Ownership"),
       tone: cronJobs.length > 0 ? "#34d399" : "#94a3b8",
     },
     {
-      label: tr("RoleMap 경로", "RoleMap Route"),
+      label: "RoleMap",
       value:
+        roleMapBindings.length > 0
+          ? `${roleMapBindings.length}`
+          : tr("없음", "None"),
+      fullValue:
         roleMapBindings.length > 0
           ? `${roleMapBindings.length} route`
           : tr("없음", "None"),
+      fullLabel: tr("RoleMap 경로", "RoleMap Route"),
       tone: roleMapBindings.length > 0 ? "#fbbf24" : "#94a3b8",
     },
     {
-      label: tr("Discord 경로", "Discord Routes"),
+      label: "Discord",
       value: `${discordBindings.length}`,
+      fullValue: `${discordBindings.length}`,
+      fullLabel: tr("Discord 경로", "Discord Routes"),
       tone: discordBindings.length > 0 ? "#a78bfa" : "#94a3b8",
     },
     {
-      label: tr("AgentDesk 링크", "AgentDesk Links"),
+      label: "ADK",
       value: `${workingLinkedSessions.length}/${claudeSessions.length}`,
+      fullValue: `${workingLinkedSessions.length}/${claudeSessions.length}`,
+      fullLabel: tr("AgentDesk 링크", "AgentDesk Links"),
       tone: workingLinkedSessions.length > 0 ? "#38bdf8" : "#94a3b8",
     },
   ];
+  const renderLinkedSessionCard = (
+    session: DispatchedSession,
+    emphasized: boolean,
+  ) => {
+    const providerTone =
+      session.provider === "codex"
+        ? { bg: "rgba(56,189,248,0.18)", text: "#38bdf8", label: "Codex" }
+        : session.provider === "gemini"
+          ? { bg: "rgba(250,204,21,0.18)", text: "#facc15", label: "Gemini" }
+          : session.provider === "qwen"
+            ? { bg: "rgba(34,197,94,0.18)", text: "#86efac", label: "Qwen" }
+            : { bg: "rgba(167,139,250,0.18)", text: "#c4b5fd", label: "Claude" };
+
+    return (
+      <div
+        key={session.id}
+        className="flex items-start justify-between gap-2 rounded-xl border px-3 py-2"
+        style={{
+          borderColor: emphasized
+            ? "rgba(16,185,129,0.26)"
+            : "rgba(148,163,184,0.12)",
+          background: emphasized
+            ? "rgba(16,185,129,0.08)"
+            : "var(--th-bg-surface)",
+        }}
+      >
+        <div className="min-w-0">
+          <div
+            className="text-xs font-medium truncate"
+            style={{ color: "var(--th-text-primary)" }}
+          >
+            {session.name || session.session_key}
+          </div>
+          <div
+            className="mt-0.5 text-xs truncate"
+            style={{ color: "var(--th-text-muted)" }}
+          >
+            {session.session_info || session.model || "AgentDesk session"}
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+          <span
+            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
+            style={{
+              background: providerTone.bg,
+              color: providerTone.text,
+            }}
+          >
+            {providerTone.label}
+          </span>
+          <span
+            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
+            style={{
+              background: emphasized
+                ? "rgba(16,185,129,0.15)"
+                : "rgba(100,116,139,0.15)",
+              color: emphasized ? "#34d399" : "#94a3b8",
+            }}
+          >
+            {emphasized ? tr("작업중", "Working") : tr("대기", "Idle")}
+          </span>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div
@@ -638,9 +718,9 @@ export default function AgentInfoCard({
                 </button>
               )}
             </div>
-            <div className="flex items-center gap-2 mt-1.5">
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
               <span
-                className="text-xs px-2 py-0.5 rounded-full font-medium"
+                className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
                 style={{
                   background:
                     agent.status === "working"
@@ -666,7 +746,7 @@ export default function AgentInfoCard({
               </span>
               {agent.status === "working" && sourceLabel && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "rgba(99,102,241,0.18)",
                     color: "#a5b4fc",
@@ -677,7 +757,7 @@ export default function AgentInfoCard({
               )}
               {dept && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -688,7 +768,7 @@ export default function AgentInfoCard({
               )}
               {!dept && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -709,15 +789,27 @@ export default function AgentInfoCard({
           </button>
         </div>
 
-        <TurnTranscriptPanel
-          source={{
-            type: "agent",
-            id: agent.id,
-            refreshSeed: `${agent.status}:${agent.session_info ?? ""}:${agent.current_task_id ?? ""}`,
-          }}
-          isKo={isKo}
-          tr={tr}
-        />
+        <DetailAccordion
+          title={tr("트랜스크립트", "Transcript")}
+          subtitle={tr(
+            "완료된 턴을 다시 살펴보고 필요한 로그만 펼쳐 봅니다.",
+            "Replay completed turns and expand only the logs you need.",
+          )}
+          badge={tr("최근 8개", "Recent 8")}
+          open={transcriptOpen}
+          onToggle={() => setTranscriptOpen((prev) => !prev)}
+        >
+          <TurnTranscriptPanel
+            source={{
+              type: "agent",
+              id: agent.id,
+              refreshSeed: `${agent.status}:${agent.session_info ?? ""}:${agent.current_task_id ?? ""}`,
+            }}
+            isKo={isKo}
+            tr={tr}
+            embedded
+          />
+        </DetailAccordion>
 
         <div
           className="px-5 py-3"
@@ -849,82 +941,198 @@ export default function AgentInfoCard({
           )}
         </div>
 
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
+        <DetailAccordion
+          title={tr("세션", "Sessions")}
+          subtitle={tr(
+            "working 세션은 바로 보이고 idle 세션은 접어 둡니다.",
+            "Working sessions stay visible while idle sessions are tucked away.",
+          )}
+          badge={
+            loadingClaudeSessions
+              ? tr("불러오는 중", "Loading")
+              : `${workingLinkedSessions.length}/${claudeSessions.length}`
+          }
+          open={sessionsOpen}
+          onToggle={() => setSessionsOpen((prev) => !prev)}
         >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("상태 요약", "Status Summary")}
-          </div>
-          <div className="space-y-2">
+          <div className="space-y-3">
             <div
-              className="rounded-xl px-3 py-2"
-              style={{ background: "var(--th-bg-surface)" }}
+              className="rounded-xl border px-3 py-3"
+              style={{
+                borderColor: "rgba(148,163,184,0.12)",
+                background: "var(--th-bg-surface)",
+              }}
             >
               <div
-                className="text-xs mb-1"
+                className="text-xs font-semibold uppercase tracking-widest"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("현재 작업", "Current Work")}
               </div>
               <div
-                className="text-xs leading-relaxed"
+                className="mt-2 text-xs leading-relaxed"
                 style={{ color: "var(--th-text-primary)" }}
               >
                 {currentWorkSummary ||
                   tr("현재 작업 설명이 없습니다", "No current work detail")}
               </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {currentWorkElapsedMs != null && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {currentWorkElapsedMs != null && (
+                  <span
+                    className="rounded-lg px-2 py-1 text-xs"
+                    style={{
+                      background: "rgba(59,130,246,0.14)",
+                      color: "#93c5fd",
+                    }}
+                  >
+                    {tr("경과", "Elapsed")}:{" "}
+                    {formatElapsedCompact(currentWorkElapsedMs, isKo)}
+                  </span>
+                )}
                 <span
-                  className="text-xs px-2 py-1 rounded-lg"
+                  className="rounded-lg px-2 py-1 text-xs"
                   style={{
-                    background: "rgba(59,130,246,0.14)",
-                    color: "#93c5fd",
+                    background: "rgba(56,189,248,0.14)",
+                    color: "#67e8f9",
                   }}
                 >
-                  {tr("경과", "Elapsed")}:{" "}
-                  {formatElapsedCompact(currentWorkElapsedMs, isKo)}
+                  AgentDesk {workingLinkedSessions.length}/{claudeSessions.length}
                 </span>
+              </div>
+              {currentWorkDetails.length > 0 && (
+                <div className="mt-3 space-y-1">
+                  {currentWorkDetails.map((line, idx) => (
+                    <div
+                      key={`${line}:${idx}`}
+                      className="text-xs"
+                      style={{ color: "var(--th-text-secondary)" }}
+                    >
+                      • {line}
+                    </div>
+                  ))}
+                </div>
               )}
-              <span
-                className="text-xs px-2 py-1 rounded-lg"
-                style={{
-                  background: "rgba(56,189,248,0.14)",
-                  color: "#67e8f9",
-                }}
-              >
-                AgentDesk {workingLinkedSessions.length}/{claudeSessions.length}
-              </span>
-              <span
-                className="text-xs px-2 py-1 rounded-lg"
-                style={{
-                  background: "rgba(168,85,247,0.14)",
-                  color: "#d8b4fe",
-                }}
-              >
-                {tr("DB 경로", "DB routes")}: {dbBindings.length}
-              </span>
             </div>
-            {currentWorkDetails.length > 0 && (
-              <div className="space-y-1">
-                {currentWorkDetails.map((line, idx) => (
-                  <div
-                    key={`${line}:${idx}`}
-                    className="text-xs"
-                    style={{ color: "var(--th-text-secondary)" }}
-                  >
-                    • {line}
-                  </div>
-                ))}
+
+            {agent.session_info && (
+              <div
+                className="rounded-xl border px-3 py-3"
+                style={{
+                  borderColor: "rgba(148,163,184,0.12)",
+                  background: "rgba(255,255,255,0.03)",
+                }}
+              >
+                <div
+                  className="text-xs font-semibold uppercase tracking-widest"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  {tr("세션 메모", "Session Note")}
+                </div>
+                <div
+                  className="mt-2 text-xs leading-relaxed"
+                  style={{ color: "var(--th-text-secondary)" }}
+                >
+                  {agent.session_info}
+                </div>
               </div>
             )}
+
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div
+                  className="text-xs font-semibold uppercase tracking-widest"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  {tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}
+                  {!loadingClaudeSessions && ` (${claudeSessions.length})`}
+                </div>
+                {!loadingClaudeSessions && idleLinkedSessions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setIdleSessionsOpen((prev) => !prev)}
+                    className="rounded-full px-2 py-1 text-xs"
+                    style={{
+                      background: "rgba(148,163,184,0.12)",
+                      color: "var(--th-text-muted)",
+                    }}
+                  >
+                    {idleSessionsOpen
+                      ? tr("idle 접기", "Hide idle")
+                      : tr(
+                          `idle ${idleLinkedSessions.length}개`,
+                          `Idle ${idleLinkedSessions.length}`,
+                        )}
+                  </button>
+                )}
+              </div>
+
+              {loadingClaudeSessions ? (
+                <div
+                  className="text-xs py-1"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  {tr("불러오는 중...", "Loading...")}
+                </div>
+              ) : claudeSessions.length === 0 ? (
+                <div
+                  className="text-xs py-1"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  {tr(
+                    "연결된 AgentDesk 세션 없음",
+                    "No linked AgentDesk sessions",
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {workingLinkedSessions.length > 0 ? (
+                    <div className="space-y-1.5">
+                      {workingLinkedSessions.map((session) =>
+                        renderLinkedSessionCard(session, true),
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      className="rounded-xl px-3 py-2 text-xs"
+                      style={{
+                        background: "rgba(148,163,184,0.08)",
+                        color: "var(--th-text-muted)",
+                      }}
+                    >
+                      {tr(
+                        "현재 working 세션은 없습니다.",
+                        "There are no working sessions right now.",
+                      )}
+                    </div>
+                  )}
+
+                  {idleLinkedSessions.length > 0 && !idleSessionsOpen && (
+                    <div
+                      className="rounded-xl px-3 py-2 text-xs"
+                      style={{
+                        background: "rgba(148,163,184,0.08)",
+                        color: "var(--th-text-muted)",
+                      }}
+                    >
+                      {tr(
+                        `idle 세션 ${idleLinkedSessions.length}개는 접혀 있습니다.`,
+                        `${idleLinkedSessions.length} idle sessions are tucked away.`,
+                      )}
+                    </div>
+                  )}
+
+                  {idleLinkedSessions.length > 0 && idleSessionsOpen && (
+                    <div className="space-y-1.5">
+                      {idleLinkedSessions.map((session) =>
+                        renderLinkedSessionCard(session, false),
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        </DetailAccordion>
 
         {warnings.length > 0 && (
           <div
@@ -964,50 +1172,109 @@ export default function AgentInfoCard({
           </div>
         )}
 
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("정본 연결", "Source of Truth")}
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {sourceOfTruthRows.map((row) => (
-              <div
-                key={row.label}
-                className="rounded-xl px-3 py-2"
-                style={{ background: "var(--th-bg-surface)" }}
-              >
-                <div
-                  className="text-xs"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {row.label}
-                </div>
-                <div
-                  className="mt-1 text-xs font-medium break-all"
-                  style={{ color: row.tone }}
-                >
-                  {row.value}
-                </div>
-              </div>
-            ))}
-          </div>
-          {roleMapBindings.length > 0 && (
-            <div
-              className="mt-2 text-xs"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr(
-                "RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.",
-                "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
-              )}
-            </div>
+        <DetailAccordion
+          title={tr("라우팅", "Routing")}
+          subtitle={tr(
+            "RoleMap/Primary/Alt/Codex가 이 agent의 Discord 연결 경로를 설명합니다.",
+            "RoleMap/Primary/Alt/Codex explain how this agent is wired to Discord.",
           )}
-        </div>
+          badge={`${discordBindings.length}`}
+          open={routingOpen}
+          onToggle={() => setRoutingOpen((prev) => !prev)}
+        >
+          <div className="space-y-3">
+            <div className="overflow-x-auto pb-1">
+              <div className="flex min-w-max items-center gap-2">
+                {routingChips.map((chip) => (
+                  <div
+                    key={chip.label}
+                    className="flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1 text-xs"
+                    style={{
+                      borderColor: `${chip.tone}44`,
+                      background: `${chip.tone}14`,
+                    }}
+                    title={`${chip.fullLabel}: ${chip.fullValue}`}
+                  >
+                    <span style={{ color: "var(--th-text-muted)" }}>
+                      {chip.label}
+                    </span>
+                    <span className="font-medium" style={{ color: chip.tone }}>
+                      {chip.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {roleMapBindings.length > 0 && (
+              <div
+                className="text-xs"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {tr(
+                  "RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.",
+                  "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
+                )}
+              </div>
+            )}
+
+            {discordBindings.length === 0 ? (
+              <div
+                className="text-xs py-1"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {tr("연결된 Discord 경로 없음", "No Discord routes")}
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {discordBindings.map((binding) => {
+                  const source = inferBindingSource(binding);
+                  const sourcePill = bindingSourceLabel(source);
+                  const subtitle =
+                    binding.counterModelChannelId &&
+                    binding.counterModelChannelId !== binding.channelId
+                      ? `counter: ${binding.counterModelChannelId}`
+                      : null;
+
+                  return (
+                    <div
+                      key={`${binding.channelId}:${source}`}
+                      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5"
+                      style={{ background: "var(--th-bg-surface)" }}
+                    >
+                      <span className="text-sm">💬</span>
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className="text-xs font-medium truncate"
+                          style={{ color: "var(--th-text-primary)" }}
+                        >
+                          {binding.channelId}
+                        </div>
+                        {subtitle && (
+                          <div
+                            className="mt-0.5 text-xs truncate"
+                            style={{ color: "var(--th-text-muted)" }}
+                          >
+                            {subtitle}
+                          </div>
+                        )}
+                      </div>
+                      <span
+                        className="rounded px-1.5 py-0.5 text-xs"
+                        style={{
+                          background: "rgba(88,101,242,0.15)",
+                          color: "#7289da",
+                        }}
+                      >
+                        {sourcePill}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </DetailAccordion>
 
         {/* Personality */}
         {agent.personality && (
@@ -1029,288 +1296,6 @@ export default function AgentInfoCard({
             </div>
           </div>
         )}
-
-        {/* Session info */}
-        {agent.session_info && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-1.5"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("현재 작업", "Current Session")}
-            </div>
-            <div
-              className="text-xs leading-relaxed"
-              style={{ color: "var(--th-text-secondary)" }}
-            >
-              {agent.session_info}
-            </div>
-          </div>
-        )}
-
-        {/* Discord Bindings */}
-        {discordBindings.length > 0 && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("Discord 라우팅", "Discord Routing")} (
-              {discordBindings.length})
-            </div>
-            <div
-              className="text-xs mb-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr(
-                "RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.",
-                "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.",
-              )}
-            </div>
-            <div className="space-y-1">
-              {discordBindings.map((b) => {
-                const source = inferBindingSource(b);
-                const sourceLabel = bindingSourceLabel(source);
-                const bindingChannel = getDiscordChannel(b.channelId);
-                const bindingParent = getDiscordChannel(bindingChannel?.parent_id);
-                const bindingSummary = describeDiscordBinding(
-                  b,
-                  bindingChannel,
-                  bindingParent,
-                );
-                const counterChannel =
-                  b.counterModelChannelId && b.counterModelChannelId !== b.channelId
-                    ? getDiscordChannel(b.counterModelChannelId)
-                    : undefined;
-                const counterParent = getDiscordChannel(counterChannel?.parent_id);
-                const counterSummary =
-                  b.counterModelChannelId && b.counterModelChannelId !== b.channelId
-                    ? describeDiscordTarget(
-                        b.counterModelChannelId,
-                        counterChannel,
-                        counterParent,
-                      )
-                    : null;
-                const subtitleParts = [
-                  bindingSummary.subtitle,
-                  counterSummary
-                    ? `counter: ${formatDiscordSummary(counterSummary)}`
-                    : null,
-                ].filter((value): value is string => Boolean(value));
-
-                return (
-                  <div
-                    key={`${b.channelId}:${source}`}
-                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg"
-                    style={{ background: "var(--th-bg-surface)" }}
-                  >
-                    <span className="text-sm">💬</span>
-                    <div className="min-w-0 flex-1">
-                      <div
-                        className="text-xs font-medium truncate"
-                        style={{ color: "var(--th-text-primary)" }}
-                      >
-                        {bindingSummary.title}
-                      </div>
-                      {subtitleParts.length > 0 && (
-                        <div
-                          className="text-xs truncate mt-0.5"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {subtitleParts.join(" · ")}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {bindingSummary.webUrl && (
-                        <a
-                          href={bindingSummary.webUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
-                          style={{
-                            background: "rgba(59,130,246,0.15)",
-                            color: "#93c5fd",
-                          }}
-                        >
-                          Web
-                        </a>
-                      )}
-                      {bindingSummary.deepLink && (
-                        <a
-                          href={bindingSummary.deepLink}
-                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
-                          style={{
-                            background: "rgba(88,101,242,0.16)",
-                            color: "#a5b4fc",
-                          }}
-                        >
-                          App
-                        </a>
-                      )}
-                      <span
-                        className="text-xs px-1.5 py-0.5 rounded"
-                        style={{
-                          background: "rgba(88,101,242,0.15)",
-                          color: "#7289da",
-                        }}
-                      >
-                        {sourceLabel}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Linked AgentDesk Sessions */}
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}
-            {!loadingClaudeSessions && ` (${claudeSessions.length})`}
-          </div>
-          {loadingClaudeSessions ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : claudeSessions.length === 0 ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {claudeSessions.map((s) => {
-                const sessionChannel = getDiscordChannel(s.thread_channel_id);
-                const sessionParent = getDiscordChannel(sessionChannel?.parent_id);
-                const sessionSummary = describeDispatchedSession(
-                  s,
-                  sessionChannel,
-                  sessionParent,
-                );
-                const sessionSubtitle = [
-                  sessionSummary.subtitle,
-                  s.session_info || s.model || "AgentDesk session",
-                ]
-                  .filter((value): value is string => Boolean(value))
-                  .join(" · ");
-
-                return (
-                  <div
-                    key={s.id}
-                    className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-lg"
-                    style={{ background: "var(--th-bg-surface)" }}
-                  >
-                    <div className="min-w-0">
-                      <div
-                        className="text-xs font-medium truncate"
-                        style={{ color: "var(--th-text-primary)" }}
-                      >
-                        {sessionSummary.title}
-                      </div>
-                      <div
-                        className="text-xs truncate mt-0.5"
-                        style={{ color: "var(--th-text-muted)" }}
-                      >
-                        {sessionSubtitle}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
-                      {sessionSummary.webUrl && (
-                        <a
-                          href={sessionSummary.webUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
-                          style={{
-                            background: "rgba(59,130,246,0.15)",
-                            color: "#93c5fd",
-                          }}
-                        >
-                          Web
-                        </a>
-                      )}
-                      {sessionSummary.deepLink && (
-                        <a
-                          href={sessionSummary.deepLink}
-                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
-                          style={{
-                            background: "rgba(88,101,242,0.16)",
-                            color: "#a5b4fc",
-                          }}
-                        >
-                          App
-                        </a>
-                      )}
-                      <span
-                        className="text-xs px-1.5 py-0.5 rounded"
-                        style={{
-                          background:
-                            s.provider === "codex"
-                              ? "rgba(56,189,248,0.18)"
-                              : s.provider === "gemini"
-                                ? "rgba(250,204,21,0.18)"
-                                : s.provider === "qwen"
-                                  ? "rgba(34,197,94,0.18)"
-                                  : "rgba(167,139,250,0.18)",
-                          color:
-                            s.provider === "codex"
-                              ? "#38bdf8"
-                              : s.provider === "gemini"
-                                ? "#facc15"
-                                : s.provider === "qwen"
-                                  ? "#86efac"
-                                  : "#c4b5fd",
-                        }}
-                      >
-                        {s.provider === "codex"
-                          ? "Codex"
-                          : s.provider === "gemini"
-                            ? "Gemini"
-                            : s.provider === "qwen"
-                              ? "Qwen"
-                              : "Claude"}
-                      </span>
-                      <span
-                        className="text-xs px-1.5 py-0.5 rounded"
-                        style={{
-                          background:
-                            s.status === "working"
-                              ? "rgba(16,185,129,0.15)"
-                              : "rgba(100,116,139,0.15)",
-                          color: s.status === "working" ? "#34d399" : "#94a3b8",
-                        }}
-                      >
-                        {s.status === "working"
-                          ? tr("작업중", "Working")
-                          : tr("대기", "Idle")}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
 
         {/* Cron Jobs */}
         <div
@@ -1394,56 +1379,6 @@ export default function AgentInfoCard({
                       {tr("비활성", "Off")}
                     </span>
                   )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("최근 변경", "Recent Changes")}
-          </div>
-          {loadingAudit ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : auditLogs.length === 0 ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("관련 변경 로그가 없습니다", "No related audit logs")}
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {auditLogs.map((log) => (
-                <div
-                  key={log.id}
-                  className="rounded-xl px-3 py-2"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <div
-                    className="text-xs"
-                    style={{ color: "var(--th-text-primary)" }}
-                  >
-                    {log.summary}
-                  </div>
-                  <div
-                    className="mt-1 text-xs"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {log.action} • {timeAgo(log.created_at, isKo)}
-                  </div>
                 </div>
               ))}
             </div>
@@ -1679,11 +1614,11 @@ export default function AgentInfoCard({
             )}
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               {agent.role_id && (
                 <span
-                  className="text-xs font-mono px-1.5 py-0.5 rounded"
+                  className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -1693,7 +1628,7 @@ export default function AgentInfoCard({
                 </span>
               )}
               <span
-                className="text-xs"
+                className="whitespace-nowrap text-xs"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("완료", "Done")} {agent.stats_tasks_done}
@@ -1701,7 +1636,7 @@ export default function AgentInfoCard({
             </div>
             <button
               onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
+              className="shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
               style={{
                 border: "1px solid var(--th-input-border)",
                 color: "var(--th-text-secondary)",

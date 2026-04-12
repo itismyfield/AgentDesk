@@ -16,6 +16,7 @@ interface TurnTranscriptPanelProps {
   tr: (ko: string, en: string) => string;
   isKo: boolean;
   title?: string;
+  embedded?: boolean;
 }
 
 type TranscriptTone = "assistant" | "thinking" | "tool" | "result" | "error";
@@ -280,6 +281,7 @@ export default function TurnTranscriptPanel({
   tr,
   isKo,
   title,
+  embedded = false,
 }: TurnTranscriptPanelProps) {
   const [transcripts, setTranscripts] = useState<api.SessionTranscript[]>([]);
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
@@ -388,23 +390,25 @@ export default function TurnTranscriptPanel({
 
   return (
     <div
-      className="px-5 py-3"
-      style={{ borderBottom: "1px solid var(--th-card-border)" }}
+      className={embedded ? "py-0" : "px-5 py-3"}
+      style={embedded ? undefined : { borderBottom: "1px solid var(--th-card-border)" }}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <div
-            className="text-xs font-semibold uppercase tracking-widest"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {title ?? tr("턴 트랜스크립트", "Turn Transcript")}
+        {!embedded && (
+          <div className="min-w-0">
+            <div
+              className="text-xs font-semibold uppercase tracking-widest"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {title ?? tr("턴 트랜스크립트", "Turn Transcript")}
+            </div>
+            <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {source.type === "agent"
+                ? tr("완료된 턴을 다시 살펴봅니다.", "Replay completed turns.")
+                : tr("이 카드에 연결된 턴 로그를 확인합니다.", "Review turn logs linked to this card.")}
+            </div>
           </div>
-          <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-            {source.type === "agent"
-              ? tr("완료된 턴을 다시 살펴봅니다.", "Replay completed turns.")
-              : tr("이 카드에 연결된 턴 로그를 확인합니다.", "Review turn logs linked to this card.")}
-          </div>
-        </div>
+        )}
 
         <div className="flex gap-2">
           <button
