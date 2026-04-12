@@ -68,11 +68,12 @@ function _autoMergeWorktreeBranch(cardId) {
   }
 
   // Try merge
-  agentdesk.log.info("[kanban] #401: merging " + branch + " into main");
+  agentdesk.log.warn("[kanban] #401: merging " + branch + " into main (mainRepo=" + mainRepo + ", repoDir=" + repoDir + ")");
   var mergeResult = agentdesk.exec("git", [
     "-C", mainRepo,
     "merge", branch, "--no-edit"
   ]);
+  agentdesk.log.warn("[kanban] #401: merge result for " + branch + ": " + JSON.stringify(mergeResult));
 
   if (mergeResult && mergeResult.indexOf("CONFLICT") >= 0) {
     // Abort failed merge
