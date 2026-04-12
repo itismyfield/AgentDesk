@@ -46,7 +46,7 @@ export default function KanbanColumn({
 }: KanbanColumnProps) {
   return (
     <section
-      className={`${compactBoard ? "w-full" : "w-[320px] shrink-0"} rounded-2xl border p-3 space-y-3`}
+      className={`${compactBoard ? "w-full" : "w-full"} min-w-0 rounded-2xl border p-3 space-y-3`}
       style={{
         borderColor: "rgba(148,163,184,0.24)",
         backgroundColor: "var(--th-bg-surface)",
@@ -111,11 +111,13 @@ export default function KanbanColumn({
 interface BacklogIssueCardProps {
   issue: GitHubIssue;
   onBacklogIssueClick: (issue: GitHubIssue) => void;
+  metaBadge?: string;
 }
 
-function BacklogIssueCard({
+export function BacklogIssueCard({
   issue,
   onBacklogIssueClick,
+  metaBadge,
 }: BacklogIssueCardProps) {
   return (
     <article
@@ -125,8 +127,16 @@ function BacklogIssueCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
-            #{issue.number}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
+            <span>#{issue.number}</span>
+            {metaBadge && (
+              <span
+                className="rounded-full px-1.5 py-0.5"
+                style={{ backgroundColor: "rgba(96,165,250,0.16)", color: "#93c5fd" }}
+              >
+                {metaBadge}
+              </span>
+            )}
           </div>
           <h4 className="mt-1 text-sm font-semibold leading-snug" style={{ color: "var(--th-text-heading)" }}>
             {issue.title}
@@ -150,11 +160,13 @@ function BacklogIssueCard({
 interface KanbanCardArticleProps {
   card: KanbanCard;
   onCardClick: (cardId: string) => void;
+  metaBadge?: string;
 }
 
-function KanbanCardArticle({
+export function KanbanCardArticle({
   card,
   onCardClick,
+  metaBadge,
 }: KanbanCardArticleProps) {
   const cardNumber = card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`;
 
@@ -169,8 +181,16 @@ function KanbanCardArticle({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
-            {cardNumber}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
+            <span>{cardNumber}</span>
+            {metaBadge && (
+              <span
+                className="rounded-full px-1.5 py-0.5"
+                style={{ backgroundColor: "rgba(14,165,233,0.16)", color: "#7dd3fc" }}
+              >
+                {metaBadge}
+              </span>
+            )}
           </div>
           <h4 className="mt-1 text-sm font-semibold leading-snug" style={{ color: "var(--th-text-heading)" }}>
             {card.title}
