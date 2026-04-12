@@ -105,9 +105,9 @@ function startDeploySession(cardId) {
   );
 
   // Spawn deploy in detached tmux session.
-  // deploy-dev.sh builds, stops dev, copies binary, restarts, health-checks.
+  // Build the workspace for release, then promote directly into the release runtime.
   // After script exits, store exit code in tmux env for the tick to read.
-  var cmd = "cd " + shellQuote(worktree.path) + " && scripts/deploy-dev.sh 2>&1; " +
+  var cmd = "cd " + shellQuote(worktree.path) + " && scripts/build-release.sh 2>&1 && scripts/promote-release.sh --skip-review 2>&1; " +
     "tmux set-environment -t " + sessionName + " DEPLOY_RESULT $?; " +
     "sleep 600";
 

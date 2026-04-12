@@ -228,7 +228,7 @@ enum Commands {
     },
     /// Show auto-queue status with thread links
     Queue,
-    /// Build + deploy dev + promote to release
+    /// Build the workspace for release and promote directly to release
     Deploy,
     /// List agents and their status
     Agents,

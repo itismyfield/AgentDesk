@@ -5,9 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
-ADK_DEV="$HOME/.adk/dev"
 ADK_REL="$HOME/.adk/release"
-PLIST_DEV="com.agentdesk.dev"
 PLIST_REL="com.agentdesk.release"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
@@ -29,8 +27,18 @@ PROMOTE_HEALTH_DELAY_SECS="${AGENTDESK_PROMOTE_HEALTH_DELAY_SECS:-2}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
+SOURCE_BINARY="${AGENTDESK_PROMOTE_SOURCE_BIN:-$REPO/target/release/agentdesk}"
 
-echo "═══ ADK Promote Dev → Release ═══"
+SKIP_REVIEW=false
+SKIP_HEALTH=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-review) SKIP_REVIEW=true ;;
+        --skip-health) SKIP_HEALTH=true ;;
+    esac
+done
+
+echo "═══ ADK Promote Workspace → Release ═══"
 
 sign_binary_with_fallback() {
     local target="$1"
@@ -67,6 +75,16 @@ sign_binary_with_fallback() {
         fi
     fi
 
+    # Skip re-sign if already signed with the same identity.
+    if [ "$identity" != "-" ] && codesign -v "$target" 2>/dev/null; then
+        local current_authority
+        current_authority=$(codesign -dvv "$target" 2>&1 | grep "^Authority=" | head -1 || true)
+        if echo "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+            echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
+            return 0
+        fi
+    fi
+
     if [ "$identity" = "-" ]; then
         codesign -f -s "$identity" --identifier "com.itismyfield.agentdesk" "$target"
     else
@@ -87,13 +105,9 @@ _notify_channel() {
     payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
 
     local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
-    local dev_port="${AGENTDESK_DEV_PORT:-8799}"
     curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/send" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
-        || curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${dev_port}/api/send" \
-            -H 'Content-Type: application/json' \
-            --data-binary "$payload" >/dev/null 2>&1 \
         || true
 }
 
@@ -104,10 +118,10 @@ _tail_for_summary() {
 }
 
 _resolve_dashboard_source() {
-    # Dev dashboard may be a symlink (deploy-dashboard.sh dev uses ln -sfn).
-    # Resolve to the real path so cp -r copies actual files, not dangling links.
+    # Prefer the workspace build output. Fall back to the currently installed
+    # release dashboard only when the workspace did not build static assets.
     local candidate
-    for candidate in "$ADK_DEV/dashboard/dist" "$REPO/dashboard/dist"; do
+    for candidate in "$REPO/dashboard/dist" "$ADK_REL/dashboard/dist"; do
         if [ -d "$candidate" ]; then
             local resolved
             resolved="$(cd "$candidate" && pwd -P)"
@@ -133,28 +147,23 @@ _normalize_bool() {
 }
 
 _review_gate_override_source() {
-    local runtime_label db_path raw normalized
-    for runtime_label in release dev; do
-        if [ "$runtime_label" = "release" ]; then
-            db_path="$ADK_REL/data/agentdesk.sqlite"
-        else
-            db_path="$ADK_DEV/data/agentdesk.sqlite"
-        fi
+    local db_path="$ADK_REL/data/agentdesk.sqlite"
+    local raw normalized
 
-        raw=$(_read_kv_flag "$db_path" "review_enabled")
-        normalized=$(_normalize_bool "$raw")
-        if [ "$normalized" = "false" ]; then
-            printf '%s\t%s\t%s\n' "$runtime_label" "review_enabled" "$db_path"
-            return 0
-        fi
+    raw=$(_read_kv_flag "$db_path" "review_enabled")
+    normalized=$(_normalize_bool "$raw")
+    if [ "$normalized" = "false" ]; then
+        printf '%s\t%s\t%s\n' "release" "review_enabled" "$db_path"
+        return 0
+    fi
 
-        raw=$(_read_kv_flag "$db_path" "counter_model_review_enabled")
-        normalized=$(_normalize_bool "$raw")
-        if [ "$normalized" = "false" ]; then
-            printf '%s\t%s\t%s\n' "$runtime_label" "counter_model_review_enabled" "$db_path"
-            return 0
-        fi
-    done
+    raw=$(_read_kv_flag "$db_path" "counter_model_review_enabled")
+    normalized=$(_normalize_bool "$raw")
+    if [ "$normalized" = "false" ]; then
+        printf '%s\t%s\t%s\n' "release" "counter_model_review_enabled" "$db_path"
+        return 0
+    fi
+
     return 1
 }
 
@@ -234,55 +243,48 @@ EOF
 
 # Safety check: review must be passed unless review automation is disabled
 # in runtime config, or unless --skip-review is passed explicitly.
-if [[ "${1:-}" != "--skip-review" ]]; then
+if [ "$SKIP_REVIEW" != true ]; then
     REVIEW_OVERRIDE=$(_review_gate_override_source || true)
     if [ -n "$REVIEW_OVERRIDE" ]; then
         IFS=$'\t' read -r REVIEW_OVERRIDE_RUNTIME REVIEW_OVERRIDE_KEY REVIEW_OVERRIDE_DB <<<"$REVIEW_OVERRIDE"
         echo "▸ Review automation disabled in ${REVIEW_OVERRIDE_RUNTIME} runtime (${REVIEW_OVERRIDE_KEY}=false)"
         echo "  bypassing review gate using $REVIEW_OVERRIDE_DB"
     else
-        # Check if the latest commit has a review-passed marker (may be in dev or release runtime)
+        # Check if the latest commit has a review-passed marker in the release runtime.
         LAST_COMMIT=$(cd "$REPO" && git rev-parse HEAD 2>/dev/null)
-        REVIEW_MARKER_DEV="$ADK_DEV/runtime/review_passed/$LAST_COMMIT"
         REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
-        if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
+        if [ ! -f "$REVIEW_MARKER_REL" ]; then
             echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
-            echo "  Run counter-review first, or use --skip-review to override"
+            echo "  Run review first, or use --skip-review to override"
             exit 1
         fi
         echo "▸ Review passed for $LAST_COMMIT"
     fi
 fi
 
-# Safety check: dev must be healthy
-DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
-echo "▸ Waiting for dev health on :${DEV_PORT}..."
-DEV_READY=false
-if wait_for_http_service_health "$PLIST_DEV" "$DEV_PORT" "$PROMOTE_HEALTH_RETRIES" "$PROMOTE_HEALTH_DELAY_SECS" 0 1; then
-    DEV_READY=true
-fi
-
-if [ "$DEV_READY" != true ]; then
-    echo "✗ Dev is not healthy after $PROMOTE_HEALTH_RETRIES attempts — aborting promotion"
+# Safety check: the workspace release build must exist.
+if [ ! -x "$SOURCE_BINARY" ]; then
+    echo "✗ Release source binary not found: $SOURCE_BINARY"
+    echo "  Build the workspace first, for example:"
+    echo "    cd $REPO && ./scripts/build-release.sh"
     exit 1
 fi
+echo "▸ Release source binary: $SOURCE_BINARY"
 
-if _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
-    echo "▸ Dev is serving (provider reconcile in progress) — proceeding"
-else
-    echo "▸ Dev is healthy — proceeding"
+if [ "$SKIP_HEALTH" = true ]; then
+    echo "▸ --skip-health is ignored in release-only promotion mode"
 fi
 
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
-    echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
+    echo "✗ Dashboard dist not found in workspace or current release — aborting promotion"
     echo "  looked for:"
-    echo "    - $ADK_DEV/dashboard/dist/index.html"
     echo "    - $REPO/dashboard/dist/index.html"
+    echo "    - $ADK_REL/dashboard/dist/index.html"
     echo "  Run 'cd $REPO/dashboard && npm run build' to generate it"
     exit 1
 fi
-if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ] && [ ! -f "$ADK_DEV/dashboard/dist/index.html" ]; then
-    echo "▸ Dashboard source: workspace fallback ($DASHBOARD_SOURCE)"
+if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ]; then
+    echo "▸ Dashboard source: workspace build ($DASHBOARD_SOURCE)"
 else
     echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 fi
@@ -313,12 +315,47 @@ DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
+if [ -d "$REPO/config/agents" ]; then
+    echo "▸ Staging agent prompts..."
+    PROMPTS_STAGED="$ADK_REL/config/agents.new"
+    rm -rf "$PROMPTS_STAGED"
+    mkdir -p "$PROMPTS_STAGED"
+    rsync -a "$REPO/config/agents/" "$PROMPTS_STAGED/"
+fi
+
 # Stage managed skills before stopping release so skill sync never sees partial content.
 echo "▸ Staging managed skills..."
 SKILLS_STAGED="$ADK_REL/skills.new"
 rm -rf "$SKILLS_STAGED"
 mkdir -p "$SKILLS_STAGED"
 rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
+
+REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+TURN_WAIT_MAX=120
+TURN_WAIT=0
+_health_busy_count() {
+    local health_json
+    health_json=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null) || { echo "0"; return; }
+    local active finalizing queue_depth
+    active=$(echo "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
+    finalizing=$(echo "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
+    queue_depth=$(echo "$health_json" | grep -o '"queue_depth":[0-9]*' | head -1 | cut -d: -f2)
+    echo $(( ${active:-0} + ${finalizing:-0} + ${queue_depth:-0} ))
+}
+BUSY=$(_health_busy_count)
+if [ "${BUSY}" -gt 0 ]; then
+    echo "▸ Waiting for active/finalizing turns and queued interventions to drain (${BUSY} pending)..."
+    while [ "${BUSY}" -gt 0 ] && [ "$TURN_WAIT" -lt "$TURN_WAIT_MAX" ]; do
+        sleep 2
+        TURN_WAIT=$((TURN_WAIT + 2))
+        BUSY=$(_health_busy_count)
+    done
+    if [ "${BUSY}" -gt 0 ]; then
+        echo "  ⚠ ${BUSY} pending item(s) remain after ${TURN_WAIT_MAX}s — proceeding anyway"
+    else
+        echo "  ✓ Active turns and queued interventions drained (${TURN_WAIT}s)"
+    fi
+fi
 
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
@@ -345,14 +382,15 @@ else
     sleep 2
 fi
 
-# Copy binary from dev — atomic: sign in tmp, then mv to replace inode.
+# Copy binary from workspace build — atomic: sign in tmp, then mv to replace inode.
 # In-place codesign can corrupt the OS signing cache if it fails mid-write,
 # causing SIGKILL on subsequent launches even though the binary is valid.
-echo "▸ Copying binary from dev..."
+echo "▸ Copying binary from workspace build..."
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk.new"
+cp "$SOURCE_BINARY" "$ADK_REL/bin/agentdesk.new"
 chmod +x "$ADK_REL/bin/agentdesk.new"
 xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk.new" 2>/dev/null || true
+xattr -d com.apple.quarantine "$ADK_REL/bin/agentdesk.new" 2>/dev/null || true
 sign_binary_with_fallback "$ADK_REL/bin/agentdesk.new"
 mv -f "$ADK_REL/bin/agentdesk.new" "$ADK_REL/bin/agentdesk"
 # Lock binary to prevent unsigned overwrites
@@ -369,14 +407,21 @@ rm -rf "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
 
+if [ -d "${PROMPTS_STAGED:-}" ]; then
+    rm -rf "$ADK_REL/config/agents.old"
+    [ -d "$ADK_REL/config/agents" ] && mv "$ADK_REL/config/agents" "$ADK_REL/config/agents.old"
+    mv "$PROMPTS_STAGED" "$ADK_REL/config/agents"
+    rm -rf "$ADK_REL/config/agents.old"
+    [ ! -e "$ADK_REL/config/agents/_shared.md" ] && ln -s _shared.prompt.md "$ADK_REL/config/agents/_shared.md" 2>/dev/null || true
+fi
+
 # Keep the user-facing CLI wrapper discoverable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."
 "$SCRIPT_DIR/ensure-agentdesk-cli.sh"
 
-# Initialize release database if it doesn't exist (never overwrite release data)
+# Initialize release database lazily on first boot.
 if [ ! -f "$ADK_REL/data/agentdesk.sqlite" ]; then
-    echo "▸ Initializing release database from dev..."
-    cp "$ADK_DEV/data/agentdesk.sqlite" "$ADK_REL/data/agentdesk.sqlite"
+    echo "▸ Release database not found — runtime will create a fresh database on startup"
 else
     echo "▸ Release database exists — preserving release data (skip copy)"
 fi

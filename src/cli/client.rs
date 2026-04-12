@@ -695,7 +695,7 @@ pub fn cmd_queue() -> Result<(), String> {
 
 /// `agentdesk deploy`
 ///
-/// Build + deploy dev + promote to release in one command.
+/// Build the workspace for release and promote directly to release.
 pub fn cmd_deploy() -> Result<(), String> {
     let workspace = crate::cli::agentdesk_runtime_root()
         .and_then(|r| {
@@ -704,35 +704,21 @@ pub fn cmd_deploy() -> Result<(), String> {
         })
         .ok_or("Cannot find workspace directory")?;
 
-    println!("=== Step 1: Deploy to dev ===");
-    let dev_status = std::process::Command::new("bash")
+    println!("=== Step 1: Build workspace for release ===");
+    let build_status = std::process::Command::new("bash")
         .arg("-c")
-        .arg("AGENTDESK_DEV_PORT=8799 AGENTDESK_REL_PORT=8791 ./scripts/deploy-dev.sh")
+        .arg("./scripts/build-release.sh")
         .current_dir(&workspace)
         .status()
-        .map_err(|e| format!("deploy-dev failed: {e}"))?;
-    if !dev_status.success() {
-        return Err("deploy-dev.sh failed".to_string());
+        .map_err(|e| format!("build-release failed: {e}"))?;
+    if !build_status.success() {
+        return Err("build-release.sh failed".to_string());
     }
 
-    println!("\n=== Step 2: Waiting for dev health ===");
-    for _ in 0..60 {
-        if let Ok(resp) = ureq::Agent::new()
-            .get("http://127.0.0.1:8799/api/health")
-            .call()
-        {
-            if resp.status() == 200 {
-                println!("✅ Dev healthy");
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-
-    println!("\n=== Step 3: Promote to release ===");
+    println!("\n=== Step 2: Promote to release ===");
     let promote_status = std::process::Command::new("bash")
         .arg("-c")
-        .arg("AGENTDESK_DEV_PORT=8799 AGENTDESK_REL_PORT=8791 ./scripts/promote-release.sh --skip-review")
+        .arg("AGENTDESK_REL_PORT=8791 ./scripts/promote-release.sh --skip-review")
         .current_dir(&workspace)
         .status()
         .map_err(|e| format!("promote-release failed: {e}"))?;
@@ -740,7 +726,7 @@ pub fn cmd_deploy() -> Result<(), String> {
         return Err("promote-release.sh failed".to_string());
     }
 
-    println!("✅ Deploy complete — release will restart after current turn");
+    println!("✅ Deploy complete — release runtime updated");
     Ok(())
 }
 
