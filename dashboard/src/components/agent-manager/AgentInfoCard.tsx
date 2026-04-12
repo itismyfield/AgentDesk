@@ -566,9 +566,9 @@ export default function AgentInfoCard({
                 </button>
               )}
             </div>
-            <div className="flex items-center gap-2 mt-1.5">
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
               <span
-                className="text-xs px-2 py-0.5 rounded-full font-medium"
+                className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
                 style={{
                   background:
                     agent.status === "working"
@@ -594,7 +594,7 @@ export default function AgentInfoCard({
               </span>
               {agent.status === "working" && sourceLabel && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "rgba(99,102,241,0.18)",
                     color: "#a5b4fc",
@@ -605,7 +605,7 @@ export default function AgentInfoCard({
               )}
               {dept && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -616,7 +616,7 @@ export default function AgentInfoCard({
               )}
               {!dept && (
                 <span
-                  className="text-xs px-2 py-0.5 rounded-full"
+                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -1099,9 +1099,9 @@ export default function AgentInfoCard({
                       {s.session_info || s.model || "AgentDesk session"}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                     <span
-                      className="text-xs px-1.5 py-0.5 rounded"
+                      className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
                       style={{
                         background:
                           s.provider === "codex"
@@ -1130,7 +1130,7 @@ export default function AgentInfoCard({
                             : "Claude"}
                     </span>
                     <span
-                      className="text-xs px-1.5 py-0.5 rounded"
+                      className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
                       style={{
                         background:
                           s.status === "working"
@@ -1517,11 +1517,11 @@ export default function AgentInfoCard({
             )}
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               {agent.role_id && (
                 <span
-                  className="text-xs font-mono px-1.5 py-0.5 rounded"
+                  className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -1531,7 +1531,7 @@ export default function AgentInfoCard({
                 </span>
               )}
               <span
-                className="text-xs"
+                className="whitespace-nowrap text-xs"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("완료", "Done")} {agent.stats_tasks_done}
@@ -1539,7 +1539,7 @@ export default function AgentInfoCard({
             </div>
             <button
               onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
+              className="shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
               style={{
                 border: "1px solid var(--th-input-border)",
                 color: "var(--th-text-secondary)",

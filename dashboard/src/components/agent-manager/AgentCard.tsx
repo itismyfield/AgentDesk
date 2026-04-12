@@ -77,13 +77,13 @@ export default function AgentCard({
       </div>
 
       <div
-        className="flex items-center justify-between mt-3 pt-2.5"
+        className="mt-3 flex flex-wrap items-center justify-between gap-2 pt-2.5"
         style={{ borderTop: "1px solid var(--th-card-border)" }}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {agent.personality && (
             <span
-              className="text-xs truncate max-w-[180px]"
+              className="max-w-[180px] truncate text-xs"
               style={{ color: "var(--th-text-muted)" }}
               title={agent.personality}
             >
@@ -92,7 +92,7 @@ export default function AgentCard({
           )}
         </div>
         <div
-          className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+          className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100"
           onClick={(e) => e.stopPropagation()}
         >
           {isDeleting ? (
