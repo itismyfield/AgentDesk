@@ -98,6 +98,7 @@ export {
 
 export type {
   AutoQueueRun,
+  AutoQueueThreadLink,
   AutoQueueStatus,
   DispatchQueueEntry,
   CronJob,

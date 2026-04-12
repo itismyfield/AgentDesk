@@ -1255,6 +1255,14 @@ export interface AutoQueueRun {
   thread_group_count?: number;
 }
 
+export interface AutoQueueThreadLink {
+  role: string;
+  label: string;
+  channel_id?: string | null;
+  thread_id: string;
+  url?: string | null;
+}
+
 export interface DispatchQueueEntry {
   id: string;
   agent_id: string;
@@ -1270,6 +1278,7 @@ export interface DispatchQueueEntry {
   github_repo?: string | null;
   thread_group?: number;
   batch_phase?: number;
+  thread_links?: AutoQueueThreadLink[];
   card_status?: string;
   review_round?: number;
 }

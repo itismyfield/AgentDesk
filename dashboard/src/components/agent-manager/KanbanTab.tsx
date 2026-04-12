@@ -79,6 +79,7 @@ interface KanbanTabProps {
 }
 
 const STALE_IN_PROGRESS_MS = 100 * 60_000;
+type MobileKanbanView = "summary" | "minimap";
 
 export default function KanbanTab({
   tr,
@@ -127,6 +128,7 @@ export default function KanbanTab({
   const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
   const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
+  const [mobileBoardView, setMobileBoardView] = useState<MobileKanbanView>("summary");
   const [retryAssigneeId, setRetryAssigneeId] = useState("");
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const [closingIssueNumber, setClosingIssueNumber] = useState<number | null>(null);
@@ -537,12 +539,25 @@ export default function KanbanTab({
   const totalVisible = filteredCards.length + backlogIssues.length;
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
+  const boardColumns = useMemo(() => effectiveColumnDefs.filter((column) =>
+    (showClosed || !TERMINAL_STATUSES.has(column.status))
+    && (!QA_STATUSES.has(column.status) || hasQaCards),
+  ), [effectiveColumnDefs, hasQaCards, showClosed]);
+  const mobileColumnSummaries = useMemo(() => boardColumns.map((column) => {
+    const columnCards = cardsByStatus.get(column.status) ?? [];
+    return {
+      column,
+      count: column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length,
+    };
+  }), [backlogIssues.length, boardColumns, cardsByStatus]);
+  const focusedMobileSummary = mobileColumnSummaries.find(
+    ({ column }) => column.status === mobileColumnStatus,
+  ) ?? mobileColumnSummaries[0] ?? null;
   const visibleColumns = compactBoard
-    ? effectiveColumnDefs.filter((column) => column.status === mobileColumnStatus)
-    : effectiveColumnDefs.filter((column) =>
-        (showClosed || !TERMINAL_STATUSES.has(column.status))
-        && (!QA_STATUSES.has(column.status) || hasQaCards),
-      );
+    ? mobileBoardView === "summary"
+      ? boardColumns
+      : boardColumns.filter((column) => column.status === mobileColumnStatus)
+    : boardColumns;
 
   const canRetryCard = (card: KanbanCard | null) =>
     Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -827,6 +842,23 @@ export default function KanbanTab({
   };
 
   const showDesktopDetailPanel = Boolean(selectedCard && !compactBoard);
+
+  useEffect(() => {
+    const fallbackStatus = boardColumns[0]?.status ?? "backlog";
+    if (!boardColumns.some((column) => column.status === mobileColumnStatus)) {
+      setMobileColumnStatus(fallbackStatus);
+    }
+  }, [boardColumns, mobileColumnStatus]);
+
+  const focusMobileColumn = (status: KanbanCardStatus, scrollToSection: boolean) => {
+    setMobileColumnStatus(status);
+    if (!scrollToSection || typeof document === "undefined") return;
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`kanban-mobile-${status}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
   const signalFilterLabel =
     signalStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
       : signalStatusFilter === "blocked" ? tr("블록됨", "Blocked")
@@ -1586,24 +1618,92 @@ export default function KanbanTab({
             <div className="space-y-3">
               {compactBoard && (
                 <>
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {effectiveColumnDefs.filter((column) => (showClosed || !TERMINAL_STATUSES.has(column.status)) && (!QA_STATUSES.has(column.status) || hasQaCards)).map((column) => (
+                  <div className="space-y-3">
+                    <div
+                      className="inline-flex rounded-2xl border p-1"
+                      style={{ borderColor: "rgba(148,163,184,0.24)", backgroundColor: "rgba(15,23,42,0.35)" }}
+                    >
                       <button
-                        key={column.status}
-                        onClick={() => setMobileColumnStatus(column.status)}
-                        className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium border"
+                        type="button"
+                        onClick={() => setMobileBoardView("summary")}
+                        className="rounded-xl px-3 py-2 text-xs font-medium"
                         style={{
-                          borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
-                          backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
-                          color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
+                          backgroundColor: mobileBoardView === "summary" ? "rgba(59,130,246,0.18)" : "transparent",
+                          color: mobileBoardView === "summary" ? "#bfdbfe" : "var(--th-text-muted)",
                         }}
                       >
-                        {tr(column.labelKo, column.labelEn)}
+                        {tr("요약+리스트", "Summary + List")}
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        onClick={() => setMobileBoardView("minimap")}
+                        className="rounded-xl px-3 py-2 text-xs font-medium"
+                        style={{
+                          backgroundColor: mobileBoardView === "minimap" ? "rgba(139,92,246,0.18)" : "transparent",
+                          color: mobileBoardView === "minimap" ? "#d8b4fe" : "var(--th-text-muted)",
+                        }}
+                      >
+                        {tr("미니맵", "Mini Map")}
+                      </button>
+                    </div>
+
+                    {mobileBoardView === "summary" ? (
+                      <div className="flex gap-2 overflow-x-auto pb-1">
+                        {mobileColumnSummaries.map(({ column, count }) => (
+                          <button
+                            key={column.status}
+                            type="button"
+                            onClick={() => focusMobileColumn(column.status, true)}
+                            className="shrink-0 rounded-2xl border px-3 py-2 text-left"
+                            style={{
+                              borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
+                              backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
+                              color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
+                            }}
+                          >
+                            <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "white" : "var(--th-text-muted)" }}>
+                              {tr(column.labelKo, column.labelEn)}
+                            </div>
+                            <div className="mt-1 text-lg font-semibold">{count}</div>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        {mobileColumnSummaries.map(({ column, count }) => (
+                          <button
+                            key={column.status}
+                            type="button"
+                            onClick={() => focusMobileColumn(column.status, false)}
+                            className="rounded-2xl border px-3 py-3 text-left"
+                            style={{
+                              borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
+                              backgroundColor: mobileColumnStatus === column.status ? `${column.accent}16` : "rgba(15,23,42,0.28)",
+                            }}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="inline-flex items-center gap-2 text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: column.accent }} />
+                                {tr(column.labelKo, column.labelEn)}
+                              </span>
+                              <span className="text-lg font-semibold" style={{ color: mobileColumnStatus === column.status ? column.accent : "var(--th-text-primary)" }}>
+                                {count}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-[11px]" style={{ color: mobileColumnStatus === column.status ? column.accent : "var(--th-text-muted)" }}>
+                              {mobileColumnStatus === column.status
+                                ? tr("아래 리스트 표시 중", "Shown below")
+                                : tr("탭해서 집중 보기", "Tap to focus")}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}>
-                    {tr("모바일에서는 카드를 탭해 상세 패널에서 상태를 변경하세요.", "On mobile, tap a card and change status in the detail sheet.")}
+                    {mobileBoardView === "summary"
+                      ? tr("상단 요약바를 탭하면 해당 상태 섹션으로 이동합니다. 카드 상태 변경은 상세 패널에서 처리하세요.", "Tap the summary bar to jump to a lane. Change card status from the detail sheet.")
+                      : tr(`미니맵으로 상태를 고르면 아래에 ${focusedMobileSummary ? tr(focusedMobileSummary.column.labelKo, focusedMobileSummary.column.labelEn) : tr("선택된", "selected")} 리스트만 표시됩니다.`, `Pick a lane in the mini map to show only the ${focusedMobileSummary ? tr(focusedMobileSummary.column.labelKo, focusedMobileSummary.column.labelEn) : "selected"} list below.`)}
                   </div>
                 </>
               )}
@@ -1614,40 +1714,41 @@ export default function KanbanTab({
                     const columnCards = cardsByStatus.get(column.status) ?? [];
                     const backlogCount = column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length;
                     return (
-                      <KanbanColumn
-                        key={column.status}
-                        column={column}
-                        columnCards={columnCards}
-                        backlogIssues={backlogIssues}
-                        backlogCount={backlogCount}
-                        tr={tr}
-                        locale={locale}
-                        compactBoard={compactBoard}
-                        initialLoading={initialLoading}
-                        loadingIssues={loadingIssues}
-                        draggingCardId={draggingCardId}
-                        dragOverStatus={dragOverStatus}
-                        dragOverCardId={dragOverCardId}
-                        closingIssueNumber={closingIssueNumber}
-                        assigningIssue={assigningIssue}
-                        dispatchMap={dispatchMap}
-                        dispatches={dispatches}
-                        repoSources={repoSources}
-                        selectedRepo={selectedRepo}
-                        getAgentLabel={getAgentLabel}
-                        resolveAgentFromLabels={resolveAgentFromLabels}
-                        onCardClick={setSelectedCardId}
-                        onBacklogIssueClick={setSelectedBacklogIssue}
-                        onSetDraggingCardId={setDraggingCardId}
-                        onSetDragOverStatus={setDragOverStatus}
-                        onSetDragOverCardId={setDragOverCardId}
-                        onDrop={handleDrop}
-                        onCloseIssue={handleCloseIssue}
-                        onDirectAssignIssue={handleDirectAssignIssue}
-                        onOpenAssignModal={handleOpenAssignModal}
-                        onUpdateCardStatus={handleUpdateCardStatus}
-                        onSetActionError={setActionError}
-                      />
+                      <div key={column.status} id={compactBoard ? `kanban-mobile-${column.status}` : undefined}>
+                        <KanbanColumn
+                          column={column}
+                          columnCards={columnCards}
+                          backlogIssues={backlogIssues}
+                          backlogCount={backlogCount}
+                          tr={tr}
+                          locale={locale}
+                          compactBoard={compactBoard}
+                          initialLoading={initialLoading}
+                          loadingIssues={loadingIssues}
+                          draggingCardId={draggingCardId}
+                          dragOverStatus={dragOverStatus}
+                          dragOverCardId={dragOverCardId}
+                          closingIssueNumber={closingIssueNumber}
+                          assigningIssue={assigningIssue}
+                          dispatchMap={dispatchMap}
+                          dispatches={dispatches}
+                          repoSources={repoSources}
+                          selectedRepo={selectedRepo}
+                          getAgentLabel={getAgentLabel}
+                          resolveAgentFromLabels={resolveAgentFromLabels}
+                          onCardClick={setSelectedCardId}
+                          onBacklogIssueClick={setSelectedBacklogIssue}
+                          onSetDraggingCardId={setDraggingCardId}
+                          onSetDragOverStatus={setDragOverStatus}
+                          onSetDragOverCardId={setDragOverCardId}
+                          onDrop={handleDrop}
+                          onCloseIssue={handleCloseIssue}
+                          onDirectAssignIssue={handleDirectAssignIssue}
+                          onOpenAssignModal={handleOpenAssignModal}
+                          onUpdateCardStatus={handleUpdateCardStatus}
+                          onSetActionError={setActionError}
+                        />
+                      </div>
                     );
                   })}
                 </div>
