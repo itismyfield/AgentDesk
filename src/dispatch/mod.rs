@@ -620,13 +620,30 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
         dispatch_status.as_deref(),
         Some("cancelled") | Some("failed")
     ) {
-        conn.execute(
-            "UPDATE auto_queue_entries \
-             SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL, completed_at = NULL \
+        let mut stmt = conn.prepare(
+            "SELECT id FROM auto_queue_entries
              WHERE dispatch_id = ?1 AND status IN ('pending', 'dispatched')",
-            [dispatch_id],
-        )
-        .ok();
+        )?;
+        let entry_ids: Vec<String> = stmt
+            .query_map([dispatch_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        for entry_id in entry_ids {
+            crate::db::auto_queue::update_entry_status_on_conn(
+                conn,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                "dispatch_cancel",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .map_err(|error| match error {
+                crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
+                other => rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                    other.to_string(),
+                ))),
+            })?;
+        }
     }
 
     Ok(cancelled)

@@ -16,9 +16,10 @@ var autoQueue = {
       [payload.card_id]
     );
     for (var i = 0; i < entries.length; i++) {
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'skipped' WHERE id = ?",
-        [entries[i].id]
+      agentdesk.autoQueue.updateEntryStatus(
+        entries[i].id,
+        "skipped",
+        "external_progress"
       );
       agentdesk.log.info("[auto-queue] Skipped entry " + entries[i].id + " — card " + payload.card_id + " progressed externally to " + payload.to);
     }
@@ -257,9 +258,10 @@ var autoQueue = {
       var pending = terminalPending[tp];
       if (!agentdesk.pipeline.isTerminal(pending.status, tickCfg)) continue;
       agentdesk.log.info("[auto-queue] onTick1min: skipping terminal pending entry " + pending.id + " for card " + pending.kanban_card_id + " at " + pending.status);
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') WHERE id = ? AND status = 'pending'",
-        [pending.id]
+      agentdesk.autoQueue.updateEntryStatus(
+        pending.id,
+        "skipped",
+        "tick_terminal_cleanup"
       );
     }
 
@@ -324,9 +326,10 @@ var autoQueue = {
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
       agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom)");
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
-        [stuck.id]
+      agentdesk.autoQueue.updateEntryStatus(
+        stuck.id,
+        "pending",
+        "tick_recovery"
       );
     }
   }
@@ -768,9 +771,11 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
         "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
         [JSON.stringify(newMeta), entry.kanban_card_id]
       );
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
-        [dispatchId, entry.id]
+      agentdesk.autoQueue.updateEntryStatus(
+        entry.id,
+        "dispatched",
+        "consultation_dispatch_created",
+        { dispatchId: dispatchId }
       );
       agentdesk.log.info("[auto-queue] Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id);
     }

@@ -426,9 +426,11 @@ var rules = {
               card.title || "Implementation"
             );
             if (nextDispatchId) {
-              agentdesk.db.execute(
-                "UPDATE auto_queue_entries SET dispatch_id = ?, dispatched_at = datetime('now'), completed_at = NULL WHERE id = ? AND status = 'dispatched'",
-                [nextDispatchId, aqEntries[0].id]
+              agentdesk.autoQueue.updateEntryStatus(
+                aqEntries[0].id,
+                "dispatched",
+                "consultation_resume",
+                { dispatchId: nextDispatchId }
               );
               agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " — resumed implementation dispatch " + nextDispatchId);
             }
@@ -463,10 +465,17 @@ var rules = {
         "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
         [JSON.stringify(noopMeta), dispatch.kanban_card_id]
       );
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE dispatch_id = ? AND status IN ('pending', 'dispatched')",
+      var noopEntries = agentdesk.db.query(
+        "SELECT id FROM auto_queue_entries WHERE dispatch_id = ? AND status IN ('pending', 'dispatched')",
         [dispatch.id]
       );
+      for (var ne = 0; ne < noopEntries.length; ne++) {
+        agentdesk.autoQueue.updateEntryStatus(
+          noopEntries[ne].id,
+          "done",
+          "dispatch_noop"
+        );
+      }
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null, awaiting_dod_at: null});
       agentdesk.reviewState.sync(card.id, "idle");
       agentdesk.kanban.setStatus(card.id, noopCardStatusTarget, true);
@@ -594,10 +603,17 @@ var rules = {
         // Move to done without implementation dispatch
         agentdesk.kanban.setStatus(payload.card_id, "done", true); // force
         // Clean up any auto-queue entries so the run doesn't stall
-        agentdesk.db.execute(
-          "UPDATE auto_queue_entries SET status = 'skipped' WHERE kanban_card_id = ? AND status = 'pending'",
+        var pendingEntries = agentdesk.db.query(
+          "SELECT id FROM auto_queue_entries WHERE kanban_card_id = ? AND status = 'pending'",
           [payload.card_id]
         );
+        for (var pi = 0; pi < pendingEntries.length; pi++) {
+          agentdesk.autoQueue.updateEntryStatus(
+            pendingEntries[pi].id,
+            "skipped",
+            "preflight_invalid"
+          );
+        }
         agentdesk.log.info("[preflight] Card " + payload.card_id + " → done (" + preflight.status + "): " + preflight.summary);
       } else if (preflight.status === "consult_required") {
         // Store consultation status — auto-queue tick will handle consultation dispatch creation
