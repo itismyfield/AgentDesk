@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubComment } from "../../api";
 import {
+  BOARD_COLUMN_DEFS,
   coalesceGitHubCommentTimeline,
+  getBoardColumnStatus,
   parseGitHubCommentTimeline,
 } from "./kanban-utils";
 
@@ -331,5 +333,22 @@ describe("coalesceGitHubCommentTimeline", () => {
 
     expect(coalesced).toHaveLength(2);
     expect(coalesced.every((entry) => !entry.coalesced)).toBe(true);
+  });
+});
+
+describe("board column helpers", () => {
+  it("칸반 보드에서 판단 대기와 막힘 상태를 메인 칼럼으로 접어 넣는다", () => {
+    expect(getBoardColumnStatus("blocked")).toBe("in_progress");
+    expect(getBoardColumnStatus("pending_decision")).toBe("review");
+    expect(getBoardColumnStatus("done")).toBe("done");
+  });
+
+  it("보드 전용 칼럼 정의에서 판단 대기와 막힘 칼럼을 제거하고 완료 일감 라벨을 사용한다", () => {
+    expect(BOARD_COLUMN_DEFS.map((column) => column.status)).not.toContain("blocked");
+    expect(BOARD_COLUMN_DEFS.map((column) => column.status)).not.toContain("pending_decision");
+    expect(BOARD_COLUMN_DEFS.find((column) => column.status === "done")).toMatchObject({
+      labelKo: "완료 일감",
+      labelEn: "Completed Work",
+    });
   });
 });
