@@ -131,6 +131,40 @@ fn dispatch_status_and_result(
     })
 }
 
+#[derive(Debug, Clone)]
+struct ActiveReviewDispatch {
+    id: String,
+    reviewed_commit: Option<String>,
+}
+
+fn latest_active_review_dispatch(
+    db: &crate::db::Db,
+    card_id: &str,
+) -> Option<ActiveReviewDispatch> {
+    db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT id, context FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+             AND status IN ('pending', 'dispatched') \
+             ORDER BY rowid DESC LIMIT 1",
+            [card_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .ok()
+        .map(|(id, context_raw)| ActiveReviewDispatch {
+            id,
+            reviewed_commit: context_raw
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|value| {
+                    value
+                        .get("reviewed_commit")
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_string)
+                }),
+        })
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct ReviewDecisionBody {
@@ -760,15 +794,6 @@ pub async fn submit_review_decision(
             );
         }
         "dispute" => {
-            // #143: Agent disputes → complete review-decision dispatch via shared helper
-            if let Some(ref rd_id) = pending_rd_id {
-                crate::dispatch::mark_dispatch_completed(
-                    &state.db,
-                    rd_id,
-                    &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
-                )
-                .ok();
-            }
             // #155: Use intents for review_status mutation (executor boundary)
             use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
             let dispute_intents = vec![
@@ -908,6 +933,103 @@ pub async fn submit_review_decision(
                 }
             }
 
+            let live_review = match latest_active_review_dispatch(&state.db, &body.card_id) {
+                Some(dispatch) => dispatch,
+                None => {
+                    tracing::error!(
+                        card_id = %body.card_id,
+                        pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                        "[review-decision] #491 dispute failed closed: no live review dispatch after re-review entry"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "review-decision dispute failed: no follow-up review dispatch created",
+                            "card_id": body.card_id,
+                            "pending_dispatch_id": pending_rd_id,
+                        })),
+                    );
+                }
+            };
+
+            if let Some(ref reviewed_commit) = live_review.reviewed_commit {
+                if !crate::dispatch::commit_belongs_to_card_issue(
+                    &state.db,
+                    &body.card_id,
+                    reviewed_commit,
+                ) {
+                    if let Ok(conn) = state.db.lock() {
+                        let _ = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                            &conn,
+                            &live_review.id,
+                            Some("invalid_dispute_rereview_target"),
+                        );
+                    }
+                    tracing::error!(
+                        card_id = %body.card_id,
+                        pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                        review_dispatch_id = %live_review.id,
+                        reviewed_commit = %reviewed_commit,
+                        "[review-decision] #491 dispute failed closed: re-review target does not belong to the card issue"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "review-decision dispute failed: re-review target is stale or unrelated to the card issue",
+                            "card_id": body.card_id,
+                            "pending_dispatch_id": pending_rd_id,
+                            "review_dispatch_id": live_review.id,
+                            "reviewed_commit": reviewed_commit,
+                        })),
+                    );
+                }
+            }
+
+            if let Some(ref rd_id) = pending_rd_id {
+                match crate::dispatch::mark_dispatch_completed(
+                    &state.db,
+                    rd_id,
+                    &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
+                ) {
+                    Ok(1) => {}
+                    Ok(_) => {
+                        tracing::error!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            review_dispatch_id = %live_review.id,
+                            "[review-decision] #491 dispute created a follow-up review dispatch but failed to finalize the pending review-decision"
+                        );
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "failed to finalize pending review-decision after re-review dispatch creation",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                                "review_dispatch_id": live_review.id,
+                            })),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            review_dispatch_id = %live_review.id,
+                            error = %e,
+                            "[review-decision] #491 dispute created a follow-up review dispatch but mark_dispatch_completed errored"
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": format!("failed to finalize pending review-decision: {e}"),
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                                "review_dispatch_id": live_review.id,
+                            })),
+                        );
+                    }
+                }
+            }
+
             // #117: Update canonical review state before returning
             update_card_review_state(
                 &state.db,
@@ -932,6 +1054,8 @@ pub async fn submit_review_decision(
                     "ok": true,
                     "card_id": body.card_id,
                     "decision": "dispute",
+                    "review_dispatch_id": live_review.id,
+                    "reviewed_commit": live_review.reviewed_commit,
                     "message": "Re-review dispatched to counter-model",
                 })),
             );

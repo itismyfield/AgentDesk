@@ -4535,6 +4535,231 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
 }
 
 #[tokio::test]
+async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
+    crate::pipeline::ensure_loaded();
+    let _env_lock = env_lock();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-dispute-repeat");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+
+    let repo = tempfile::tempdir().unwrap();
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test"]);
+    run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+    let safe_commit = git_commit(repo.path(), "fix: safe review target (#472)");
+    let worktree_dir = repo.path().join("wt-472");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            "wt/472-poison",
+        ],
+    );
+    let worktree_path = worktree_dir.to_string_lossy().to_string();
+    let poisoned_commit = git_commit(&worktree_dir, "chore: stale target (#482)");
+    let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let _config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &_config_dir.path().join("agentdesk.yaml"),
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, review_status, created_at, updated_at
+            ) VALUES (
+                'card-dispute-repeat', 'Issue #472', 'review', 'medium', 'agent-dispute-repeat', 'test-repo',
+                472, 'rd-dispute-1', 'suggestion_pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
+                created_at, updated_at, completed_at
+            ) VALUES (
+                'impl-dispute-repeat', 'card-dispute-repeat', 'agent-dispute-repeat', 'implementation',
+                'completed', 'impl', ?1, ?2, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'),
+                datetime('now', '-10 minutes')
+            )",
+            rusqlite::params![
+                serde_json::json!({
+                    "worktree_path": worktree_path,
+                    "branch": "wt/472-poison"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": worktree_path,
+                    "completed_branch": "wt/472-poison",
+                    "completed_commit": poisoned_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'rd-dispute-1', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+                'pending', '[Review Decision]', datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, pending_dispatch_id, review_round, updated_at
+            ) VALUES (
+                'card-dispute-repeat', 'suggestion_pending', 'rd-dispute-1', 1, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let dispute_request = |dispatch_id: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/review-decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "card_id": "card-dispute-repeat",
+                    "decision": "dispute",
+                    "dispatch_id": dispatch_id,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response1 = app
+        .clone()
+        .oneshot(dispute_request("rd-dispute-1"))
+        .await
+        .unwrap();
+    assert_eq!(response1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+    let first_review_dispatch_id = json1["review_dispatch_id"]
+        .as_str()
+        .expect("dispute response must include first review dispatch id")
+        .to_string();
+    let first_reviewed_commit = json1["reviewed_commit"]
+        .as_str()
+        .expect("dispute response must include first reviewed commit")
+        .to_string();
+    assert_eq!(first_reviewed_commit, safe_commit);
+    assert_ne!(first_reviewed_commit, poisoned_commit);
+
+    {
+        let conn = db.lock().unwrap();
+        let first_rd_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'rd-dispute-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_rd_status, "completed");
+
+        conn.execute(
+            "UPDATE task_dispatches
+             SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?1",
+            [&first_review_dispatch_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'rd-dispute-2', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+                'pending', '[Review Decision 2]', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'rd-dispute-2', review_status = 'suggestion_pending', updated_at = datetime('now')
+             WHERE id = 'card-dispute-repeat'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE card_review_state
+             SET state = 'suggestion_pending', pending_dispatch_id = 'rd-dispute-2', updated_at = datetime('now')
+             WHERE card_id = 'card-dispute-repeat'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let response2 = app.oneshot(dispute_request("rd-dispute-2")).await.unwrap();
+    assert_eq!(response2.status(), StatusCode::OK);
+
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    let second_review_dispatch_id = json2["review_dispatch_id"]
+        .as_str()
+        .expect("dispute response must include second review dispatch id")
+        .to_string();
+    let second_reviewed_commit = json2["reviewed_commit"]
+        .as_str()
+        .expect("dispute response must include second reviewed commit")
+        .to_string();
+    assert_ne!(second_review_dispatch_id, first_review_dispatch_id);
+    assert_eq!(second_reviewed_commit, safe_commit);
+    assert_ne!(second_reviewed_commit, poisoned_commit);
+
+    let conn = db.lock().unwrap();
+    let second_context = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [&second_review_dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .expect("second review dispatch must persist context");
+    assert_eq!(second_context["reviewed_commit"], safe_commit);
+    let actual_worktree_path = std::fs::canonicalize(
+        second_context["worktree_path"]
+            .as_str()
+            .expect("review dispatch must persist worktree_path"),
+    )
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+    let expected_worktree_path = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(actual_worktree_path, expected_worktree_path);
+    assert_eq!(second_context["branch"], "main");
+}
+
+#[tokio::test]
 async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
