@@ -14,6 +14,8 @@ use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
+const STALE_THREAD_SESSION_MAX_AGE_SQL: &str = "-1 hour";
+const STALE_THREAD_SESSION_ACTIVE_DISPATCH_MAX_AGE_SQL: &str = "-3 hours";
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -959,17 +961,29 @@ fn backfill_legacy_thread_channel_ids(conn: &rusqlite::Connection) -> usize {
         .sum()
 }
 
-/// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
+/// GC stale thread sessions from DB.
 /// Legacy rows may only encode the Discord thread ID inside session_key, so
-/// backfill thread_channel_id before applying the normal thread-session GC.
+/// backfill thread_channel_id before applying thread-session GC.
+///
+/// Idle/disconnected thread sessions without an active dispatch are dropped
+/// after 1 hour. Rows that still carry an active_dispatch_id are preserved
+/// until the 3-hour safety TTL so warm-resume sessions cannot lose their DB
+/// ownership before idle-kill has a chance to reap them.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
     let _ = backfill_legacy_thread_channel_ids(conn);
     conn.execute(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'disconnected')
-           AND COALESCE(last_heartbeat, created_at) < datetime('now', '-1 hour')",
-        [],
+           AND (
+             (active_dispatch_id IS NULL
+               AND COALESCE(last_heartbeat, created_at) < datetime('now', ?1))
+             OR COALESCE(last_heartbeat, created_at) < datetime('now', ?2)
+           )",
+        rusqlite::params![
+            STALE_THREAD_SESSION_MAX_AGE_SQL,
+            STALE_THREAD_SESSION_ACTIVE_DISPATCH_MAX_AGE_SQL,
+        ],
     )
     .unwrap_or(0)
 }
@@ -2194,13 +2208,20 @@ mod tests {
         session_key: &str,
         status: &str,
         thread_channel_id: Option<&str>,
+        active_dispatch_id: Option<&str>,
         heartbeat_age_sql: &str,
     ) {
         conn.execute(
             "INSERT INTO sessions
-             (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
-             VALUES (?1, 'codex', ?2, ?3, datetime('now', ?4), datetime('now', ?4))",
-            rusqlite::params![session_key, status, thread_channel_id, heartbeat_age_sql],
+             (session_key, provider, status, thread_channel_id, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (?1, 'codex', ?2, ?3, ?4, datetime('now', ?5), datetime('now', ?5))",
+            rusqlite::params![
+                session_key,
+                status,
+                thread_channel_id,
+                active_dispatch_id,
+                heartbeat_age_sql
+            ],
         )
         .unwrap();
     }
@@ -2213,15 +2234,23 @@ mod tests {
         let fixed_channel_session = "mac-mini:AgentDesk-claude-adk-cc-token-test";
         let recent_thread_session = "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796";
 
-        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, "-2 hours");
+        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, None, "-2 hours");
         insert_gc_candidate_session(
             &conn,
             fixed_channel_session,
             "disconnected",
             None,
+            None,
             "-2 hours",
         );
-        insert_gc_candidate_session(&conn, recent_thread_session, "idle", None, "-10 minutes");
+        insert_gc_candidate_session(
+            &conn,
+            recent_thread_session,
+            "idle",
+            None,
+            None,
+            "-10 minutes",
+        );
 
         let deleted = gc_stale_thread_sessions_db(&conn);
         assert_eq!(deleted, 1);
@@ -2276,6 +2305,52 @@ mod tests {
     }
 
     #[test]
+    fn gc_stale_thread_sessions_db_keeps_active_dispatch_rows_until_safety_ttl() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let protected_session = "mac-mini:AgentDesk-codex-adk-cdx-t1495400795435372796";
+        let expired_session = "mac-mini:AgentDesk-codex-adk-cdx-t1495400795435372797";
+
+        insert_gc_candidate_session(
+            &conn,
+            protected_session,
+            "idle",
+            None,
+            Some("dispatch-492-protected"),
+            "-2 hours",
+        );
+        insert_gc_candidate_session(
+            &conn,
+            expired_session,
+            "idle",
+            None,
+            Some("dispatch-492-expired"),
+            "-4 hours",
+        );
+
+        let deleted = gc_stale_thread_sessions_db(&conn);
+        assert_eq!(deleted, 1);
+
+        let protected_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [protected_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(protected_count, 1);
+
+        let expired_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [expired_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(expired_count, 0);
+    }
+
+    #[test]
     fn backfill_legacy_thread_channel_ids_uses_active_dispatch_thread_id() {
         let db = test_db();
         let conn = db.lock().unwrap();
@@ -2325,6 +2400,7 @@ mod tests {
                 &conn,
                 "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120",
                 "idle",
+                None,
                 None,
                 "-2 hours",
             );

@@ -976,8 +976,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     });
                 }
 
-                // Background: periodic GC for stale thread sessions in DB
-                // (idle/disconnected thread sessions older than 1 hour)
+                // Background: periodic GC for stale thread sessions in DB.
+                // Normal idle/disconnected thread rows expire after 1 hour,
+                // but rows still carrying an active_dispatch_id stay until the
+                // 3-hour safety TTL so warm-resume sessions keep DB ownership.
                 {
                     let api_port = shared_clone.api_port;
                     let shared_for_session_gc = shared_clone.clone();
