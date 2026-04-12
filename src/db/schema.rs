@@ -1022,7 +1022,7 @@ fn backfill_auto_queue_dispatch_history(conn: &Connection) -> Result<()> {
     )?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, context, created_at
+        "SELECT id, context, CAST(created_at AS TEXT)
          FROM task_dispatches
          WHERE NULLIF(TRIM(COALESCE(context, '')), '') IS NOT NULL",
     )?;
