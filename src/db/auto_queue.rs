@@ -400,8 +400,7 @@ pub fn current_batch_phase(conn: &Connection, run_id: &str) -> Option<i64> {
         "SELECT MIN(COALESCE(batch_phase, 0))
          FROM auto_queue_entries
          WHERE run_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND COALESCE(batch_phase, 0) > 0",
+           AND status IN ('pending', 'dispatched')",
         [run_id],
         |row| row.get::<_, Option<i64>>(0),
     )
@@ -410,9 +409,6 @@ pub fn current_batch_phase(conn: &Connection, run_id: &str) -> Option<i64> {
 }
 
 pub fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool {
-    if batch_phase == 0 {
-        return true;
-    }
     match current_phase {
         Some(phase) => batch_phase == phase,
         None => true,

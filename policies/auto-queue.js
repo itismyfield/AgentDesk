@@ -494,17 +494,17 @@ function loadPhaseGateDispatches(dispatchIds) {
   );
 }
 
-function countPositiveBatchPhases(runId) {
+function countDistinctBatchPhases(runId) {
   var rows = agentdesk.db.query(
     "SELECT COUNT(DISTINCT COALESCE(batch_phase, 0)) as cnt " +
-    "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) > 0",
+    "FROM auto_queue_entries WHERE run_id = ?",
     [runId]
   );
   return (rows.length > 0) ? (rows[0].cnt || 0) : 0;
 }
 
 function _phaseGateRequired(runId, phase) {
-  return (phase || 0) > 0 && countPositiveBatchPhases(runId) > 1;
+  return countDistinctBatchPhases(runId) > 1;
 }
 
 function completeRunAndNotify(runId) {
