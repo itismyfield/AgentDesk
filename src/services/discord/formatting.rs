@@ -514,15 +514,15 @@ mod tests {
     }
 
     #[test]
-    fn test_build_placeholder_status_block_uses_two_line_trail_only_without_narration() {
-        let two_line = build_placeholder_status_block(
+    fn test_build_placeholder_status_block_shows_only_current_tool() {
+        let placeholder = build_placeholder_status_block(
             "⠋",
             Some("✓ Read: src/config.rs"),
             Some("⚙ Bash: cargo build"),
             "",
             false,
         );
-        assert_eq!(two_line, "✓ Read: src/config.rs\n⠋ ⚙ Bash: cargo build");
+        assert_eq!(placeholder, "⠋ ⚙ Bash: cargo build");
 
         let narrated = build_placeholder_status_block(
             "⠋",
@@ -1240,8 +1240,8 @@ fn tool_status_identity(line: &str) -> (&str, &str) {
     ("other", trimmed)
 }
 
-/// Preserve the last distinct tool/thinking status so placeholders can show a
-/// short trail instead of only the newest line.
+/// Preserve the last distinct tool/thinking status in inflight state so the
+/// bridge can retain prior context across stream transitions and retries.
 pub(super) fn preserve_previous_tool_status(
     prev_tool_status: &mut Option<String>,
     current_tool_line: Option<&str>,
@@ -1281,25 +1281,15 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
 }
 
 /// Build the spinner/status block shown in Discord placeholders.
-/// When narrate_progress is disabled, include the previous status line as a
-/// compact 2-line trail if both previous and current tool states are available.
+/// Placeholder updates should surface only the currently active tool/thinking
+/// line; completed prior tools remain part of the streamed body/final response.
 pub(super) fn build_placeholder_status_block(
     indicator: &str,
-    prev_tool_status: Option<&str>,
+    _prev_tool_status: Option<&str>,
     current_tool_line: Option<&str>,
     full_response: &str,
-    narrate_progress: bool,
+    _narrate_progress: bool,
 ) -> String {
-    if !narrate_progress {
-        if let (Some(prev), Some(current)) = (prev_tool_status, current_tool_line) {
-            let prev = humanize_tool_status(prev);
-            let current = humanize_tool_status(current);
-            if prev != current {
-                return format!("{prev}\n{indicator} {current}");
-            }
-        }
-    }
-
     let raw_tool_status = resolve_raw_tool_status(current_tool_line, full_response);
     let tool_status = humanize_tool_status(raw_tool_status);
     format!("{indicator} {tool_status}")
