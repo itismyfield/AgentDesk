@@ -161,6 +161,7 @@ pub(super) async fn post_adk_session_status(
     cwd: Option<&str>,
     dispatch_id: Option<&str>,
     thread_channel_id: Option<u64>,
+    agent_id: Option<&str>,
     _api_port: u16,
 ) {
     let Some(session_key) = session_key else {
@@ -169,6 +170,7 @@ pub(super) async fn post_adk_session_status(
 
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
+        agent_id: agent_id.map(str::to_string),
         status: Some(status.to_string()),
         provider: Some(provider.as_str().to_string()),
         session_info: session_info.map(str::to_string),
@@ -224,6 +226,7 @@ pub(super) async fn save_provider_session_id(
 ) {
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
+        agent_id: None,
         status: None,
         provider: Some(provider.as_str().to_string()),
         session_info: None,
