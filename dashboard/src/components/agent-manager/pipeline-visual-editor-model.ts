@@ -341,6 +341,26 @@ export function buildPipelineGraph(
       };
     }
 
+    if (fromNode.id === toNode.id) {
+      const startX = fromNode.x + fromNode.width;
+      const startY = fromNode.y + fromNode.height / 2;
+      const endX = fromNode.x + fromNode.width / 2;
+      const endY = fromNode.y;
+      const loopRightX = fromNode.x + fromNode.width + (compact ? 52 : 64);
+      const loopTopY = fromNode.y - (compact ? 40 : 52);
+      return {
+        key: `transition-${index}`,
+        index,
+        from: transition.from,
+        to: transition.to,
+        type: transition.type,
+        gates: [...(transition.gates ?? [])],
+        path: `M ${startX} ${startY} C ${loopRightX} ${startY}, ${loopRightX} ${loopTopY}, ${endX} ${loopTopY} C ${fromNode.x + 8} ${loopTopY}, ${endX - 24} ${endY}, ${endX} ${endY}`,
+        labelX: loopRightX - 12,
+        labelY: loopTopY - 8,
+      };
+    }
+
     if (compact) {
       const startX = fromNode.x + fromNode.width / 2;
       const startY = fromNode.y + fromNode.height;
@@ -381,11 +401,17 @@ export function buildPipelineGraph(
       };
     }
 
+    const upward = toNode.y < fromNode.y;
     const startX = fromNode.x + fromNode.width / 2;
-    const startY = fromNode.y + fromNode.height;
+    const startY = upward ? fromNode.y : fromNode.y + fromNode.height;
     const endX = toNode.x + toNode.width / 2;
-    const endY = toNode.y;
-    const midY = startY + (endY - startY) / 2;
+    const endY = upward ? toNode.y + toNode.height : toNode.y;
+    const controlDistance = Math.max(42, Math.abs(endY - startY) / 2);
+    const controlStartY = upward ? startY - controlDistance : startY + controlDistance;
+    const controlEndY = upward ? endY + controlDistance : endY - controlDistance;
+    const labelY = upward
+      ? Math.min(controlStartY, controlEndY) - 10
+      : (startY + endY) / 2 - 10;
 
     return {
       key: `transition-${index}`,
@@ -394,9 +420,9 @@ export function buildPipelineGraph(
       to: transition.to,
       type: transition.type,
       gates: [...(transition.gates ?? [])],
-      path: `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`,
+      path: `M ${startX} ${startY} C ${startX} ${controlStartY}, ${endX} ${controlEndY}, ${endX} ${endY}`,
       labelX: (startX + endX) / 2,
-      labelY: midY - 10,
+      labelY,
     };
   });
 
