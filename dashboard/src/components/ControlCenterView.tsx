@@ -86,6 +86,11 @@ export default function ControlCenterView({
     },
   ], [agents.length, departments.length, offices.length]);
 
+  const activeSessionCount = useMemo(
+    () => sessions.filter((session) => session.status !== "disconnected").length,
+    [sessions],
+  );
+
   const organizationSections = useMemo(() => [
     {
       id: "agents" as const,
@@ -117,9 +122,9 @@ export default function ControlCenterView({
       labelEn: "Dispatch Sessions",
       descriptionKo: "감지된 세션을 오피스와 에이전트에 배치합니다.",
       descriptionEn: "Assign detected sessions into offices and agents.",
-      count: sessions.filter((session) => session.status !== "disconnected").length,
+      count: activeSessionCount,
     },
-  ], [agents.length, departments.length, offices.length, sessions]);
+  ], [activeSessionCount, agents.length, departments.length, offices.length]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -152,7 +157,7 @@ export default function ControlCenterView({
                 {t("선택 오피스", "Selected Office")}: {selectedOfficeName}
               </span>
               <span className="rounded-full px-2.5 py-1" style={{ background: "rgba(16,185,129,0.12)", color: "#34d399" }}>
-                {t("활성 세션", "Live Sessions")}: {sessions.filter((session) => session.status !== "disconnected").length}
+                {t("활성 세션", "Live Sessions")}: {activeSessionCount}
               </span>
               <span className="rounded-full px-2.5 py-1" style={{ background: "rgba(245,158,11,0.12)", color: "#f59e0b" }}>
                 {t("조직 자산", "Org Surface")}: {agents.length}/{departments.length}/{offices.length}
