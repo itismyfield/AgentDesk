@@ -510,7 +510,6 @@ fn handle_activate_preflight_metadata(
                 rusqlite::params![dispatch_id, entry_id],
             )
             .ok();
-            ActivatePreflightOutcome::Dispatched(deps.entry_json(entry_id))
             crate::auto_queue_log!(
                 info,
                 "activate_preflight_consultation_dispatch_created",
