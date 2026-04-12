@@ -211,7 +211,14 @@ where
         sync_terminal_card_state(db, card_id);
     }
     github_sync_on_transition(db, &effective, card_id, new_status);
-    fire_dynamic_hooks(engine, &effective, card_id, &old_status, new_status);
+    fire_dynamic_hooks(
+        engine,
+        &effective,
+        card_id,
+        &old_status,
+        new_status,
+        Some(source),
+    );
 
     if effective.is_terminal(new_status) && record_true_negative_if_pass(db, card_id) {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
@@ -269,121 +276,6 @@ where
     )
 }
 
-/// Transition a card through the full reducer (decision → intents → execute)
-/// but skip post-transition side-effects (policy hooks, GitHub sync).
-///
-/// Used by auto-queue's silent free-walk to move non-dispatchable cards
-/// (e.g. backlog) to a dispatchable state without firing kanban-rules hooks
-/// that would create side-dispatches.
-///
-/// Unlike raw SQL, this preserves all canonical invariants:
-/// ApplyClock, AuditLog, SyncReviewState, SyncAutoQueue.
-pub fn transition_status_no_hooks(
-    db: &Db,
-    card_id: &str,
-    new_status: &str,
-    source: &str,
-) -> Result<TransitionResult> {
-    use crate::engine::transition::{
-        self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
-    };
-
-    let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-
-    let (old_status, review_status, latest_dispatch_id, card_repo_id, card_agent_id): (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = conn
-        .query_row(
-            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id \
-             FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
-
-    if old_status == new_status {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
-    }
-
-    crate::pipeline::ensure_loaded();
-    let effective =
-        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref());
-
-    let has_active_dispatch: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
-            [card_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    let ctx = TransitionContext {
-        card: CardState {
-            id: card_id.to_string(),
-            status: old_status.clone(),
-            review_status,
-            latest_dispatch_id,
-        },
-        pipeline: effective,
-        gates: GateSnapshot {
-            has_active_dispatch,
-            review_verdict_pass: false,
-            review_verdict_rework: false,
-        },
-    };
-
-    let decision = transition::decide_status_transition(&ctx, new_status, source, true);
-
-    if let TransitionOutcome::Blocked(ref reason) = decision.outcome {
-        return Err(anyhow::anyhow!("{}", reason));
-    }
-    if decision.outcome == TransitionOutcome::NoOp {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
-    }
-
-    conn.execute_batch("BEGIN")?;
-    let exec_result = (|| -> anyhow::Result<()> {
-        for intent in &decision.intents {
-            transition::execute_intent_on_conn(&conn, intent)?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = exec_result {
-        conn.execute_batch("ROLLBACK").ok();
-        return Err(e);
-    }
-    conn.execute_batch("COMMIT")?;
-
-    // Intentionally skip: fire_dynamic_hooks, github_sync, drain_hook_side_effects
-
-    Ok(TransitionResult {
-        changed: true,
-        from: old_status,
-        to: new_status.to_string(),
-    })
-}
-
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct TransitionResult {
@@ -402,13 +294,17 @@ fn fire_dynamic_hooks(
     card_id: &str,
     old_status: &str,
     new_status: &str,
+    source: Option<&str>,
 ) {
-    let payload = json!({
+    let mut payload = json!({
         "card_id": card_id,
         "from": old_status,
         "to": new_status,
         "status": new_status,
     });
+    if let Some(source) = source {
+        payload["source"] = json!(source);
+    }
 
     // Fire on_exit hooks for the state being LEFT
     if let Some(bindings) = pipeline.hooks_for_state(old_status) {
@@ -543,7 +439,7 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
         crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
     });
     if let Some(ref pipeline) = effective {
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to);
+        fire_dynamic_hooks(engine, pipeline, card_id, from, to, None);
     }
     drain_hook_side_effects(db, engine);
 }
@@ -630,7 +526,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
         }
 
         github_sync_on_transition(db, pipeline, card_id, to);
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to);
+        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
 
         // #119: Record true_negative for cards that passed review and reached terminal state
         if pipeline.is_terminal(to) && record_true_negative_if_pass(db, card_id) {

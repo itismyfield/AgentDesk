@@ -153,6 +153,221 @@ struct ResolvedDispatchCard {
     assigned_agent_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ActivateCardState {
+    status: String,
+    title: String,
+    metadata: Option<String>,
+    latest_dispatch_id: Option<String>,
+    latest_dispatch_status: Option<String>,
+    entry_status: String,
+}
+
+impl ActivateCardState {
+    fn has_active_dispatch(&self) -> bool {
+        self.latest_dispatch_id.is_some()
+            && matches!(
+                self.latest_dispatch_status.as_deref(),
+                Some("pending") | Some("dispatched")
+            )
+    }
+}
+
+fn load_activate_card_state(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    entry_id: &str,
+) -> rusqlite::Result<ActivateCardState> {
+    let (status, title, metadata, latest_dispatch_id): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT status, title, metadata, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+        [card_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let latest_dispatch_status = latest_dispatch_id.as_deref().and_then(|dispatch_id| {
+        conn.query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+    });
+    let entry_status = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = ?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "pending".to_string());
+
+    Ok(ActivateCardState {
+        status,
+        title,
+        metadata,
+        latest_dispatch_id,
+        latest_dispatch_status,
+        entry_status,
+    })
+}
+
+enum ActivatePreflightOutcome {
+    Continue,
+    Dispatched(serde_json::Value),
+    Skipped,
+}
+
+fn handle_activate_preflight_metadata(
+    state: &AppState,
+    entry_id: &str,
+    card_id: &str,
+    agent_id: &str,
+    group: i64,
+    title: &str,
+    metadata: Option<&str>,
+    guild_id: Option<&str>,
+) -> ActivatePreflightOutcome {
+    let Some(metadata) = metadata else {
+        return ActivatePreflightOutcome::Continue;
+    };
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return ActivatePreflightOutcome::Continue;
+    };
+
+    match parsed.get("preflight_status").and_then(|v| v.as_str()) {
+        Some("consult_required") => {
+            let consult_agent_id = {
+                let conn = state.db.separate_conn().unwrap();
+                let provider = conn
+                    .query_row(
+                        "SELECT COALESCE(provider, 'claude') FROM agents WHERE id = ?1",
+                        [agent_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map(|raw| ProviderKind::from_str_or_unsupported(&raw))
+                    .unwrap_or_else(|_| {
+                        ProviderKind::default_channel_provider().unwrap_or(ProviderKind::Claude)
+                    });
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, COALESCE(provider, 'claude')
+                         FROM agents
+                         WHERE id != ?1
+                         ORDER BY id ASC",
+                    )
+                    .unwrap();
+                let available_agents: Vec<(String, ProviderKind)> = stmt
+                    .query_map([agent_id], |row| {
+                        let provider_raw: String = row.get(1)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            ProviderKind::from_str_or_unsupported(&provider_raw),
+                        ))
+                    })
+                    .ok()
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                    .unwrap_or_default();
+                provider
+                    .select_counterpart_from(
+                        available_agents
+                            .iter()
+                            .map(|(_, candidate_provider)| candidate_provider.clone()),
+                    )
+                    .and_then(|counterpart| {
+                        available_agents
+                            .iter()
+                            .find_map(|(candidate_id, candidate_provider)| {
+                                (*candidate_provider == counterpart).then_some(candidate_id.clone())
+                            })
+                    })
+                    .unwrap_or_else(|| agent_id.to_string())
+            };
+
+            let dispatch_result = tokio::task::block_in_place(|| {
+                crate::dispatch::create_dispatch(
+                    &state.db,
+                    &state.engine,
+                    card_id,
+                    &consult_agent_id,
+                    "consultation",
+                    &format!("[Consultation] {title}"),
+                    &json!({
+                        "auto_queue": true,
+                        "entry_id": entry_id,
+                        "thread_group": group,
+                    }),
+                )
+            });
+            if dispatch_result.is_err() {
+                tracing::warn!(
+                    "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group})"
+                );
+                return ActivatePreflightOutcome::Continue;
+            }
+
+            let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if let Some(obj) = parsed.as_object_mut() {
+                obj.insert(
+                    "consultation_status".to_string(),
+                    serde_json::json!("pending"),
+                );
+                obj.insert(
+                    "consultation_dispatch_id".to_string(),
+                    serde_json::json!(dispatch_id),
+                );
+            }
+
+            let conn = state.db.separate_conn().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![parsed.to_string(), card_id],
+            )
+            .ok();
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'dispatched',
+                     dispatch_id = ?1,
+                     dispatched_at = datetime('now')
+                 WHERE id = ?2",
+                rusqlite::params![dispatch_id, entry_id],
+            )
+            .ok();
+            ActivatePreflightOutcome::Dispatched(
+                state
+                    .auto_queue_service()
+                    .entry_json(entry_id, guild_id)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        }
+        Some("invalid") | Some("already_applied") => {
+            let conn = state.db.separate_conn().unwrap();
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'skipped',
+                     completed_at = datetime('now')
+                 WHERE id = ?1 AND status = 'pending'",
+                [entry_id],
+            )
+            .ok();
+            tracing::info!(
+                "[auto-queue] skipping entry {entry_id} for card {card_id} due to preflight_status={}",
+                parsed
+                    .get("preflight_status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            );
+            ActivatePreflightOutcome::Skipped
+        }
+        _ => ActivatePreflightOutcome::Continue,
+    }
+}
+
 fn normalize_generate_entries(
     body: &GenerateBody,
 ) -> Result<Option<Vec<RequestedGenerateEntry>>, String> {
@@ -1551,6 +1766,29 @@ pub async fn activate(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap_or((1, 1));
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT agent_id
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1",
+            )
+            .unwrap();
+        let run_agents: Vec<String> = stmt
+            .query_map([&run_id], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            .unwrap_or_default();
+        drop(stmt);
+        for run_agent_id in run_agents {
+            crate::db::auto_queue::ensure_agent_slot_pool_rows(
+                &conn,
+                &run_agent_id,
+                max_concurrent,
+            )
+            .ok();
+        }
+    }
     let current_phase = crate::db::auto_queue::current_batch_phase(&conn, &run_id);
 
     // Count currently active groups (groups with at least one 'dispatched' entry)
@@ -1694,6 +1932,23 @@ pub async fn activate(
             continue;
         };
 
+        let initial_state = {
+            let conn = state.db.separate_conn().unwrap();
+            let card_state = load_activate_card_state(&conn, &card_id, &entry_id);
+            drop(conn);
+            match card_state {
+                Ok(card_state) => card_state,
+                Err(error) => {
+                    tracing::warn!(
+                        "[auto-queue] failed to load card {} before activate for entry {}: {error}",
+                        card_id,
+                        entry_id
+                    );
+                    continue;
+                }
+            }
+        };
+
         // Busy-agent guard (#110): skip if agent has active cards outside auto-queue.
         // Exclude the card being dispatched (#162) and cards that belong to the
         // same auto-queue run — those work in isolated worktrees so parallel
@@ -1718,19 +1973,11 @@ pub async fn activate(
             continue;
         }
 
-        // #162: If card is in a non-dispatchable state (e.g. backlog, requested),
-        // walk it through free transitions to the dispatchable state using the
-        // canonical reducer path (preserves ApplyClock, AuditLog, SyncReviewState)
-        // but without firing policy hooks that would create side-dispatches.
-        {
+        // #162/#500: If card is in a non-dispatchable state (e.g. backlog),
+        // walk it through free transitions using the same canonical transition
+        // path as manual status changes so requested-state hooks/preflight fire.
+        let walk_path = {
             let conn = state.db.separate_conn().unwrap();
-            let card_status: String = conn
-                .query_row(
-                    "SELECT status FROM kanban_cards WHERE id = ?1",
-                    [&card_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or_default();
             let (card_repo_id, card_assigned_agent_id): (Option<String>, Option<String>) = conn
                 .query_row(
                     "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
@@ -1745,33 +1992,35 @@ pub async fn activate(
                 card_assigned_agent_id.as_deref(),
             );
             drop(conn);
-            if let Some(path) = effective.free_path_to_dispatchable(&card_status) {
-                tracing::info!(
-                    "[auto-queue] Silent walk: card {} from '{}' through {:?} (canonical reducer, no hooks)",
-                    card_id,
-                    card_status,
-                    path
-                );
-                let mut walk_failed = false;
-                for step in &path {
-                    if let Err(e) = crate::kanban::transition_status_no_hooks(
-                        &state.db,
-                        &card_id,
-                        step,
-                        "auto-queue-walk",
-                    ) {
-                        tracing::warn!(
-                            "[auto-queue] Silent walk failed for card {} at step '{}': {e}",
-                            card_id,
-                            step
-                        );
-                        walk_failed = true;
-                        break;
-                    }
-                }
-                if walk_failed {
+            effective.free_path_to_dispatchable(&initial_state.status)
+        }
+        .filter(|path| {
+            // `create_dispatch()` already handles the canonical ready -> in_progress
+            // kickoff path. Replaying the single-hop ready -> requested free edge here
+            // would rerun requested-state preflight and change longstanding activate()
+            // semantics for already-ready cards.
+            !(initial_state.status == "ready"
+                && path.len() == 1
+                && path.first().is_some_and(|step| step == "requested"))
+        });
+
+        if walk_path.is_none() {
+            match handle_activate_preflight_metadata(
+                &state,
+                &entry_id,
+                &card_id,
+                &agent_id,
+                *group,
+                &initial_state.title,
+                initial_state.metadata.as_deref(),
+                guild_id,
+            ) {
+                ActivatePreflightOutcome::Continue => {}
+                ActivatePreflightOutcome::Dispatched(entry_json) => {
+                    dispatched.push(entry_json);
                     continue;
                 }
+                ActivatePreflightOutcome::Skipped => continue,
             }
         }
 
@@ -1987,6 +2236,124 @@ pub async fn activate(
             }
         }
 
+        // #500: Silent walk with hooks enabled
+        if let Some(path) = walk_path {
+            tracing::info!(
+                "[auto-queue] Silent walk: card {} from '{}' through {:?} (canonical reducer, hooks enabled)",
+                card_id,
+                initial_state.status,
+                path
+            );
+            let mut walk_failed = false;
+            for step in &path {
+                if let Err(e) = crate::kanban::transition_status_with_opts(
+                    &state.db,
+                    &state.engine,
+                    &card_id,
+                    step,
+                    "auto-queue-walk",
+                    false,
+                ) {
+                    tracing::warn!(
+                        "[auto-queue] Silent walk failed for card {} at step '{}': {e}",
+                        card_id,
+                        step
+                    );
+                    walk_failed = true;
+                    break;
+                }
+            }
+            if walk_failed {
+                continue;
+            }
+        }
+
+        let post_walk = {
+            let conn = state.db.separate_conn().unwrap();
+            let state_after_walk = load_activate_card_state(&conn, &card_id, &entry_id);
+            drop(conn);
+            match state_after_walk {
+                Ok(card_state) => card_state,
+                Err(error) => {
+                    tracing::warn!(
+                        "[auto-queue] failed to reload card {} after walk for entry {}: {error}",
+                        card_id,
+                        entry_id
+                    );
+                    continue;
+                }
+            }
+        };
+
+        if post_walk.entry_status != "pending" {
+            if post_walk.entry_status == "dispatched" {
+                dispatched.push(
+                    state
+                        .auto_queue_service()
+                        .entry_json(&entry_id, guild_id)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            continue;
+        }
+
+        if post_walk.status == "done" {
+            let conn = state.db.separate_conn().unwrap();
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'skipped',
+                     completed_at = COALESCE(completed_at, datetime('now'))
+                 WHERE id = ?1 AND status = 'pending'",
+                [&entry_id],
+            )
+            .ok();
+            drop(conn);
+            continue;
+        }
+
+        if post_walk.has_active_dispatch() {
+            let dispatch_id = post_walk
+                .latest_dispatch_id
+                .as_ref()
+                .expect("active dispatch state requires dispatch id");
+            let conn = state.db.separate_conn().unwrap();
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'dispatched',
+                     dispatch_id = ?1,
+                     dispatched_at = COALESCE(dispatched_at, datetime('now'))
+                 WHERE id = ?2 AND status = 'pending'",
+                rusqlite::params![dispatch_id, entry_id],
+            )
+            .ok();
+            drop(conn);
+            dispatched.push(
+                state
+                    .auto_queue_service()
+                    .entry_json(&entry_id, guild_id)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            continue;
+        }
+
+        match handle_activate_preflight_metadata(
+            &state,
+            &entry_id,
+            &card_id,
+            &agent_id,
+            *group,
+            &post_walk.title,
+            post_walk.metadata.as_deref(),
+            guild_id,
+        ) {
+            ActivatePreflightOutcome::Continue => {}
+            ActivatePreflightOutcome::Dispatched(entry_json) => {
+                dispatched.push(entry_json);
+                continue;
+            }
+            ActivatePreflightOutcome::Skipped => continue,
+        }
+
         // Create dispatch
         let conn = state.db.separate_conn().unwrap();
         let slot_allocation =
@@ -2001,10 +2368,9 @@ pub async fn activate(
         if let Some((assigned_slot, _newly_assigned)) = slot_allocation {
             let slot_key = (agent_id.clone(), assigned_slot);
             if !cleared_slots.contains(&slot_key) {
-                let clear_conn = state.db.separate_conn().unwrap();
                 let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
                     state.health_registry.clone(),
-                    &clear_conn,
+                    &conn,
                     &agent_id,
                     assigned_slot,
                 );
@@ -2045,7 +2411,7 @@ pub async fn activate(
                 &card_id,
                 &agent_id,
                 "implementation",
-                &title,
+                &post_walk.title,
                 &json!({
                     "auto_queue": true,
                     "entry_id": entry_id,

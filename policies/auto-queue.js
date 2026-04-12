@@ -6,6 +6,9 @@ var autoQueue = {
   // If a pending queue entry's card gets dispatched externally (by PMD, user, etc.),
   // skip the entry so auto-queue doesn't try to dispatch it again.
   onCardTransition: function(payload) {
+    if (payload.source === "auto-queue-walk" || payload.source === "auto-queue-generate") {
+      return;
+    }
     var aqCfg = agentdesk.pipeline.getConfig();
     var aqKickoff = agentdesk.pipeline.kickoffState(aqCfg);
     var aqNext = agentdesk.pipeline.nextGatedTarget(aqKickoff, aqCfg);
