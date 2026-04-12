@@ -48,6 +48,7 @@ type ViewMode = "office" | "dashboard" | "kanban" | "more";
 type ControlTab = "agents" | "departments" | "offices" | "settings" | "meetings";
 type AgentsPane = "directory" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
+const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
 
 interface ShellRoute {
   id: ViewMode;
@@ -83,6 +84,20 @@ const PALETTE_ROUTES: PaletteRoute[] = [
   { id: "control_meetings", labelKo: "회의 기록", labelEn: "Meeting Records", icon: "📝" },
   { id: "control_settings", labelKo: "설정", labelEn: "Settings", icon: "⚙️" },
 ];
+
+function hasDashboardTabQuery(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URL(window.location.href).searchParams.has(DASHBOARD_TAB_QUERY_KEY);
+}
+
+function clearDashboardTabQuery() {
+  if (typeof window === "undefined") return;
+
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has(DASHBOARD_TAB_QUERY_KEY)) return;
+  url.searchParams.delete(DASHBOARD_TAB_QUERY_KEY);
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const totalIssues = meeting.proposed_issues?.length ?? 0;
@@ -258,7 +273,7 @@ interface AppShellProps {
 }
 
 function AppShell({ wsConnected, notifications, dismissNotification }: AppShellProps) {
-  const [view, setView] = useState<ViewMode>("office");
+  const [view, setView] = useState<ViewMode>(() => (hasDashboardTabQuery() ? "dashboard" : "office"));
   const [controlTab, setControlTab] = useState<ControlTab>("agents");
   const [agentsPane, setAgentsPane] = useState<AgentsPane>("directory");
   const [kanbanSignalFocus, setKanbanSignalFocus] = useState<KanbanSignalFocus | null>(null);
@@ -372,6 +387,10 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
     setControlTab("settings");
     setView("more");
   }, []);
+
+  useEffect(() => {
+    if (view !== "dashboard") clearDashboardTabQuery();
+  }, [view]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {

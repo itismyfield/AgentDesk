@@ -8,15 +8,12 @@ import type {
   TokenAnalyticsResponse,
 } from "../../types";
 import type { TFunction } from "./model";
-import RateLimitWidget from "./RateLimitWidget";
-import ReceiptWidget from "./ReceiptWidget";
 
 type Period = "7d" | "30d" | "90d";
 
 interface TokenAnalyticsSectionProps {
   t: TFunction;
   numberFormatter: Intl.NumberFormat;
-  onOpenSettings?: () => void;
 }
 
 interface CachedAnalyticsEntry {
@@ -149,7 +146,6 @@ function periodLabel(period: Period, t: TFunction): string {
 export default function TokenAnalyticsSection({
   t,
   numberFormatter,
-  onOpenSettings,
 }: TokenAnalyticsSectionProps) {
   const [period, setPeriod] = useState<Period>("30d");
   const [data, setData] = useState<TokenAnalyticsResponse | null>(null);
@@ -251,134 +247,127 @@ export default function TokenAnalyticsSection({
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
-        <div className="space-y-4 min-w-0">
-          <div
-            className="rounded-2xl border p-4 sm:p-5"
-            style={{
-              borderColor: "rgba(245,158,11,0.22)",
-              background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
-            }}
-          >
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <MetricCard
-                label={t({ ko: "총 토큰", en: "Total Tokens", ja: "総トークン", zh: "总代币" })}
-                value={data ? formatTokens(data.summary.total_tokens) : "…"}
-                sub={data ? data.period_label : t({ ko: "로딩 중", en: "Loading", ja: "読み込み中", zh: "加载中" })}
-                accent="#f59e0b"
-              />
-              <MetricCard
-                label={t({ ko: "API 비용", en: "API Spend", ja: "API コスト", zh: "API 成本" })}
-                value={data ? formatCost(data.summary.total_cost) : "…"}
-                sub={data ? `-${formatCost(data.summary.cache_discount)}` : ""}
-                accent="#22c55e"
-              />
-              <MetricCard
-                label={t({ ko: "활성 일수", en: "Active Days", ja: "稼働日数", zh: "活跃天数" })}
-                value={data ? numberFormatter.format(data.summary.active_days) : "…"}
-                sub={data ? `${formatTokens(data.summary.average_daily_tokens)} / day` : ""}
-                accent="#38bdf8"
-              />
-              <MetricCard
-                label={t({ ko: "피크 데이", en: "Peak Day", ja: "ピーク日", zh: "峰值日" })}
-                value={data?.summary.peak_day?.date.slice(5) ?? "—"}
-                sub={data?.summary.peak_day ? formatTokens(data.summary.peak_day.total_tokens) : ""}
-                accent="#fb7185"
-              />
+      <div className="space-y-4">
+        <div
+          className="rounded-2xl border p-4 sm:p-5"
+          style={{
+            borderColor: "rgba(245,158,11,0.22)",
+            background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricCard
+              label={t({ ko: "총 토큰", en: "Total Tokens", ja: "総トークン", zh: "总代币" })}
+              value={data ? formatTokens(data.summary.total_tokens) : "…"}
+              sub={data ? data.period_label : t({ ko: "로딩 중", en: "Loading", ja: "読み込み中", zh: "加载中" })}
+              accent="#f59e0b"
+            />
+            <MetricCard
+              label={t({ ko: "API 비용", en: "API Spend", ja: "API コスト", zh: "API 成本" })}
+              value={data ? formatCost(data.summary.total_cost) : "…"}
+              sub={data ? `-${formatCost(data.summary.cache_discount)}` : ""}
+              accent="#22c55e"
+            />
+            <MetricCard
+              label={t({ ko: "활성 일수", en: "Active Days", ja: "稼働日数", zh: "活跃天数" })}
+              value={data ? numberFormatter.format(data.summary.active_days) : "…"}
+              sub={data ? `${formatTokens(data.summary.average_daily_tokens)} / day` : ""}
+              accent="#38bdf8"
+            />
+            <MetricCard
+              label={t({ ko: "피크 데이", en: "Peak Day", ja: "ピーク日", zh: "峰值日" })}
+              value={data?.summary.peak_day?.date.slice(5) ?? "—"}
+              sub={data?.summary.peak_day ? formatTokens(data.summary.peak_day.total_tokens) : ""}
+              accent="#fb7185"
+            />
+          </div>
+        </div>
+
+        <div
+          className="rounded-2xl border p-4 sm:p-5"
+          style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                {t({
+                  ko: "토큰 활동 히트맵",
+                  en: "Token Activity Heatmap",
+                  ja: "トークン活動ヒートマップ",
+                  zh: "Token 活动热力图",
+                })}
+              </h3>
+              <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                {t({
+                  ko: "최근 13주를 GitHub 스타일로 표시합니다",
+                  en: "Last 13 weeks in a GitHub-style grid",
+                  ja: "直近 13 週間を GitHub スタイルのグリッドで表示します",
+                  zh: "用 GitHub 风格网格展示最近 13 周",
+                })}
+              </p>
+            </div>
+            <div className="flex items-center gap-1">
+              {HEATMAP_COLORS.map((color, index) => (
+                <span
+                  key={color}
+                  className="h-2.5 w-2.5 rounded-[4px] border"
+                  style={{
+                    background: color,
+                    borderColor: index === 0 ? "rgba(148,163,184,0.12)" : "transparent",
+                  }}
+                />
+              ))}
             </div>
           </div>
 
-          <div
-            className="rounded-2xl border p-4 sm:p-5"
-            style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-                  {t({
-                    ko: "토큰 활동 히트맵",
-                    en: "Token Activity Heatmap",
-                    ja: "トークン活動ヒートマップ",
-                    zh: "Token 活动热力图",
-                  })}
-                </h3>
-                <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {t({
-                    ko: "최근 13주를 GitHub 스타일로 표시합니다",
-                    en: "Last 13 weeks in a GitHub-style grid",
-                    ja: "直近 13 週間を GitHub スタイルのグリッドで表示します",
-                    zh: "用 GitHub 风格网格展示最近 13 周",
-                  })}
-                </p>
-              </div>
-              <div className="flex items-center gap-1">
-                {HEATMAP_COLORS.map((color, index) => (
-                  <span
-                    key={color}
-                    className="h-2.5 w-2.5 rounded-[4px] border"
-                    style={{
-                      background: color,
-                      borderColor: index === 0 ? "rgba(148,163,184,0.12)" : "transparent",
-                    }}
-                  />
-                ))}
-              </div>
+          {!data ? (
+            <div className="py-12 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "토큰 분석을 불러오는 중입니다", en: "Loading token analytics", ja: "トークン分析を読み込み中", zh: "正在加载 Token 分析" })}
             </div>
+          ) : (
+            <div className="mt-4 overflow-x-auto">
+              <div className="min-w-[640px]">
+                <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                  {weekLabels.map((item) => (
+                    <span key={item.week} className="truncate">
+                      {item.label}
+                    </span>
+                  ))}
+                </div>
 
-            {!data ? (
-              <div className="py-12 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-                {t({ ko: "토큰 분석을 불러오는 중입니다", en: "Loading token analytics", ja: "トークン分析を読み込み中", zh: "正在加载 Token 分析" })}
-              </div>
-            ) : (
-              <div className="mt-4 overflow-x-auto">
-                <div className="min-w-[640px]">
-                  <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-                    {weekLabels.map((item) => (
-                      <span key={item.week} className="truncate">
-                        {item.label}
+                <div className="flex gap-3">
+                  <div
+                    className="grid grid-rows-7 gap-1 pt-1 text-[10px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {["M", "", "W", "", "F", "", "S"].map((label, index) => (
+                      <span key={`${label}-${index}`} className="h-3 leading-3">
+                        {label}
                       </span>
                     ))}
                   </div>
 
-                  <div className="flex gap-3">
-                    <div
-                      className="grid grid-rows-7 gap-1 pt-1 text-[10px]"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {["M", "", "W", "", "F", "", "S"].map((label, index) => (
-                        <span key={`${label}-${index}`} className="h-3 leading-3">
-                          {label}
-                        </span>
-                      ))}
-                    </div>
-
-                    <div className="grid grid-flow-col grid-rows-7 gap-1">
-                      {data.heatmap.map((cell) => (
-                        <div
-                          key={cell.date}
-                          className="h-3 w-3 rounded-[4px] border transition-transform hover:scale-110"
-                          title={`${cell.date} · ${formatTokens(cell.total_tokens)} tokens · ${formatCost(cell.cost)}`}
-                          style={{
-                            background: cell.future ? "rgba(148,163,184,0.04)" : HEATMAP_COLORS[cell.level] ?? HEATMAP_COLORS[0],
-                            borderColor: cell.future ? "rgba(148,163,184,0.05)" : "rgba(255,255,255,0.04)",
-                            opacity: cell.future ? 0.35 : 1,
-                          }}
-                        />
-                      ))}
-                    </div>
+                  <div className="grid grid-flow-col grid-rows-7 gap-1">
+                    {data.heatmap.map((cell) => (
+                      <div
+                        key={cell.date}
+                        className="h-3 w-3 rounded-[4px] border transition-transform hover:scale-110"
+                        title={`${cell.date} · ${formatTokens(cell.total_tokens)} tokens · ${formatCost(cell.cost)}`}
+                        style={{
+                          background: cell.future ? "rgba(148,163,184,0.04)" : HEATMAP_COLORS[cell.level] ?? HEATMAP_COLORS[0],
+                          borderColor: cell.future ? "rgba(148,163,184,0.05)" : "rgba(255,255,255,0.04)",
+                          opacity: cell.future ? 0.35 : 1,
+                        }}
+                      />
+                    ))}
                   </div>
                 </div>
               </div>
-            )}
-          </div>
-
-          <DailyTrendCard daily={data?.daily ?? []} trendMax={trendMax} t={t} />
+            </div>
+          )}
         </div>
 
-        <div className="space-y-4 min-w-0">
-          <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
-          <ReceiptWidget t={t} />
-        </div>
+        <DailyTrendCard daily={data?.daily ?? []} trendMax={trendMax} t={t} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">

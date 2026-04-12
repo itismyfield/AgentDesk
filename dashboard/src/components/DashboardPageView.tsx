@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
 import type {
   Agent,
@@ -17,19 +17,51 @@ import {
 } from "./dashboard/HeroSections";
 import {
   AchievementWidget,
-  CookingHeartRoleBoardWidget,
   CronTimelineWidget,
-  MachineStatusWidget,
   MvpWidget,
   SkillTrendWidget,
 } from "./dashboard/ExtraWidgets";
 import HealthWidget from "./dashboard/HealthWidget";
 import { type TFunction } from "./dashboard/model";
+import RateLimitWidget from "./dashboard/RateLimitWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 
+type DashboardTab = "operations" | "tokens" | "automation" | "achievements";
 type DashboardKanbanSignal = "review" | "blocked" | "requested" | "stalled";
+const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
+
+function parseDashboardTab(value: string | null): DashboardTab {
+  switch (value) {
+    case "tokens":
+    case "automation":
+    case "achievements":
+      return value;
+    case "operations":
+    default:
+      return "operations";
+  }
+}
+
+function readDashboardTabFromUrl(): DashboardTab {
+  if (typeof window === "undefined") return "operations";
+
+  const url = new URL(window.location.href);
+  const fromQuery = url.searchParams.get(DASHBOARD_TAB_QUERY_KEY);
+  if (fromQuery) return parseDashboardTab(fromQuery);
+
+  const fromHash = new URLSearchParams(url.hash.replace(/^#/, "")).get(DASHBOARD_TAB_QUERY_KEY);
+  return parseDashboardTab(fromHash);
+}
+
+function writeDashboardTabToUrl(tab: DashboardTab) {
+  if (typeof window === "undefined") return;
+
+  const url = new URL(window.location.href);
+  url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
@@ -62,6 +94,7 @@ export default function DashboardPageView({
 
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
   const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("7d");
+  const [activeTab, setActiveTab] = useState<DashboardTab>(() => readDashboardTabFromUrl());
 
   useEffect(() => {
     let mounted = true;
@@ -81,6 +114,20 @@ export default function DashboardPageView({
       clearInterval(timer);
     };
   }, [skillWindow]);
+
+  useEffect(() => {
+    writeDashboardTabToUrl(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const syncFromUrl = () => setActiveTab(readDashboardTabFromUrl());
+    window.addEventListener("popstate", syncFromUrl);
+    window.addEventListener("hashchange", syncFromUrl);
+    return () => {
+      window.removeEventListener("popstate", syncFromUrl);
+      window.removeEventListener("hashchange", syncFromUrl);
+    };
+  }, []);
 
   if (!stats) {
     return (
@@ -137,6 +184,48 @@ export default function DashboardPageView({
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
   const maxXp = topAgents.reduce((max, agent) => Math.max(max, agent.xp), 1);
+  const tabs: Array<{ id: DashboardTab; label: string; summary: string }> = [
+    {
+      id: "operations",
+      label: t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" }),
+      summary: t({
+        ko: "요약 카드, Health, Weather",
+        en: "Summary cards, health, weather",
+        ja: "要約カード、Health、Weather",
+        zh: "摘要卡、Health、Weather",
+      }),
+    },
+    {
+      id: "tokens",
+      label: t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "Token" }),
+      summary: t({
+        ko: "히트맵, 비용, 모델, 추이",
+        en: "Heatmap, spend, models, trend",
+        ja: "ヒートマップ、コスト、モデル、推移",
+        zh: "热力图、成本、模型、趋势",
+      }),
+    },
+    {
+      id: "automation",
+      label: t({ ko: "자동화", en: "Automation", ja: "自動化", zh: "自动化" }),
+      summary: t({
+        ko: "크론 타임라인, 스킬 허브",
+        en: "Cron timeline, skill hub",
+        ja: "Cron タイムライン、スキルハブ",
+        zh: "Cron 时间线、技能中心",
+      }),
+    },
+    {
+      id: "achievements",
+      label: t({ ko: "업적", en: "Achievements", ja: "業績", zh: "成就" }),
+      summary: t({
+        ko: "랭킹, 업적, MVP",
+        en: "Ranking, achievements, MVP",
+        ja: "ランキング、業績、MVP",
+        zh: "排行、成就、MVP",
+      }),
+    },
+  ];
 
   return (
     <div
@@ -148,93 +237,161 @@ export default function DashboardPageView({
         t={t}
       />
 
-      <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
+      <DashboardTabBar tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 
-      <HealthWidget t={t} />
+      <DashboardTabPanel active={activeTab === "operations"}>
+        <section className="space-y-4">
+          <SectionHeader
+            title={t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" })}
+            subtitle={t({
+              ko: "상단 요약 카드와 런타임 상태만 빠르게 확인합니다",
+              en: "Focus on summary cards and live runtime status only",
+              ja: "上部サマリーカードとランタイム状態だけを素早く確認します",
+              zh: "只快速查看摘要卡与运行时状态",
+            })}
+          />
+          <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <HealthWidget t={t} />
+            <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
+          </div>
+        </section>
+      </DashboardTabPanel>
 
-      <TokenAnalyticsSection
-        t={t}
-        numberFormatter={numberFormatter}
-        onOpenSettings={onOpenSettings}
-      />
-
-      <section className="space-y-4">
-        <SectionHeader
-          title={t({ ko: "게이미피케이션", en: "Gamification", ja: "ゲーミフィケーション", zh: "游戏化" })}
-          subtitle={t({
-            ko: "핵심 랭킹과 남겨둘 가치가 있는 보상 정보만 표시합니다",
-            en: "Keep only the core ranking and reward signals worth surfacing",
-            ja: "残す価値のある主要ランキングと報酬情報だけを表示します",
-            zh: "仅保留值得展示的核心排行与奖励信息",
-          })}
-        />
-
-        <DashboardRankingBoard
-          topAgents={topAgents}
-          podiumOrder={podiumOrder}
-          agentMap={agentMap}
-          agents={agents}
-          maxXp={maxXp}
-          numberFormatter={numberFormatter}
+      <DashboardTabPanel active={activeTab === "tokens"}>
+        <TokenAnalyticsSection
           t={t}
-          onSelectAgent={onSelectAgent}
-        />
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <AchievementWidget t={t} />
-          <MvpWidget agents={agents} t={t} isKo={language === "ko"} />
-        </div>
-      </section>
-
-      <section className="space-y-4">
-        <SectionHeader
-          title={t({ ko: "스킬 허브", en: "Skill Hub", ja: "スキルハブ", zh: "技能中心" })}
-          subtitle={t({
-            ko: "호출 랭킹, 추세, 카탈로그를 한 곳에 모읍니다",
-            en: "Keep skill ranking, trends, and catalog together in one place",
-            ja: "呼び出しランキング、推移、カタログを一か所に集約",
-            zh: "将技能排行、趋势和目录集中到一处",
-          })}
-        />
-
-        <SkillRankingSection
-          skillRanking={skillRanking}
-          skillWindow={skillWindow}
-          onChangeWindow={setSkillWindow}
           numberFormatter={numberFormatter}
-          t={t}
         />
+      </DashboardTabPanel>
 
-        <SkillTrendWidget t={t} />
+      <DashboardTabPanel active={activeTab === "automation"}>
+        <section className="space-y-4">
+          <SectionHeader
+            title={t({ ko: "자동화", en: "Automation", ja: "自動化", zh: "自动化" })}
+            subtitle={t({
+              ko: "스케줄 실행 흐름과 스킬 호출 허브를 함께 봅니다",
+              en: "Keep scheduled runs and the skill hub together",
+              ja: "スケジュール実行フローとスキルハブをまとめて確認します",
+              zh: "将定时执行流与技能中心放在一起查看",
+            })}
+          />
+          <CronTimelineWidget t={t} />
 
-        <Suspense
-          fallback={(
-            <div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "카탈로그 로딩 중...", en: "Loading catalog...", ja: "カタログ読み込み中...", zh: "加载目录中..." })}
-            </div>
-          )}
-        >
-          <SkillCatalogView embedded />
-        </Suspense>
-      </section>
+          <section className="space-y-4">
+            <SectionHeader
+              title={t({ ko: "스킬 허브", en: "Skill Hub", ja: "スキルハブ", zh: "技能中心" })}
+              subtitle={t({
+                ko: "호출 랭킹, 추세, 카탈로그를 한 곳에 모읍니다",
+                en: "Keep skill ranking, trends, and catalog together in one place",
+                ja: "呼び出しランキング、推移、カタログを一か所に集約",
+                zh: "将技能排行、趋势和目录集中到一处",
+              })}
+            />
 
-      <section className="space-y-4">
-        <SectionHeader
-          title={t({ ko: "인프라", en: "Infrastructure", ja: "インフラ", zh: "基础设施" })}
-          subtitle={t({
-            ko: "머신 상태와 자동화 흐름만 유지합니다",
-            en: "Keep machine status and automation flow only",
-            ja: "マシン状態と自動化の流れだけを残します",
-            zh: "仅保留机器状态与自动化流向",
-          })}
-        />
+            <SkillRankingSection
+              skillRanking={skillRanking}
+              skillWindow={skillWindow}
+              onChangeWindow={setSkillWindow}
+              numberFormatter={numberFormatter}
+              t={t}
+            />
 
-        <MachineStatusWidget t={t} />
-        <CronTimelineWidget t={t} />
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <CookingHeartRoleBoardWidget agents={agents} t={t} isKo={language === "ko"} />
-        </div>
-      </section>
+            <SkillTrendWidget t={t} />
+
+            <Suspense
+              fallback={(
+                <div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+                  {t({ ko: "카탈로그 로딩 중...", en: "Loading catalog...", ja: "カタログ読み込み中...", zh: "加载目录中..." })}
+                </div>
+              )}
+            >
+              <SkillCatalogView embedded />
+            </Suspense>
+          </section>
+        </section>
+      </DashboardTabPanel>
+
+      <DashboardTabPanel active={activeTab === "achievements"}>
+        <section className="space-y-4">
+          <SectionHeader
+            title={t({ ko: "업적", en: "Achievements", ja: "業績", zh: "成就" })}
+            subtitle={t({
+              ko: "핵심 랭킹과 남겨둘 가치가 있는 보상 정보만 표시합니다",
+              en: "Keep only the core ranking and reward signals worth surfacing",
+              ja: "残す価値のある主要ランキングと報酬情報だけを表示します",
+              zh: "仅保留值得展示的核心排行与奖励信息",
+            })}
+          />
+
+          <DashboardRankingBoard
+            topAgents={topAgents}
+            podiumOrder={podiumOrder}
+            agentMap={agentMap}
+            agents={agents}
+            maxXp={maxXp}
+            numberFormatter={numberFormatter}
+            t={t}
+            onSelectAgent={onSelectAgent}
+          />
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <AchievementWidget t={t} />
+            <MvpWidget agents={agents} t={t} isKo={language === "ko"} />
+          </div>
+        </section>
+      </DashboardTabPanel>
+    </div>
+  );
+}
+
+function DashboardTabBar({
+  tabs,
+  activeTab,
+  onChange,
+}: {
+  tabs: Array<{ id: DashboardTab; label: string; summary: string }>;
+  activeTab: DashboardTab;
+  onChange: (tab: DashboardTab) => void;
+}) {
+  return (
+    <div className="game-panel p-2">
+      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+        {tabs.map((tab) => {
+          const active = tab.id === activeTab;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onChange(tab.id)}
+              className="rounded-2xl px-3 py-3 text-left transition-all"
+              style={{
+                background: active ? "linear-gradient(135deg, rgba(245,158,11,0.22), rgba(59,130,246,0.18))" : "rgba(15,23,42,0.18)",
+                border: active ? "1px solid rgba(251,191,36,0.28)" : "1px solid rgba(148,163,184,0.14)",
+                boxShadow: active ? "0 0 0 1px rgba(245,158,11,0.12) inset" : "none",
+              }}
+            >
+              <div
+                className="text-sm font-semibold"
+                style={{ color: active ? "var(--th-text-heading)" : "var(--th-text)" }}
+              >
+                {tab.label}
+              </div>
+              <div className="mt-1 text-[11px] leading-4" style={{ color: "var(--th-text-muted)" }}>
+                {tab.summary}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DashboardTabPanel({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <div hidden={!active} aria-hidden={!active}>
+      {children}
     </div>
   );
 }
