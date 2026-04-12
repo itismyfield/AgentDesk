@@ -2294,20 +2294,39 @@ pub async fn rereview_card(
         )
         .ok();
 
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET status = 'dispatched',
-                 dispatch_id = ?1,
-                 dispatched_at = datetime('now'),
-                 completed_at = NULL
-             WHERE kanban_card_id = ?2
-               AND status IN ('pending', 'dispatched', 'done')
-               AND run_id IN (
-                   SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-               )",
-            rusqlite::params![review_dispatch_id, id],
-        )
-        .ok();
+        let entry_ids: Vec<String> = conn
+            .prepare(
+                "SELECT id FROM auto_queue_entries
+                 WHERE kanban_card_id = ?1
+                   AND status IN ('pending', 'dispatched', 'done')
+                   AND run_id IN (
+                       SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+                   )",
+            )
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([&id], |row| row.get::<_, String>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default();
+        for entry_id in entry_ids {
+            if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+                &conn,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                "rereview_dispatch",
+                &crate::db::auto_queue::EntryStatusUpdateOptions {
+                    dispatch_id: Some(review_dispatch_id.clone()),
+                    slot_index: None,
+                },
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
 
         match conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
             card_row_to_json(row)
@@ -2716,12 +2735,32 @@ pub async fn reopen_card(
                 }
 
                 // Reactivate auto_queue_entries that were marked done
-                conn.execute(
-                    "UPDATE auto_queue_entries SET status = 'dispatched', completed_at = NULL \
-                     WHERE kanban_card_id = ?1 AND status = 'done'",
-                    [&id],
-                )
-                .ok();
+                let entry_ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT id FROM auto_queue_entries
+                         WHERE kanban_card_id = ?1 AND status = 'done'",
+                    )
+                    .ok()
+                    .and_then(|mut stmt| {
+                        stmt.query_map([&id], |row| row.get::<_, String>(0))
+                            .ok()
+                            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                    })
+                    .unwrap_or_default();
+                for entry_id in entry_ids {
+                    if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+                        &conn,
+                        &entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                        "pmd_reopen",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                    ) {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{error}")})),
+                        );
+                    }
+                }
 
                 // Re-open GitHub issue if linked
                 let gh_url: Option<String> = conn

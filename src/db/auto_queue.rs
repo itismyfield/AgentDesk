@@ -1,4 +1,167 @@
 use rusqlite::{Connection, OptionalExtension, types::ToSql};
+use thiserror::Error;
+
+pub const ENTRY_STATUS_PENDING: &str = "pending";
+pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";
+pub const ENTRY_STATUS_DONE: &str = "done";
+pub const ENTRY_STATUS_SKIPPED: &str = "skipped";
+
+#[derive(Debug, Clone, Default)]
+pub struct EntryStatusUpdateOptions {
+    pub dispatch_id: Option<String>,
+    pub slot_index: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryStatusUpdateResult {
+    pub run_id: String,
+    pub from_status: String,
+    pub to_status: String,
+    pub changed: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum EntryStatusUpdateError {
+    #[error("auto-queue entry not found: {entry_id}")]
+    NotFound { entry_id: String },
+    #[error("unsupported auto-queue entry status: {status}")]
+    UnsupportedStatus { status: String },
+    #[error("invalid auto-queue entry transition for {entry_id}: {from_status} -> {to_status}")]
+    InvalidTransition {
+        entry_id: String,
+        from_status: String,
+        to_status: String,
+    },
+    #[error(transparent)]
+    Sql(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, Clone)]
+struct EntryStatusRow {
+    run_id: String,
+    status: String,
+    dispatch_id: Option<String>,
+    slot_index: Option<i64>,
+    completed_at: Option<String>,
+}
+
+pub fn update_entry_status_on_conn(
+    conn: &Connection,
+    entry_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    options: &EntryStatusUpdateOptions,
+) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
+    let current = load_entry_status_row(conn, entry_id)?;
+    let normalized = normalize_entry_status(new_status)?;
+
+    if !is_allowed_entry_transition(&current.status, normalized) {
+        tracing::warn!(
+            "[auto-queue] blocked invalid entry transition {} {} -> {} (source: {})",
+            entry_id,
+            current.status,
+            normalized,
+            trigger_source
+        );
+        return Err(EntryStatusUpdateError::InvalidTransition {
+            entry_id: entry_id.to_string(),
+            from_status: current.status,
+            to_status: normalized.to_string(),
+        });
+    }
+
+    let effective_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let effective_slot_index = options.slot_index.or(current.slot_index);
+    let metadata_change = match normalized {
+        ENTRY_STATUS_PENDING => {
+            current.dispatch_id.is_some()
+                || current.slot_index.is_some()
+                || current.completed_at.is_some()
+        }
+        ENTRY_STATUS_DISPATCHED => {
+            effective_dispatch_id != current.dispatch_id
+                || effective_slot_index != current.slot_index
+                || current.completed_at.is_some()
+        }
+        ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => false,
+        _ => false,
+    };
+    let changed = current.status != normalized || metadata_change;
+
+    if !changed {
+        return Ok(EntryStatusUpdateResult {
+            run_id: current.run_id,
+            from_status: current.status,
+            to_status: normalized.to_string(),
+            changed: false,
+        });
+    }
+
+    match normalized {
+        ENTRY_STATUS_PENDING => {
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'pending',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NULL
+                 WHERE id = ?1",
+                [entry_id],
+            )?;
+        }
+        ENTRY_STATUS_DISPATCHED => {
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'dispatched',
+                     dispatch_id = ?1,
+                     slot_index = ?2,
+                     dispatched_at = datetime('now'),
+                     completed_at = NULL
+                 WHERE id = ?3",
+                rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id],
+            )?;
+        }
+        ENTRY_STATUS_DONE => {
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'done',
+                     completed_at = datetime('now')
+                 WHERE id = ?1",
+                [entry_id],
+            )?;
+        }
+        ENTRY_STATUS_SKIPPED => {
+            conn.execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'skipped',
+                     dispatch_id = NULL,
+                     dispatched_at = NULL,
+                     completed_at = datetime('now')
+                 WHERE id = ?1",
+                [entry_id],
+            )?;
+        }
+        _ => unreachable!(),
+    }
+
+    record_entry_transition_on_conn(conn, entry_id, &current.status, normalized, trigger_source)?;
+
+    if matches!(normalized, ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED) {
+        release_completed_group_slots_for_run(conn, &current.run_id);
+        maybe_finalize_run_after_terminal_entry(conn, &current.run_id, normalized)?;
+    }
+
+    Ok(EntryStatusUpdateResult {
+        run_id: current.run_id,
+        from_status: current.status,
+        to_status: normalized.to_string(),
+        changed: true,
+    })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct GenerateCardFilter {
@@ -665,6 +828,242 @@ pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> rusqlite::Res
     Ok(())
 }
 
+fn load_entry_status_row(
+    conn: &Connection,
+    entry_id: &str,
+) -> Result<EntryStatusRow, EntryStatusUpdateError> {
+    conn.query_row(
+        "SELECT run_id, status, dispatch_id, slot_index, completed_at
+         FROM auto_queue_entries
+         WHERE id = ?1",
+        [entry_id],
+        |row| {
+            Ok(EntryStatusRow {
+                run_id: row.get(0)?,
+                status: row.get(1)?,
+                dispatch_id: row.get(2)?,
+                slot_index: row.get(3)?,
+                completed_at: row.get(4)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| EntryStatusUpdateError::NotFound {
+        entry_id: entry_id.to_string(),
+    })
+}
+
+fn normalize_entry_status(status: &str) -> Result<&str, EntryStatusUpdateError> {
+    match status.trim() {
+        ENTRY_STATUS_PENDING => Ok(ENTRY_STATUS_PENDING),
+        ENTRY_STATUS_DISPATCHED => Ok(ENTRY_STATUS_DISPATCHED),
+        ENTRY_STATUS_DONE => Ok(ENTRY_STATUS_DONE),
+        ENTRY_STATUS_SKIPPED => Ok(ENTRY_STATUS_SKIPPED),
+        other => Err(EntryStatusUpdateError::UnsupportedStatus {
+            status: other.to_string(),
+        }),
+    }
+}
+
+fn is_allowed_entry_transition(from_status: &str, to_status: &str) -> bool {
+    if from_status == to_status {
+        return true;
+    }
+
+    matches!(
+        (from_status, to_status),
+        (ENTRY_STATUS_PENDING, ENTRY_STATUS_DISPATCHED)
+            | (ENTRY_STATUS_PENDING, ENTRY_STATUS_DONE)
+            | (ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_PENDING)
+            | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE)
+            | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_DONE, ENTRY_STATUS_DISPATCHED)
+    )
+}
+
+fn release_completed_group_slots_for_run(conn: &Connection, run_id: &str) {
+    let completed_slots = completed_group_slots(conn, run_id);
+    if !completed_slots.is_empty() {
+        release_group_slots(conn, &completed_slots);
+    }
+}
+
+fn maybe_finalize_run_after_terminal_entry(
+    conn: &Connection,
+    run_id: &str,
+    new_status: &str,
+) -> rusqlite::Result<bool> {
+    if new_status == ENTRY_STATUS_DONE && distinct_batch_phase_count(conn, run_id) > 1 {
+        return Ok(false);
+    }
+    if run_has_blocking_phase_gate(conn, run_id) {
+        return Ok(false);
+    }
+
+    let remaining: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM auto_queue_entries
+         WHERE run_id = ?1 AND status IN ('pending', 'dispatched')",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if remaining > 0 {
+        return Ok(false);
+    }
+
+    release_run_slots(conn, run_id);
+    complete_run_on_conn(conn, run_id)
+}
+
+pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+    let updated = conn.execute(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = datetime('now')
+         WHERE id = ?1 AND status IN ('active', 'paused', 'generated', 'pending')",
+        [run_id],
+    )?;
+    if updated == 0 {
+        return Ok(false);
+    }
+
+    if let Err(error) = queue_run_completion_notify_on_conn(conn, run_id) {
+        tracing::warn!(
+            "[auto-queue] failed to queue completion notify for run {}: {}",
+            run_id,
+            error
+        );
+    }
+
+    Ok(true)
+}
+
+fn queue_run_completion_notify_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
+    let (repo, agent_id): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT repo, agent_id FROM auto_queue_runs WHERE id = ?1",
+        [run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let targets = completion_notify_targets_on_conn(conn, run_id, agent_id.as_deref());
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let entry_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let repo_label = repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(global)");
+    let short_run_id = &run_id[..8.min(run_id.len())];
+    let content = format!("자동큐 완료: {repo_label} / run {short_run_id} / {entry_count}개");
+
+    for channel_id in targets {
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+            rusqlite::params![format!("channel:{channel_id}"), &content],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn completion_notify_targets_on_conn(
+    conn: &Connection,
+    run_id: &str,
+    run_agent_id: Option<&str>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    if let Some(agent_id) = run_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && let Ok(channel_id) = conn.query_row(
+            "SELECT discord_channel_id FROM agents WHERE id = ?1",
+            [agent_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        && let Some(channel_id) = channel_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    {
+        targets.push(channel_id);
+    }
+
+    if targets.is_empty()
+        && let Ok(mut stmt) = conn.prepare(
+            "SELECT DISTINCT a.discord_channel_id
+             FROM auto_queue_entries e
+             JOIN agents a ON a.id = e.agent_id
+             WHERE e.run_id = ?1
+               AND a.discord_channel_id IS NOT NULL
+               AND TRIM(a.discord_channel_id) != ''",
+        )
+        && let Ok(rows) = stmt.query_map([run_id], |row| row.get::<_, String>(0))
+    {
+        targets.extend(rows.filter_map(|row| row.ok()));
+    }
+
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn distinct_batch_phase_count(conn: &Connection, run_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(batch_phase, 0))
+         FROM auto_queue_entries
+         WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
+fn record_entry_transition_on_conn(
+    conn: &Connection,
+    entry_id: &str,
+    from_status: &str,
+    to_status: &str,
+    trigger_source: &str,
+) -> rusqlite::Result<()> {
+    ensure_entry_transition_audit_schema(conn)?;
+    conn.execute(
+        "INSERT INTO auto_queue_entry_transitions (
+             entry_id,
+             from_status,
+             to_status,
+             trigger_source
+         )
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![entry_id, from_status, to_status, trigger_source],
+    )?;
+    Ok(())
+}
+
+fn ensure_entry_transition_audit_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id       TEXT NOT NULL,
+            from_status    TEXT,
+            to_status      TEXT NOT NULL,
+            trigger_source TEXT NOT NULL,
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
+            ON auto_queue_entry_transitions(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
+            ON auto_queue_entry_transitions(created_at);",
+    )
+}
+
 fn map_status_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StatusEntryRecord> {
     Ok(StatusEntryRecord {
         id: row.get(0)?,
@@ -727,5 +1126,232 @@ fn append_card_filters(
             params.push(Box::new(*issue_number));
         }
         conditions.push(format!("{}github_issue_number IN ({placeholders})", prefix));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, EntryStatusUpdateError,
+        EntryStatusUpdateOptions, update_entry_status_on_conn,
+    };
+    use rusqlite::Connection;
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE auto_queue_runs (
+                id TEXT PRIMARY KEY,
+                repo TEXT,
+                agent_id TEXT,
+                status TEXT,
+                completed_at DATETIME,
+                max_concurrent_threads INTEGER DEFAULT 1
+            );
+            CREATE TABLE auto_queue_entries (
+                id TEXT PRIMARY KEY,
+                run_id TEXT,
+                kanban_card_id TEXT,
+                agent_id TEXT,
+                status TEXT,
+                dispatch_id TEXT,
+                slot_index INTEGER,
+                thread_group INTEGER DEFAULT 0,
+                batch_phase INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at DATETIME,
+                completed_at DATETIME
+            );
+            CREATE TABLE auto_queue_slots (
+                agent_id TEXT NOT NULL,
+                slot_index INTEGER NOT NULL,
+                assigned_run_id TEXT,
+                assigned_thread_group INTEGER,
+                thread_id_map TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (agent_id, slot_index)
+            );
+            CREATE TABLE kv_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE TABLE agents (
+                id TEXT PRIMARY KEY,
+                discord_channel_id TEXT
+            );
+            CREATE TABLE message_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target TEXT,
+                content TEXT,
+                bot TEXT,
+                source TEXT
+            );",
+        )
+        .expect("schema");
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-1', 'repo-1', 'agent-1', 'active')",
+            [],
+        )
+        .expect("seed run");
+        conn.execute(
+            "INSERT INTO agents (id, discord_channel_id) VALUES ('agent-1', '123')",
+            [],
+        )
+        .expect("seed agent");
+        conn.execute(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-1', 0, 'run-1', 0, '{}')",
+            [],
+        )
+        .expect("seed slot");
+        conn
+    }
+
+    #[test]
+    fn entry_transition_done_releases_slots_and_completes_run() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES ('entry-1', 'run-1', 'card-1', 'agent-1', 'pending', NULL, 0, 0)",
+            [],
+        )
+        .expect("seed entry");
+
+        let dispatched = update_entry_status_on_conn(
+            &conn,
+            "entry-1",
+            ENTRY_STATUS_DISPATCHED,
+            "test_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-1".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("dispatch transition");
+        assert_eq!(dispatched.from_status, ENTRY_STATUS_PENDING);
+        assert_eq!(dispatched.to_status, ENTRY_STATUS_DISPATCHED);
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-1",
+            ENTRY_STATUS_DONE,
+            "test_done",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("done transition");
+
+        let (status, dispatch_id, completed_at): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id, completed_at FROM auto_queue_entries WHERE id = 'entry-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_DONE);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-1"));
+        assert!(completed_at.is_some());
+
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run status");
+        assert_eq!(run_status, "completed");
+
+        let slot_run: Option<String> = conn
+            .query_row(
+                "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("slot row");
+        assert!(slot_run.is_none());
+
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = 'entry-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert_eq!(audit_rows, 2);
+
+        let (target, bot, content): (String, String, String) = conn
+            .query_row(
+                "SELECT target, bot, content FROM message_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("completion notify");
+        assert_eq!(target, "channel:123");
+        assert_eq!(bot, "notify");
+        assert!(content.contains("자동큐 완료: repo-1 / run run-1 / 1개"));
+    }
+
+    #[test]
+    fn entry_transition_pending_clears_dispatch_binding() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, completed_at
+             ) VALUES ('entry-2', 'run-1', 'card-2', 'agent-1', 'dispatched', 'dispatch-2', 0, 0, datetime('now'))",
+            [],
+        )
+        .expect("seed entry");
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-2",
+            ENTRY_STATUS_PENDING,
+            "test_reset",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("pending reset");
+
+        let (status, dispatch_id, slot_index, completed_at): (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, completed_at FROM auto_queue_entries WHERE id = 'entry-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_PENDING);
+        assert!(dispatch_id.is_none());
+        assert!(slot_index.is_none());
+        assert!(completed_at.is_none());
+    }
+
+    #[test]
+    fn entry_transition_blocks_invalid_skipped_reactivation() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-3', 'run-1', 'card-3', 'agent-1', 'skipped', 0)",
+            [],
+        )
+        .expect("seed entry");
+
+        let error = update_entry_status_on_conn(
+            &conn,
+            "entry-3",
+            ENTRY_STATUS_DISPATCHED,
+            "test_invalid",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect_err("invalid transition must fail");
+        assert!(matches!(
+            error,
+            EntryStatusUpdateError::InvalidTransition { .. }
+        ));
     }
 }

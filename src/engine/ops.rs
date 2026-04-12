@@ -5,6 +5,7 @@
 //! lifetime issues with Value<'js> in MutFn closures.
 
 mod agent_ops;
+mod auto_queue_ops;
 mod cards_ops;
 mod config_ops;
 mod db_ops;
@@ -20,6 +21,8 @@ mod pipeline_ops;
 mod queue_ops;
 mod review_ops;
 mod runtime_ops;
+
+pub(crate) use review_ops::ADVANCE_REVIEW_ROUND_HINT_KEY;
 
 #[cfg(test)]
 mod tests;
@@ -91,6 +94,9 @@ pub fn register_globals_with_supervisor(
 
     // ── agentdesk.queue ──────────────────────────────────────────
     queue_ops::register_queue_ops(ctx, db.clone())?;
+
+    // ── agentdesk.autoQueue ─────────────────────────────────────
+    auto_queue_ops::register_auto_queue_ops(ctx, db.clone())?;
 
     // ── agentdesk.runtime ────────────────────────────────────────
     runtime_ops::register_runtime_ops(ctx, db.clone(), supervisor_bridge)?;

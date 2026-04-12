@@ -134,12 +134,21 @@ fn reset_broken_auto_queue_entries(conn: &Connection) -> Result<usize> {
 
     let mut reset = 0usize;
     for entry_id in broken_ids {
-        reset += conn.execute(
-            "UPDATE auto_queue_entries
-             SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL
-             WHERE id = ?1 AND status = 'dispatched'",
-            [&entry_id],
-        )? as usize;
+        if crate::db::auto_queue::update_entry_status_on_conn(
+            conn,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_PENDING,
+            "boot_reconcile",
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        )
+        .map_err(|error| match error {
+            crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => anyhow!(sql),
+            other => anyhow!(other.to_string()),
+        })?
+        .changed
+        {
+            reset += 1;
+        }
     }
     Ok(reset)
 }

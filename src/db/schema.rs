@@ -807,7 +807,19 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, slot_index)
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        TEXT NOT NULL,
+            from_status     TEXT,
+            to_status       TEXT NOT NULL,
+            trigger_source  TEXT NOT NULL,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
+            ON auto_queue_entry_transitions(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
+            ON auto_queue_entry_transitions(created_at);",
     )?;
 
     ensure_auto_queue_column(

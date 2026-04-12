@@ -3,7 +3,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
-const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
+pub(crate) const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
 
 pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -246,6 +246,8 @@ fn review_record_entry_raw(db: &Db, card_id: &str, opts_json: &str) -> String {
             )?,
         };
 
+        clear_review_round_advance_hint_on_conn(&conn, card_id)?;
+
         Ok(json!({
             "ok": true,
             "rows_affected": changed,
@@ -257,4 +259,41 @@ fn review_record_entry_raw(db: &Db, card_id: &str, opts_json: &str) -> String {
         Ok(value) => value.to_string(),
         Err(err) => json!({ "error": err.to_string() }).to_string(),
     }
+}
+
+fn clear_review_round_advance_hint_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> rusqlite::Result<()> {
+    let metadata_raw: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = metadata_raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(());
+    };
+    if object.remove(ADVANCE_REVIEW_ROUND_HINT_KEY).is_none() {
+        return Ok(());
+    }
+
+    let stored_metadata = if object.is_empty() {
+        None
+    } else {
+        Some(metadata.to_string())
+    };
+    conn.execute(
+        "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![stored_metadata, card_id],
+    )?;
+    Ok(())
 }
