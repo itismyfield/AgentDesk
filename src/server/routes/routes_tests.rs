@@ -9134,6 +9134,351 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
     assert_eq!(phase_two_dispatched, 2);
 }
 
+#[tokio::test]
+async fn auto_queue_pause_cancels_live_dispatches_and_releases_slots() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-pause-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-pause-dispatched",
+        4496,
+        "in_progress",
+        "agent-pause-slot",
+    );
+    seed_auto_queue_card(&db, "card-pause-pending", 4497, "ready", "agent-pause-slot");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-pause-slot', 'test-repo', 'agent-pause-slot', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-pause-slot', 0, 'run-pause-slot', 0, ?1
+            )",
+            [json!({"111": "222000000000004496"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-pause-slot', 'card-pause-dispatched', 'agent-pause-slot',
+                'implementation', 'dispatched', 'Pause slot dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-pause-dispatched', 'run-pause-slot', 'card-pause-dispatched',
+                'agent-pause-slot', 'dispatched', 'dispatch-pause-slot', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-pause-pending', 'run-pause-slot', 'card-pause-pending',
+                'agent-pause-slot', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, session_info, tokens,
+                active_dispatch_id, thread_channel_id, claude_session_id,
+                last_heartbeat, created_at
+            ) VALUES (
+                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
+                'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/pause")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["paused_runs"], 1);
+    assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["released_slots"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-pause-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "paused");
+
+    let dispatched_entry: (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id, dispatched_at
+             FROM auto_queue_entries
+             WHERE id = 'entry-pause-dispatched'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatched_entry.0, "pending");
+    assert_eq!(dispatched_entry.1, None);
+    assert_eq!(dispatched_entry.2, None);
+
+    let pending_entry: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-pause-pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_entry, "pending");
+
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-pause-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-pause-slot' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot, (None, None));
+
+    let session: (String, Option<String>, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id, tokens, claude_session_id
+             FROM sessions
+             WHERE session_key = 'host:AgentDesk-claude-pause-slot'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(session.0, "idle");
+    assert_eq!(session.1, None);
+    assert_eq!(session.2, 0);
+    assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_slots() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-dispatched",
+        4596,
+        "in_progress",
+        "agent-cancel-slot",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-pending",
+        4597,
+        "ready",
+        "agent-cancel-slot",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-cancel-slot', 'test-repo', 'agent-cancel-slot', 'paused', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-cancel-slot', 0, 'run-cancel-slot', 0, ?1
+            )",
+            [json!({"111": "222000000000004597"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-slot', 'card-cancel-dispatched', 'agent-cancel-slot',
+                'implementation', 'dispatched', 'Cancel slot dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-cancel-dispatched', 'run-cancel-slot', 'card-cancel-dispatched',
+                'agent-cancel-slot', 'dispatched', 'dispatch-cancel-slot', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-pending', 'run-cancel-slot', 'card-cancel-pending',
+                'agent-cancel-slot', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, session_info, tokens,
+                active_dispatch_id, thread_channel_id, claude_session_id,
+                last_heartbeat, created_at
+            ) VALUES (
+                'host:AgentDesk-claude-cancel-slot', 'agent-cancel-slot', 'claude', 'working',
+                'cancel slot seed', 23, 'dispatch-cancel-slot', '222000000000004597', 'claude-cancel-slot',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["released_slots"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
+
+    let entries: Vec<(String, Option<String>, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, dispatch_id, completed_at
+                 FROM auto_queue_entries
+                 WHERE run_id = 'run-cancel-slot'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|(status, dispatch_id, completed_at)| status == "skipped"
+                && dispatch_id.is_none()
+                && completed_at.is_some()),
+        "cancel must skip every active/pending queue entry and stamp completed_at"
+    );
+
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-cancel-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-cancel-slot' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot, (None, None));
+
+    let session: (String, Option<String>, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id, tokens, claude_session_id
+             FROM sessions
+             WHERE session_key = 'host:AgentDesk-claude-cancel-slot'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(session.0, "idle");
+    assert_eq!(session.1, None);
+    assert_eq!(session.2, 0);
+    assert_eq!(session.3, None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activate_run_id_blocks_phase_gate_paused_runs() {
     crate::pipeline::ensure_loaded();

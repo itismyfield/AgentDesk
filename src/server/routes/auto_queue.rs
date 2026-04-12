@@ -7,6 +7,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::AppState;
 use crate::services::provider::ProviderKind;
@@ -117,6 +118,121 @@ struct PlannedEntry {
     priority_rank: i64,
     batch_phase: i64,
     reason: String,
+}
+
+fn load_run_ids_with_status(
+    conn: &rusqlite::Connection,
+    statuses: &[&str],
+) -> rusqlite::Result<Vec<String>> {
+    if statuses.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(statuses.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id FROM auto_queue_runs WHERE status IN ({placeholders}) ORDER BY rowid ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(statuses.iter()), |row| {
+        row.get(0)
+    })?
+    .collect::<Result<Vec<_>, _>>()
+}
+
+fn load_slot_bindings_for_runs(
+    conn: &rusqlite::Connection,
+    run_ids: &[String],
+) -> rusqlite::Result<Vec<(String, i64)>> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT agent_id, slot_index
+         FROM auto_queue_slots
+         WHERE assigned_run_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?
+    .collect::<Result<Vec<_>, _>>()
+}
+
+fn load_live_dispatch_ids_for_runs(
+    conn: &rusqlite::Connection,
+    run_ids: &[String],
+) -> rusqlite::Result<Vec<String>> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT td.id
+         FROM task_dispatches td
+         JOIN auto_queue_entries e ON e.dispatch_id = td.id
+         WHERE e.run_id IN ({placeholders})
+           AND td.status IN ('pending', 'dispatched')"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn cancel_live_dispatches_for_runs(
+    conn: &rusqlite::Connection,
+    run_ids: &[String],
+    reason: &str,
+) -> usize {
+    let dispatch_ids = load_live_dispatch_ids_for_runs(conn, run_ids).unwrap_or_default();
+    dispatch_ids
+        .into_iter()
+        .map(|dispatch_id| {
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                conn,
+                &dispatch_id,
+                Some(reason),
+            )
+            .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn clear_and_release_slots_for_runs(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    conn: &rusqlite::Connection,
+    run_ids: &[String],
+) -> (usize, usize) {
+    let mut released_slots: HashSet<(String, i64)> = HashSet::new();
+    let mut cleared_sessions = 0usize;
+
+    for (agent_id, slot_index) in load_slot_bindings_for_runs(conn, run_ids).unwrap_or_default() {
+        if released_slots.insert((agent_id.clone(), slot_index)) {
+            cleared_sessions += crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
+                health_registry.clone(),
+                conn,
+                &agent_id,
+                slot_index,
+            );
+        }
+    }
+
+    for run_id in run_ids {
+        crate::db::auto_queue::release_run_slots(conn, run_id);
+    }
+
+    (released_slots.len(), cleared_sessions)
 }
 
 #[derive(Debug, Clone)]
@@ -3208,15 +3324,29 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             );
         }
     };
+    let active_run_ids = load_run_ids_with_status(&conn, &["active"]).unwrap_or_default();
+    let cancelled_dispatches =
+        cancel_live_dispatches_for_runs(&conn, &active_run_ids, "auto_queue_pause");
+    let (released_slots, cleared_slot_sessions) =
+        clear_and_release_slots_for_runs(state.health_registry.clone(), &conn, &active_run_ids);
     let paused = conn
         .execute(
-            "UPDATE auto_queue_runs SET status = 'paused' WHERE status = 'active'",
+            "UPDATE auto_queue_runs
+             SET status = 'paused',
+                 completed_at = NULL
+             WHERE status = 'active'",
             [],
         )
         .unwrap_or(0);
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "paused_runs": paused})),
+        Json(json!({
+            "ok": true,
+            "paused_runs": paused,
+            "cancelled_dispatches": cancelled_dispatches,
+            "released_slots": released_slots,
+            "cleared_slot_sessions": cleared_slot_sessions,
+        })),
     )
 }
 
@@ -3304,24 +3434,40 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             );
         }
     };
+    let target_run_ids = load_run_ids_with_status(&conn, &["active", "paused"]).unwrap_or_default();
+    let cancelled_dispatches =
+        cancel_live_dispatches_for_runs(&conn, &target_run_ids, "auto_queue_cancel");
+    let (released_slots, cleared_slot_sessions) =
+        clear_and_release_slots_for_runs(state.health_registry.clone(), &conn, &target_run_ids);
     let cancelled_runs = conn
         .execute(
             "UPDATE auto_queue_runs SET status = 'cancelled', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
             [],
         )
         .unwrap_or(0);
-    let entry_ids: Vec<String> = conn
-        .prepare(
+    let entry_ids: Vec<String> = if target_run_ids.is_empty() {
+        Vec::new()
+    } else {
+        let placeholders = std::iter::repeat("?")
+            .take(target_run_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             "SELECT id FROM auto_queue_entries
-             WHERE status IN ('pending', 'dispatched')",
-        )
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| row.get::<_, String>(0))
+             WHERE run_id IN ({placeholders})
+               AND status IN ('pending', 'dispatched')"
+        );
+        conn.prepare(&sql)
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map(rusqlite::params_from_iter(target_run_ids.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
                 .ok()
                 .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        })
-        .unwrap_or_default();
+            })
+            .unwrap_or_default()
+    };
     let mut cancelled_entries = 0usize;
     for entry_id in entry_ids {
         match crate::db::auto_queue::update_entry_status_on_conn(
@@ -3346,6 +3492,9 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             "ok": true,
             "cancelled_entries": cancelled_entries,
             "cancelled_runs": cancelled_runs,
+            "cancelled_dispatches": cancelled_dispatches,
+            "released_slots": released_slots,
+            "cleared_slot_sessions": cleared_slot_sessions,
         })),
     )
 }
