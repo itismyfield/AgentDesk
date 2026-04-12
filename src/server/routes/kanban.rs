@@ -3,10 +3,13 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
+use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 /// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.
 pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
@@ -104,6 +107,105 @@ pub struct AssignIssueBody {
     pub title: String,
     pub description: Option<String>,
     pub assignee_agent_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveTurnTarget {
+    session_key: String,
+    provider: Option<String>,
+    thread_channel_id: Option<String>,
+}
+
+fn is_allowed_manual_transition(from: &str, to: &str) -> bool {
+    (from == "backlog" && to == "ready") || (from != to && to == "backlog")
+}
+
+fn load_active_turn_targets_for_card(
+    db: &crate::db::Db,
+    card_id: &str,
+) -> anyhow::Result<Vec<ActiveTurnTarget>> {
+    let conn = db.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT session_key, provider, thread_channel_id
+         FROM sessions
+         WHERE active_dispatch_id IN (
+             SELECT id FROM task_dispatches
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')
+         )",
+    )?;
+    let rows = stmt.query_map([card_id], |row| {
+        Ok(ActiveTurnTarget {
+            session_key: row.get(0)?,
+            provider: row.get(1)?,
+            thread_channel_id: row.get(2)?,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], reason: &str) {
+    for target in targets {
+        let tmux_name = target
+            .session_key
+            .split(':')
+            .last()
+            .unwrap_or(&target.session_key)
+            .to_string();
+        let lifecycle = stop_turn_preserving_queue(
+            state.health_registry.as_deref(),
+            &TurnLifecycleTarget {
+                provider: target.provider.as_deref().and_then(ProviderKind::from_str),
+                channel_id: target
+                    .thread_channel_id
+                    .as_deref()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(ChannelId::new),
+                tmux_name: tmux_name.clone(),
+            },
+            reason,
+        )
+        .await;
+
+        if let Ok(conn) = state.db.lock() {
+            conn.execute(
+                "UPDATE sessions
+                 SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+                 WHERE session_key = ?1",
+                [&target.session_key],
+            )
+            .ok();
+        }
+
+        tracing::info!(
+            "[kanban] cancelled live turn during backlog revert: session={}, tmux={}, killed={}, lifecycle={}",
+            target.session_key,
+            tmux_name,
+            lifecycle.tmux_killed,
+            lifecycle.lifecycle_path,
+        );
+    }
+}
+
+async fn transition_card_to_backlog_with_cleanup(
+    state: &AppState,
+    card_id: &str,
+    source: &str,
+) -> anyhow::Result<crate::kanban::TransitionResult> {
+    let turn_targets = load_active_turn_targets_for_card(&state.db, card_id)?;
+    let result = crate::kanban::transition_status_with_opts_and_on_conn(
+        &state.db,
+        &state.engine,
+        card_id,
+        "backlog",
+        source,
+        true,
+        |conn| {
+            cleanup_force_transition_revert_on_conn(conn, card_id, "backlog")?;
+            Ok(())
+        },
+    )?;
+    cancel_turn_targets(state, &turn_targets, "kanban backlog revert").await;
+    Ok(result)
 }
 
 fn load_retry_dispatch_spec(
@@ -271,12 +373,7 @@ pub async fn update_card(
     Path(id): Path<String>,
     Json(body): Json<UpdateCardBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Read old status + repo/agent for effective pipeline resolution
-    let (old_status, card_repo_id, card_agent_id): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = {
+    let old_status: Option<String> = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -288,11 +385,11 @@ pub async fn update_card(
         };
 
         conn.query_row(
-            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+            "SELECT status FROM kanban_cards WHERE id = ?1",
             [&id],
-            |row| Ok((Some(row.get::<_, String>(0)?), row.get(1)?, row.get(2)?)),
+            |row| row.get(0),
         )
-        .unwrap_or((None, None, None))
+        .ok()
     };
 
     if old_status.is_none() {
@@ -303,48 +400,19 @@ pub async fn update_card(
     }
     let old_status = old_status.unwrap();
 
-    // Build dynamic UPDATE
-    let mut sets: Vec<String> = Vec::new();
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let mut idx = 1;
+    let has_non_status_updates = body.title.is_some()
+        || body.priority.is_some()
+        || body.assigned_agent_id.is_some()
+        || body.assignee_agent_id.is_some()
+        || body.repo_id.is_some()
+        || body.github_issue_url.is_some()
+        || body.description.is_some()
+        || body.metadata.is_some()
+        || body.metadata_json.is_some()
+        || body.review_status.is_some()
+        || body.review_notes.is_some();
 
-    macro_rules! push_field {
-        ($field:expr, $val:expr) => {
-            if let Some(ref v) = $val {
-                sets.push(format!("{} = ?{}", $field, idx));
-                values.push(Box::new(v.clone()));
-                idx += 1;
-            }
-        };
-    }
-
-    push_field!("title", body.title);
-    // Status changes go through transition_status_with_opts (not direct SQL)
-    // push_field!("status", body.status); — handled below
-    push_field!("priority", body.priority);
-    // Accept both assigned_agent_id and assignee_agent_id (frontend alias)
-    let agent_id = body.assigned_agent_id.or(body.assignee_agent_id);
-    push_field!("assigned_agent_id", agent_id);
-    push_field!("repo_id", body.repo_id);
-    push_field!("github_issue_url", body.github_issue_url);
-    push_field!("description", body.description);
-
-    // Accept both metadata (JSON object) and metadata_json (string)
-    let meta_str = body
-        .metadata
-        .as_ref()
-        .map(|m| serde_json::to_string(m).unwrap_or_default())
-        .or(body.metadata_json);
-    if let Some(ref ms) = meta_str {
-        sets.push(format!("metadata = ?{}", idx));
-        values.push(Box::new(ms.clone()));
-        idx += 1;
-    }
-
-    push_field!("review_status", body.review_status);
-    push_field!("review_notes", body.review_notes);
-
-    if sets.is_empty() && body.status.is_none() {
+    if !has_non_status_updates && body.status.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
@@ -353,46 +421,35 @@ pub async fn update_card(
 
     let new_status = body.status.clone();
 
-    // Resolve effective pipeline for this card (repo + agent overrides)
-    crate::pipeline::ensure_loaded();
-    let effective_pipeline = if let Ok(conn) = state.db.lock() {
-        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref())
-    } else {
-        crate::pipeline::get().clone()
-    };
-
-    // ── Status transition FIRST (validates before any writes) ──
-    // Block PATCH only when the CONCRETE transition (old→new) is a dispatch kickoff.
-    // A target state may have both gated and free inbound transitions — only block
-    // when this specific edge is a kickoff (gated from a dispatchable state).
     if let Some(new_s) = &new_status {
-        // Only block when THIS SPECIFIC edge (old→new) is a gated dispatch kickoff.
-        // A target may have both gated and free inbound transitions — only block
-        // the gated ones originating from a dispatchable state.
-        let dispatchable = effective_pipeline.dispatchable_states();
-        let is_kickoff_transition = effective_pipeline
-            .find_transition(&old_status, new_s)
-            .map_or(false, |t| {
-                t.transition_type == crate::pipeline::TransitionType::Gated
-                    && dispatchable.contains(&t.from.as_str())
-            });
-        if is_kickoff_transition {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": format!("Use POST /api/dispatches to transition to '{}'. Direct PATCH is not allowed for dispatch kickoff states.", new_s)}),
-                ),
-            );
-        }
         if new_s.as_str() != old_status {
-            match crate::kanban::transition_status_with_opts(
-                &state.db,
-                &state.engine,
-                &id,
-                new_s,
-                "api",
-                false,
-            ) {
+            if !is_allowed_manual_transition(&old_status, new_s) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "Manual status transitions only allow backlog → ready and any → backlog (requested: {} → {})",
+                            old_status,
+                            new_s,
+                        ),
+                    })),
+                );
+            }
+
+            let transition_result = if new_s == "backlog" {
+                transition_card_to_backlog_with_cleanup(&state, &id, "api:manual-backlog").await
+            } else {
+                crate::kanban::transition_status_with_opts(
+                    &state.db,
+                    &state.engine,
+                    &id,
+                    new_s,
+                    "api",
+                    false,
+                )
+            };
+
+            match transition_result {
                 Ok(_) => {}
                 Err(e) => {
                     return (
@@ -405,7 +462,43 @@ pub async fn update_card(
     }
 
     // ── Non-status field updates (only after status transition succeeds) ──
-    if !sets.is_empty() {
+    if has_non_status_updates {
+        let mut sets: Vec<String> = Vec::new();
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        macro_rules! push_field {
+            ($field:expr, $val:expr) => {
+                if let Some(ref v) = $val {
+                    sets.push(format!("{} = ?{}", $field, idx));
+                    values.push(Box::new(v.clone()));
+                    idx += 1;
+                }
+            };
+        }
+
+        push_field!("title", body.title);
+        push_field!("priority", body.priority);
+        let agent_id = body.assigned_agent_id.or(body.assignee_agent_id);
+        push_field!("assigned_agent_id", agent_id);
+        push_field!("repo_id", body.repo_id);
+        push_field!("github_issue_url", body.github_issue_url);
+        push_field!("description", body.description);
+
+        let meta_str = body
+            .metadata
+            .as_ref()
+            .map(|metadata| serde_json::to_string(metadata).unwrap_or_default())
+            .or(body.metadata_json);
+        if let Some(ref metadata) = meta_str {
+            sets.push(format!("metadata = ?{}", idx));
+            values.push(Box::new(metadata.clone()));
+            idx += 1;
+        }
+
+        push_field!("review_status", body.review_status);
+        push_field!("review_notes", body.review_notes);
+
         sets.push(format!("updated_at = datetime('now')"));
         let sql = format!(
             "UPDATE kanban_cards SET {} WHERE id = ?{}",
@@ -1306,14 +1399,20 @@ pub async fn bulk_action(
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     for card_id in &body.card_ids {
-        match crate::kanban::transition_status_with_opts(
-            &state.db,
-            &state.engine,
-            card_id,
-            &target_status,
-            "bulk-action",
-            true,
-        ) {
+        let transition_result = if target_status == "backlog" {
+            transition_card_to_backlog_with_cleanup(&state, card_id, "bulk-action:backlog").await
+        } else {
+            crate::kanban::transition_status_with_opts(
+                &state.db,
+                &state.engine,
+                card_id,
+                &target_status,
+                "bulk-action",
+                true,
+            )
+        };
+
+        match transition_result {
             Ok(_) => {
                 // Emit updated card for each successful transition
                 if let Ok(conn) = state.db.lock() {

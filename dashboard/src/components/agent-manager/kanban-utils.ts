@@ -54,18 +54,25 @@ export const PRIORITY_OPTIONS: KanbanCardPriority[] = ["low", "medium", "high", 
 export const REVIEW_DISPATCH_TYPES = new Set(["review", "review-decision"]);
 
 /** Quick-transition targets per status. Order = button order (primary first). */
+export function isManualStatusTransitionAllowed(
+  from: KanbanCardStatus,
+  to: KanbanCardStatus,
+): boolean {
+  return (from === "backlog" && to === "ready") || (from !== to && to === "backlog");
+}
+
 export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = {
   backlog: ["ready"],
   ready: ["backlog"],
-  requested: ["ready", "in_progress"],
-  in_progress: ["review", "blocked"],
-  review: ["done", "in_progress"],
-  blocked: ["in_progress"],
+  requested: ["backlog"],
+  in_progress: ["backlog"],
+  review: ["backlog"],
+  blocked: ["backlog"],
   done: ["backlog"],
-  qa_pending: ["qa_in_progress", "done"],
-  qa_in_progress: ["done", "qa_failed"],
-  qa_failed: ["ready"],
-  pending_decision: ["review", "blocked", "in_progress"],
+  qa_pending: ["backlog"],
+  qa_in_progress: ["backlog"],
+  qa_failed: ["backlog"],
+  pending_decision: ["backlog"],
 };
 
 export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {

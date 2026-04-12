@@ -21,8 +21,16 @@ import type {
   CronJob,
   AgentSkill,
   DiscordBinding,
+  DiscordChannelInfo,
   AgentOfficeMembership,
 } from "../../api/client";
+import {
+  describeDiscordBinding,
+  describeDiscordTarget,
+  describeDispatchedSession,
+  formatDiscordSummary,
+  isDiscordSnowflake,
+} from "./discord-routing";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -175,6 +183,7 @@ export default function AgentInfoCard({
   const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
+  const [discordChannels, setDiscordChannels] = useState<Record<string, DiscordChannelInfo>>({});
   const [loadingBindings, setLoadingBindings] = useState(true);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
@@ -380,6 +389,59 @@ export default function AgentInfoCard({
       });
   }, [agent.id]);
 
+  useEffect(() => {
+    const queue: string[] = [];
+    const queued = new Set<string>();
+    const enqueue = (value: string | null | undefined) => {
+      if (!isDiscordSnowflake(value) || queued.has(value) || discordChannels[value]) {
+        return;
+      }
+      queued.add(value);
+      queue.push(value);
+    };
+
+    discordBindings.forEach((binding) => {
+      enqueue(binding.channelId);
+      enqueue(binding.counterModelChannelId);
+    });
+    claudeSessions.forEach((session) => enqueue(session.thread_channel_id));
+
+    if (queue.length === 0) return;
+
+    let stale = false;
+    void (async () => {
+      const fetched: Record<string, DiscordChannelInfo> = {};
+      while (queue.length > 0) {
+        const channelId = queue.shift();
+        if (!channelId) continue;
+        try {
+          const info = await api.getDiscordChannelInfo(channelId);
+          if (!info?.id) continue;
+          fetched[info.id] = info;
+          if (
+            isDiscordSnowflake(info.parent_id)
+            && !queued.has(info.parent_id)
+            && !discordChannels[info.parent_id]
+            && !fetched[info.parent_id]
+          ) {
+            queued.add(info.parent_id);
+            queue.push(info.parent_id);
+          }
+        } catch {
+          // Ignore per-channel lookup failures and keep the raw fallback text.
+        }
+      }
+
+      if (!stale && Object.keys(fetched).length > 0) {
+        setDiscordChannels((prev) => ({ ...prev, ...fetched }));
+      }
+    })();
+
+    return () => {
+      stale = true;
+    };
+  }, [agent.id, claudeSessions, discordBindings, discordChannels]);
+
   const statusLabel: Record<string, { ko: string; en: string }> = {
     working: { ko: "근무 중", en: "Working" },
     idle: { ko: "대기", en: "Idle" },
@@ -391,6 +453,8 @@ export default function AgentInfoCard({
     agent.activity_source === "agentdesk"
       ? tr("AgentDesk 작업", "AgentDesk")
       : null;
+  const getDiscordChannel = (channelId: string | null | undefined) =>
+    channelId ? discordChannels[channelId] : undefined;
 
   const workingLinkedSessions = claudeSessions.filter(
     (session) => session.status === "working",
@@ -414,7 +478,15 @@ export default function AgentInfoCard({
         agent.session_info,
         ...workingLinkedSessions.flatMap((session) => [
           session.session_info,
-          session.name,
+          formatDiscordSummary(
+            describeDispatchedSession(
+              session,
+              getDiscordChannel(session.thread_channel_id),
+              getDiscordChannel(
+                getDiscordChannel(session.thread_channel_id)?.parent_id,
+              ),
+            ),
+          ),
         ]),
       ].filter((value): value is string => Boolean(value && value.trim())),
     ),
@@ -566,9 +638,9 @@ export default function AgentInfoCard({
                 </button>
               )}
             </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2 mt-1.5">
               <span
-                className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
+                className="text-xs px-2 py-0.5 rounded-full font-medium"
                 style={{
                   background:
                     agent.status === "working"
@@ -594,7 +666,7 @@ export default function AgentInfoCard({
               </span>
               {agent.status === "working" && sourceLabel && (
                 <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{
                     background: "rgba(99,102,241,0.18)",
                     color: "#a5b4fc",
@@ -605,7 +677,7 @@ export default function AgentInfoCard({
               )}
               {dept && (
                 <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -616,7 +688,7 @@ export default function AgentInfoCard({
               )}
               {!dept && (
                 <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -1005,12 +1077,32 @@ export default function AgentInfoCard({
               {discordBindings.map((b) => {
                 const source = inferBindingSource(b);
                 const sourceLabel = bindingSourceLabel(source);
-                const title = b.channelId;
-                const subtitle =
-                  b.counterModelChannelId &&
-                  b.counterModelChannelId !== b.channelId
-                    ? `counter: ${b.counterModelChannelId}`
+                const bindingChannel = getDiscordChannel(b.channelId);
+                const bindingParent = getDiscordChannel(bindingChannel?.parent_id);
+                const bindingSummary = describeDiscordBinding(
+                  b,
+                  bindingChannel,
+                  bindingParent,
+                );
+                const counterChannel =
+                  b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                    ? getDiscordChannel(b.counterModelChannelId)
+                    : undefined;
+                const counterParent = getDiscordChannel(counterChannel?.parent_id);
+                const counterSummary =
+                  b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                    ? describeDiscordTarget(
+                        b.counterModelChannelId,
+                        counterChannel,
+                        counterParent,
+                      )
                     : null;
+                const subtitleParts = [
+                  bindingSummary.subtitle,
+                  counterSummary
+                    ? `counter: ${formatDiscordSummary(counterSummary)}`
+                    : null,
+                ].filter((value): value is string => Boolean(value));
 
                 return (
                   <div
@@ -1024,26 +1116,54 @@ export default function AgentInfoCard({
                         className="text-xs font-medium truncate"
                         style={{ color: "var(--th-text-primary)" }}
                       >
-                        {title}
+                        {bindingSummary.title}
                       </div>
-                      {subtitle && (
+                      {subtitleParts.length > 0 && (
                         <div
                           className="text-xs truncate mt-0.5"
                           style={{ color: "var(--th-text-muted)" }}
                         >
-                          {subtitle}
+                          {subtitleParts.join(" · ")}
                         </div>
                       )}
                     </div>
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded"
-                      style={{
-                        background: "rgba(88,101,242,0.15)",
-                        color: "#7289da",
-                      }}
-                    >
-                      {sourceLabel}
-                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {bindingSummary.webUrl && (
+                        <a
+                          href={bindingSummary.webUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
+                          style={{
+                            background: "rgba(59,130,246,0.15)",
+                            color: "#93c5fd",
+                          }}
+                        >
+                          Web
+                        </a>
+                      )}
+                      {bindingSummary.deepLink && (
+                        <a
+                          href={bindingSummary.deepLink}
+                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
+                          style={{
+                            background: "rgba(88,101,242,0.16)",
+                            color: "#a5b4fc",
+                          }}
+                        >
+                          App
+                        </a>
+                      )}
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          background: "rgba(88,101,242,0.15)",
+                          color: "#7289da",
+                        }}
+                      >
+                        {sourceLabel}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
@@ -1079,73 +1199,115 @@ export default function AgentInfoCard({
             </div>
           ) : (
             <div className="space-y-1.5">
-              {claudeSessions.map((s) => (
-                <div
-                  key={s.id}
-                  className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-lg"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <div className="min-w-0">
-                    <div
-                      className="text-xs font-medium truncate"
-                      style={{ color: "var(--th-text-primary)" }}
-                    >
-                      {s.name || s.session_key}
+              {claudeSessions.map((s) => {
+                const sessionChannel = getDiscordChannel(s.thread_channel_id);
+                const sessionParent = getDiscordChannel(sessionChannel?.parent_id);
+                const sessionSummary = describeDispatchedSession(
+                  s,
+                  sessionChannel,
+                  sessionParent,
+                );
+                const sessionSubtitle = [
+                  sessionSummary.subtitle,
+                  s.session_info || s.model || "AgentDesk session",
+                ]
+                  .filter((value): value is string => Boolean(value))
+                  .join(" · ");
+
+                return (
+                  <div
+                    key={s.id}
+                    className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-lg"
+                    style={{ background: "var(--th-bg-surface)" }}
+                  >
+                    <div className="min-w-0">
+                      <div
+                        className="text-xs font-medium truncate"
+                        style={{ color: "var(--th-text-primary)" }}
+                      >
+                        {sessionSummary.title}
+                      </div>
+                      <div
+                        className="text-xs truncate mt-0.5"
+                        style={{ color: "var(--th-text-muted)" }}
+                      >
+                        {sessionSubtitle}
+                      </div>
                     </div>
-                    <div
-                      className="text-xs truncate mt-0.5"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {s.session_info || s.model || "AgentDesk session"}
+                    <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                      {sessionSummary.webUrl && (
+                        <a
+                          href={sessionSummary.webUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
+                          style={{
+                            background: "rgba(59,130,246,0.15)",
+                            color: "#93c5fd",
+                          }}
+                        >
+                          Web
+                        </a>
+                      )}
+                      {sessionSummary.deepLink && (
+                        <a
+                          href={sessionSummary.deepLink}
+                          className="text-[11px] px-1.5 py-0.5 rounded hover:brightness-110"
+                          style={{
+                            background: "rgba(88,101,242,0.16)",
+                            color: "#a5b4fc",
+                          }}
+                        >
+                          App
+                        </a>
+                      )}
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          background:
+                            s.provider === "codex"
+                              ? "rgba(56,189,248,0.18)"
+                              : s.provider === "gemini"
+                                ? "rgba(250,204,21,0.18)"
+                                : s.provider === "qwen"
+                                  ? "rgba(34,197,94,0.18)"
+                                  : "rgba(167,139,250,0.18)",
+                          color:
+                            s.provider === "codex"
+                              ? "#38bdf8"
+                              : s.provider === "gemini"
+                                ? "#facc15"
+                                : s.provider === "qwen"
+                                  ? "#86efac"
+                                  : "#c4b5fd",
+                        }}
+                      >
+                        {s.provider === "codex"
+                          ? "Codex"
+                          : s.provider === "gemini"
+                            ? "Gemini"
+                            : s.provider === "qwen"
+                              ? "Qwen"
+                              : "Claude"}
+                      </span>
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          background:
+                            s.status === "working"
+                              ? "rgba(16,185,129,0.15)"
+                              : "rgba(100,116,139,0.15)",
+                          color: s.status === "working" ? "#34d399" : "#94a3b8",
+                        }}
+                      >
+                        {s.status === "working"
+                          ? tr("작업중", "Working")
+                          : tr("대기", "Idle")}
+                      </span>
                     </div>
                   </div>
-                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-                    <span
-                      className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-                      style={{
-                        background:
-                          s.provider === "codex"
-                            ? "rgba(56,189,248,0.18)"
-                            : s.provider === "gemini"
-                              ? "rgba(250,204,21,0.18)"
-                              : s.provider === "qwen"
-                                ? "rgba(34,197,94,0.18)"
-                                : "rgba(167,139,250,0.18)",
-                        color:
-                          s.provider === "codex"
-                            ? "#38bdf8"
-                            : s.provider === "gemini"
-                              ? "#facc15"
-                              : s.provider === "qwen"
-                                ? "#86efac"
-                                : "#c4b5fd",
-                      }}
-                    >
-                      {s.provider === "codex"
-                        ? "Codex"
-                        : s.provider === "gemini"
-                          ? "Gemini"
-                          : s.provider === "qwen"
-                            ? "Qwen"
-                            : "Claude"}
-                    </span>
-                    <span
-                      className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-                      style={{
-                        background:
-                          s.status === "working"
-                            ? "rgba(16,185,129,0.15)"
-                            : "rgba(100,116,139,0.15)",
-                        color: s.status === "working" ? "#34d399" : "#94a3b8",
-                      }}
-                    >
-                      {s.status === "working"
-                        ? tr("작업중", "Working")
-                        : tr("대기", "Idle")}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -1517,11 +1679,11 @@ export default function AgentInfoCard({
             )}
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
               {agent.role_id && (
                 <span
-                  className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs"
+                  className="text-xs font-mono px-1.5 py-0.5 rounded"
                   style={{
                     background: "var(--th-bg-surface)",
                     color: "var(--th-text-muted)",
@@ -1531,7 +1693,7 @@ export default function AgentInfoCard({
                 </span>
               )}
               <span
-                className="whitespace-nowrap text-xs"
+                className="text-xs"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("완료", "Done")} {agent.stats_tasks_done}
@@ -1539,7 +1701,7 @@ export default function AgentInfoCard({
             </div>
             <button
               onClick={onClose}
-              className="shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
               style={{
                 border: "1px solid var(--th-input-border)",
                 color: "var(--th-text-secondary)",

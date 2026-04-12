@@ -4,7 +4,9 @@ import {
   BOARD_COLUMN_DEFS,
   coalesceGitHubCommentTimeline,
   getBoardColumnStatus,
+  isManualStatusTransitionAllowed,
   parseGitHubCommentTimeline,
+  STATUS_TRANSITIONS,
 } from "./kanban-utils";
 
 function makeComment(
@@ -289,6 +291,27 @@ assign_issue 경로가 description을 metadata에만 저장합니다.
       status: "completed",
       title: "#53 작업 완료",
     });
+  });
+});
+
+describe("manual kanban transitions", () => {
+  it("only allows backlog to ready and any status back to backlog", () => {
+    expect(isManualStatusTransitionAllowed("backlog", "ready")).toBe(true);
+    expect(isManualStatusTransitionAllowed("ready", "backlog")).toBe(true);
+    expect(isManualStatusTransitionAllowed("in_progress", "backlog")).toBe(true);
+    expect(isManualStatusTransitionAllowed("review", "backlog")).toBe(true);
+
+    expect(isManualStatusTransitionAllowed("ready", "requested")).toBe(false);
+    expect(isManualStatusTransitionAllowed("review", "done")).toBe(false);
+    expect(isManualStatusTransitionAllowed("backlog", "in_progress")).toBe(false);
+  });
+
+  it("exposes only permitted quick-transition buttons", () => {
+    expect(STATUS_TRANSITIONS.backlog).toEqual(["ready"]);
+    expect(STATUS_TRANSITIONS.ready).toEqual(["backlog"]);
+    expect(STATUS_TRANSITIONS.in_progress).toEqual(["backlog"]);
+    expect(STATUS_TRANSITIONS.review).toEqual(["backlog"]);
+    expect(STATUS_TRANSITIONS.done).toEqual(["backlog"]);
   });
 });
 

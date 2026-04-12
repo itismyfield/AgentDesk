@@ -44,6 +44,7 @@ export {
   getHealth,
   getTokenAnalytics,
   getDiscordBindings,
+  getDiscordChannelInfo,
   getCronJobs,
   getMachineStatus,
   getActivityHeatmap,
@@ -97,6 +98,7 @@ export {
 } from "./client";
 
 export type {
+  AutoQueueThreadLink,
   AutoQueueRun,
   AutoQueueStatus,
   DispatchQueueEntry,
@@ -114,6 +116,7 @@ export type {
   SkillRankingByAgentRow,
   SkillRankingResponse,
   DiscordBinding,
+  DiscordChannelInfo,
   CronJobGlobal,
   MachineStatus,
   HeatmapData,

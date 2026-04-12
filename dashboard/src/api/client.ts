@@ -516,15 +516,20 @@ export async function getStalledCards(): Promise<KanbanCard[]> {
 }
 
 export async function bulkKanbanAction(
-  action: "pass" | "reset" | "cancel",
+  action: "pass" | "reset" | "cancel" | "transition",
   card_ids: string[],
+  targetStatus?: string,
 ): Promise<{
   action: string;
   results: Array<{ id: string; ok: boolean; error?: string }>;
 }> {
   return request("/api/kanban-cards/bulk-action", {
     method: "POST",
-    body: JSON.stringify({ action, card_ids }),
+    body: JSON.stringify({
+      action,
+      card_ids,
+      target_status: targetStatus,
+    }),
   });
 }
 
@@ -658,6 +663,8 @@ export interface PipelineStageInput {
   max_retries?: number;
   skip_condition?: string | null;
   parallel_with?: string | null;
+  applies_to_agent_id?: string | null;
+  trigger_after?: "ready" | "review_pass";
 }
 
 export async function getPipelineStages(
@@ -893,6 +900,20 @@ export async function getDiscordBindings(): Promise<DiscordBinding[]> {
     "/api/discord-bindings",
   );
   return data.bindings;
+}
+
+export interface DiscordChannelInfo {
+  id: string;
+  guild_id?: string | null;
+  name?: string | null;
+  parent_id?: string | null;
+  type?: number | null;
+}
+
+export async function getDiscordChannelInfo(
+  channelId: string,
+): Promise<DiscordChannelInfo> {
+  return request(`/api/discord/channels/${channelId}`);
 }
 
 export interface GitHubRepoOption {
@@ -1255,6 +1276,14 @@ export interface AutoQueueRun {
   thread_group_count?: number;
 }
 
+export interface AutoQueueThreadLink {
+  role: string;
+  label: string;
+  channel_id?: string | null;
+  thread_id: string;
+  url?: string | null;
+}
+
 export interface DispatchQueueEntry {
   id: string;
   agent_id: string;
@@ -1270,6 +1299,7 @@ export interface DispatchQueueEntry {
   github_repo?: string | null;
   thread_group?: number;
   batch_phase?: number;
+  thread_links?: AutoQueueThreadLink[];
   card_status?: string;
   review_round?: number;
 }
