@@ -105,9 +105,25 @@ _notify_channel() {
     payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
 
     local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
-    curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/send" \
+    if curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/send" \
         -H 'Content-Type: application/json' \
-        --data-binary "$payload" >/dev/null 2>&1 \
+        --data-binary "$payload" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    case "$REPORT_CHANNEL_ID" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+
+    local agentdesk_cli="$ADK_REL/bin/agentdesk"
+    if [ ! -x "$agentdesk_cli" ] && command -v agentdesk >/dev/null 2>&1; then
+        agentdesk_cli="$(command -v agentdesk)"
+    fi
+    [ -x "$agentdesk_cli" ] || return 0
+
+    "$agentdesk_cli" discord-sendmessage \
+        --channel "$REPORT_CHANNEL_ID" \
+        --message "$content" >/dev/null 2>&1 \
         || true
 }
 
@@ -229,6 +245,12 @@ export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_PROMOTE_DETACHED_CHILD=1
 export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_PROMOTE_TEST_MODE=$(printf '%q' "$PROMOTE_TEST_MODE")
+export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "$CODESIGN_IDENTITY")
+export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "$ALLOW_ADHOC_RELEASE_SIGN")
+export AGENTDESK_PROMOTE_SOURCE_BIN=$(printf '%q' "$SOURCE_BINARY")
+export AGENTDESK_REL_PORT=$(printf '%q' "${AGENTDESK_REL_PORT:-}")
+export AGENTDESK_PROMOTE_HEALTH_RETRIES=$(printf '%q' "$PROMOTE_HEALTH_RETRIES")
+export AGENTDESK_PROMOTE_HEALTH_DELAY_SECS=$(printf '%q' "$PROMOTE_HEALTH_DELAY_SECS")
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/promote-release.sh")${quoted_args}
 EOF
@@ -238,7 +260,8 @@ EOF
     echo "▸ Self-hosted release promotion detected — using detached helper"
     echo "  helper tmux: $helper_session"
     echo "  helper log: $log_path"
-    echo "  current turn will finish before dcserver restart; final result will be reported automatically"
+    echo "  current turn will finish before dcserver restart; final result will be reported when available"
+    echo "  if release stays down, inspect the helper log above"
 }
 
 # Safety check: review must be passed unless review automation is disabled
