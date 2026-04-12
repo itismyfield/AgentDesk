@@ -991,6 +991,38 @@ pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
 /// Mark stale fixed-channel working sessions as disconnected so they cannot
 /// keep restoring dead provider session IDs after restart.
 pub fn gc_stale_fixed_working_sessions_db(conn: &rusqlite::Connection) -> usize {
+    let stale_dispatches: Vec<String> = conn
+        .prepare(
+            "SELECT active_dispatch_id
+             FROM sessions
+             WHERE thread_channel_id IS NULL
+               AND status = 'working'
+               AND active_dispatch_id IS NOT NULL
+               AND COALESCE(last_heartbeat, created_at) < datetime('now', ?1)",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok().flatten()).collect())
+        })
+        .unwrap_or_default();
+
+    for dispatch_id in stale_dispatches {
+        crate::dispatch::set_dispatch_status_on_conn(
+            conn,
+            &dispatch_id,
+            "failed",
+            None,
+            "gc_stale_fixed_working_session",
+            Some(&["pending", "dispatched"]),
+            false,
+        )
+        .ok();
+    }
+
     conn.execute(
         "UPDATE sessions
          SET status = 'disconnected',
@@ -1008,6 +1040,40 @@ fn disconnect_stale_fixed_session_by_key_db(
     conn: &rusqlite::Connection,
     session_key: &str,
 ) -> usize {
+    let stale_dispatches: Vec<String> = conn
+        .prepare(
+            "SELECT active_dispatch_id
+             FROM sessions
+             WHERE session_key = ?1
+               AND thread_channel_id IS NULL
+               AND status = 'working'
+               AND active_dispatch_id IS NOT NULL
+               AND COALESCE(last_heartbeat, created_at) < datetime('now', ?2)",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(
+                rusqlite::params![session_key, STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok().flatten()).collect())
+        })
+        .unwrap_or_default();
+
+    for dispatch_id in stale_dispatches {
+        crate::dispatch::set_dispatch_status_on_conn(
+            conn,
+            &dispatch_id,
+            "failed",
+            None,
+            "disconnect_stale_fixed_session_by_key",
+            Some(&["pending", "dispatched"]),
+            false,
+        )
+        .ok();
+    }
+
     conn.execute(
         "UPDATE sessions
          SET status = 'disconnected',
@@ -2348,6 +2414,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(expired_count, 0);
+    }
+
+    #[test]
+    fn gc_stale_fixed_working_sessions_db_disconnects_session_and_fails_dispatch() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        seed_agent(&conn, "agent-fixed-gc");
+        seed_card(&conn, "card-fixed-gc", "dispatch-fixed-gc", "requested");
+        seed_dispatch(
+            &conn,
+            "dispatch-fixed-gc",
+            "card-fixed-gc",
+            "agent-fixed-gc",
+        );
+        insert_gc_candidate_session(
+            &conn,
+            "mac-mini:AgentDesk-codex-adk-cdx-fixed-gc",
+            "working",
+            None,
+            Some("dispatch-fixed-gc"),
+            "-7 hours",
+        );
+
+        let disconnected = gc_stale_fixed_working_sessions_db(&conn);
+        assert_eq!(disconnected, 1);
+
+        let session_state: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, claude_session_id
+                 FROM sessions
+                 WHERE session_key = 'mac-mini:AgentDesk-codex-adk-cdx-fixed-gc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_state.0, "disconnected");
+        assert_eq!(session_state.1, None);
+        assert_eq!(session_state.2, None);
+
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-fixed-gc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "failed");
+    }
+
+    #[test]
+    fn disconnect_stale_fixed_session_by_key_db_fails_target_dispatch() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        seed_agent(&conn, "agent-fixed-key");
+        seed_card(&conn, "card-fixed-key", "dispatch-fixed-key", "requested");
+        seed_dispatch(
+            &conn,
+            "dispatch-fixed-key",
+            "card-fixed-key",
+            "agent-fixed-key",
+        );
+        insert_gc_candidate_session(
+            &conn,
+            "mac-mini:AgentDesk-codex-adk-cdx-fixed-key",
+            "working",
+            None,
+            Some("dispatch-fixed-key"),
+            "-7 hours",
+        );
+
+        let disconnected = disconnect_stale_fixed_session_by_key_db(
+            &conn,
+            "mac-mini:AgentDesk-codex-adk-cdx-fixed-key",
+        );
+        assert_eq!(disconnected, 1);
+
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-fixed-key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "failed");
     }
 
     #[test]

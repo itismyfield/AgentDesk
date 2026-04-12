@@ -1201,6 +1201,36 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
     Ok(true)
 }
 
+/// Ensure a pending status-reaction outbox row exists for a dispatch.
+///
+/// At most one in-flight status sync is needed: when the worker drains it, the
+/// Discord side-effect reads the latest dispatch status from `task_dispatches`.
+/// Once an older row is already `done` or `failed`, a later transition should
+/// enqueue a fresh row.
+pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> rusqlite::Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM dispatch_outbox
+         WHERE dispatch_id = ?1
+           AND action = 'status_reaction'
+           AND status IN ('pending', 'processing')",
+        [dispatch_id],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'status_reaction')",
+        [dispatch_id],
+    )?;
+    Ok(true)
+}
+
 pub(crate) fn record_dispatch_status_event_on_conn(
     conn: &rusqlite::Connection,
     dispatch_id: &str,
@@ -1322,6 +1352,13 @@ pub(crate) fn set_dispatch_status_on_conn(
                 transition_source,
                 result,
             )?;
+
+            if matches!(
+                to_status,
+                "dispatched" | "completed" | "failed" | "cancelled"
+            ) {
+                ensure_dispatch_status_reaction_outbox_on_conn(conn, dispatch_id)?;
+            }
         }
         Ok(changed)
     })();
@@ -1914,6 +1951,15 @@ mod tests {
     fn count_notify_outbox(conn: &rusqlite::Connection, dispatch_id: &str) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn count_status_reaction_outbox(conn: &rusqlite::Connection, dispatch_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'status_reaction'",
             [dispatch_id],
             |row| row.get(0),
         )
@@ -2798,6 +2844,80 @@ mod tests {
                 ),
             ],
             "dispatch event log must preserve ordered status transitions"
+        );
+    }
+
+    #[test]
+    fn dispatch_status_transitions_enqueue_status_reaction_outbox_entries() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-reaction-outbox", "ready");
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-reaction-outbox",
+            "agent-1",
+            "implementation",
+            "Reaction trail",
+            &json!({}),
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        {
+            let conn = db.separate_conn().unwrap();
+            set_dispatch_status_on_conn(
+                &conn,
+                &dispatch_id,
+                "dispatched",
+                None,
+                "test_dispatch_outbox",
+                Some(&["pending"]),
+                false,
+            )
+            .unwrap();
+        }
+
+        let conn = db.separate_conn().unwrap();
+        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 1);
+
+        conn.execute(
+            "UPDATE dispatch_outbox
+             SET status = 'done', processed_at = datetime('now')
+             WHERE dispatch_id = ?1 AND action = 'status_reaction'",
+            [&dispatch_id],
+        )
+        .unwrap();
+
+        set_dispatch_status_on_conn(
+            &conn,
+            &dispatch_id,
+            "completed",
+            Some(&json!({"completion_source":"test_complete"})),
+            "test_complete",
+            Some(&["dispatched"]),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 2);
+
+        set_dispatch_status_on_conn(
+            &conn,
+            &dispatch_id,
+            "completed",
+            Some(&json!({"completion_source":"test_complete"})),
+            "test_complete_duplicate",
+            Some(&["completed"]),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            count_status_reaction_outbox(&conn, &dispatch_id),
+            2,
+            "duplicate terminal transition must not enqueue extra status sync work"
         );
     }
 

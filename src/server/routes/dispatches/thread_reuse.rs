@@ -474,39 +474,57 @@ pub(super) async fn try_reuse_thread(
             .await;
     }
 
-    let msg_url = format!(
-        "{}/channels/{}/messages",
-        discord_api_base.trim_end_matches('/'),
-        thread_id
-    );
-    let msg_ok = client
-        .post(&msg_url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": message}))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
-
-    if msg_ok {
-        // Update dispatch thread_id and mark as notified
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                rusqlite::params![thread_id, dispatch_id],
-            )
-            .ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
-            )
-            .ok();
+    match super::discord_delivery::post_dispatch_message_to_channel(
+        client,
+        token,
+        discord_api_base,
+        thread_id,
+        message,
+    )
+    .await
+    {
+        Ok(message_id) => {
+            // Update dispatch thread_id and mark as notified
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
+                    rusqlite::params![thread_id, dispatch_id],
+                )
+                .ok();
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
+                )
+                .ok();
+            }
+            if let Err(error) =
+                super::discord_delivery::persist_dispatch_message_target_and_add_pending_reaction(
+                    db,
+                    client,
+                    token,
+                    discord_api_base,
+                    dispatch_id,
+                    thread_id,
+                    &message_id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "[dispatch] Failed to persist reused thread message target for {}: {}",
+                    dispatch_id,
+                    error
+                );
+            }
+            tracing::info!("[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}");
+            Some(true)
         }
-        tracing::info!("[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}");
-        Some(true)
-    } else {
-        tracing::warn!("[dispatch] Failed to send message to reused thread {thread_id}");
-        None
+        Err(error) => {
+            tracing::warn!(
+                "[dispatch] Failed to send message to reused thread {thread_id}: {}",
+                error
+            );
+            None
+        }
     }
 }
 

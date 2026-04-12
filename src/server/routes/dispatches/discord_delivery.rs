@@ -9,6 +9,7 @@ use crate::db::agents::{
 };
 use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch};
 use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
+use rusqlite::OptionalExtension;
 
 const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
 const SLOT_THREAD_RESET_MAX_AGE_DAYS: i64 = 7;
@@ -52,6 +53,280 @@ fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i6
     dispatch_context
         .and_then(|ctx| ctx.get("slot_index"))
         .and_then(|value| value.as_i64())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DispatchMessageTarget {
+    channel_id: String,
+    message_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchStatusReactionState {
+    InProgress,
+    Succeeded,
+    Failed,
+}
+
+fn dispatch_reaction_emoji_path(emoji: char) -> Option<&'static str> {
+    match emoji {
+        '⏳' => Some("%E2%8F%B3"),
+        '✅' => Some("%E2%9C%85"),
+        '❌' => Some("%E2%9D%8C"),
+        _ => None,
+    }
+}
+
+fn parse_dispatch_message_target(dispatch_context: Option<&str>) -> Option<DispatchMessageTarget> {
+    let context = dispatch_context_value(dispatch_context)?;
+    let channel_id = context
+        .get("discord_message_channel_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let message_id = context
+        .get("discord_message_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(DispatchMessageTarget {
+        channel_id: channel_id.to_string(),
+        message_id: message_id.to_string(),
+    })
+}
+
+pub(super) fn persist_dispatch_message_target_on_conn(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    channel_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let mut context = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    context["discord_message_channel_id"] = serde_json::json!(channel_id);
+    context["discord_message_id"] = serde_json::json!(message_id);
+    conn.execute(
+        "UPDATE task_dispatches
+         SET context = ?1,
+             updated_at = datetime('now')
+         WHERE id = ?2",
+        rusqlite::params![context.to_string(), dispatch_id],
+    )?;
+    Ok(())
+}
+
+async fn update_dispatch_reaction_presence(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    target: &DispatchMessageTarget,
+    emoji: char,
+    present: bool,
+) -> Result<(), String> {
+    let encoded_emoji = dispatch_reaction_emoji_path(emoji)
+        .ok_or_else(|| format!("unsupported dispatch reaction emoji: {emoji}"))?;
+    let url = discord_api_url(
+        base_url,
+        &format!(
+            "/channels/{}/messages/{}/reactions/{}/@me",
+            target.channel_id, target.message_id, encoded_emoji
+        ),
+    );
+    let response = if present {
+        client
+            .put(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to add reaction {emoji} to dispatch message {}: {error}",
+                    target.message_id
+                )
+            })?
+    } else {
+        client
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to remove reaction {emoji} from dispatch message {}: {error}",
+                    target.message_id
+                )
+            })?
+    };
+
+    if response.status().is_success() || (!present && response.status().as_u16() == 404) {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let action = if present { "add" } else { "remove" };
+    Err(format!(
+        "failed to {action} reaction {emoji} for dispatch message {}: {status} {body}",
+        target.message_id
+    ))
+}
+
+async fn apply_dispatch_status_reaction_state(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    target: &DispatchMessageTarget,
+    state: DispatchStatusReactionState,
+) -> Result<(), String> {
+    match state {
+        DispatchStatusReactionState::InProgress => {
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '❌', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '⏳', true).await
+        }
+        DispatchStatusReactionState::Succeeded => {
+            update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '❌', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', true).await
+        }
+        DispatchStatusReactionState::Failed => {
+            update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '❌', true).await
+        }
+    }
+}
+
+pub(super) async fn post_dispatch_message_to_channel(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message: &str,
+) -> Result<String, String> {
+    let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
+    let response = client
+        .post(&message_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+        .map_err(|error| format!("failed to post dispatch message to {channel_id}: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "failed to post dispatch message to {channel_id}: {status} {body}"
+        ));
+    }
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            format!("failed to parse dispatch message response for {channel_id}: {error}")
+        })?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| format!("dispatch message response for {channel_id} omitted message id"))
+}
+
+pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
+    db: &crate::db::Db,
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    dispatch_id: &str,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    {
+        let conn = db
+            .lock()
+            .map_err(|_| format!("db lock failed while saving message target for {dispatch_id}"))?;
+        persist_dispatch_message_target_on_conn(&conn, dispatch_id, channel_id, message_id)
+            .map_err(|error| {
+                format!("persist dispatch message target for {dispatch_id}: {error}")
+            })?;
+    }
+
+    let target = DispatchMessageTarget {
+        channel_id: channel_id.to_string(),
+        message_id: message_id.to_string(),
+    };
+    if let Err(error) = apply_dispatch_status_reaction_state(
+        client,
+        token,
+        base_url,
+        &target,
+        DispatchStatusReactionState::InProgress,
+    )
+    .await
+    {
+        tracing::warn!(
+            "[dispatch] Failed to add pending reaction to message {} for dispatch {}: {}",
+            message_id,
+            dispatch_id,
+            error
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn sync_dispatch_status_reaction(
+    db: &crate::db::Db,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    let (status, target) = {
+        let conn = db
+            .lock()
+            .map_err(|_| format!("db lock failed for dispatch reaction sync {dispatch_id}"))?;
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT status, context FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("load dispatch reaction target for {dispatch_id}: {error}"))?;
+        let Some((status, context)) = row else {
+            return Ok(());
+        };
+        (status, parse_dispatch_message_target(context.as_deref()))
+    };
+
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    let Some(state) = (match status.as_str() {
+        "pending" | "dispatched" => Some(DispatchStatusReactionState::InProgress),
+        "completed" => Some(DispatchStatusReactionState::Succeeded),
+        "failed" | "cancelled" => Some(DispatchStatusReactionState::Failed),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+
+    let token = crate::credential::read_bot_token("announce")
+        .ok_or_else(|| "no announce bot token".to_string())?;
+    let client = reqwest::Client::new();
+    let base_url = discord_api_base_url();
+    apply_dispatch_status_reaction_state(&client, &token, &base_url, &target, state).await
 }
 
 fn thread_id_from_slot_map(thread_id_map: Option<&str>, channel_id: u64) -> Option<String> {
@@ -1164,66 +1439,74 @@ async fn send_dispatch_to_discord_inner_with_context(
                     // If the POST fails, we don't save thread_id so that
                     // [I-0] recovery sends to the channel and future dispatches won't
                     // reuse an empty thread.
-                    let thread_msg_url = discord_api_url(
+                    match post_dispatch_message_to_channel(
+                        &client,
+                        token,
                         &discord_api_base,
-                        &format!("/channels/{thread_id}/messages"),
-                    );
-                    let thread_msg_ok = client
-                        .post(&thread_msg_url)
-                        .header("Authorization", format!("Bot {}", token))
-                        .json(&serde_json::json!({"content": message}))
-                        .send()
-                        .await
-                        .map(|r| r.status().is_success())
-                        .unwrap_or(false);
-                    if thread_msg_ok {
-                        // Persist thread_id on success
-                        if let Ok(conn) = db.lock() {
-                            conn.execute(
-                                "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                                rusqlite::params![thread_id, dispatch_id],
-                            )
-                            .ok();
-                            set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                            if let Some(binding) = slot_binding.as_ref() {
-                                upsert_slot_thread_id(
-                                    &conn,
-                                    &binding.agent_id,
-                                    binding.slot_index,
-                                    channel_id_num,
-                                    thread_id,
-                                );
+                        thread_id,
+                        &message,
+                    )
+                    .await
+                    {
+                        Ok(message_id) => {
+                            // Persist thread_id on success
+                            if let Ok(conn) = db.lock() {
+                                conn.execute(
+                                    "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
+                                    rusqlite::params![thread_id, dispatch_id],
+                                )
+                                .ok();
+                                set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
+                                if let Some(binding) = slot_binding.as_ref() {
+                                    upsert_slot_thread_id(
+                                        &conn,
+                                        &binding.agent_id,
+                                        binding.slot_index,
+                                        channel_id_num,
+                                        thread_id,
+                                    );
+                                }
                             }
+                            persist_dispatch_message_target_and_add_pending_reaction(
+                                db,
+                                &client,
+                                token,
+                                &discord_api_base,
+                                dispatch_id,
+                                thread_id,
+                                &message_id,
+                            )
+                            .await?;
+                            archive_duplicate_slot_threads(
+                                &client,
+                                &token,
+                                discord_api_base,
+                                channel_id_num,
+                                thread_id,
+                                &existing_thread_ids,
+                            )
+                            .await;
+                            maybe_add_owner_to_dispatch_thread(
+                                &client,
+                                &token,
+                                &discord_api_base,
+                                thread_id,
+                                dispatch_id,
+                                thread_owner_user_id,
+                            )
+                            .await;
+                            tracing::info!(
+                                "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
+                            );
+                            return Ok(());
                         }
-                        archive_duplicate_slot_threads(
-                            &client,
-                            &token,
-                            discord_api_base,
-                            channel_id_num,
-                            thread_id,
-                            &existing_thread_ids,
-                        )
-                        .await;
-                        maybe_add_owner_to_dispatch_thread(
-                            &client,
-                            &token,
-                            &discord_api_base,
-                            thread_id,
-                            dispatch_id,
-                            thread_owner_user_id,
-                        )
-                        .await;
-                        tracing::info!(
-                            "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
-                        );
-                        return Ok(());
-                    } else {
-                        tracing::warn!(
-                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}"
-                        );
-                        return Err(format!(
-                            "thread message POST failed for dispatch {dispatch_id}"
-                        ));
+                        Err(error) => {
+                            tracing::warn!(
+                                "[dispatch] Thread message POST failed for dispatch {dispatch_id}: {}",
+                                error
+                            );
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -1236,32 +1519,35 @@ async fn send_dispatch_to_discord_inner_with_context(
             tracing::warn!(
                 "[dispatch] Thread creation failed ({status}), falling back to channel message"
             );
-            let url = discord_api_url(
+            let channel_id_text = channel_id_num.to_string();
+            match post_dispatch_message_to_channel(
+                &client,
+                token,
                 &discord_api_base,
-                &format!("/channels/{channel_id_num}/messages"),
-            );
-            match client
-                .post(&url)
-                .header("Authorization", format!("Bot {}", token))
-                .json(&serde_json::json!({"content": message}))
-                .send()
-                .await
+                &channel_id_text,
+                &message,
+            )
+            .await
             {
-                Ok(r) if r.status().is_success() => {
+                Ok(message_id) => {
+                    persist_dispatch_message_target_and_add_pending_reaction(
+                        db,
+                        &client,
+                        token,
+                        &discord_api_base,
+                        dispatch_id,
+                        &channel_id_text,
+                        &message_id,
+                    )
+                    .await?;
                     tracing::info!(
                         "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
                     );
                     return Ok(());
                 }
-                Ok(r) => {
-                    let st = r.status();
-                    let body = r.text().await.unwrap_or_default();
-                    tracing::warn!("[dispatch] Discord API error {st}: {body}");
-                    return Err(format!("discord API error {st}: {body}"));
-                }
                 Err(e) => {
-                    tracing::warn!("[dispatch] Request failed: {e}");
-                    return Err(format!("discord request failed: {e}"));
+                    tracing::warn!("[dispatch] Fallback dispatch message failed: {e}");
+                    return Err(e);
                 }
             }
         }
@@ -1637,11 +1923,13 @@ mod tests {
     use axum::{
         Json, Router,
         extract::{Path, State},
+        http::Uri,
         response::IntoResponse,
         routing::{get, post, put},
     };
     use std::{
         collections::HashMap,
+        ffi::OsString,
         sync::{Arc, Mutex},
     };
 
@@ -1650,6 +1938,48 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn write_announce_token(root: &std::path::Path) {
+        let credential_dir = root.join("credential");
+        std::fs::create_dir_all(&credential_dir).unwrap();
+        std::fs::write(
+            credential_dir.join("announce_bot_token"),
+            "announce-token\n",
+        )
+        .unwrap();
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1792,6 +2122,26 @@ mod tests {
             axum::http::StatusCode::NO_CONTENT
         }
 
+        async fn add_reaction(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path((_channel_id, _message_id, _emoji)): Path<(String, String, String)>,
+            uri: Uri,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state.calls.push(format!("PUT {}", uri.path()));
+            axum::http::StatusCode::NO_CONTENT
+        }
+
+        async fn remove_reaction(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path((_channel_id, _message_id, _emoji)): Path<(String, String, String)>,
+            uri: Uri,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state.calls.push(format!("DELETE {}", uri.path()));
+            axum::http::StatusCode::NO_CONTENT
+        }
+
         let state = Arc::new(Mutex::new(MockDiscordState {
             archived: initial_archived,
             unarchive_failures_remaining,
@@ -1806,6 +2156,10 @@ mod tests {
             )
             .route("/channels/{channel_id}/threads", post(create_thread))
             .route("/channels/{channel_id}/messages", post(post_message))
+            .route(
+                "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me",
+                put(add_reaction).delete(remove_reaction),
+            )
             .route(
                 "/channels/{thread_id}/thread-members/{user_id}",
                 put(add_thread_member),
@@ -1897,6 +2251,18 @@ mod tests {
                 .calls
                 .contains(&"POST /channels/thread-created/messages".to_string())
         );
+        assert!(state.calls.contains(
+            &"DELETE /channels/thread-created/messages/message-thread-created/reactions/%E2%9C%85/@me"
+                .to_string()
+        ));
+        assert!(state.calls.contains(
+            &"DELETE /channels/thread-created/messages/message-thread-created/reactions/%E2%9D%8C/@me"
+                .to_string()
+        ));
+        assert!(state.calls.contains(
+            &"PUT /channels/thread-created/messages/message-thread-created/reactions/%E2%8F%B3/@me"
+                .to_string()
+        ));
         assert!(
             state
                 .calls
@@ -1915,6 +2281,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(thread_id.as_deref(), Some("thread-created"));
+        let context: Option<String> = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = 'dispatch-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
+        assert_eq!(context["discord_message_channel_id"], "thread-created");
+        assert_eq!(context["discord_message_id"], "message-thread-created");
     }
 
     #[tokio::test]
@@ -2002,6 +2378,9 @@ mod tests {
                 "GET /channels/thread-history",
                 "PATCH /channels/thread-history",
                 "POST /channels/thread-history/messages",
+                "DELETE /channels/thread-history/messages/message-thread-history/reactions/%E2%9C%85/@me",
+                "DELETE /channels/thread-history/messages/message-thread-history/reactions/%E2%9D%8C/@me",
+                "PUT /channels/thread-history/messages/message-thread-history/reactions/%E2%8F%B3/@me",
             ]
         );
         assert_eq!(
@@ -2047,6 +2426,136 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&slot_map).unwrap()["123"],
             "thread-history"
+        );
+
+        let dispatch_context: Option<String> = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = 'dispatch-current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_context =
+            serde_json::from_str::<serde_json::Value>(&dispatch_context.unwrap()).unwrap();
+        assert_eq!(
+            dispatch_context["discord_message_channel_id"],
+            "thread-history"
+        );
+        assert_eq!(
+            dispatch_context["discord_message_id"],
+            "message-thread-history"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_dispatch_status_reaction_marks_completed_dispatch_success() {
+        let _env_lock = env_lock();
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+        let temp = tempfile::tempdir().unwrap();
+        write_announce_token(temp.path());
+        let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-1', 'Complete card', 'in_progress', 'agent-1', 'dispatch-complete',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES (
+                    'dispatch-complete', 'card-1', 'agent-1', 'implementation', 'completed', 'Complete me',
+                    '{\"discord_message_channel_id\":\"123\",\"discord_message_id\":\"message-123\"}',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        sync_dispatch_status_reaction(&db, "dispatch-complete")
+            .await
+            .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
+                "PUT /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_dispatch_status_reaction_marks_failed_dispatch_error() {
+        let _env_lock = env_lock();
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+        let temp = tempfile::tempdir().unwrap();
+        write_announce_token(temp.path());
+        let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-1', 'Failed card', 'in_progress', 'agent-1', 'dispatch-failed',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES (
+                    'dispatch-failed', 'card-1', 'agent-1', 'implementation', 'failed', 'Fail me',
+                    '{\"discord_message_channel_id\":\"123\",\"discord_message_id\":\"message-123\"}',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        sync_dispatch_status_reaction(&db, "dispatch-failed")
+            .await
+            .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+                "PUT /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
+            ]
         );
     }
 

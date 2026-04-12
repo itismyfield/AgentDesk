@@ -298,6 +298,9 @@ mod outbox_boundary {
         Followup {
             dispatch_id: String,
         },
+        StatusReaction {
+            dispatch_id: String,
+        },
     }
 
     impl MockNotifier {
@@ -346,6 +349,18 @@ mod outbox_boundary {
                 .lock()
                 .unwrap()
                 .push(MockCall::Followup { dispatch_id });
+            Ok(())
+        }
+
+        async fn sync_status_reaction(
+            &self,
+            _db: crate::db::Db,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::StatusReaction { dispatch_id });
             Ok(())
         }
     }
