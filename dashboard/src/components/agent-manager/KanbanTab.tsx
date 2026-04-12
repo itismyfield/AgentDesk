@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import AutoQueuePanel from "./AutoQueuePanel";
@@ -22,7 +22,7 @@ import type {
 import type { KanbanReview } from "../../api";
 import { localeName } from "../../i18n";
 import {
-  COLUMN_DEFS,
+  BOARD_COLUMN_DEFS,
   EMPTY_EDITOR,
   PRIORITY_OPTIONS,
   QA_STATUSES,
@@ -33,6 +33,7 @@ import {
   createChecklistItem,
   formatIso,
   formatTs,
+  getBoardColumnStatus,
   isReviewCard,
   labelForStatus,
   parseCardMetadata,
@@ -122,9 +123,6 @@ export default function KanbanTab({
   const [assigningIssue, setAssigningIssue] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [draggingCardId, setDraggingCardId] = useState<string | null>(null);
-  const [dragOverStatus, setDragOverStatus] = useState<KanbanCardStatus | null>(null);
-  const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
   const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
   const [retryAssigneeId, setRetryAssigneeId] = useState("");
@@ -154,38 +152,6 @@ export default function KanbanTab({
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const cardsById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
-  const dispatchMap = useMemo(() => new Map(dispatches.map((dispatch) => [dispatch.id, dispatch])), [dispatches]);
-
-  /** Resolve agent from `agent:*` GitHub labels by matching role_id. */
-  const resolveAgentFromLabels = useMemo(() => {
-    const roleIdMap = new Map<string, Agent>();
-    const suffixMap = new Map<string, Agent>();
-    for (const agent of agents) {
-      // Use agent.id as primary key (role_id may be null from API)
-      const key = agent.role_id || agent.id;
-      if (key) {
-        roleIdMap.set(key, agent);
-        // Also map by agent.id if different from role_id
-        if (agent.id && agent.id !== key) roleIdMap.set(agent.id, agent);
-        // Also map the suffix after last hyphen (e.g. "ch-dd" → "dd")
-        const lastDash = key.lastIndexOf("-");
-        if (lastDash >= 0) {
-          const suffix = key.slice(lastDash + 1);
-          if (!suffixMap.has(suffix)) suffixMap.set(suffix, agent);
-        }
-      }
-    }
-    return (labels: Array<{ name: string; color: string }>): Agent | null => {
-      for (const label of labels) {
-        if (label.name.startsWith("agent:")) {
-          const roleId = label.name.slice("agent:".length).trim();
-          const matched = roleIdMap.get(roleId) ?? suffixMap.get(roleId);
-          if (matched) return matched;
-        }
-      }
-      return null;
-    };
-  }, [agents]);
 
   const selectedCard = selectedCardId ? cardsById.get(selectedCardId) ?? null : null;
   const invalidateCardActivity = (cardId: string) => {
@@ -377,7 +343,7 @@ export default function KanbanTab({
       setCardTypeFilter("review");
       setMobileColumnStatus("review");
     } else if (externalStatusFocus === "blocked") {
-      setMobileColumnStatus("blocked");
+      setMobileColumnStatus("in_progress");
     } else if (externalStatusFocus === "requested") {
       setMobileColumnStatus("requested");
     } else {
@@ -485,8 +451,8 @@ export default function KanbanTab({
 
   // Compute dynamic columns: inject pipeline stage columns when an agent is selected
   const effectiveColumnDefs = useMemo(() => {
-    if (!selectedAgentId || !agentPipelineStages.length) return COLUMN_DEFS;
-    const base = COLUMN_DEFS.filter((c) => !QA_STATUSES.has(c.status));
+    if (!selectedAgentId || !agentPipelineStages.length) return BOARD_COLUMN_DEFS;
+    const base = BOARD_COLUMN_DEFS.filter((c) => !QA_STATUSES.has(c.status));
     const reviewPassStages = agentPipelineStages.filter((s) => s.trigger_after === "review_pass");
     if (reviewPassStages.length === 0) return base;
     const reviewIdx = base.findIndex((c) => c.status === "review");
@@ -506,7 +472,11 @@ export default function KanbanTab({
       grouped.set(column.status, []);
     }
     for (const card of filteredCards) {
-      grouped.get(card.status)?.push(card);
+      const boardStatus = getBoardColumnStatus(card.status);
+      if (!grouped.has(boardStatus)) {
+        grouped.set(boardStatus, []);
+      }
+      grouped.get(boardStatus)?.push(card);
     }
     for (const column of effectiveColumnDefs) {
       grouped.get(column.status)?.sort((a, b) => {
@@ -534,7 +504,6 @@ export default function KanbanTab({
     return issues.filter((issue) => !activeIssueNumbers.has(issue.number));
   }, [issues, activeIssueNumbers, cardTypeFilter]);
 
-  const totalVisible = filteredCards.length + backlogIssues.length;
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
   const visibleColumns = compactBoard
@@ -601,93 +570,14 @@ export default function KanbanTab({
     }
   };
 
-  /** Assign a backlog issue directly (auto-assign from agent:* label). */
-  const handleDirectAssignIssue = async (issue: GitHubIssue, agentId: string) => {
-    if (!selectedRepo) return;
-    setAssigningIssue(true);
-    setActionError(null);
-    try {
-      await onAssignIssue({
-        github_repo: selectedRepo,
-        github_issue_number: issue.number,
-        github_issue_url: issue.url,
-        title: issue.title,
-        description: issue.body || null,
-        assignee_agent_id: agentId,
-      });
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
-    } finally {
-      setAssigningIssue(false);
-    }
-  };
-
-  const handleDrop = async (
-    targetStatus: KanbanCardStatus,
-    beforeCardId: string | null,
-    event: DragEvent<HTMLElement>,
-  ) => {
-    event.preventDefault();
-    setDragOverStatus(null);
-    setDragOverCardId(null);
-    setActionError(null);
-
-    // --- Backlog issue drop ---
-    const issueJson = event.dataTransfer.getData("application/x-backlog-issue");
-    if (issueJson) {
-      setDraggingCardId(null);
-      if (targetStatus === "backlog") return; // no-op: dropped back on backlog
-      try {
-        const issue = JSON.parse(issueJson) as GitHubIssue;
-        const autoAgent = resolveAgentFromLabels(issue.labels);
-        if (autoAgent) {
-          await handleDirectAssignIssue(issue, autoAgent.id);
-        } else {
-          // Open modal for manual agent selection
-          setAssignIssue(issue);
-          const repoSource = repoSources.find((s) => s.repo === selectedRepo);
-          setAssignAssigneeId(repoSource?.default_agent_id ?? "");
-        }
-      } catch (error) {
-        setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
-      }
-      return;
-    }
-
-    // --- Existing card drag ---
-    const draggedId = draggingCardId;
-    setDraggingCardId(null);
-    if (!draggedId) return;
-    if (beforeCardId === draggedId) return;
-    try {
-      if (targetStatus === "requested") {
-        const card = cardsById.get(draggedId);
-        await api.createDispatch({
-          kanban_card_id: draggedId,
-          to_agent_id: card?.assignee_agent_id ?? "",
-          title: card?.title ?? "Dispatch",
-        });
-        window.location.reload();
-      } else {
-        await onUpdateCard(draggedId, {
-          status: targetStatus,
-          before_card_id: beforeCardId,
-        });
-        invalidateCardActivity(draggedId);
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : tr("카드 이동에 실패했습니다.", "Failed to move card."));
-    }
-  };
-
-  const handleUpdateCardStatus = async (cardId: string, targetStatus: KanbanCardStatus) => {
+  const handleUpdateCardStatus = async (cardId: string, targetStatus: KanbanCardStatus): Promise<boolean> => {
     setActionError(null);
     // When moving to "ready" without an assignee, show assignee selection modal
     if (targetStatus === "ready") {
       const card = cardsById.get(cardId);
       if (card && !card.assignee_agent_id) {
         setAssignBeforeReady({ cardId, agentId: "" });
-        return;
+        return false;
       }
     }
     try {
@@ -700,12 +590,15 @@ export default function KanbanTab({
           title: card?.title ?? "Dispatch",
         });
         window.location.reload();
+        return true;
       } else {
         await onUpdateCard(cardId, { status: targetStatus });
         invalidateCardActivity(cardId);
+        return true;
       }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
+      return false;
     }
   };
 
@@ -818,12 +711,6 @@ export default function KanbanTab({
     } finally {
       setAssigningIssue(false);
     }
-  };
-
-  const handleOpenAssignModal = (issue: GitHubIssue) => {
-    setAssignIssue(issue);
-    const repoSource = repoSources.find((s) => s.repo === selectedRepo);
-    setAssignAssigneeId(repoSource?.default_agent_id ?? "");
   };
 
   const showDesktopDetailPanel = Boolean(selectedCard && !compactBoard);
@@ -1510,7 +1397,7 @@ export default function KanbanTab({
                   className="flex w-full items-center gap-2 text-left"
                 >
                   <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("최근 완료", "Recent Completions")}
+                    {tr("완료 일감", "Completed Work")}
                   </span>
                   <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
                     {recentDoneCards.length}
@@ -1522,11 +1409,7 @@ export default function KanbanTab({
                 {recentDoneOpen && (
                   <div className="mt-2 space-y-1.5">
                     {pageCards.map((card) => {
-                      const statusDef = COLUMN_DEFS.find((c) => c.status === card.status);
-                      const agentName = getAgentLabel(card.assignee_agent_id);
-                      const completedDate = card.completed_at
-                        ? new Date(card.completed_at).toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })
-                        : "";
+                      const cardNumber = card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`;
                       return (
                         <button
                           key={card.id}
@@ -1534,18 +1417,22 @@ export default function KanbanTab({
                           className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
                           style={{ background: "rgba(148,163,184,0.06)" }}
                         >
-                          <span
-                            className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-                            style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
-                          >
-                            {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
+                          <span className="shrink-0 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
+                            {cardNumber}
                           </span>
-                          {card.github_issue_number && (
-                            <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>
-                          )}
                           <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                          <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
-                          <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
+                          {card.github_issue_url && (
+                            <a
+                              href={card.github_issue_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="shrink-0 text-xs hover:underline"
+                              onClick={(event) => event.stopPropagation()}
+                              style={{ color: "#93c5fd" }}
+                            >
+                              GH
+                            </a>
+                          )}
                         </button>
                       );
                     })}
@@ -1621,32 +1508,11 @@ export default function KanbanTab({
                         backlogIssues={backlogIssues}
                         backlogCount={backlogCount}
                         tr={tr}
-                        locale={locale}
                         compactBoard={compactBoard}
                         initialLoading={initialLoading}
                         loadingIssues={loadingIssues}
-                        draggingCardId={draggingCardId}
-                        dragOverStatus={dragOverStatus}
-                        dragOverCardId={dragOverCardId}
-                        closingIssueNumber={closingIssueNumber}
-                        assigningIssue={assigningIssue}
-                        dispatchMap={dispatchMap}
-                        dispatches={dispatches}
-                        repoSources={repoSources}
-                        selectedRepo={selectedRepo}
-                        getAgentLabel={getAgentLabel}
-                        resolveAgentFromLabels={resolveAgentFromLabels}
                         onCardClick={setSelectedCardId}
                         onBacklogIssueClick={setSelectedBacklogIssue}
-                        onSetDraggingCardId={setDraggingCardId}
-                        onSetDragOverStatus={setDragOverStatus}
-                        onSetDragOverCardId={setDragOverCardId}
-                        onDrop={handleDrop}
-                        onCloseIssue={handleCloseIssue}
-                        onDirectAssignIssue={handleDirectAssignIssue}
-                        onOpenAssignModal={handleOpenAssignModal}
-                        onUpdateCardStatus={handleUpdateCardStatus}
-                        onSetActionError={setActionError}
                       />
                     );
                   })}
@@ -1744,11 +1610,10 @@ export default function KanbanTab({
                               setSavingCard(true);
                               setActionError(null);
                               try {
-                                await onUpdateCard(selectedCard.id, { status: target });
-                                invalidateCardActivity(selectedCard.id);
-                                setEditor((prev) => ({ ...prev, status: target }));
-                              } catch (error) {
-                                setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
+                                const updated = await handleUpdateCardStatus(selectedCard.id, target);
+                                if (updated) {
+                                  setEditor((prev) => ({ ...prev, status: target }));
+                                }
                               } finally {
                                 setSavingCard(false);
                               }
