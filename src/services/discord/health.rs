@@ -441,6 +441,7 @@ pub async fn hard_stop_runtime_turn(
                 removed_token: None,
                 has_pending: false,
                 mailbox_online: false,
+                queue_exit_events: Vec::new(),
             }
         };
         let runtime_session_cleared = apply_runtime_hard_stop_cleanup(

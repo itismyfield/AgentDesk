@@ -90,8 +90,9 @@ pub(crate) use runtime_bootstrap::RunBotContext;
 pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
-    CancelActiveTurnResult, ChannelMailboxSnapshot, ClearChannelResult, FinishTurnResult,
-    QueuePersistenceContext, RecoveryKickoffResult, load_pending_queues,
+    CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot, ClearChannelResult,
+    FinishTurnResult, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
+    RecoveryKickoffResult, TakeNextSoftResult, load_pending_queues,
     warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
@@ -562,13 +563,59 @@ async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> bool {
-    shared
+    let result = shared
         .mailbox(channel_id)
         .enqueue(
             intervention,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result.enqueued
+}
+
+fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
+    match kind {
+        QueueExitKind::Cancelled => '🚫',
+        QueueExitKind::Expired => '⌛',
+        QueueExitKind::Superseded => '⏏',
+    }
+}
+
+async fn apply_queue_exit_feedback(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    queue_exit_events: &[QueueExitEvent],
+) {
+    let queue_exit_events: Vec<&QueueExitEvent> = queue_exit_events
+        .iter()
+        .filter(|event| event.intervention.author_id.get() > 1)
+        .collect();
+    if queue_exit_events.is_empty() {
+        return;
+    }
+
+    let Some(ctx) = shared.cached_serenity_ctx.get() else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing)",
+            queue_exit_events.len(),
+            channel_id
+        );
+        return;
+    };
+
+    for event in queue_exit_events {
+        formatting::remove_reaction_raw(&ctx.http, channel_id, event.intervention.message_id, '📬')
+            .await;
+        formatting::add_reaction_raw(
+            &ctx.http,
+            channel_id,
+            event.intervention.message_id,
+            queue_exit_feedback_emoji(event.kind),
+        )
+        .await;
+    }
 }
 
 async fn enqueue_internal_followup(
@@ -605,10 +652,12 @@ async fn mailbox_has_pending_soft_queue(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> HasPendingSoftQueueResult {
-    shared
+    let result = shared
         .mailbox(channel_id)
         .has_pending_soft_queue(queue_persistence_context(shared, provider, channel_id))
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result
 }
 
 async fn mailbox_take_next_soft_intervention(
@@ -616,10 +665,14 @@ async fn mailbox_take_next_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<(Intervention, bool)> {
-    shared
+    let result: TakeNextSoftResult = shared
         .mailbox(channel_id)
         .take_next_soft(queue_persistence_context(shared, provider, channel_id))
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result
+        .intervention
+        .map(|intervention| (intervention, result.has_more))
 }
 
 async fn mailbox_requeue_intervention_front(
@@ -643,13 +696,15 @@ async fn mailbox_cancel_soft_intervention(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> Option<Intervention> {
-    shared
+    let result: CancelQueuedMessageResult = shared
         .mailbox(channel_id)
         .cancel_queued_message(
             message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result.removed
 }
 
 async fn mailbox_finish_turn(
@@ -657,10 +712,12 @@ async fn mailbox_finish_turn(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> FinishTurnResult {
-    shared
+    let result = shared
         .mailbox(channel_id)
         .finish_turn(queue_persistence_context(shared, provider, channel_id))
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result
 }
 
 async fn mailbox_clear_channel(
@@ -668,10 +725,12 @@ async fn mailbox_clear_channel(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> ClearChannelResult {
-    shared
+    let result = shared
         .mailbox(channel_id)
         .clear(queue_persistence_context(shared, provider, channel_id))
-        .await
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    result
 }
 
 async fn mailbox_replace_queue(
