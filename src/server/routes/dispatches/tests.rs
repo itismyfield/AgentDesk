@@ -87,6 +87,28 @@ fn review_dispatch_message_with_branch() {
 }
 
 #[test]
+fn review_dispatch_message_with_merge_base_diff_instructions() {
+    let message = format_dispatch_message(
+        "dispatch-merge-base",
+        "[Review R1] card-1",
+        Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+        Some(19),
+        true,
+        Some("abc12345deadbeef0011223344556677"),
+        Some("codex"),
+        Some("wt/feature-branch"),
+        Some("review"),
+        Some(r#"{"merge_base":"11223344556677889900aabbccddeeff00112233"}"#),
+    );
+
+    assert!(message.contains("merge-base(main, `wt/feature-branch`)"));
+    assert!(message.contains("11223344556677889900aabbccddeeff00112233"));
+    assert!(message.contains(
+        "git diff 11223344556677889900aabbccddeeff00112233..abc12345deadbeef0011223344556677"
+    ));
+}
+
+#[test]
 fn review_dispatch_message_without_commit() {
     let message = format_dispatch_message(
         "dispatch-no-commit",

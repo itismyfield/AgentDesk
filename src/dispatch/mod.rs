@@ -346,6 +346,33 @@ fn apply_review_target_context(
     }
 }
 
+fn inject_review_merge_base_context(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if obj.contains_key("merge_base") {
+        return;
+    }
+
+    let path = obj
+        .get("worktree_path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let branch = obj
+        .get("branch")
+        .and_then(|value| value.as_str())
+        .or_else(|| obj.get("worktree_branch").and_then(|value| value.as_str()))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let (Some(path), Some(branch)) = (path, branch) else {
+        return;
+    };
+
+    if let Some(merge_base) =
+        crate::services::platform::shell::git_merge_base(&path, "main", &branch)
+    {
+        obj.insert("merge_base".to_string(), json!(merge_base));
+    }
+}
+
 /// Resolve the canonical worktree for a card's GitHub issue.
 ///
 /// Looks up the card's `github_issue_number`, then searches for an active
@@ -532,6 +559,8 @@ fn build_review_context(
                 }
             }
         }
+
+        inject_review_merge_base_context(obj);
 
         // Inject from_provider/target_provider for cross-provider review validation
         if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
@@ -3199,6 +3228,52 @@ mod tests {
         if let Some(branch) = completed_branch {
             assert_eq!(parsed["branch"], branch);
         }
+    }
+
+    #[test]
+    fn review_context_includes_merge_base_for_branch_review() {
+        let db = test_db();
+        seed_card(&db, "card-review-merge-base", "review");
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let fork_point = crate::services::platform::git_head_commit(repo_dir).unwrap();
+        let wt_dir = repo.path().join("wt-542");
+        let wt_path = wt_dir.to_str().unwrap();
+
+        run_git(repo_dir, &["worktree", "add", wt_path, "-b", "wt/fix-542"]);
+        let reviewed_commit = git_commit(wt_path, "fix: branch-only review target");
+        let main_commit = git_commit(repo_dir, "chore: main advanced after fork");
+        assert_ne!(fork_point, main_commit);
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-merge-base', 'card-review-merge-base', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": wt_path,
+                    "completed_branch": "wt/fix-542",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-merge-base", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(parsed["branch"], "wt/fix-542");
+        assert_eq!(parsed["merge_base"], fork_point);
     }
 
     #[test]

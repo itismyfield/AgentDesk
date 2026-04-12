@@ -458,6 +458,21 @@ pub(super) fn format_dispatch_message(
                 "\n\n리뷰 대상 브랜치: `{branch}` (commit: `{short_commit}`)\n\
                  반드시 해당 브랜치를 checkout하여 리뷰하세요. main 브랜치가 아닙니다."
             ));
+            if let (Some(merge_base), Some(reviewed_commit)) = (
+                context_json
+                    .get("merge_base")
+                    .and_then(|value| value.as_str()),
+                reviewed_commit,
+            ) {
+                message.push_str(&format!(
+                    "\n\
+                     merge-base(main, `{branch}`): `{merge_base}`\n\
+                     정확한 변경 범위는 아래 명령으로 확인하세요:\n\
+                     ```bash\n\
+                     git diff {merge_base}..{reviewed_commit}\n\
+                     ```"
+                ));
+            }
         }
         // Append verdict API call instructions for the counter-model reviewer
         let commit_arg = reviewed_commit
