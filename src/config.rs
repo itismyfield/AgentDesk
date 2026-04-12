@@ -373,8 +373,8 @@ pub struct MeetingSettings {
     pub max_participants: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_agent: Option<MeetingSummaryAgentDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_agents: Vec<MeetingAgentEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_agents: Option<Vec<MeetingAgentEntry>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

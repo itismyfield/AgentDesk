@@ -1,9 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use poise::serenity_prelude::ChannelId;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
-use super::settings::{PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{
+    PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
+};
 use crate::config::{AgentChannel, Config, MeetingAgentEntry, MeetingSummaryAgentDef};
 use crate::services::provider::ProviderKind;
 
@@ -392,11 +394,11 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
     };
 
     if let Some(meeting) = &config.meeting
-        && !meeting.available_agents.is_empty()
+        && let Some(available_agents) = meeting.available_agents.as_ref()
     {
         let mut peers = Vec::new();
         let mut seen = HashSet::new();
-        for entry in &meeting.available_agents {
+        for entry in available_agents {
             let Some(agent) = meeting_agent_from_entry(&config, entry) else {
                 continue;
             };
@@ -442,8 +444,12 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let available_agents = if meeting.available_agents.is_empty() {
-        config
+    let available_agents = match meeting.available_agents.as_ref() {
+        Some(explicit_agents) => explicit_agents
+            .iter()
+            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
+            .collect(),
+        None => config
             .agents
             .iter()
             .map(|agent| MeetingAgentConfig {
@@ -463,13 +469,7 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 peer_agents_enabled: true,
                 memory: resolve_memory_settings(None, None),
             })
-            .collect()
-    } else {
-        meeting
-            .available_agents
-            .iter()
-            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
-            .collect()
+            .collect(),
     };
 
     Some(MeetingConfig {
@@ -479,6 +479,45 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         summary_agent,
         available_agents,
     })
+}
+
+pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let Some(config) = load_agentdesk_config() else {
+        return Vec::new();
+    };
+
+    let mut bindings = BTreeMap::<u64, RegisteredChannelBinding>::new();
+    for agent in &config.agents {
+        for (provider_key, maybe_channel) in agent.channels.iter() {
+            let Some(channel) = maybe_channel else {
+                continue;
+            };
+            let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(owner_provider) =
+                binding_provider(agent, provider_key, channel).filter(ProviderKind::is_supported)
+            else {
+                continue;
+            };
+            let fallback_name = channel
+                .channel_name()
+                .or_else(|| channel.aliases().into_iter().next());
+            bindings.insert(
+                channel_id,
+                RegisteredChannelBinding {
+                    channel_id,
+                    owner_provider,
+                    fallback_name,
+                },
+            );
+        }
+    }
+
+    bindings.into_values().collect()
 }
 
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
@@ -718,6 +757,31 @@ meeting:
                 meeting.available_agents[0].display_name,
                 "TD (테크니컬 디렉터)"
             );
+        });
+    }
+
+    #[test]
+    fn load_meeting_config_preserves_explicit_empty_available_agents() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: ch-td
+    name: "TD"
+  - id: ch-pd
+    name: "PD"
+meeting:
+  channel_name: "round-table"
+  summary_agent: "ch-td"
+  available_agents: []
+"#,
+            );
+
+            let meeting = load_meeting_config().expect("meeting config");
+            assert!(meeting.available_agents.is_empty());
         });
     }
 }

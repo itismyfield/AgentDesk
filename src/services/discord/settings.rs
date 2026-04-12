@@ -559,10 +559,7 @@ fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u6
 }
 
 fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
-    match raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
         None => None,
         Some(value) if value.eq_ignore_ascii_case("auto") => Some("auto"),
         Some(value) if value.eq_ignore_ascii_case("file") => Some("file"),
@@ -642,10 +639,7 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
 }
 
 fn resolve_mem0_profile(raw: Option<&str>) -> String {
-    match raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
         None => DEFAULT_MEM0_PROFILE.to_string(),
         Some(value)
             if KNOWN_MEM0_PROFILES
@@ -971,9 +965,13 @@ pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
 
     if org_schema::org_schema_exists() {
         for binding in org_schema::list_registered_channel_bindings() {
-            // Org schema is the canonical source when both configs define the same channel.
             merged.insert(binding.channel_id, binding);
         }
+    }
+
+    for binding in agentdesk_config::list_registered_channel_bindings() {
+        // Match resolve_role_binding() precedence: agentdesk.yaml > org.yaml > role_map.json.
+        merged.insert(binding.channel_id, binding);
     }
 
     merged.into_values().collect()
@@ -2703,6 +2701,97 @@ channels:
                     (456, ProviderKind::Claude),
                     (789, ProviderKind::Codex),
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_includes_agentdesk_with_highest_precedence() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "legacy-codex",
+                            "promptFile": "/tmp/legacy-codex.prompt.md",
+                            "provider": "codex"
+                        },
+                        "456": {
+                            "roleId": "legacy-claude",
+                            "promptFile": "/tmp/legacy-claude.prompt.md",
+                            "provider": "claude"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  org-gemini:
+    display_name: Org Gemini
+    provider: gemini
+channels:
+  by_id:
+    "123":
+      agent: org-gemini
+    "789":
+      agent: org-gemini
+"#,
+            )
+            .unwrap();
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  bots: {}
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    channels:
+      codex:
+        id: "123"
+        name: "adk-cdx"
+  - id: project-claude
+    name: "Claude Agent"
+    provider: claude
+    channels:
+      claude:
+        id: "999"
+        name: "adk-cc"
+"#,
+            );
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.channel_id, binding.owner_provider.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (123, ProviderKind::Codex),
+                    (456, ProviderKind::Claude),
+                    (789, ProviderKind::Gemini),
+                    (999, ProviderKind::Claude),
+                ]
+            );
+            assert_eq!(
+                bindings
+                    .iter()
+                    .find(|binding| binding.channel_id == 123)
+                    .and_then(|binding| binding.fallback_name.as_deref()),
+                Some("adk-cdx")
             );
         });
     }

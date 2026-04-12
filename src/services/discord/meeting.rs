@@ -1133,6 +1133,12 @@ async fn select_participants(
         ));
     }
     let fixed_participants = normalize_role_ids(&fixed_participants);
+    let fixed_participants_fill_roster = fixed_participants.len() >= MIN_MEETING_PARTICIPANTS
+        && (fixed_participants.len() >= max_participants
+            || fixed_participants.len() >= config.available_agents.len());
+    if fixed_participants_fill_roster {
+        return merge_selected_participants(config, &[], &fixed_participants, max_participants);
+    }
     let agents_desc: Vec<String> = config
         .available_agents
         .iter()
@@ -2250,8 +2256,8 @@ mod tests {
         MeetingUtterance, ProviderKind, ResolvedMemorySettings, SummaryAgentConfig,
         agent_metadata_card, build_meeting_markdown, build_meeting_status_payload,
         clamp_max_participants, display_query_hash, effective_round_count, meeting_query_hash,
-        meeting_slot_state, parse_meeting_start_text, summary_agent_context, thread_query_hash,
-        validate_fixed_participants,
+        meeting_slot_state, parse_meeting_start_text, select_participants, summary_agent_context,
+        thread_query_hash, validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -2425,6 +2431,52 @@ mod tests {
         .expect_err("clamped max participants should reject six fixed members");
 
         assert!(err.contains("Too many fixed participants: 6 (max 5)"));
+    }
+
+    #[tokio::test]
+    async fn test_select_participants_skips_llm_when_fixed_participants_fill_roster() {
+        let make_agent = |role_id: &str| MeetingAgentConfig {
+            role_id: role_id.to_string(),
+            display_name: role_id.to_string(),
+            keywords: Vec::new(),
+            prompt_file: format!("/tmp/{role_id}.md"),
+            domain_summary: None,
+            strengths: Vec::new(),
+            task_types: Vec::new(),
+            anti_signals: Vec::new(),
+            provider_hint: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            workspace: None,
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings::default(),
+        };
+        let config = MeetingConfig {
+            channel_name: "meeting".to_string(),
+            max_rounds: 3,
+            max_participants: 2,
+            summary_agent: SummaryAgentConfig::Static("pmd".to_string()),
+            available_agents: vec![make_agent("a"), make_agent("b"), make_agent("c")],
+        };
+
+        let participants = select_participants(
+            &config,
+            "고정 전문 에이전트만으로 시작",
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .await
+        .expect("fixed roster should bypass provider selection");
+
+        assert_eq!(
+            participants
+                .iter()
+                .map(|participant| participant.role_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
