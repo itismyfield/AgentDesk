@@ -119,6 +119,76 @@ fn read_slot_thread_binding(
     })
 }
 
+fn push_unique_thread_candidate(candidates: &mut Vec<String>, thread_id: Option<&str>) {
+    let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if !candidates.iter().any(|existing| existing == thread_id) {
+        candidates.push(thread_id.to_string());
+    }
+}
+
+fn recent_slot_thread_history(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    slot_index: i64,
+) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT td.thread_id
+         FROM task_dispatches td
+         WHERE td.to_agent_id = ?1
+           AND td.thread_id IS NOT NULL
+           AND TRIM(td.thread_id) != ''
+           AND CASE
+                 WHEN td.context IS NULL OR TRIM(td.context) = '' OR json_valid(td.context) = 0
+                     THEN NULL
+                 ELSE CAST(json_extract(td.context, '$.slot_index') AS INTEGER)
+               END = ?2
+         ORDER BY datetime(COALESCE(td.updated_at, td.created_at)) DESC,
+                  td.rowid DESC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+
+    let rows = match stmt.query_map(rusqlite::params![agent_id, slot_index], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut candidates = Vec::new();
+    for row in rows.flatten() {
+        push_unique_thread_candidate(&mut candidates, Some(row.as_str()));
+    }
+    candidates
+}
+
+fn collect_slot_thread_candidates(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    card_id: &str,
+    slot_binding: Option<&SlotThreadBinding>,
+    channel_id: u64,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_unique_thread_candidate(
+        &mut candidates,
+        slot_binding.and_then(|binding| binding.thread_id.as_deref()),
+    );
+    push_unique_thread_candidate(
+        &mut candidates,
+        get_thread_for_channel(conn, card_id, channel_id).as_deref(),
+    );
+    if let Some(binding) = slot_binding {
+        for thread_id in recent_slot_thread_history(conn, agent_id, binding.slot_index) {
+            push_unique_thread_candidate(&mut candidates, Some(thread_id.as_str()));
+        }
+    }
+    candidates
+}
+
 fn allocate_manual_slot_binding(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -268,6 +338,7 @@ async fn reset_stale_slot_thread_if_needed(
     db: &crate::db::Db,
     client: &reqwest::Client,
     token: &str,
+    discord_api_base: &str,
     dispatch_id: &str,
     slot_binding: &SlotThreadBinding,
 ) -> Result<bool, String> {
@@ -275,7 +346,7 @@ async fn reset_stale_slot_thread_if_needed(
         return Ok(false);
     };
 
-    let thread_info_url = format!("https://discord.com/api/v10/channels/{thread_id}");
+    let thread_info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
     let response = client
         .get(&thread_info_url)
         .header("Authorization", format!("Bot {}", token))
@@ -322,6 +393,92 @@ async fn reset_stale_slot_thread_if_needed(
     );
     reset_slot_thread_bindings(db, &slot_binding.agent_id, slot_binding.slot_index).await?;
     Ok(true)
+}
+
+async fn archive_duplicate_slot_threads(
+    client: &reqwest::Client,
+    token: &str,
+    discord_api_base: &str,
+    expected_parent: u64,
+    keep_thread_id: &str,
+    candidate_thread_ids: &[String],
+) {
+    for thread_id in candidate_thread_ids {
+        if thread_id == keep_thread_id {
+            continue;
+        }
+
+        let thread_info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
+        let response = match client
+            .get(&thread_info_url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    "[dispatch] Failed to inspect duplicate slot thread {thread_id}: {err}"
+                );
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            continue;
+        }
+
+        let thread_info = match response.json::<serde_json::Value>().await {
+            Ok(thread_info) => thread_info,
+            Err(err) => {
+                tracing::warn!(
+                    "[dispatch] Failed to parse duplicate slot thread {thread_id}: {err}"
+                );
+                continue;
+            }
+        };
+
+        let parent_id = thread_info
+            .get("parent_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        if parent_id != expected_parent {
+            continue;
+        }
+
+        let already_archived = thread_info
+            .get("thread_metadata")
+            .and_then(|metadata| metadata.get("archived"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if already_archived {
+            continue;
+        }
+
+        match client
+            .patch(&thread_info_url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"archived": true}))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("[dispatch] Archived duplicate slot thread {thread_id}");
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "[dispatch] Failed to archive duplicate slot thread {thread_id}: {}",
+                    resp.status()
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[dispatch] Failed to archive duplicate slot thread {thread_id}: {err}"
+                );
+            }
+        }
+    }
 }
 
 fn build_slot_thread_name(
@@ -847,7 +1004,16 @@ async fn send_dispatch_to_discord_inner_with_context(
         )
     };
     if let Some(binding) = slot_binding.clone() {
-        if reset_stale_slot_thread_if_needed(db, &client, &token, dispatch_id, &binding).await? {
+        if reset_stale_slot_thread_if_needed(
+            db,
+            &client,
+            &token,
+            discord_api_base,
+            dispatch_id,
+            &binding,
+        )
+        .await?
+        {
             slot_binding = db.lock().ok().and_then(|conn| {
                 read_slot_thread_binding(
                     &conn,
@@ -866,18 +1032,25 @@ async fn send_dispatch_to_discord_inner_with_context(
         .unwrap_or(0);
     let thread_name =
         build_slot_thread_name(db, dispatch_id, card_id, slot_index, issue_number, title);
-    let existing_thread_id = slot_binding
-        .as_ref()
-        .and_then(|binding| binding.thread_id.clone())
-        .or_else(|| {
-            let conn = db.lock().ok()?;
-            get_thread_for_channel(&conn, card_id, channel_id_num)
-        });
+    let existing_thread_ids = db
+        .lock()
+        .ok()
+        .map(|conn| {
+            collect_slot_thread_candidates(
+                &conn,
+                agent_id,
+                card_id,
+                slot_binding.as_ref(),
+                channel_id_num,
+            )
+        })
+        .unwrap_or_default();
 
-    if let Some(ref existing_tid) = existing_thread_id {
+    for existing_tid in &existing_thread_ids {
         if let Some(reused) = try_reuse_thread(
             &client,
             &token,
+            discord_api_base,
             existing_tid,
             channel_id_num,
             &thread_name,
@@ -889,17 +1062,9 @@ async fn send_dispatch_to_discord_inner_with_context(
         .await
         {
             if reused {
-                maybe_add_owner_to_dispatch_thread(
-                    &client,
-                    &token,
-                    &discord_api_base,
-                    existing_tid,
-                    dispatch_id,
-                    thread_owner_user_id,
-                )
-                .await;
-                if let Some(binding) = slot_binding.as_ref() {
-                    if let Ok(conn) = db.lock() {
+                if let Ok(conn) = db.lock() {
+                    set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
+                    if let Some(binding) = slot_binding.as_ref() {
                         upsert_slot_thread_id(
                             &conn,
                             &binding.agent_id,
@@ -909,6 +1074,24 @@ async fn send_dispatch_to_discord_inner_with_context(
                         );
                     }
                 }
+                archive_duplicate_slot_threads(
+                    &client,
+                    &token,
+                    discord_api_base,
+                    channel_id_num,
+                    existing_tid,
+                    &existing_thread_ids,
+                )
+                .await;
+                maybe_add_owner_to_dispatch_thread(
+                    &client,
+                    &token,
+                    &discord_api_base,
+                    existing_tid,
+                    dispatch_id,
+                    thread_owner_user_id,
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -975,6 +1158,15 @@ async fn send_dispatch_to_discord_inner_with_context(
                                 );
                             }
                         }
+                        archive_duplicate_slot_threads(
+                            &client,
+                            &token,
+                            discord_api_base,
+                            channel_id_num,
+                            thread_id,
+                            &existing_thread_ids,
+                        )
+                        .await;
                         maybe_add_owner_to_dispatch_thread(
                             &client,
                             &token,
@@ -1414,7 +1606,10 @@ mod tests {
         response::IntoResponse,
         routing::{get, post, put},
     };
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     fn test_db() -> crate::db::Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1428,6 +1623,8 @@ mod tests {
         archived: bool,
         unarchive_failures_remaining: usize,
         calls: Vec<String>,
+        thread_names: HashMap<String, String>,
+        thread_parents: HashMap<String, String>,
     }
 
     async fn spawn_mock_discord_server(
@@ -1452,15 +1649,29 @@ mod tests {
             State(state): State<Arc<Mutex<MockDiscordState>>>,
             Path(thread_id): Path<String>,
         ) -> impl IntoResponse {
-            let archived = {
+            let (archived, thread_name, parent_id) = {
                 let mut state = state.lock().unwrap();
                 state.calls.push(format!("GET /channels/{thread_id}"));
-                state.archived
+                (
+                    state.archived,
+                    state
+                        .thread_names
+                        .get(&thread_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("seed-{thread_id}")),
+                    state
+                        .thread_parents
+                        .get(&thread_id)
+                        .cloned()
+                        .unwrap_or_else(|| "123".to_string()),
+                )
             };
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
                     "id": thread_id,
+                    "name": thread_name,
+                    "parent_id": parent_id,
                     "thread_metadata": {
                         "archived": archived,
                     }
@@ -1471,17 +1682,27 @@ mod tests {
         async fn patch_channel(
             State(state): State<Arc<Mutex<MockDiscordState>>>,
             Path(thread_id): Path<String>,
+            Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
             let mut state = state.lock().unwrap();
             state.calls.push(format!("PATCH /channels/{thread_id}"));
-            if state.unarchive_failures_remaining > 0 {
+            if body.get("archived").and_then(|value| value.as_bool()) == Some(false)
+                && state.unarchive_failures_remaining > 0
+            {
                 state.unarchive_failures_remaining -= 1;
                 return (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"id": thread_id, "ok": false})),
                 );
             }
-            state.archived = false;
+            if let Some(name) = body.get("name").and_then(|value| value.as_str()) {
+                state
+                    .thread_names
+                    .insert(thread_id.clone(), name.to_string());
+            }
+            if let Some(archived) = body.get("archived").and_then(|value| value.as_bool()) {
+                state.archived = archived;
+            }
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({"id": thread_id, "ok": true})),
@@ -1491,14 +1712,24 @@ mod tests {
         async fn create_thread(
             State(state): State<Arc<Mutex<MockDiscordState>>>,
             Path(channel_id): Path<String>,
+            Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
             let mut state = state.lock().unwrap();
             state
                 .calls
                 .push(format!("POST /channels/{channel_id}/threads"));
+            let thread_id = "thread-created".to_string();
+            state
+                .thread_parents
+                .insert(thread_id.clone(), channel_id.clone());
+            if let Some(name) = body.get("name").and_then(|value| value.as_str()) {
+                state
+                    .thread_names
+                    .insert(thread_id.clone(), name.to_string());
+            }
             (
                 axum::http::StatusCode::OK,
-                Json(serde_json::json!({"id": "thread-created"})),
+                Json(serde_json::json!({"id": thread_id})),
             )
         }
 
@@ -1531,6 +1762,8 @@ mod tests {
             archived: initial_archived,
             unarchive_failures_remaining,
             calls: Vec::new(),
+            thread_names: HashMap::new(),
+            thread_parents: HashMap::new(),
         }));
         let app = Router::new()
             .route(
@@ -1648,6 +1881,139 @@ mod tests {
             )
             .unwrap();
         assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    }
+
+    #[tokio::test]
+    async fn send_dispatch_reuses_recent_slot_thread_history_when_slot_map_is_empty() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, github_issue_number,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-current', 'Reuse card', 'requested', 'agent-1', 'dispatch-current', 506,
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-old', 'Old card', 'done', 'agent-1', 'dispatch-old',
+                    datetime('now', '-1 day'), datetime('now', '-1 day')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-current', 'card-current', 'agent-1', 'implementation', 'pending',
+                    'Reuse card', '{\"slot_index\":1}', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-old', 'card-old', 'agent-1', 'implementation', 'completed',
+                    'Old card', '{\"slot_index\":1}', 'thread-history',
+                    datetime('now', '-1 day'), datetime('now', '-1 day')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+                 VALUES ('agent-1', 1, '{}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "Reuse card",
+            "card-current",
+            "dispatch-current",
+            "announce-token",
+            &base_url,
+            None,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-history",
+                "PATCH /channels/thread-history",
+                "POST /channels/thread-history/messages",
+            ]
+        );
+        assert_eq!(
+            state.thread_names.get("thread-history").map(String::as_str),
+            Some("[slot 1] #506 Reuse card")
+        );
+
+        let conn = db.lock().unwrap();
+        let reused_thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reused_thread_id.as_deref(), Some("thread-history"));
+
+        let (active_thread_id, channel_thread_map): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT active_thread_id, channel_thread_map
+                 FROM kanban_cards
+                 WHERE id = 'card-current'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(active_thread_id.as_deref(), Some("thread-history"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(channel_thread_map.as_deref().unwrap())
+                .unwrap()["123"],
+            "thread-history"
+        );
+
+        let slot_map: String = conn
+            .query_row(
+                "SELECT thread_id_map
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&slot_map).unwrap()["123"],
+            "thread-history"
+        );
     }
 
     fn insert_review_followup_fixture(db: &crate::db::Db) {
