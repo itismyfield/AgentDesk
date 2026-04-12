@@ -81,6 +81,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
+    ensure_memento_feedback_stats_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -999,6 +1000,54 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute_batch("ALTER TABLE session_transcripts ADD COLUMN duration_ms INTEGER;");
     migrate_legacy_session_transcripts_agent_fk(conn)?;
+    Ok(())
+}
+
+fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memento_feedback_turn_stats (
+            turn_id                       TEXT PRIMARY KEY,
+            stat_date                     TEXT NOT NULL,
+            agent_id                      TEXT NOT NULL,
+            provider                      TEXT NOT NULL,
+            recall_count                  INTEGER NOT NULL DEFAULT 0,
+            manual_tool_feedback_count    INTEGER NOT NULL DEFAULT 0,
+            manual_covered_recall_count   INTEGER NOT NULL DEFAULT 0,
+            auto_tool_feedback_count      INTEGER NOT NULL DEFAULT 0,
+            covered_recall_count          INTEGER NOT NULL DEFAULT 0,
+            created_at                    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_memento_feedback_turn_stats_date_agent
+            ON memento_feedback_turn_stats (stat_date, agent_id, provider);",
+    )?;
+
+    conn.execute_batch(
+        "DROP VIEW IF EXISTS memento_feedback_daily_stats;
+         CREATE VIEW memento_feedback_daily_stats AS
+         SELECT
+            stat_date,
+            agent_id,
+            provider,
+            SUM(recall_count) AS recall_count,
+            SUM(manual_tool_feedback_count + auto_tool_feedback_count) AS tool_feedback_count,
+            SUM(manual_tool_feedback_count) AS manual_tool_feedback_count,
+            SUM(manual_covered_recall_count) AS manual_covered_recall_count,
+            SUM(auto_tool_feedback_count) AS auto_tool_feedback_count,
+            SUM(covered_recall_count) AS covered_recall_count,
+            CASE
+                WHEN SUM(recall_count) > 0
+                    THEN CAST(SUM(manual_covered_recall_count) AS REAL) / SUM(recall_count)
+                ELSE 0.0
+            END AS compliance_rate,
+            CASE
+                WHEN SUM(recall_count) > 0
+                    THEN CAST(SUM(covered_recall_count) AS REAL) / SUM(recall_count)
+                ELSE 0.0
+            END AS coverage_rate
+         FROM memento_feedback_turn_stats
+         GROUP BY stat_date, agent_id, provider;",
+    )?;
+
     Ok(())
 }
 
