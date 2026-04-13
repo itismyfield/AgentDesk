@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 
-const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
+export const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
   claude: {
     label: "Claude",
     bg: "rgba(245,158,11,0.12)",
@@ -51,7 +51,7 @@ const PROVIDER_META: Record<string, { label: string; bg: string; color: string; 
   },
 };
 
-function getProviderMeta(provider: string | null) {
+export function getProviderMeta(provider: string | null) {
   if (!provider) {
     return {
       label: "Unknown",
@@ -109,7 +109,7 @@ export default function MeetingProviderFlow({
   const reviewer = getProviderMeta(reviewerProvider);
 
   return (
-    <div className={`flex items-center gap-1.5 flex-wrap ${compact ? "" : "rounded-xl px-3 py-2"}`} style={compact ? undefined : {
+    <div className={`flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden flex-wrap ${compact ? "" : "rounded-xl px-3 py-2"}`} style={compact ? undefined : {
       background: "rgba(148,163,184,0.08)",
       border: "1px solid rgba(148,163,184,0.14)",
     }}>
@@ -119,14 +119,14 @@ export default function MeetingProviderFlow({
         </span>
       )}
       <ProviderChip label={primary.label} bg={primary.bg} color={primary.color} border={primary.border} />
-      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="min-w-0 text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "초안/최종", en: "draft/final" })}
       </span>
       <span className="text-xs font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
         →
       </span>
       <ProviderChip label={reviewer.label} bg={reviewer.bg} color={reviewer.color} border={reviewer.border} />
-      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="min-w-0 text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "비판 검토", en: "critique" })}
       </span>
     </div>
@@ -146,7 +146,7 @@ function ProviderChip({
 }) {
   return (
     <span
-      className="text-xs px-2 py-0.5 rounded-full font-semibold"
+      className="max-w-full truncate rounded-full px-2 py-0.5 text-xs font-semibold"
       style={{ background: bg, color, border: `1px solid ${border}` }}
     >
       {label}

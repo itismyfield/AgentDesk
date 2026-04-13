@@ -9,7 +9,7 @@ mod handoff;
 pub(crate) mod health;
 mod inflight;
 pub(crate) mod internal_api;
-mod meeting_orchestrator;
+pub(crate) mod meeting_orchestrator;
 mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
@@ -32,7 +32,7 @@ mod tmux;
 mod tmux_reaper;
 mod turn_bridge;
 
-pub(in crate::services::discord) use meeting_orchestrator as meeting;
+pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use recovery_engine as recovery;
 
 use std::collections::HashMap;

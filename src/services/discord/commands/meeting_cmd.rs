@@ -22,7 +22,7 @@ pub(in crate::services::discord) async fn cmd_meeting(
     let ts = chrono::Local::now().format("%H:%M:%S");
     let channel_id = ctx.channel_id();
     let agenda_str = agenda.as_deref().unwrap_or("");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /meeting {action} {agenda_str}");
+    println!("  [{ts}] ◀ [{user_name}] /meeting {action} {agenda_str}");
 
     ctx.defer().await?;
 
@@ -53,24 +53,26 @@ pub(in crate::services::discord) async fn cmd_meeting(
             let agenda_owned = agenda_text.to_string();
             // Spawn as background task
             let spawn_provider = selected_provider.clone();
+            let spawn_reviewer = selected_provider.counterpart();
             tokio::spawn(async move {
                 match meeting::start_meeting(
                     &*http,
                     channel_id,
                     &agenda_owned,
                     spawn_provider,
+                    spawn_reviewer,
                     &shared,
                 )
                 .await
                 {
                     Ok(Some(id)) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
+                        println!("  [{ts}] ✅ Meeting completed: {id}");
                     }
                     Ok(None) => {}
                     Err(e) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] ❌ Meeting error: {e}");
+                        println!("  [{ts}] ❌ Meeting error: {e}");
                         rate_limit_wait(&shared, channel_id).await;
                         let _ = channel_id
                             .send_message(

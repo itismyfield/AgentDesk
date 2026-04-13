@@ -18,6 +18,7 @@ use super::formatting::normalize_allowed_tools;
 use super::org_schema;
 use super::role_map::{
     is_known_agent as is_known_agent_from_role_map,
+    list_registered_channel_bindings as list_registered_channel_bindings_from_role_map,
     load_peer_agents as load_peer_agents_from_role_map,
     load_shared_prompt_path as load_shared_prompt_path_from_role_map,
     resolve_role_binding as resolve_role_binding_from_role_map,
@@ -81,67 +82,8 @@ struct LegacyBotSettingsEntry {
 
 fn load_legacy_bot_settings_json() -> Option<serde_json::Value> {
     let path = bot_settings_path()?;
-    let content = fs::read_to_string(&path).ok()?;
-    let json = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-
-    // Retire the legacy file if it has no runtime-only data (channel_model_overrides).
-    // Auth fields are already in agentdesk.yaml; this file is only needed for overrides.
-    let has_runtime_data = json
-        .as_object()
-        .map(|obj| {
-            obj.values().any(|entry| {
-                entry
-                    .get("channel_model_overrides")
-                    .and_then(|v| v.as_object())
-                    .is_some_and(|m| !m.is_empty())
-            })
-        })
-        .unwrap_or(false);
-
-    if !has_runtime_data {
-        // Before retiring, ensure provider fields are persisted to yaml.
-        // bot_settings.json may be the only source of provider for some bots.
-        if let Some(obj) = json.as_object() {
-            for (_key, entry) in obj {
-                let token = match entry.get("token").and_then(|v| v.as_str()) {
-                    Some(t) => t.to_string(),
-                    None => continue,
-                };
-                let legacy_provider = entry
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(provider_str) = legacy_provider {
-                    if let Some(bot) = agentdesk_config::find_discord_bot_by_token(&token) {
-                        if bot.provider.is_none() {
-                            // Merge full settings (yaml + legacy) then persist
-                            let full = load_bot_settings(&token);
-                            let mut merged = full;
-                            merged.provider = ProviderKind::from_str_or_unsupported(&provider_str);
-                            persist_bot_auth_to_yaml(&token, &merged);
-                        }
-                    }
-                }
-            }
-        }
-
-        let migrated = path.with_extension("json.migrated");
-        if let Err(e) = fs::rename(&path, &migrated) {
-            tracing::warn!(
-                "Failed to retire '{}' → '{}': {e}",
-                path.display(),
-                migrated.display()
-            );
-        } else {
-            tracing::info!(
-                "[bot-settings] Retired '{}' → '{}' (auth migrated to agentdesk.yaml)",
-                path.display(),
-                migrated.display()
-            );
-        }
-    }
-
-    Some(json)
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&content).ok()
 }
 
 fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
@@ -296,6 +238,18 @@ fn save_runtime_bot_settings(token: &str, settings: &DiscordBotSettings) {
         return;
     };
 
+    let yaml_manages_bot = config_path_for_write()
+        .map(|config_path| {
+            let config = if config_path.is_file() {
+                crate::config::load_from_path(&config_path).unwrap_or_default()
+            } else {
+                crate::config::Config::default()
+            };
+            resolved_config_bot_name(&config, token).is_some()
+        })
+        .unwrap_or(false);
+    let legacy_metadata =
+        find_bot_settings_entry(obj, token).and_then(|(_, entry)| entry.as_object().cloned());
     let key = discord_token_hash(token);
     obj.retain(|existing_key, existing_entry| {
         if existing_key == &key {
@@ -308,13 +262,92 @@ fn save_runtime_bot_settings(token: &str, settings: &DiscordBotSettings) {
             .unwrap_or(true)
     });
 
-    if !settings.channel_model_overrides.is_empty() {
-        obj.insert(
-            key,
-            serde_json::json!({
-                "channel_model_overrides": settings.channel_model_overrides,
-            }),
+    if yaml_manages_bot {
+        if !settings.channel_model_overrides.is_empty() {
+            obj.insert(
+                key,
+                serde_json::json!({
+                    "channel_model_overrides": settings.channel_model_overrides,
+                }),
+            );
+        }
+    } else {
+        let mut entry = legacy_metadata.unwrap_or_default();
+        entry.insert("token".to_string(), serde_json::json!(token));
+        entry.insert(
+            "provider".to_string(),
+            serde_json::json!(settings.provider.as_str()),
         );
+        match settings
+            .agent
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(agent) => {
+                entry.insert("agent".to_string(), serde_json::json!(agent));
+            }
+            None => {
+                entry.remove("agent");
+            }
+        }
+        if settings.allowed_channel_ids.is_empty() {
+            entry.remove("allowed_channel_ids");
+        } else {
+            entry.insert(
+                "allowed_channel_ids".to_string(),
+                serde_json::json!(settings.allowed_channel_ids),
+            );
+        }
+        if settings.allowed_user_ids.is_empty() {
+            entry.remove("allowed_user_ids");
+        } else {
+            entry.insert(
+                "allowed_user_ids".to_string(),
+                serde_json::json!(settings.allowed_user_ids),
+            );
+        }
+        if settings.allowed_bot_ids.is_empty() {
+            entry.remove("allowed_bot_ids");
+        } else {
+            entry.insert(
+                "allowed_bot_ids".to_string(),
+                serde_json::json!(settings.allowed_bot_ids),
+            );
+        }
+        if settings.allowed_tools.is_empty() {
+            entry.remove("allowed_tools");
+        } else {
+            entry.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(normalize_allowed_tools(&settings.allowed_tools)),
+            );
+        }
+        if settings.allow_all_users {
+            entry.insert("allow_all_users".to_string(), serde_json::json!(true));
+        } else {
+            entry.remove("allow_all_users");
+        }
+        match settings.owner_user_id {
+            Some(owner_user_id) => {
+                entry.insert(
+                    "owner_user_id".to_string(),
+                    serde_json::json!(owner_user_id),
+                );
+            }
+            None => {
+                entry.remove("owner_user_id");
+            }
+        }
+        if settings.channel_model_overrides.is_empty() {
+            entry.remove("channel_model_overrides");
+        } else {
+            entry.insert(
+                "channel_model_overrides".to_string(),
+                serde_json::json!(settings.channel_model_overrides),
+            );
+        }
+        obj.insert(key, serde_json::Value::Object(entry));
     }
 
     if obj.is_empty() {
@@ -415,6 +448,13 @@ pub(crate) struct RoleBinding {
     pub memory: ResolvedMemorySettings,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredChannelBinding {
+    pub channel_id: u64,
+    pub owner_provider: ProviderKind,
+    pub fallback_name: Option<String>,
+}
+
 const DEFAULT_MEMORY_RECALL_TIMEOUT_MS: u64 = 500;
 const DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 5_000;
 const MIN_MEMORY_RECALL_TIMEOUT_MS: u64 = 100;
@@ -510,7 +550,7 @@ impl Default for ResolvedMemorySettings {
 fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
     let clamped = value.clamp(min, max);
     if value != clamped {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: {name}={} is out of range; clamping to {clamped}",
             value
         );
@@ -527,7 +567,7 @@ fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
         Some(value) if value.eq_ignore_ascii_case("mem0") => Some("mem0"),
         Some(value) if value.eq_ignore_ascii_case("memento") => Some("memento"),
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: unknown memory.backend '{value}', falling back to auto-detect"
             );
             None
@@ -582,14 +622,14 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
     }
 
     if let Some(state) = crate::services::memory::backend_state(kind) {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: requested backend '{}' unavailable (configured={}, failures={}); falling back to file",
             kind.as_str(),
             state.configured,
             state.consecutive_failures
         );
     } else {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: requested backend '{}' unavailable; falling back to file",
             kind.as_str()
         );
@@ -609,7 +649,7 @@ fn resolve_mem0_profile(raw: Option<&str>) -> String {
             value.to_ascii_lowercase()
         }
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: unknown memory.mem0.profile '{value}', falling back to {DEFAULT_MEM0_PROFILE}"
             );
             DEFAULT_MEM0_PROFILE.to_string()
@@ -621,7 +661,7 @@ fn resolve_confidence_threshold(raw: Option<f64>) -> Option<f64> {
     match raw {
         Some(value) if (0.0..=1.0).contains(&value) => Some(value),
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: memory.mem0.ingestion.confidence_threshold={} is invalid; dropping override",
                 value
             );
@@ -753,19 +793,29 @@ pub(super) fn channel_supports_provider(
         return provider.is_supported();
     }
 
-    let explicit_provider = role_binding
-        .and_then(|binding| binding.provider.as_ref())
-        .cloned()
-        .or_else(|| channel_name.and_then(lookup_suffix_provider));
+    if let Some(bound_provider) = role_binding.and_then(|binding| binding.provider.as_ref()) {
+        return bound_provider == provider;
+    }
+
+    // Check global suffix_map from bot_settings.json
+    if let Some(ch) = channel_name {
+        if let Some(mapped) = lookup_suffix_provider(ch) {
+            return mapped == *provider;
+        }
+    }
 
     // When org.yaml is present, require an explicit channel binding or suffix match.
     // This avoids the legacy "Claude catches all generic channels" behavior leaking
     // into deployments that already opted into explicit org routing.
-    if org_schema::org_schema_exists() && explicit_provider.is_none() {
+    if org_schema::org_schema_exists() {
         return false;
     }
 
-    provider.is_channel_supported(channel_name, is_dm, explicit_provider.as_ref())
+    provider.is_channel_supported(
+        channel_name,
+        is_dm,
+        role_binding.and_then(|binding| binding.provider.as_ref()),
+    )
 }
 
 pub(super) fn bot_settings_allow_channel(
@@ -815,6 +865,12 @@ impl std::fmt::Display for BotChannelRoutingGuardFailure {
             Self::AgentMismatch => f.write_str("agent mismatch"),
             Self::ProviderMismatch => f.write_str("provider mismatch"),
         }
+    }
+}
+
+impl BotChannelRoutingGuardFailure {
+    pub(super) fn is_expected_cross_bot_skip(self) -> bool {
+        matches!(self, Self::ChannelNotAllowed | Self::AgentMismatch)
     }
 }
 
@@ -904,6 +960,27 @@ pub(super) fn resolve_role_binding(
     resolve_role_binding_from_role_map(channel_id, channel_name)
 }
 
+pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
+
+    for binding in list_registered_channel_bindings_from_role_map() {
+        merged.insert(binding.channel_id, binding);
+    }
+
+    if org_schema::org_schema_exists() {
+        for binding in org_schema::list_registered_channel_bindings() {
+            merged.insert(binding.channel_id, binding);
+        }
+    }
+
+    for binding in agentdesk_config::list_registered_channel_bindings() {
+        // Match resolve_role_binding() precedence: agentdesk.yaml > org.yaml > role_map.json.
+        merged.insert(binding.channel_id, binding);
+    }
+
+    merged.into_values().collect()
+}
+
 /// Resolve workspace path from role_map.json (or org.yaml) for a given channel.
 pub(super) fn resolve_workspace(
     channel_id: ChannelId,
@@ -925,10 +1002,10 @@ pub(super) fn resolve_workspace(
 /// fallback for unrelated runtimes that happen to share a channel name.
 pub(super) fn has_configured_channel_binding(
     channel_id: ChannelId,
-    channel_name: Option<&str>,
+    _channel_name: Option<&str>,
 ) -> bool {
-    resolve_role_binding(channel_id, channel_name).is_some()
-        || resolve_workspace(channel_id, channel_name).is_some()
+    resolve_role_binding(channel_id, None).is_some()
+        || resolve_workspace(channel_id, None).is_some()
 }
 
 pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
@@ -1404,10 +1481,10 @@ mod tests {
 
     use super::{
         BotChannelRoutingGuardFailure, bot_settings_allow_agent, bot_settings_allow_channel,
-        channel_supports_provider, discord_token_hash, load_bot_settings,
-        load_discord_bot_launch_configs, load_narrate_progress, load_peer_agents,
-        render_peer_agent_guidance, resolve_memory_settings, resolve_role_binding,
-        save_bot_settings, validate_bot_channel_routing,
+        channel_supports_provider, discord_token_hash, list_registered_channel_bindings,
+        load_bot_settings, load_discord_bot_launch_configs, load_narrate_progress,
+        load_peer_agents, render_peer_agent_guidance, resolve_memory_settings,
+        resolve_role_binding, save_bot_settings, validate_bot_channel_routing,
         validate_bot_channel_routing_with_provider_channel,
     };
 
@@ -2012,6 +2089,87 @@ agents:
     }
 
     #[test]
+    fn test_load_bot_launch_configs_includes_command_alias_bots_from_yaml() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  owner_id: "343742347365974026"
+  bots:
+    command:
+      token: "claude-token"
+      provider: "claude"
+    command_2:
+      token: "codex-token"
+      provider: "codex"
+    notify:
+      token: "notify-token"
+      provider: "claude"
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1479671298497183835"
+        name: "adk-cc"
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+"#,
+            );
+
+            let mut tokens = load_discord_bot_launch_configs()
+                .into_iter()
+                .map(|cfg| cfg.token)
+                .collect::<Vec<_>>();
+            tokens.sort();
+            assert_eq!(tokens, vec!["claude-token", "codex-token"]);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_launch_configs_includes_allowlisted_alias_bot_from_yaml() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  owner_id: "343742347365974026"
+  bots:
+    workspace-bot:
+      token: "workspace-token"
+      provider: "claude"
+      auth:
+        allowed_channel_ids:
+          - "1479671298497183835"
+    notify:
+      token: "notify-token"
+      provider: "claude"
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1479671298497183835"
+        name: "adk-cc"
+"#,
+            );
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].token, "workspace-token");
+            assert_eq!(configs[0].provider, ProviderKind::Claude);
+        });
+    }
+
+    #[test]
     fn test_load_bot_settings_accepts_string_encoded_ids() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
@@ -2251,6 +2409,72 @@ agents:
     }
 
     #[test]
+    fn test_save_bot_settings_preserves_legacy_launch_metadata_without_yaml_match() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "legacy-token";
+            let key = discord_token_hash(token);
+            let path = settings_dir.join("bot_settings.json");
+            let json = serde_json::json!({
+                "legacy_alias": {
+                    "token": token,
+                    "provider": "codex",
+                    "agent": "codex",
+                    "allowed_channel_ids": [123],
+                    "owner_user_id": 7
+                }
+            });
+            fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+            let mut settings = load_bot_settings(token);
+            settings
+                .channel_model_overrides
+                .insert("123".to_string(), "gpt-5.4".to_string());
+            save_bot_settings(token, &settings);
+
+            let raw = fs::read_to_string(&path).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let entry = saved.get(&key).unwrap();
+            assert_eq!(
+                entry.get("token").and_then(|value| value.as_str()),
+                Some(token)
+            );
+            assert_eq!(
+                entry.get("provider").and_then(|value| value.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                entry.get("agent").and_then(|value| value.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                entry
+                    .get("allowed_channel_ids")
+                    .and_then(|value| value.as_array())
+                    .map(|ids| ids.len()),
+                Some(1)
+            );
+            assert_eq!(
+                entry.get("owner_user_id").and_then(|value| value.as_u64()),
+                Some(7)
+            );
+            assert_eq!(
+                entry
+                    .get("channel_model_overrides")
+                    .and_then(|value| value.get("123"))
+                    .and_then(|value| value.as_str()),
+                Some("gpt-5.4")
+            );
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].token, token);
+            assert_eq!(configs[0].provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
     fn test_load_bot_settings_reads_allow_all_users() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
@@ -2374,6 +2598,206 @@ agents:
                 false,
                 Some(&binding)
             ));
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_falls_back_to_role_map_when_org_has_no_by_id() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "family-routine",
+                            "promptFile": "/tmp/family-routine.prompt.md",
+                            "provider": "codex"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  codex:
+    display_name: Codex
+    provider: codex
+channels:
+  by_name:
+    enabled: true
+    mappings:
+      test-channel:
+        agent: codex
+"#,
+            )
+            .unwrap();
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].channel_id, 123);
+            assert_eq!(bindings[0].owner_provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_merges_org_and_role_map_with_org_precedence() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "legacy-codex",
+                            "promptFile": "/tmp/legacy-codex.prompt.md",
+                            "provider": "codex"
+                        },
+                        "456": {
+                            "roleId": "legacy-claude",
+                            "promptFile": "/tmp/legacy-claude.prompt.md",
+                            "provider": "claude"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  org-gemini:
+    display_name: Org Gemini
+    provider: gemini
+  org-codex:
+    display_name: Org Codex
+    provider: codex
+channels:
+  by_id:
+    "123":
+      agent: org-gemini
+    "789":
+      agent: org-codex
+"#,
+            )
+            .unwrap();
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(bindings.len(), 3);
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.channel_id, binding.owner_provider.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (123, ProviderKind::Gemini),
+                    (456, ProviderKind::Claude),
+                    (789, ProviderKind::Codex),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_includes_agentdesk_with_highest_precedence() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "legacy-codex",
+                            "promptFile": "/tmp/legacy-codex.prompt.md",
+                            "provider": "codex"
+                        },
+                        "456": {
+                            "roleId": "legacy-claude",
+                            "promptFile": "/tmp/legacy-claude.prompt.md",
+                            "provider": "claude"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  org-gemini:
+    display_name: Org Gemini
+    provider: gemini
+channels:
+  by_id:
+    "123":
+      agent: org-gemini
+    "789":
+      agent: org-gemini
+"#,
+            )
+            .unwrap();
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  bots: {}
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    channels:
+      codex:
+        id: "123"
+        name: "adk-cdx"
+  - id: project-claude
+    name: "Claude Agent"
+    provider: claude
+    channels:
+      claude:
+        id: "999"
+        name: "adk-cc"
+"#,
+            );
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.channel_id, binding.owner_provider.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (123, ProviderKind::Codex),
+                    (456, ProviderKind::Claude),
+                    (789, ProviderKind::Gemini),
+                    (999, ProviderKind::Claude),
+                ]
+            );
+            assert_eq!(
+                bindings
+                    .iter()
+                    .find(|binding| binding.channel_id == 123)
+                    .and_then(|binding| binding.fallback_name.as_deref()),
+                Some("adk-cdx")
+            );
         });
     }
 
@@ -2581,6 +3005,37 @@ agents:
     }
 
     #[test]
+    fn test_has_configured_channel_binding_ignores_org_by_name_fallback_for_ownership() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  codex:
+    display_name: Codex
+    provider: codex
+channels:
+  by_name:
+    enabled: true
+    mappings:
+      agentdesk-codex:
+        agent: codex
+"#,
+            )
+            .unwrap();
+
+            assert!(!super::has_configured_channel_binding(
+                ChannelId::new(1486017489027469493),
+                Some("agentdesk-codex"),
+            ));
+        });
+    }
+
+    #[test]
     fn test_validate_bot_channel_routing_reports_channel_not_allowed() {
         let mut settings = super::super::DiscordBotSettings::default();
         settings.allowed_channel_ids = vec![1488022491992424448];
@@ -2651,6 +3106,13 @@ channels:
                 Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
             );
         });
+    }
+
+    #[test]
+    fn test_cross_bot_skip_classification_only_hides_expected_misses() {
+        assert!(BotChannelRoutingGuardFailure::ChannelNotAllowed.is_expected_cross_bot_skip());
+        assert!(BotChannelRoutingGuardFailure::AgentMismatch.is_expected_cross_bot_skip());
+        assert!(!BotChannelRoutingGuardFailure::ProviderMismatch.is_expected_cross_bot_skip());
     }
 
     #[test]

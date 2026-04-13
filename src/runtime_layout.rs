@@ -1136,6 +1136,7 @@ fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSet
     Some(crate::config::MeetingSettings {
         channel_name,
         max_rounds,
+        max_participants: None,
         summary_agent,
         available_agents,
     })
@@ -1202,6 +1203,11 @@ fn role_map_meeting_agent_to_config(value: &Value) -> Option<crate::config::Meet
             display_name,
             keywords,
             prompt_file,
+            domain_summary: None,
+            strengths: Vec::new(),
+            task_types: Vec::new(),
+            anti_signals: Vec::new(),
+            provider_hint: None,
         },
     ))
 }

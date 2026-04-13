@@ -3,10 +3,13 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 
 use super::AppState;
+use crate::services::discord::{health, meeting, settings};
 use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -21,6 +24,8 @@ pub struct StartMeetingBody {
     pub agenda: Option<String>,
     pub channel_id: Option<String>,
     pub primary_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub fixed_participants: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,8 +41,10 @@ pub struct MeetingEntryBody {
 #[derive(Debug, Deserialize)]
 pub struct UpsertMeetingBody {
     pub id: String,
+    pub channel_id: Option<String>,
     pub agenda: Option<String>,
     pub summary: Option<String>,
+    pub selection_reason: Option<String>,
     pub status: Option<String>,
     pub primary_provider: Option<String>,
     pub reviewer_provider: Option<String>,
@@ -47,6 +54,480 @@ pub struct UpsertMeetingBody {
     pub completed_at: Option<i64>,
     pub thread_id: Option<String>,
     pub entries: Option<Vec<MeetingEntryBody>>,
+}
+
+fn normalize_selection_reason(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = compact.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed
+        .strip_prefix("선정 사유:")
+        .map(str::trim)
+        .filter(|inner| !inner.is_empty())
+        .unwrap_or(trimmed);
+
+    Some(normalized.to_string())
+}
+
+fn selection_reason_needs_fallback(value: Option<&str>) -> bool {
+    let Some(reason) = value.and_then(normalize_selection_reason) else {
+        return true;
+    };
+
+    let compact = reason.split_whitespace().collect::<String>();
+    compact.contains("안건적합도와후보메타데이터적합도")
+        || compact.contains("고정전문에이전트조건을함께반영")
+        || compact.contains("커버리지를우선해자동구성했어")
+        || compact.contains("자동구성했어")
+        || (reason.starts_with("안건의 ")
+            && reason.contains("축을 기준으로")
+            && reason.contains("조합으로 정리했어"))
+        || (!reason.contains('(') && reason.chars().count() <= 48)
+}
+
+fn tokenize_selection_reason_text(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            current.extend(ch.to_lowercase());
+        } else if !current.is_empty() {
+            if current.chars().count() >= 2 {
+                tokens.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+
+    if current.chars().count() >= 2 {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn compact_reason_fragment(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let compact: String = chars.by_ref().take(24).collect();
+    if chars.next().is_some() {
+        format!("{compact}…")
+    } else {
+        compact
+    }
+}
+
+fn clean_reason_signal_fragment(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut trimmed = compact.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    for prefix in ["BLOCKED.", "BLOCKED:", "CONSENSUS:", "이견:", "합의:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            trimmed = rest.trim();
+        }
+    }
+
+    trimmed = trimmed.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '“' | '”'));
+    trimmed = trimmed.trim_start_matches(|ch: char| !ch.is_alphanumeric());
+    trimmed = trimmed.trim_end_matches(|ch: char| !ch.is_alphanumeric());
+
+    if trimmed.chars().count() < 3 {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn transcript_signal_candidates_from_content(content: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    let mut push_value = |value: &str| {
+        let Some(cleaned) = clean_reason_signal_fragment(value) else {
+            return;
+        };
+        let key = cleaned.to_lowercase();
+        if seen.insert(key) {
+            candidates.push(cleaned);
+        }
+    };
+
+    let mut in_backticks = false;
+    let mut backtick_buffer = String::new();
+    for ch in content.chars() {
+        if ch == '`' {
+            if in_backticks {
+                push_value(&backtick_buffer);
+                backtick_buffer.clear();
+            }
+            in_backticks = !in_backticks;
+            continue;
+        }
+        if in_backticks {
+            backtick_buffer.push(ch);
+        }
+    }
+
+    for fragment in content.split(|ch| ['\n', '.', '!', '?', ',', ';', ':'].contains(&ch)) {
+        push_value(fragment);
+    }
+
+    candidates
+}
+
+fn json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn selection_signal_candidates_from_expert(expert: &serde_json::Value) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    let mut push_value = |value: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let key = trimmed.to_lowercase();
+        if seen.insert(key) {
+            candidates.push(trimmed.to_string());
+        }
+    };
+
+    for value in json_string_array(expert.get("task_types")) {
+        push_value(&value);
+    }
+    for value in json_string_array(expert.get("strengths")) {
+        push_value(&value);
+    }
+    for value in json_string_array(expert.get("keywords")) {
+        push_value(&value);
+    }
+    if let Some(summary) = expert
+        .get("domain_summary")
+        .and_then(|value| value.as_str())
+    {
+        for fragment in summary.split(|ch| ['.', '\n', ',', ';', '·', '/', '|'].contains(&ch)) {
+            push_value(fragment);
+        }
+    }
+
+    candidates
+}
+
+fn score_signal_against_agenda(
+    signal: &str,
+    agenda_lower: &str,
+    agenda_tokens: &HashSet<String>,
+) -> usize {
+    if agenda_lower.is_empty() {
+        return 0;
+    }
+
+    let signal_lower = signal.trim().to_lowercase();
+    if signal_lower.is_empty() {
+        return 0;
+    }
+
+    let mut score = 0;
+    if agenda_lower.contains(&signal_lower) || signal_lower.contains(agenda_lower) {
+        score += 6;
+    }
+
+    let matched_tokens = tokenize_selection_reason_text(&signal_lower)
+        .into_iter()
+        .filter(|token| agenda_tokens.contains(token))
+        .count();
+
+    score + matched_tokens * 3
+}
+
+fn score_signal_for_reason(
+    signal: &str,
+    agenda_lower: &str,
+    agenda_tokens: &HashSet<String>,
+) -> usize {
+    let trimmed = signal.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let mut score = score_signal_against_agenda(trimmed, agenda_lower, agenda_tokens);
+    let length = trimmed.chars().count();
+
+    if (4..=36).contains(&length) {
+        score += 2;
+    }
+    if trimmed.chars().any(|ch| ch.is_ascii_digit()) {
+        score += 3;
+    }
+    if trimmed.chars().any(|ch| ch.is_ascii_uppercase()) {
+        score += 1;
+    }
+    if trimmed.contains("Top") || trimmed.contains("TOP") {
+        score += 2;
+    }
+    if trimmed.split_whitespace().count() <= 7 {
+        score += 1;
+    }
+
+    score
+}
+
+fn build_expert_reason_clause(
+    expert: Option<&serde_json::Value>,
+    transcript_signals: &[String],
+    agenda_lower: &str,
+    agenda_tokens: &HashSet<String>,
+    fallback_label: &str,
+) -> (usize, String, Option<String>) {
+    let display_name = expert
+        .and_then(|value| value.get("display_name"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_label);
+
+    let mut signal_candidates = Vec::new();
+    let mut seen_signals = HashSet::new();
+    let mut push_signal = |signal: String| {
+        let trimmed = signal.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let key = trimmed.to_lowercase();
+        if seen_signals.insert(key) {
+            signal_candidates.push(trimmed.to_string());
+        }
+    };
+
+    if let Some(expert) = expert {
+        for signal in selection_signal_candidates_from_expert(expert) {
+            push_signal(signal);
+        }
+    }
+    for signal in transcript_signals {
+        push_signal(signal.clone());
+    }
+
+    let mut scored_signals: Vec<(usize, String)> = signal_candidates
+        .iter()
+        .cloned()
+        .map(|signal| {
+            (
+                score_signal_for_reason(&signal, agenda_lower, agenda_tokens),
+                signal,
+            )
+        })
+        .collect();
+
+    scored_signals.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.chars().count().cmp(&b.1.chars().count()))
+    });
+
+    let mut detail_parts = Vec::new();
+    let mut detail_seen = HashSet::new();
+    let mut best_score = 0;
+    for (score, signal) in scored_signals {
+        if score == 0 {
+            continue;
+        }
+        if best_score == 0 {
+            best_score = score;
+        }
+        let compact = compact_reason_fragment(&signal);
+        let key = compact.to_lowercase();
+        if detail_seen.insert(key) {
+            detail_parts.push(compact);
+        }
+        if detail_parts.len() >= 2 {
+            break;
+        }
+    }
+
+    if detail_parts.is_empty() {
+        if let Some(fallback) = signal_candidates.first().cloned() {
+            detail_parts.push(compact_reason_fragment(&fallback));
+        }
+    }
+
+    let focus = detail_parts.first().cloned();
+    let clause = if detail_parts.is_empty() {
+        display_name.to_string()
+    } else {
+        format!("{display_name}({})", detail_parts.join("·"))
+    };
+
+    (best_score, clause, focus)
+}
+
+fn derive_selection_reason_from_meeting_data(
+    agenda: &str,
+    participant_count: usize,
+    transcripts: &[serde_json::Value],
+    experts: &[serde_json::Value],
+) -> Option<String> {
+    let agenda_compact = compact_reason_fragment(agenda);
+    let agenda_lower = agenda.trim().to_lowercase();
+    let agenda_tokens: HashSet<String> =
+        tokenize_selection_reason_text(agenda).into_iter().collect();
+
+    let mut role_ids = Vec::new();
+    let mut seen_role_ids = HashSet::new();
+    let mut transcript_signals_by_role: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in transcripts {
+        if entry
+            .get("is_summary")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(role_id) = entry
+            .get("speaker_agent_id")
+            .or_else(|| entry.get("speaker_role_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let role_id = role_id.to_string();
+        if seen_role_ids.insert(role_id.clone()) {
+            role_ids.push(role_id.clone());
+        }
+        if let Some(content) = entry.get("content").and_then(|value| value.as_str()) {
+            let signals = transcript_signals_by_role.entry(role_id).or_default();
+            let mut seen_signals: HashSet<String> =
+                signals.iter().map(|value| value.to_lowercase()).collect();
+            for signal in transcript_signal_candidates_from_content(content) {
+                let key = signal.to_lowercase();
+                if seen_signals.insert(key) {
+                    signals.push(signal);
+                }
+            }
+        }
+    }
+
+    if role_ids.is_empty() {
+        return None;
+    }
+
+    let experts_by_id: HashMap<&str, &serde_json::Value> = experts
+        .iter()
+        .filter_map(|expert| {
+            expert
+                .get("role_id")
+                .and_then(|value| value.as_str())
+                .map(|role_id| (role_id, expert))
+        })
+        .collect();
+
+    let mut participant_clauses = Vec::new();
+    let mut focus_labels = Vec::new();
+    let mut seen_focus = HashSet::new();
+    for role_id in &role_ids {
+        let transcript_signals = transcript_signals_by_role
+            .get(role_id)
+            .cloned()
+            .unwrap_or_default();
+        let (score, clause, focus) = build_expert_reason_clause(
+            experts_by_id.get(role_id.as_str()).copied(),
+            &transcript_signals,
+            &agenda_lower,
+            &agenda_tokens,
+            role_id,
+        );
+        if let Some(label) = focus {
+            let key = label.to_lowercase();
+            if seen_focus.insert(key) {
+                focus_labels.push(label);
+            }
+        }
+        participant_clauses.push((score, clause));
+    }
+
+    participant_clauses.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut roster_labels: Vec<String> = participant_clauses
+        .iter()
+        .take(2)
+        .map(|(_, clause)| clause.clone())
+        .collect();
+    if participant_clauses.len() > roster_labels.len() {
+        roster_labels.push(format!(
+            "외 {}명",
+            participant_clauses.len() - roster_labels.len()
+        ));
+    }
+
+    let focus = if !focus_labels.is_empty() {
+        focus_labels
+            .into_iter()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else if !agenda_compact.is_empty() {
+        agenda_compact.clone()
+    } else {
+        "핵심 전문성".to_string()
+    };
+
+    let roster = if roster_labels.is_empty() {
+        "선정된 전문가들".to_string()
+    } else {
+        roster_labels.join(", ")
+    };
+
+    let count = participant_count.max(role_ids.len());
+    Some(format!(
+        "안건인 {agenda_compact}에 맞춰 {roster}를 묶었고, 회의 기록에선 {focus}가 반복돼 총 {count}명 조합으로 정리했어."
+    ))
+}
+
+fn apply_selection_reason_fallback(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    transcripts: &[serde_json::Value],
+) {
+    let existing = obj.get("selection_reason").and_then(|value| value.as_str());
+    if !selection_reason_needs_fallback(existing) {
+        return;
+    }
+
+    let agenda = obj
+        .get("agenda")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let participant_count = obj
+        .get("participant_names")
+        .and_then(|value| value.as_array())
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let experts = meeting::list_available_agent_options();
+
+    if let Some(derived) =
+        derive_selection_reason_from_meeting_data(agenda, participant_count, transcripts, &experts)
+    {
+        obj.insert("selection_reason".to_string(), json!(derived));
+    }
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -64,8 +545,8 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, created_at
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings
          ORDER BY started_at DESC",
     ) {
@@ -95,12 +576,70 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
             let transcripts = load_transcripts(&conn, &mid);
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(transcripts));
+            obj.insert("entries".to_string(), json!(&transcripts));
             enrich_meeting_with_issue_data(&conn, &mid, obj);
+            apply_selection_reason_fallback(obj, &transcripts);
         }
     }
 
     (StatusCode::OK, Json(json!({"meetings": meetings})))
+}
+
+/// GET /api/round-table-meetings/channels
+pub async fn list_meeting_channels(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let bindings = settings::list_registered_channel_bindings();
+    let registry = state.health_registry.as_ref();
+    let available_experts = meeting::list_available_agent_options();
+
+    let mut channels = Vec::new();
+    for binding in bindings {
+        let channel_id = ChannelId::new(binding.channel_id);
+        let fallback_name = binding
+            .fallback_name
+            .clone()
+            .unwrap_or_else(|| format!("channel-{}", binding.channel_id));
+        let channel_name = match registry {
+            Some(registry) if binding.fallback_name.is_none() => {
+                health::fetch_channel_name(registry, channel_id, &binding.owner_provider)
+                    .await
+                    .unwrap_or(fallback_name)
+            }
+            _ => fallback_name,
+        };
+
+        channels.push(json!({
+            "channel_id": binding.channel_id.to_string(),
+            "channel_name": channel_name,
+            "owner_provider": binding.owner_provider.as_str(),
+            "available_experts": available_experts.clone(),
+        }));
+    }
+
+    channels.sort_by(|left, right| {
+        let left_name = left
+            .get("channel_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let right_name = right
+            .get("channel_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        left_name.cmp(right_name).then_with(|| {
+            left.get("channel_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("channel_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default(),
+                )
+        })
+    });
+
+    (StatusCode::OK, Json(json!({"channels": channels})))
 }
 
 /// GET /api/round-table-meetings/:id
@@ -119,8 +658,8 @@ pub async fn get_meeting(
     };
 
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, created_at
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings WHERE id = ?1",
         [&id],
         |row| meeting_row_to_json(row),
@@ -129,8 +668,9 @@ pub async fn get_meeting(
             let transcripts = load_transcripts(&conn, &id);
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(transcripts));
+            obj.insert("entries".to_string(), json!(&transcripts));
             enrich_meeting_with_issue_data(&conn, &id, obj);
+            apply_selection_reason_fallback(obj, &transcripts);
             (StatusCode::OK, Json(json!({"meeting": meeting})))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => (
@@ -227,8 +767,8 @@ pub async fn update_issue_repo(
 
     // Read back meeting
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, created_at
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings WHERE id = ?1",
         [&id],
         |row| meeting_row_to_json(row),
@@ -263,67 +803,61 @@ pub async fn create_issues(
     Path(id): Path<String>,
     Json(body): Json<CreateIssuesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (repo, summaries) = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-
-        // Verify meeting exists
-        let meeting_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM meetings WHERE id = ?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if !meeting_exists {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
             return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "meeting not found"})),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
             );
         }
+    };
 
-        // Get issue repo from kv_meta or request body
-        let repo: Option<String> = body.repo.clone().or_else(|| {
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("meeting_issue_repo:{id}")],
-                |row| row.get(0),
+    // Verify meeting exists
+    let meeting_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM meetings WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !meeting_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "meeting not found"})),
+        );
+    }
+
+    // Get issue repo from kv_meta or request body
+    let repo: Option<String> = body.repo.clone().or_else(|| {
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [&format!("meeting_issue_repo:{id}")],
+            |row| row.get(0),
+        )
+        .ok()
+    });
+
+    let Some(repo) = repo else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no repo configured for this meeting — set issue_repo first"})),
+        );
+    };
+
+    // Get summary transcripts (action items)
+    let summaries: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM meeting_transcripts
+                 WHERE meeting_id = ?1 AND is_summary = 1
+                 ORDER BY seq ASC",
             )
+            .unwrap();
+        stmt.query_map([&id], |row| row.get::<_, String>(0))
             .ok()
-        });
-
-        let Some(repo) = repo else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "no repo configured for this meeting — set issue_repo first"}),
-                ),
-            );
-        };
-
-        // Get summary transcripts (action items)
-        let summaries: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT content FROM meeting_transcripts
-                     WHERE meeting_id = ?1 AND is_summary = 1
-                     ORDER BY seq ASC",
-                )
-                .unwrap();
-            stmt.query_map([&id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        };
-
-        (repo, summaries)
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
     };
 
     if summaries.is_empty() {
@@ -337,6 +871,9 @@ pub async fn create_issues(
             })),
         );
     }
+
+    drop(conn);
+
     // Create issues from summaries using gh CLI
     let mut results = Vec::new();
     let mut created = 0i64;
@@ -390,9 +927,15 @@ pub async fn create_issues(
         };
 
         // Create GitHub issue
-        match crate::github::create_issue(&repo, title, &body_text).await {
-            Ok(created_issue) => {
-                let url = created_issue.url;
+        let output = std::process::Command::new("gh")
+            .args([
+                "issue", "create", "--repo", &repo, "--title", title, "--body", &body_text,
+            ])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 // Store result
                 let conn = state.db.lock().unwrap();
                 conn.execute(
@@ -404,8 +947,13 @@ pub async fn create_issues(
                 results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
                 created += 1;
             }
-            Err(error) => {
-                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": error, "attempted_at": chrono::Utc::now().timestamp()}));
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).to_string();
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": err, "attempted_at": chrono::Utc::now().timestamp()}));
+                failed += 1;
+            }
+            Err(e) => {
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": format!("{e}"), "attempted_at": chrono::Utc::now().timestamp()}));
                 failed += 1;
             }
         }
@@ -474,8 +1022,8 @@ pub async fn discard_issue(
     // Return meeting + summary for UI refresh
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                    primary_provider, reviewer_provider, participant_names, created_at
+            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                    primary_provider, reviewer_provider, participant_names, selection_reason, created_at
              FROM meetings WHERE id = ?1",
             [&id],
             |row| meeting_row_to_json(row),
@@ -524,8 +1072,8 @@ pub async fn discard_all_issues(
 
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                    primary_provider, reviewer_provider, participant_names, created_at
+            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                    primary_provider, reviewer_provider, participant_names, selection_reason, created_at
              FROM meetings WHERE id = ?1",
             [&id],
             |row| meeting_row_to_json(row),
@@ -544,12 +1092,12 @@ pub async fn discard_all_issues(
 }
 
 /// POST /api/round-table-meetings/start
-/// Send meeting start request to Discord channel via announce bot.
+/// Start a meeting directly via the provider-bound runtime.
 pub async fn start_meeting(
     State(state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_id = match &body.channel_id {
+    let channel_id_raw = match &body.channel_id {
         Some(id) if !id.is_empty() => id.clone(),
         _ => {
             return (
@@ -558,41 +1106,72 @@ pub async fn start_meeting(
             );
         }
     };
-
-    let agenda = body.agenda.as_deref().unwrap_or("General discussion");
-    let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
+    let channel_id_value = match channel_id_raw.parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "channel_id must be a numeric string"})),
+            );
+        }
+    };
+    let requested_primary_provider = match parse_meeting_provider(body.primary_provider.as_deref())
+    {
         Ok(provider) => provider,
         Err(error) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
-
-    let message = build_meeting_start_command(agenda, primary_provider);
+    let (owner_provider, primary_provider) = match resolve_start_meeting_providers(
+        resolve_channel_owner_provider(channel_id_value),
+        requested_primary_provider,
+    ) {
+        Ok(providers) => providers,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
     let Some(registry) = state.health_registry.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"ok": false, "error": "Discord health registry unavailable"})),
+            Json(json!({"error": "health registry unavailable"})),
         );
     };
-    let (status, body) = crate::services::discord::health::send_message(
+
+    let agenda = body.agenda.as_deref().unwrap_or("General discussion");
+
+    let reviewer_provider = match parse_required_meeting_provider(body.reviewer_provider.as_deref())
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+    if let Err(error) =
+        validate_reviewer_provider(&primary_provider, &reviewer_provider, &owner_provider)
+    {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+    }
+
+    match health::start_direct_meeting(
         registry,
-        &state.db,
-        &format!("channel:{channel_id}"),
-        &message,
-        "dashboard",
-        "announce",
+        ChannelId::new(channel_id_value),
+        owner_provider,
+        primary_provider,
+        reviewer_provider,
+        agenda.to_string(),
+        body.fixed_participants.unwrap_or_default(),
     )
-    .await;
-    if status == "200 OK" {
-        (
+    .await
+    {
+        Ok(()) => (
             StatusCode::OK,
-            Json(json!({"ok": true, "message": "Meeting start command sent"})),
-        )
-    } else {
-        (
+            Json(json!({"ok": true, "message": "Meeting start scheduled"})),
+        ),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": format!("Discord send failed: {status} {body}")})),
-        )
+            Json(json!({"ok": false, "error": error})),
+        ),
     }
 }
 
@@ -650,6 +1229,10 @@ pub async fn upsert_meeting(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let selection_reason = body
+        .selection_reason
+        .as_deref()
+        .and_then(normalize_selection_reason);
 
     let conn = match state.db.lock() {
         Ok(c) => c,
@@ -663,23 +1246,26 @@ pub async fn upsert_meeting(
 
     if let Err(e) = conn.execute(
         "INSERT INTO meetings (
-            id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-            primary_provider, reviewer_provider, participant_names, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+            primary_provider, reviewer_provider, participant_names, selection_reason, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(id) DO UPDATE SET
             channel_id = COALESCE(excluded.channel_id, meetings.channel_id),
-            title = COALESCE(?13, meetings.title),
-            status = COALESCE(?14, meetings.status),
-            effective_rounds = COALESCE(?15, meetings.effective_rounds),
+            thread_id = COALESCE(excluded.thread_id, meetings.thread_id),
+            title = COALESCE(?15, meetings.title),
+            status = COALESCE(?16, meetings.status),
+            effective_rounds = COALESCE(?17, meetings.effective_rounds),
             started_at = COALESCE(meetings.started_at, excluded.started_at),
-            completed_at = COALESCE(?16, meetings.completed_at),
-            summary = COALESCE(?17, meetings.summary),
-            primary_provider = COALESCE(?18, meetings.primary_provider),
-            reviewer_provider = COALESCE(?19, meetings.reviewer_provider),
-            participant_names = COALESCE(?20, meetings.participant_names),
+            completed_at = COALESCE(?18, meetings.completed_at),
+            summary = COALESCE(?19, meetings.summary),
+            primary_provider = COALESCE(?20, meetings.primary_provider),
+            reviewer_provider = COALESCE(?21, meetings.reviewer_provider),
+            participant_names = COALESCE(?22, meetings.participant_names),
+            selection_reason = COALESCE(?23, meetings.selection_reason),
             created_at = COALESCE(meetings.created_at, excluded.created_at)",
         rusqlite::params![
             body.id,
+            body.channel_id,
             body.thread_id,
             agenda,
             status,
@@ -690,6 +1276,7 @@ pub async fn upsert_meeting(
             primary_provider.as_ref().map(ProviderKind::as_str),
             reviewer_provider.as_ref().map(ProviderKind::as_str),
             participant_names_json,
+            selection_reason.clone(),
             started_at,
             agenda_update,
             status_update,
@@ -699,8 +1286,24 @@ pub async fn upsert_meeting(
             primary_provider.as_ref().map(ProviderKind::as_str),
             reviewer_provider.as_ref().map(ProviderKind::as_str),
             participant_names_update_json,
+            selection_reason,
         ],
     ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        );
+    }
+
+    let saved_thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM meetings WHERE id = ?1",
+            [&body.id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    if let Err(e) = persist_meeting_query_hashes(&conn, &body.id, saved_thread_id.as_deref()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -815,8 +1418,8 @@ pub async fn upsert_meeting(
     }
 
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, created_at
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings WHERE id = ?1",
         [&body.id],
         |row| meeting_row_to_json(row),
@@ -825,8 +1428,9 @@ pub async fn upsert_meeting(
             let transcripts = load_transcripts(&conn, &body.id);
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(transcripts));
+            obj.insert("entries".to_string(), json!(&transcripts));
             enrich_meeting_with_issue_data(&conn, &body.id, obj);
+            apply_selection_reason_fallback(obj, &transcripts);
             (
                 StatusCode::OK,
                 Json(json!({"ok": true, "meeting": meeting})),
@@ -851,11 +1455,118 @@ fn parse_meeting_provider(raw: Option<&str>) -> Result<Option<ProviderKind>, Str
         .ok_or_else(|| format!("invalid provider '{}'", value))
 }
 
+fn parse_required_meeting_provider(raw: Option<&str>) -> Result<ProviderKind, String> {
+    parse_meeting_provider(raw)?.ok_or_else(|| "reviewer_provider is required".to_string())
+}
+
+fn resolve_channel_owner_provider(channel_id: u64) -> Option<ProviderKind> {
+    settings::list_registered_channel_bindings()
+        .into_iter()
+        .find(|binding| binding.channel_id == channel_id)
+        .map(|binding| binding.owner_provider)
+}
+
+fn resolve_start_meeting_providers(
+    owner_provider: Option<ProviderKind>,
+    requested_primary_provider: Option<ProviderKind>,
+) -> Result<(ProviderKind, ProviderKind), String> {
+    match owner_provider {
+        Some(owner_provider) => {
+            let primary_provider =
+                requested_primary_provider.unwrap_or_else(|| owner_provider.clone());
+            Ok((owner_provider, primary_provider))
+        }
+        None => Err("channel_id is not a registered meeting channel".to_string()),
+    }
+}
+
+fn validate_reviewer_provider(
+    primary_provider: &ProviderKind,
+    reviewer_provider: &ProviderKind,
+    owner_provider: &ProviderKind,
+) -> Result<(), String> {
+    if reviewer_provider == owner_provider {
+        return Err("reviewer_provider must differ from channel owner provider".to_string());
+    }
+    if reviewer_provider == primary_provider {
+        return Err("reviewer_provider must differ from primary_provider".to_string());
+    }
+    Ok(())
+}
+
 fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKind>) -> String {
     match primary_provider {
         Some(provider) => format!("/meeting start --primary {} {}", provider.as_str(), agenda),
         None => format!("/meeting start {agenda}"),
     }
+}
+
+fn short_query_hash(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    hex::encode(&digest[..6])
+}
+
+fn meeting_query_hash(meeting_id: &str) -> String {
+    format!(
+        "#meeting-{}",
+        short_query_hash(&format!("meeting:{meeting_id}"))
+    )
+}
+
+fn thread_query_hash(thread_id: &str) -> String {
+    format!(
+        "#thread-{}",
+        short_query_hash(&format!("thread:{thread_id}"))
+    )
+}
+
+fn persist_meeting_query_hashes(
+    conn: &rusqlite::Connection,
+    meeting_id: &str,
+    thread_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let meeting_hash = meeting_query_hash(meeting_id);
+    let normalized_thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
+    let thread_hash = normalized_thread_id.map(thread_query_hash);
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash:{meeting_id}"),
+            meeting_hash.clone()
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash_lookup:{meeting_hash}"),
+            meeting_id
+        ],
+    )?;
+
+    if let (Some(thread_id), Some(thread_hash)) = (normalized_thread_id, thread_hash.as_deref()) {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("meeting_thread_hash:{meeting_id}"), thread_hash],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("meeting_thread_hash_lookup:{thread_hash}"),
+                json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string()
+            ],
+        )?;
+    }
+
+    tracing::info!(
+        meeting_id = %meeting_id,
+        meeting_hash = %meeting_hash,
+        thread_hash = thread_hash.as_deref().unwrap_or("-"),
+        "[meetings] persisted meeting query hashes"
+    );
+
+    Ok(())
 }
 
 fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
@@ -885,29 +1596,41 @@ fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
 }
 
 fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
-    let title = row.get::<_, Option<String>>(2)?;
-    let effective_rounds = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+    let meeting_id = row.get::<_, String>(0)?;
+    let channel_id = row.get::<_, Option<String>>(1)?;
+    let thread_id = row.get::<_, Option<String>>(2)?;
+    let title = row.get::<_, Option<String>>(3)?;
+    let effective_rounds = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
     let participant_names = row
-        .get::<_, Option<String>>(10)?
+        .get::<_, Option<String>>(11)?
         .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
         .unwrap_or_default();
-    let started_at = row_optional_timestamp(row, 5).unwrap_or(0);
-    let completed_at = row_optional_timestamp(row, 6);
-    let created_at = row_optional_timestamp(row, 11).unwrap_or(started_at);
+    let started_at = row_optional_timestamp(row, 6).unwrap_or(0);
+    let completed_at = row_optional_timestamp(row, 7);
+    let created_at = row_optional_timestamp(row, 13).unwrap_or(started_at);
+    let thread_hash = thread_id.as_deref().map(thread_query_hash);
+    let selection_reason = row
+        .get::<_, Option<String>>(12)?
+        .as_deref()
+        .and_then(normalize_selection_reason);
     Ok(json!({
-        "id": row.get::<_, String>(0)?,
-        "channel_id": row.get::<_, Option<String>>(1)?,
+        "id": meeting_id.clone(),
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "meeting_hash": meeting_query_hash(&meeting_id),
+        "thread_hash": thread_hash,
         "title": title,
-        "status": row.get::<_, Option<String>>(3)?,
+        "status": row.get::<_, Option<String>>(4)?,
         "effective_rounds": effective_rounds,
         "started_at": started_at,
         "completed_at": completed_at,
-        "summary": row.get::<_, Option<String>>(7)?,
+        "summary": row.get::<_, Option<String>>(8)?,
+        "selection_reason": selection_reason,
         // alias fields for frontend compatibility
         "agenda": title,
         "total_rounds": effective_rounds,
-        "primary_provider": row.get::<_, Option<String>>(8)?,
-        "reviewer_provider": row.get::<_, Option<String>>(9)?,
+        "primary_provider": row.get::<_, Option<String>>(9)?,
+        "reviewer_provider": row.get::<_, Option<String>>(10)?,
         "participant_names": participant_names,
         "issues_created": 0,
         "proposed_issues": null,
@@ -1022,7 +1745,10 @@ mod tests {
     use crate::db::Db;
     use crate::engine::PolicyEngine;
     use crate::services::provider::ProviderKind;
-    use axum::{Json, extract::State};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
     use std::path::PathBuf;
 
     fn test_db() -> Db {
@@ -1084,6 +1810,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_reviewer_provider_accepts_distinct_provider() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Codex,
+                &ProviderKind::Gemini,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_reviewer_provider_rejects_primary_provider_match() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Claude,
+                &ProviderKind::Gemini,
+            ),
+            Err("reviewer_provider must differ from primary_provider".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_reviewer_provider_rejects_owner_provider_match() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Gemini,
+                &ProviderKind::Gemini,
+            ),
+            Err("reviewer_provider must differ from channel owner provider".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_start_meeting_providers_prefers_registered_owner_when_available() {
+        assert_eq!(
+            resolve_start_meeting_providers(Some(ProviderKind::Claude), None),
+            Ok((ProviderKind::Claude, ProviderKind::Claude))
+        );
+        assert_eq!(
+            resolve_start_meeting_providers(Some(ProviderKind::Claude), Some(ProviderKind::Qwen)),
+            Ok((ProviderKind::Claude, ProviderKind::Qwen))
+        );
+    }
+
+    #[test]
+    fn resolve_start_meeting_providers_rejects_unregistered_channel() {
+        assert_eq!(
+            resolve_start_meeting_providers(None, None),
+            Err("channel_id is not a registered meeting channel".to_string())
+        );
+        assert_eq!(
+            resolve_start_meeting_providers(None, Some(ProviderKind::Gemini)),
+            Err("channel_id is not a registered meeting channel".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_required_meeting_provider_rejects_missing_provider() {
+        assert_eq!(
+            parse_required_meeting_provider(None),
+            Err("reviewer_provider is required".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn start_meeting_rejects_unregistered_channel_without_primary_provider() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, body) = start_meeting(
+            State(state),
+            Json(StartMeetingBody {
+                agenda: Some("안건".to_string()),
+                channel_id: Some("999999999999".to_string()),
+                primary_provider: None,
+                reviewer_provider: Some("codex".to_string()),
+                fixed_participants: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.0["error"],
+            "channel_id is not a registered meeting channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_meeting_rejects_unregistered_channel_even_when_primary_provider_is_supplied() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, body) = start_meeting(
+            State(state),
+            Json(StartMeetingBody {
+                agenda: Some("안건".to_string()),
+                channel_id: Some("999999999999".to_string()),
+                primary_provider: Some("qwen".to_string()),
+                reviewer_provider: Some("codex".to_string()),
+                fixed_participants: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.0["error"],
+            "channel_id is not a registered meeting channel"
+        );
+    }
+
     #[tokio::test]
     async fn upsert_meeting_preserves_existing_metadata_when_optional_fields_omitted() {
         let db = test_db();
@@ -1093,8 +1935,13 @@ mod tests {
             State(state.clone()),
             Json(UpsertMeetingBody {
                 id: "meeting-meta".to_string(),
+                channel_id: None,
                 agenda: Some("기존 안건".to_string()),
                 summary: None,
+                selection_reason: Some(
+                    "고정 전문 에이전트를 유지하고 핵심 전문성을 보완하는 조합으로 선정"
+                        .to_string(),
+                ),
                 status: Some("in_progress".to_string()),
                 primary_provider: Some("qwen".to_string()),
                 reviewer_provider: Some("codex".to_string()),
@@ -1113,8 +1960,13 @@ mod tests {
             State(state),
             Json(UpsertMeetingBody {
                 id: "meeting-meta".to_string(),
+                channel_id: None,
                 agenda: None,
                 summary: Some("요약 갱신".to_string()),
+                selection_reason: Some(
+                    "리뷰 반영 후 중복 전문성을 줄이고 핵심 축을 유지하는 조합으로 확정"
+                        .to_string(),
+                ),
                 status: None,
                 primary_provider: None,
                 reviewer_provider: None,
@@ -1132,7 +1984,7 @@ mod tests {
         let conn = db.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT title, status, effective_rounds, completed_at, summary, participant_names
+                "SELECT title, status, effective_rounds, completed_at, summary, participant_names, selection_reason
                  FROM meetings WHERE id = ?1",
                 ["meeting-meta"],
                 |row| {
@@ -1143,6 +1995,7 @@ mod tests {
                         row.get::<_, Option<i64>>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
@@ -1154,6 +2007,76 @@ mod tests {
         assert_eq!(row.3, Some(222));
         assert_eq!(row.4.as_deref(), Some("요약 갱신"));
         assert_eq!(row.5.as_deref(), Some("[\"Alice\",\"Bob\"]"));
+        assert_eq!(
+            row.6.as_deref(),
+            Some("리뷰 반영 후 중복 전문성을 줄이고 핵심 축을 유지하는 조합으로 확정")
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_meeting_persists_query_hashes_and_returns_them() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, _) = upsert_meeting(
+            State(state.clone()),
+            Json(UpsertMeetingBody {
+                id: "meeting-hash".to_string(),
+                channel_id: None,
+                agenda: Some("해시 안건".to_string()),
+                summary: None,
+                selection_reason: Some("해시 검증을 위해 핵심 참여자만 압축 선정".to_string()),
+                status: Some("in_progress".to_string()),
+                primary_provider: Some("qwen".to_string()),
+                reviewer_provider: Some("codex".to_string()),
+                participant_names: Some(vec!["Alice".to_string()]),
+                total_rounds: Some(1),
+                started_at: Some(111),
+                completed_at: None,
+                thread_id: Some("thread-123".to_string()),
+                entries: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let expected_meeting_hash = meeting_query_hash("meeting-hash");
+        let expected_thread_hash = thread_query_hash("thread-123");
+        let (status, body) = get_meeting(State(state), Path("meeting-hash".to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["meeting"]["meeting_hash"], expected_meeting_hash);
+        assert_eq!(body.0["meeting"]["thread_hash"], expected_thread_hash);
+        assert_eq!(
+            body.0["meeting"]["selection_reason"],
+            json!("해시 검증을 위해 핵심 참여자만 압축 선정")
+        );
+
+        let conn = db.lock().unwrap();
+        let stored_meeting_hash: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                ["meeting_query_hash:meeting-hash"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let meeting_lookup: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [format!("meeting_query_hash_lookup:{expected_meeting_hash}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_thread_hash: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                ["meeting_thread_hash:meeting-hash"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_meeting_hash, expected_meeting_hash);
+        assert_eq!(meeting_lookup, "meeting-hash");
+        assert_eq!(stored_thread_hash, expected_thread_hash);
     }
 
     #[tokio::test]
@@ -1166,8 +2089,10 @@ mod tests {
             State(state.clone()),
             Json(UpsertMeetingBody {
                 id: "meeting-transcript".to_string(),
+                channel_id: None,
                 agenda: Some("안건".to_string()),
                 summary: Some("기존 요약".to_string()),
+                selection_reason: Some("초기 조합 선정".to_string()),
                 status: Some("completed".to_string()),
                 primary_provider: Some("qwen".to_string()),
                 reviewer_provider: Some("codex".to_string()),
@@ -1189,8 +2114,10 @@ mod tests {
             State(state),
             Json(UpsertMeetingBody {
                 id: "meeting-transcript".to_string(),
+                channel_id: None,
                 agenda: None,
                 summary: Some("새 요약".to_string()),
+                selection_reason: Some("후속 업데이트에서도 선정 사유 유지".to_string()),
                 status: Some("completed".to_string()),
                 primary_provider: None,
                 reviewer_provider: None,

@@ -1017,6 +1017,55 @@ pub async fn resolve_bot_http(
     }
 }
 
+pub async fn fetch_channel_name(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+) -> Option<String> {
+    let http = resolve_bot_http(registry, provider.as_str()).await.ok()?;
+    let channel = channel_id.to_channel(&*http).await.ok()?;
+    channel.guild().map(|guild_channel| guild_channel.name)
+}
+
+pub async fn start_direct_meeting(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    owner_provider: ProviderKind,
+    primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
+    agenda: String,
+    fixed_participants: Vec<String>,
+) -> Result<(), String> {
+    let http = resolve_bot_http(registry, owner_provider.as_str())
+        .await
+        .map_err(|(_, body)| body)?;
+
+    let shared = {
+        let providers = registry.providers.lock().await;
+        providers
+            .iter()
+            .find(|entry| entry.name == owner_provider.as_str())
+            .map(|entry| entry.shared.clone())
+            .ok_or_else(|| {
+                format!(
+                    r#"{{"ok":false,"error":"provider runtime not registered: {}"}}"#,
+                    owner_provider.as_str()
+                )
+            })?
+    };
+
+    super::meeting::spawn_direct_start(
+        http,
+        channel_id,
+        agenda,
+        primary_provider,
+        reviewer_provider,
+        fixed_participants,
+        shared,
+    )
+    .await
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum SendTargetResolutionError {
     BadRequest(&'static str),
