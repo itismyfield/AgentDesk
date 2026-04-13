@@ -33,11 +33,16 @@ export function DashboardHeroHeader({
     <div
       className={cx(dashboardCard.accentHero, "relative overflow-hidden")}
       style={{
-        borderColor: "rgba(34,211,238,0.16)",
-        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 94%, #22d3ee 6%), var(--th-card-bg))",
+        borderColor: "var(--color-info-border)",
+        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 94%, var(--color-info) 6%), var(--th-card-bg))",
       }}
     >
-      <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,rgba(0,0,0,0.03)_2px,rgba(0,0,0,0.03)_4px)]" />
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background: "repeating-linear-gradient(0deg, transparent, transparent 2px, var(--color-neutral-soft) 2px, var(--color-neutral-soft) 4px)",
+        }}
+      />
 
       <div className="relative">
         <div className="space-y-1.5">
@@ -68,7 +73,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
         <div
           key={stat.id}
           className={cx(dashboardCard.standard, "group relative overflow-hidden transition-all duration-300 hover:-translate-y-0.5")}
-          style={{ borderColor: `${stat.color}25` }}
+          style={{ borderColor: `color-mix(in srgb, ${stat.color} 24%, transparent)` }}
         >
           <div
             className="absolute top-0 left-0 right-0 h-[2px] opacity-60"
@@ -81,7 +86,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
               </p>
               <p
                 className="mt-0.5 sm:mt-1 text-lg sm:text-3xl font-black tracking-tight"
-                style={{ color: stat.color, textShadow: `0 0 20px ${stat.color}40` }}
+                style={{ color: stat.color, textShadow: `0 0 20px color-mix(in srgb, ${stat.color} 26%, transparent)` }}
               >
                 {typeof stat.value === "number" ? numberFormatter.format(stat.value) : stat.value}
               </p>
@@ -91,7 +96,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
             </div>
             <span
               className="hidden sm:inline text-3xl opacity-20 transition-all duration-300 group-hover:opacity-40 group-hover:scale-110"
-              style={{ filter: `drop-shadow(0 0 8px ${stat.color}40)` }}
+              style={{ filter: `drop-shadow(0 0 8px color-mix(in srgb, ${stat.color} 28%, transparent))` }}
             >
               {stat.icon}
             </span>
@@ -127,17 +132,22 @@ export function DashboardRankingBoard({
     <div
       className={cx(dashboardCard.accentHero, "relative overflow-hidden")}
       style={{
-        borderColor: "rgba(251,191,36,0.2)",
-        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 93%, #f59e0b 7%), var(--th-card-bg))",
+        borderColor: "var(--color-warning-border)",
+        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 93%, var(--color-warning) 7%), var(--th-card-bg))",
       }}
     >
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-amber-500/[0.03] via-transparent to-transparent" />
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background: "linear-gradient(180deg, color-mix(in srgb, var(--color-warning) 8%, transparent), transparent 64%)",
+        }}
+      />
 
       <div className="relative mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span
             className="text-2xl animate-crown-wiggle"
-            style={{ display: "inline-block", filter: "drop-shadow(0 0 8px rgba(255,215,0,0.5))" }}
+            style={{ display: "inline-block", filter: "drop-shadow(0 0 8px color-mix(in srgb, var(--color-warning) 52%, transparent))" }}
           >
             🏆
           </span>
@@ -158,7 +168,7 @@ export function DashboardRankingBoard({
         <span
           className={dashboardBadge.default}
           style={{
-            border: "1px solid rgba(148,163,184,0.2)",
+            border: "1px solid var(--color-neutral-border)",
             background: "var(--th-overlay-subtle)",
             color: "var(--th-text-secondary)",
           }}
@@ -211,18 +221,18 @@ export function DashboardRankingBoard({
                     {rank === 1 && (
                       <span
                         className="text-2xl animate-crown-wiggle"
-                        style={{ display: "inline-block", filter: "drop-shadow(0 0 12px rgba(255,215,0,0.6))" }}
+                        style={{ display: "inline-block", filter: "drop-shadow(0 0 12px color-mix(in srgb, var(--color-warning) 60%, transparent))" }}
                       >
                         🥇
                       </span>
                     )}
                     {rank === 2 && (
-                      <span className="text-lg" style={{ filter: "drop-shadow(0 0 6px rgba(192,192,192,0.5))" }}>
+                      <span className="text-lg" style={{ filter: "drop-shadow(0 0 6px color-mix(in srgb, var(--th-text-secondary) 50%, transparent))" }}>
                         🥈
                       </span>
                     )}
                     {rank === 3 && (
-                      <span className="text-lg" style={{ filter: "drop-shadow(0 0 6px rgba(205,127,50,0.5))" }}>
+                      <span className="text-lg" style={{ filter: "drop-shadow(0 0 6px color-mix(in srgb, var(--color-warning) 56%, var(--color-danger) 44%))" }}>
                         🥉
                       </span>
                     )}

@@ -46,22 +46,22 @@ const THRESHOLDS = {
 
 const LEVEL_THEME: Record<HealthMetricLevel, { accent: string; surface: string; border: string; text: string }> = {
   normal: {
-    accent: "#38bdf8",
-    surface: "rgba(56,189,248,0.10)",
-    border: "rgba(56,189,248,0.22)",
-    text: "#7dd3fc",
+    accent: "var(--color-info)",
+    surface: "var(--color-info-soft)",
+    border: "var(--color-info-border)",
+    text: "var(--color-info)",
   },
   warning: {
-    accent: "#f59e0b",
-    surface: "rgba(245,158,11,0.12)",
-    border: "rgba(245,158,11,0.24)",
-    text: "#fbbf24",
+    accent: "var(--color-warning)",
+    surface: "var(--color-warning-soft)",
+    border: "var(--color-warning-border)",
+    text: "var(--color-warning)",
   },
   danger: {
-    accent: "#ef4444",
-    surface: "rgba(239,68,68,0.12)",
-    border: "rgba(239,68,68,0.28)",
-    text: "#fca5a5",
+    accent: "var(--color-danger)",
+    surface: "var(--color-danger-soft)",
+    border: "var(--color-danger-border)",
+    text: "var(--color-danger)",
   },
 };
 
@@ -428,9 +428,9 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
           <span
             className={cx(dashboardBadge.default, "font-bold uppercase tracking-[0.18em]")}
             style={{
-              color: pollState === "error" ? "#fca5a5" : pollState === "stale" ? "#fbbf24" : "#93c5fd",
-              background: pollState === "error" ? "rgba(239,68,68,0.12)" : pollState === "stale" ? "rgba(245,158,11,0.12)" : "rgba(59,130,246,0.12)",
-              border: pollState === "error" ? "1px solid rgba(239,68,68,0.24)" : pollState === "stale" ? "1px solid rgba(245,158,11,0.24)" : "1px solid rgba(59,130,246,0.24)",
+              color: pollState === "error" ? "var(--color-danger)" : pollState === "stale" ? "var(--color-warning)" : "var(--color-info)",
+              background: pollState === "error" ? "var(--color-danger-soft)" : pollState === "stale" ? "var(--color-warning-soft)" : "var(--color-info-soft)",
+              border: pollState === "error" ? "1px solid var(--color-danger-border)" : pollState === "stale" ? "1px solid var(--color-warning-border)" : "1px solid var(--color-info-border)",
             }}
           >
             {translatePollState(pollState, t)}
@@ -441,7 +441,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
       <div
         className={dashboardCard.nestedCompact}
         style={{
-          background: `linear-gradient(135deg, ${theme.surface}, rgba(15,23,42,0.22))`,
+          background: `linear-gradient(135deg, ${theme.surface}, var(--color-panel-core))`,
           border: `1px solid ${theme.border}`,
         }}
       >
@@ -462,9 +462,9 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
               key={reason}
               className={dashboardBadge.default}
               style={{
-                color: topLevel === "danger" ? "#fca5a5" : "#fbbf24",
-                background: topLevel === "danger" ? "rgba(239,68,68,0.12)" : "rgba(245,158,11,0.10)",
-                border: topLevel === "danger" ? "1px solid rgba(239,68,68,0.22)" : "1px solid rgba(245,158,11,0.20)",
+                color: topLevel === "danger" ? "var(--color-danger)" : "var(--color-warning)",
+                background: topLevel === "danger" ? "var(--color-danger-soft)" : "var(--color-warning-soft)",
+                border: topLevel === "danger" ? "1px solid var(--color-danger-border)" : "1px solid var(--color-warning-border)",
               }}
             >
               {describeDegradedReason(reason)}
@@ -477,9 +477,9 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
         <div
           className={cx(dashboardCard.nestedCompact, "mt-2 text-[10px]")}
           style={{
-            color: data ? "#fbbf24" : "#fca5a5",
-            background: data ? "rgba(245,158,11,0.10)" : "rgba(239,68,68,0.12)",
-            border: data ? "1px solid rgba(245,158,11,0.22)" : "1px solid rgba(239,68,68,0.24)",
+            color: data ? "var(--color-warning)" : "var(--color-danger)",
+            background: data ? "var(--color-warning-soft)" : "var(--color-danger-soft)",
+            border: data ? "1px solid var(--color-warning-border)" : "1px solid var(--color-danger-border)",
           }}
         >
           {data
@@ -524,7 +524,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
                 className={dashboardCard.nestedCompact}
                 style={{
                   border: `1px solid ${metricTheme.border}`,
-                  background: `linear-gradient(180deg, ${metricTheme.surface}, rgba(15,23,42,0.22))`,
+                  background: `linear-gradient(180deg, ${metricTheme.surface}, var(--color-panel-core))`,
                 }}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -537,7 +537,10 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
                   </div>
                   <span
                     className="mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full"
-                    style={{ background: metricTheme.accent, boxShadow: `0 0 10px ${metricTheme.accent}66` }}
+                    style={{
+                      background: metricTheme.accent,
+                      boxShadow: `0 0 10px color-mix(in srgb, ${metricTheme.accent} 40%, transparent)`,
+                    }}
                   />
                 </div>
                 <div className="mt-2 text-xl font-black leading-none sm:text-2xl" style={{ color: "var(--th-text-primary)" }}>
