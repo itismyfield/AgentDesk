@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
 use crate::services::provider::ProviderKind;
+use crate::utils::format::tail_with_ellipsis;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
@@ -412,6 +413,17 @@ mod tests {
         assert_eq!(&text[..split_at], "alpha beta ");
     }
 
+    #[test]
+    fn test_plan_streaming_rollover_keeps_raw_frozen_chunk() {
+        use super::plan_streaming_rollover;
+
+        let current_portion = format!("{}\n\n\n{}", "a".repeat(1500), "b".repeat(700));
+        let plan = plan_streaming_rollover(&current_portion, "⏳ status").unwrap();
+
+        assert_eq!(plan.frozen_chunk, current_portion[..plan.split_at]);
+        assert!(plan.frozen_chunk.contains("\n\n\n"));
+    }
+
     // ── filter_codex_tool_logs tests ─────────────────────────────────────
 
     #[test]
@@ -597,6 +609,51 @@ pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usi
     };
 
     Some(floor_char_boundary(text, split_at))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StreamingRolloverPlan {
+    pub(super) display_snapshot: String,
+    pub(super) frozen_chunk: String,
+    pub(super) split_at: usize,
+}
+
+fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &str) -> String {
+    let footer = format!("\n\n{status_block}");
+    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let normalized = normalize_empty_lines(current_portion);
+    let body = tail_with_ellipsis(&normalized, body_budget);
+    format!("{}{}", body, footer)
+}
+
+pub(super) fn plan_streaming_rollover(
+    current_portion: &str,
+    status_block: &str,
+) -> Option<StreamingRolloverPlan> {
+    if current_portion.is_empty() {
+        return None;
+    }
+
+    let footer = format!("\n\n{status_block}");
+    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let split_at = streaming_split_boundary(current_portion, body_budget)?;
+
+    Some(StreamingRolloverPlan {
+        display_snapshot: build_streaming_placeholder_snapshot(current_portion, status_block),
+        frozen_chunk: current_portion[..split_at].to_string(),
+        split_at,
+    })
+}
+
+pub(super) fn build_streaming_placeholder_text(
+    current_portion: &str,
+    status_block: &str,
+) -> String {
+    if current_portion.is_empty() {
+        status_block.to_string()
+    } else {
+        build_streaming_placeholder_snapshot(current_portion, status_block)
+    }
 }
 
 /// Truncate a string to max_len bytes at a safe UTF-8 and line boundary

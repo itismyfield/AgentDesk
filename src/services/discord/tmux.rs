@@ -13,14 +13,14 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    format_tool_input, normalize_empty_lines, replace_long_message_raw, send_long_message_raw,
-    streaming_split_boundary, truncate_str,
+    build_streaming_placeholder_text, format_tool_input, plan_streaming_rollover,
+    replace_long_message_raw, send_long_message_raw, truncate_str,
 };
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
     resolve_role_binding, validate_bot_channel_routing_with_provider_channel,
 };
-use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
+use super::{SharedData, TmuxWatcherHandle, rate_limit_wait};
 
 const PROVIDER_OVERLOAD_MAX_RETRIES: u8 = 3;
 
@@ -1010,29 +1010,20 @@ pub(super) async fn tmux_output_watcher(
                             &full_response,
                             narrate_progress,
                         );
-                        let footer = format!("\n\n{status_block}");
-                        let body_budget =
-                            DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
-                        let normalized = normalize_empty_lines(current_portion);
-                        let display_snapshot = {
-                            let body = tail_with_ellipsis(&normalized, body_budget);
-                            format!("{}{}", body, footer)
-                        };
                         let Some(msg_id) = placeholder_msg_id else {
                             break;
                         };
-                        let Some(split_at) = streaming_split_boundary(current_portion, body_budget)
+                        let Some(plan) = plan_streaming_rollover(current_portion, &status_block)
                         else {
                             break;
                         };
 
-                        let frozen_chunk = normalize_empty_lines(&current_portion[..split_at]);
                         rate_limit_wait(&shared, channel_id).await;
                         match channel_id
                             .edit_message(
                                 &http,
                                 msg_id,
-                                serenity::EditMessage::new().content(&frozen_chunk),
+                                serenity::EditMessage::new().content(&plan.frozen_chunk),
                             )
                             .await
                         {
@@ -1047,7 +1038,7 @@ pub(super) async fn tmux_output_watcher(
                                 {
                                     Ok(message) => {
                                         placeholder_msg_id = Some(message.id);
-                                        response_sent_offset += split_at;
+                                        response_sent_offset += plan.split_at;
                                         last_edit_text = status_block;
                                     }
                                     Err(error) => {
@@ -1063,10 +1054,10 @@ pub(super) async fn tmux_output_watcher(
                                                 &http,
                                                 msg_id,
                                                 serenity::EditMessage::new()
-                                                    .content(&display_snapshot),
+                                                    .content(&plan.display_snapshot),
                                             )
                                             .await;
-                                        last_edit_text = display_snapshot;
+                                        last_edit_text = plan.display_snapshot;
                                         break;
                                     }
                                 }
@@ -1091,16 +1082,9 @@ pub(super) async fn tmux_output_watcher(
                         &full_response,
                         narrate_progress,
                     );
-                    let footer = format!("\n\n{status_block}");
-                    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
                     let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
-                    let display_text = if current_portion.is_empty() {
-                        status_block.clone()
-                    } else {
-                        let normalized = normalize_empty_lines(current_portion);
-                        let body = tail_with_ellipsis(&normalized, body_budget.max(1));
-                        format!("{}{}", body, footer)
-                    };
+                    let display_text =
+                        build_streaming_placeholder_text(current_portion, &status_block);
 
                     if display_text != last_edit_text {
                         match placeholder_msg_id {

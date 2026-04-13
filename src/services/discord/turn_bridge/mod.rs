@@ -721,27 +721,19 @@ pub(super) fn spawn_turn_bridge(
                     &full_response,
                     narrate_progress,
                 );
-                let footer = format!("\n\n{status_block}");
-                let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
-                let normalized = normalize_empty_lines(current_portion);
-                let display_snapshot = {
-                    let body = tail_with_ellipsis(&normalized, body_budget);
-                    format!("{}{}", body, footer)
-                };
-                let Some(split_at) =
-                    super::formatting::streaming_split_boundary(current_portion, body_budget)
+                let Some(plan) =
+                    super::formatting::plan_streaming_rollover(current_portion, &status_block)
                 else {
                     break;
                 };
 
-                let frozen_chunk = normalize_empty_lines(&current_portion[..split_at]);
                 match gateway
-                    .edit_message(channel_id, current_msg_id, &frozen_chunk)
+                    .edit_message(channel_id, current_msg_id, &plan.frozen_chunk)
                     .await
                 {
                     Ok(()) => match gateway.send_message(channel_id, &status_block).await {
                         Ok(next_msg_id) => {
-                            response_sent_offset += split_at;
+                            response_sent_offset += plan.split_at;
                             current_msg_id = next_msg_id;
                             last_edit_text = status_block;
                             last_status_edit = tokio::time::Instant::now() - status_interval;
@@ -758,9 +750,9 @@ pub(super) fn spawn_turn_bridge(
                                 error
                             );
                             let _ = gateway
-                                .edit_message(channel_id, current_msg_id, &display_snapshot)
+                                .edit_message(channel_id, current_msg_id, &plan.display_snapshot)
                                 .await;
-                            last_edit_text = display_snapshot;
+                            last_edit_text = plan.display_snapshot;
                             break;
                         }
                     },
@@ -785,15 +777,8 @@ pub(super) fn spawn_turn_bridge(
                 &full_response,
                 narrate_progress,
             );
-            let footer = format!("\n\n{status_block}");
-            let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
-            let normalized = normalize_empty_lines(current_portion);
-            let stable_display_text = if current_portion.is_empty() {
-                status_block.clone()
-            } else {
-                let body = tail_with_ellipsis(&normalized, body_budget.max(1));
-                format!("{}{}", body, footer)
-            };
+            let stable_display_text =
+                super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
 
             if stable_display_text != last_edit_text
                 && !done

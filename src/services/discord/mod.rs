@@ -64,7 +64,7 @@ use adk_session::{
 };
 use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_skills_notice,
-    format_tool_input, normalize_empty_lines, send_long_message_raw, truncate_str,
+    format_tool_input, send_long_message_raw, truncate_str,
 };
 use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
