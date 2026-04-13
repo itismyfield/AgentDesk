@@ -568,6 +568,43 @@ pub enum FollowupResult {
     RecreateSession { error: String },
 }
 
+/// Best-effort tmux watcher handoff after follow-up output polling fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxFollowupFallback {
+    /// Offset the watcher should resume from.
+    pub last_offset: u64,
+    /// Whether the provider path should synthesize an empty Done event first
+    /// because the pane is already idle and no unread bytes remain.
+    pub emit_synthetic_done: bool,
+}
+
+/// Decide whether a managed tmux provider can recover from a follow-up read
+/// failure by attaching a watcher instead of silently leaving the dispatch
+/// without a watcher on a reused session.
+pub fn tmux_followup_fallback_after_read_error(
+    start_offset: u64,
+    last_observed_offset: u64,
+    current_file_len: Option<u64>,
+    session_alive: bool,
+    ready_for_input: bool,
+    output_path_exists: bool,
+    input_path_exists: bool,
+) -> Option<TmuxFollowupFallback> {
+    if !session_alive || !output_path_exists || !input_path_exists {
+        return None;
+    }
+
+    let file_len = current_file_len.unwrap_or(last_observed_offset);
+    let last_offset = std::cmp::min(last_observed_offset, file_len);
+    let emit_synthetic_done =
+        ready_for_input && last_offset == file_len && last_offset > start_offset;
+
+    Some(TmuxFollowupFallback {
+        last_offset,
+        emit_synthetic_done,
+    })
+}
+
 /// Callbacks for session status checks during output file polling.
 pub(crate) struct SessionProbe {
     /// Returns true if the session process is still running.
@@ -1800,5 +1837,89 @@ build logs\n\
 waiting for tool output\n\
 still running";
         assert!(!super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[test]
+    fn test_tmux_followup_fallback_attaches_watcher_for_unread_bytes() {
+        let fallback = super::tmux_followup_fallback_after_read_error(
+            100,
+            140,
+            Some(180),
+            true,
+            false,
+            true,
+            true,
+        )
+        .expect("fallback decision");
+
+        assert_eq!(
+            fallback,
+            super::TmuxFollowupFallback {
+                last_offset: 140,
+                emit_synthetic_done: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_tmux_followup_fallback_synthesizes_done_when_turn_is_idle() {
+        let fallback = super::tmux_followup_fallback_after_read_error(
+            100,
+            180,
+            Some(180),
+            true,
+            true,
+            true,
+            true,
+        )
+        .expect("fallback decision");
+
+        assert_eq!(
+            fallback,
+            super::TmuxFollowupFallback {
+                last_offset: 180,
+                emit_synthetic_done: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_tmux_followup_fallback_requires_live_session_and_paths() {
+        assert!(
+            super::tmux_followup_fallback_after_read_error(
+                100,
+                180,
+                Some(180),
+                false,
+                true,
+                true,
+                true,
+            )
+            .is_none()
+        );
+        assert!(
+            super::tmux_followup_fallback_after_read_error(
+                100,
+                180,
+                Some(180),
+                true,
+                true,
+                false,
+                true,
+            )
+            .is_none()
+        );
+        assert!(
+            super::tmux_followup_fallback_after_read_error(
+                100,
+                180,
+                Some(180),
+                true,
+                true,
+                true,
+                false,
+            )
+            .is_none()
+        );
     }
 }

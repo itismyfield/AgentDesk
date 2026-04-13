@@ -703,14 +703,14 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
 
   if (!groupDone) {
     if (!agentBusy) {
-      activateRun(runId, doneGroup || 0);
+      activateRun(runId, doneGroup || 0, agentId);
     } else {
       agentdesk.log.info("[auto-queue] Agent " + agentId + " still busy, deferring group " + (doneGroup || 0) + " next dispatch");
     }
     return;
   }
 
-  activateRun(runId, null);
+  activateRun(runId, null, agentId);
 }
 
 function resumeRunAndActivate(runId, nextPhase) {
@@ -911,14 +911,26 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
   return state;
 }
 
-function activateRun(runId, threadGroup) {
+function activateRun(runId, threadGroup, agentId) {
   if (!runId) return null;
   try {
+    if (agentId !== null && agentId !== undefined) {
+      var body = {
+        run_id: runId,
+        active_only: true,
+        agent_id: agentId
+      };
+      if (threadGroup !== null && threadGroup !== undefined) {
+        body.thread_group = threadGroup;
+      }
+      return agentdesk.autoQueue.activate(body);
+    }
     return agentdesk.autoQueue.activate(runId, threadGroup);
   } catch (e) {
     autoQueueLog("warn", "activate bridge failed for run " + runId + ": " + e, {
       run_id: runId,
-      thread_group: threadGroup
+      thread_group: threadGroup,
+      agent_id: agentId || null
     });
     return null;
   }
@@ -926,7 +938,7 @@ function activateRun(runId, threadGroup) {
 
 // ── Shared dispatch helper (group-aware) (#140) ─────────────────
 function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
-  var result = activateRun(runId, threadGroup);
+  var result = activateRun(runId, threadGroup, agentId);
   if (!result) return;
   if (result.count > 0) {
     autoQueueLog("info", "activate API dispatched " + result.count + " entry(s) for run " + runId + " group " + threadGroup, {

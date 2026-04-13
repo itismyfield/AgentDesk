@@ -1002,3 +1002,56 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
     assert_eq!(entry_status, "dispatched");
     assert_eq!(dispatch_count, 1);
 }
+
+#[test]
+fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js");
+    let policy = fs::read_to_string(&policy_path).expect("auto-queue policy must be readable");
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let _: rquickjs::Value = ctx.eval(r#"agentdesk.registerPolicy = function(_) {};"#).unwrap();
+        let _: rquickjs::Value = ctx.eval(policy.as_str()).unwrap();
+        let captured: String = ctx
+            .eval(
+                r#"
+                (function() {
+                    var activateCalls = [];
+                    agentdesk.autoQueue.activate = function(body) {
+                        activateCalls.push(body);
+                        return { count: 0, dispatched: [] };
+                    };
+
+                    var originalQuery = agentdesk.db.query;
+                    agentdesk.db.query = function(sql, params) {
+                        if (sql.indexOf("SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')") === 0) {
+                            return [{ cnt: 1 }];
+                        }
+                        if (sql.indexOf("SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND COALESCE(thread_group, 0) = ? AND status IN ('pending', 'dispatched')") === 0) {
+                            return [{ cnt: 1 }];
+                        }
+                        if (sql.indexOf("SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (") === 0) {
+                            return [{ cnt: 0 }];
+                        }
+                        return originalQuery.call(agentdesk.db, sql, params);
+                    };
+
+                    continueRunAfterEntry("run-continue", "agent-continue", 3, 0, null);
+                    return JSON.stringify(activateCalls[0] || null);
+                })()
+                "#,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&captured).unwrap();
+        assert_eq!(parsed["run_id"], "run-continue");
+        assert_eq!(parsed["active_only"], true);
+        assert_eq!(parsed["agent_id"], "agent-continue");
+        assert_eq!(parsed["thread_group"], 3);
+    });
+}

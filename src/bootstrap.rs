@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use tracing_subscriber::EnvFilter;
 
 pub(crate) struct BootstrapState {
     pub(crate) config: crate::config::Config,
@@ -7,7 +6,7 @@ pub(crate) struct BootstrapState {
 }
 
 pub(crate) fn initialize() -> Result<BootstrapState> {
-    init_tracing()?;
+    crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();
     let legacy_scan = runtime_root
@@ -51,14 +50,4 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     };
 
     Ok(BootstrapState { config, db })
-}
-
-fn init_tracing() -> Result<()> {
-    let directive = "agentdesk=info"
-        .parse()
-        .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(directive))
-        .init();
-    Ok(())
 }
