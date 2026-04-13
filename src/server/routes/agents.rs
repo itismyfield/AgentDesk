@@ -910,7 +910,7 @@ pub async fn stop_agent_turn(
         &state,
         &session_key,
         false,
-        "turn/stop API invoked",
+        &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
     )
     .await;
     body["agent_id"] = json!(id);

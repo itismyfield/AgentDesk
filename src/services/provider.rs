@@ -526,7 +526,7 @@ impl CancelToken {
             {
                 crate::services::tmux_diagnostics::record_tmux_exit_reason(
                     &name,
-                    "explicit cleanup via cancel_with_tmux_cleanup",
+                    "턴 취소에 의한 tmux 세션 정리",
                 );
                 crate::services::platform::tmux::kill_session(&name);
             }

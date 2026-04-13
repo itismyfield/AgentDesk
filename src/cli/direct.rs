@@ -433,12 +433,14 @@ pub(crate) async fn cmd_auto_queue_activate(
 
 pub(crate) async fn cmd_force_kill(session_key: &str, retry: bool) -> Result<(), String> {
     run_command(false, true, |state| async move {
-        let (status, body) = crate::server::routes::dispatched_sessions::force_kill_session_impl(
-            &state,
-            session_key,
-            retry,
-        )
-        .await;
+        let (status, body) =
+            crate::server::routes::dispatched_sessions::force_kill_session_impl_with_reason(
+                &state,
+                session_key,
+                retry,
+                "CLI force-kill 명령 실행",
+            )
+            .await;
         route_json(status, body)
     })
     .await

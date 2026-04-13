@@ -1081,7 +1081,13 @@ pub(crate) async fn force_kill_session_impl(
     session_key: &str,
     retry: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    force_kill_session_impl_with_reason(state, session_key, retry, "force-kill API invoked").await
+    force_kill_session_impl_with_reason(
+        state,
+        session_key,
+        retry,
+        "force-kill API 직접 호출 (호출자 미상)",
+    )
+    .await
 }
 
 pub(crate) async fn force_kill_session_impl_with_reason(
