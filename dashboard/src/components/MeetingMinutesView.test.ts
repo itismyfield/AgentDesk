@@ -124,6 +124,25 @@ function renderMeetingListMarkup(meetings: RoundTableMeeting[]) {
     ),
   );
 }
+
+function renderEmbeddedMeetingListMarkup(meetings: RoundTableMeeting[]) {
+  installLocalStorage({
+    "climpire.language": "ko",
+    pcd_meeting_fixed_participants: "[]",
+  });
+
+  return renderToStaticMarkup(
+    createElement(
+      I18nProvider,
+      { language: "ko" },
+      createElement(MeetingMinutesView, {
+        meetings,
+        onRefresh: () => {},
+        embedded: true,
+      }),
+    ),
+  );
+}
 describe("pruneFixedParticipantRoleIdsForLoadedChannel", () => {
   it("keeps stored fixed participants while meeting channels are loading", () => {
     const previous = ["td", "pd"];
@@ -269,6 +288,15 @@ describe("MeetingMinutesView rendered meeting cards", () => {
     expect(markup.match(/비판 검토/g) ?? []).toHaveLength(1);
     expect(markup).not.toContain("초안/최종:");
     expect(markup).not.toContain("비판 검토:");
+  });
+
+  it("omits the page header copy in embedded mode", () => {
+    const markup = renderEmbeddedMeetingListMarkup([meeting()]);
+
+    expect(markup).not.toContain(
+      "라운드 테이블 상세와 후속 일감 상태를 함께 관리합니다.",
+    );
+    expect(markup).toContain("새 회의");
   });
 });
 

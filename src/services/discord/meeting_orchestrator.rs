@@ -1429,12 +1429,10 @@ async fn start_meeting_with_reviewer(
         }
     };
 
-    // POST in_progress status to own HTTP server so office view can show active meeting
+    // Persist the in-progress status through the internal API so office view can
+    // show the active meeting even when auth is enabled.
     if let Some(payload) = adk_payload {
-        let port = shared.api_port;
-        tokio::spawn(async move {
-            let _ = post_meeting_status(payload, port).await;
-        });
+        persist_meeting_status(payload).await?;
     }
 
     // Run meeting rounds
@@ -2603,12 +2601,10 @@ async fn save_meeting_record(
     let path = meetings_dir.join(format!("{}_{}.md", date_str, meeting_id));
     fs::write(&path, md)?;
 
-    // POST meeting data to own HTTP server (fire-and-forget, ignore errors)
+    // Persist meeting data through the direct internal API so auth-protected
+    // deployments do not silently drop meeting records.
     if let Some(payload) = adk_payload {
-        let port = shared.api_port;
-        tokio::spawn(async move {
-            let _ = post_meeting_status(payload, port).await;
-        });
+        persist_meeting_status(payload).await?;
     }
 
     Ok(true)
@@ -2687,22 +2683,16 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
     }))
 }
 
-/// POST meeting data to own HTTP server
-async fn post_meeting_status(
+/// Persist meeting data through the internal API without going through
+/// auth-protected HTTP routes.
+async fn persist_meeting_status(
     payload: serde_json::Value,
-    api_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let _ = client
-        .post(crate::config::local_api_url(
-            api_port,
-            "/api/round-table-meetings",
-        ))
-        .json(&payload)
-        .send()
-        .await?;
+    let body: crate::server::routes::meetings::UpsertMeetingBody = serde_json::from_value(payload)?;
+    super::internal_api::upsert_meeting(body)
+        .await
+        .map(|_| ())
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
     Ok(())
 }
 
