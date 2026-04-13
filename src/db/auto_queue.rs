@@ -114,52 +114,83 @@ pub fn update_entry_status_on_conn(
         });
     }
 
-    match normalized {
-        ENTRY_STATUS_PENDING => {
-            conn.execute(
-                "UPDATE auto_queue_entries
+    let rows_affected = match normalized {
+        ENTRY_STATUS_PENDING => conn.execute(
+            "UPDATE auto_queue_entries
                  SET status = 'pending',
                      dispatch_id = NULL,
                      slot_index = NULL,
                      dispatched_at = NULL,
                      completed_at = NULL
-                 WHERE id = ?1",
-                [entry_id],
-            )?;
-        }
-        ENTRY_STATUS_DISPATCHED => {
-            conn.execute(
-                "UPDATE auto_queue_entries
+                 WHERE id = ?1
+                   AND status = ?2",
+            rusqlite::params![entry_id, current.status],
+        )?,
+        ENTRY_STATUS_DISPATCHED => conn.execute(
+            "UPDATE auto_queue_entries
                  SET status = 'dispatched',
                      dispatch_id = ?1,
                      slot_index = ?2,
                      dispatched_at = datetime('now'),
                      completed_at = NULL
-                 WHERE id = ?3",
-                rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id],
-            )?;
-        }
-        ENTRY_STATUS_DONE => {
-            conn.execute(
-                "UPDATE auto_queue_entries
+                 WHERE id = ?3
+                   AND status = ?4",
+            rusqlite::params![
+                effective_dispatch_id,
+                effective_slot_index,
+                entry_id,
+                current.status
+            ],
+        )?,
+        ENTRY_STATUS_DONE => conn.execute(
+            "UPDATE auto_queue_entries
                  SET status = 'done',
                      completed_at = datetime('now')
-                 WHERE id = ?1",
-                [entry_id],
-            )?;
-        }
-        ENTRY_STATUS_SKIPPED => {
-            conn.execute(
-                "UPDATE auto_queue_entries
+                 WHERE id = ?1
+                   AND status = ?2",
+            rusqlite::params![entry_id, current.status],
+        )?,
+        ENTRY_STATUS_SKIPPED => conn.execute(
+            "UPDATE auto_queue_entries
                  SET status = 'skipped',
                      dispatch_id = NULL,
                      dispatched_at = NULL,
                      completed_at = datetime('now')
-                 WHERE id = ?1",
-                [entry_id],
-            )?;
-        }
+                 WHERE id = ?1
+                   AND status = ?2",
+            rusqlite::params![entry_id, current.status],
+        )?,
         _ => unreachable!(),
+    };
+
+    if rows_affected == 0 {
+        let latest = load_entry_status_row(conn, entry_id)?;
+        if entry_status_row_matches_target(
+            &latest,
+            normalized,
+            effective_dispatch_id.as_deref(),
+            effective_slot_index,
+        ) {
+            return Ok(EntryStatusUpdateResult {
+                run_id: latest.run_id,
+                from_status: latest.status,
+                to_status: normalized.to_string(),
+                changed: false,
+            });
+        }
+
+        tracing::warn!(
+            "[auto-queue] stale entry transition blocked {} {} -> {} (source: {})",
+            entry_id,
+            latest.status,
+            normalized,
+            trigger_source
+        );
+        return Err(EntryStatusUpdateError::InvalidTransition {
+            entry_id: entry_id.to_string(),
+            from_status: latest.status,
+            to_status: normalized.to_string(),
+        });
     }
 
     if normalized == ENTRY_STATUS_DISPATCHED {
@@ -961,6 +992,30 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str) -> bool {
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_SKIPPED)
             | (ENTRY_STATUS_DONE, ENTRY_STATUS_DISPATCHED)
     )
+}
+
+fn entry_status_row_matches_target(
+    row: &EntryStatusRow,
+    normalized: &str,
+    effective_dispatch_id: Option<&str>,
+    effective_slot_index: Option<i64>,
+) -> bool {
+    if row.status != normalized {
+        return false;
+    }
+
+    match normalized {
+        ENTRY_STATUS_PENDING => {
+            row.dispatch_id.is_none() && row.slot_index.is_none() && row.completed_at.is_none()
+        }
+        ENTRY_STATUS_DISPATCHED => {
+            row.dispatch_id.as_deref() == effective_dispatch_id
+                && row.slot_index == effective_slot_index
+                && row.completed_at.is_none()
+        }
+        ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => true,
+        _ => false,
+    }
 }
 
 fn release_completed_group_slots_for_run(conn: &Connection, run_id: &str) {
