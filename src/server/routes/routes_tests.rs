@@ -4225,6 +4225,236 @@ async fn force_transition_succeeds_with_correct_channel() {
 }
 
 #[tokio::test]
+async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_up() {
+    crate::pipeline::ensure_loaded();
+    let (repo, _repo_override) = setup_test_repo();
+    let policy_dir = tempfile::tempdir().unwrap();
+    let source_policies = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    for entry in std::fs::read_dir(&source_policies).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+            continue;
+        }
+        std::fs::copy(&path, policy_dir.path().join(entry.file_name())).unwrap();
+    }
+    std::fs::write(
+        policy_dir.path().join("zz-ft-terminal-marker.js"),
+        r#"
+        agentdesk.registerPolicy({
+          name: "ft-terminal-marker",
+          priority: 9999,
+          onCardTerminal: function(payload) {
+            agentdesk.db.execute(
+              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('test_force_terminal_marker', ?1)",
+              [payload.card_id + ":" + payload.status]
+            );
+          }
+        });
+        "#,
+    )
+    .unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    run_git(origin.path(), &["init", "--bare"]);
+    run_git(
+        repo.path(),
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+    );
+    run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+    let worktrees_dir = repo.path().join("worktrees");
+    std::fs::create_dir_all(&worktrees_dir).unwrap();
+    run_git(repo.path(), &["branch", "wt/card-575-force"]);
+
+    let worktree_path = worktrees_dir.join("card-575-force");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            worktree_path.to_str().unwrap(),
+            "wt/card-575-force",
+        ],
+    );
+    std::fs::write(
+        worktree_path.join("feature.txt"),
+        "force transition merge\n",
+    )
+    .unwrap();
+    run_git(worktree_path.as_path(), &["add", "feature.txt"]);
+    run_git(
+        worktree_path.as_path(),
+        &["commit", "-m", "fix: force-transition merge target (#575)"],
+    );
+    std::fs::write(
+        worktree_path.join("merge-proof.txt"),
+        "second force transition merge\n",
+    )
+    .unwrap();
+    run_git(worktree_path.as_path(), &["add", "merge-proof.txt"]);
+    run_git(
+        worktree_path.as_path(),
+        &[
+            "commit",
+            "-m",
+            "fix: second force-transition merge target (#575)",
+        ],
+    );
+
+    let db = test_db();
+    let mut config = crate::config::Config::default();
+    config.policies.dir = policy_dir.path().to_path_buf();
+    let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+    seed_agent(&db, "agent-ft-terminal");
+    seed_repo(&db, "test-repo");
+    set_pmd_channel(&db, "pmd-chan-123");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, created_at, updated_at, started_at
+            ) VALUES (
+                'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test-repo',
+                575, 'dispatch-ft-terminal', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+            ) VALUES (
+                'dispatch-ft-terminal', 'card-ft-terminal', 'agent-ft-terminal', 'implementation', 'dispatched',
+                'live impl', ?1, datetime('now', '-4 minutes'), datetime('now', '-4 minutes')
+            )",
+            [serde_json::json!({
+                "worktree_path": worktree_path.to_string_lossy().to_string(),
+                "worktree_branch": "wt/card-575-force"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router_with_config(db.clone(), engine, config, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-ft-terminal/force-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"done"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["forced"], true);
+    assert_eq!(
+        json["cancelled_dispatches"],
+        serde_json::json!(1),
+        "force-transition to done must cancel the live work dispatch before terminal hooks"
+    );
+
+    let hook_marker: Option<String> = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = 'test_force_terminal_marker'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    };
+    assert_eq!(
+        hook_marker.as_deref(),
+        Some("card-ft-terminal:done"),
+        "force-transition to done must still fire OnCardTerminal hooks"
+    );
+
+    let merge_debug: (Option<String>, Option<String>) = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT state, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None))
+    };
+
+    run_git(repo.path(), &["fetch", "origin", "main"]);
+    let merged_feature = Command::new("git")
+        .args(["show", "origin/main:feature.txt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let merged_proof = Command::new("git")
+        .args(["show", "origin/main:merge-proof.txt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        merged_feature.status.success()
+            && merged_proof.status.success()
+            && String::from_utf8_lossy(&merged_feature.stdout) == "force transition merge\n"
+            && String::from_utf8_lossy(&merged_proof.stdout) == "second force transition merge\n",
+        "force-transition terminal path must still hand merge-automation a usable worktree target; pr_tracking={:?}",
+        merge_debug
+    );
+
+    let conn = db.lock().unwrap();
+    let (card_status, latest_dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ft-terminal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let pr_tracking_state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    assert_eq!(card_status, "done");
+    assert!(
+        latest_dispatch_id.is_none(),
+        "force-transition terminal cleanup must clear stale latest_dispatch_id"
+    );
+    assert_eq!(
+        dispatch_status, "cancelled",
+        "live implementation dispatch must not survive a force-transition to done"
+    );
+    assert_eq!(
+        pr_tracking_state.as_deref(),
+        Some("closed"),
+        "direct merge success should close PR tracking even when the source dispatch never completed"
+    );
+}
+
+#[tokio::test]
 async fn batch_transition_returns_per_card_results_and_transitions_targets() {
     let db = test_db();
     let engine = test_engine(&db);

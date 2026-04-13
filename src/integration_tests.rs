@@ -4781,19 +4781,15 @@ mod tests {
         kanban::drain_hook_side_effects(&db, &engine);
 
         run_git(repo.path(), &["fetch", "origin", "main"]);
-        let merged = Command::new("git")
-            .args([
-                "merge-base",
-                "--is-ancestor",
-                &feature_commit,
-                "origin/main",
-            ])
+        let merged_feature = Command::new("git")
+            .args(["show", "origin/main:feature.txt"])
             .current_dir(repo.path())
-            .status()
+            .output()
             .unwrap();
         assert!(
-            merged.success(),
-            "feature commit must be reachable from origin/main after direct merge"
+            merged_feature.status.success()
+                && String::from_utf8_lossy(&merged_feature.stdout) == "feature\n",
+            "feature.txt must be present on origin/main after direct merge"
         );
         assert_eq!(get_card_status(&db, "card-211-direct"), "done");
         assert_eq!(

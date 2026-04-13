@@ -22,6 +22,8 @@
 //   Set kv: merge_request:{pr_number} = "{owner/repo}"
 //   OnTick5min picks it up and merges (no author check — explicit request)
 
+(function() {
+
 var prTracking = agentdesk.prTracking;
 
 var CODEX_REVIEWERS = {
@@ -206,57 +208,68 @@ function extractRepoFromIssueUrl(url) {
 
 function loadLatestCompletedWorkTarget(cardId) {
   var rows = agentdesk.db.query(
-    "SELECT result, context FROM task_dispatches " +
+    "SELECT id, status, result, context FROM task_dispatches " +
     "WHERE kanban_card_id = ? " +
     "AND dispatch_type IN ('implementation', 'rework') " +
-    "AND status = 'completed' " +
-    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
+    "AND status IN ('completed', 'cancelled', 'dispatched', 'pending') " +
+    "ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC LIMIT 8",
     [cardId]
   );
-  if (rows.length === 0) return null;
 
-  var result = parseJsonObject(rows[0].result);
-  var context = parseJsonObject(rows[0].context);
-  var worktreePath = firstPresent(
-    result.completed_worktree_path,
-    result.worktree_path,
-    context.completed_worktree_path,
-    context.worktree_path
-  );
-  var branch = firstPresent(
-    result.completed_branch,
-    result.worktree_branch,
-    result.branch,
-    context.completed_branch,
-    context.worktree_branch,
-    context.branch
-  );
-  var headSha = firstPresent(
-    result.completed_commit,
-    result.reviewed_commit,
-    context.completed_commit,
-    context.reviewed_commit
-  );
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var result = parseJsonObject(row.result);
+    var context = parseJsonObject(row.context);
+    var worktreePath = firstPresent(
+      result.completed_worktree_path,
+      result.worktree_path,
+      context.completed_worktree_path,
+      context.worktree_path
+    );
+    var branch = firstPresent(
+      result.completed_branch,
+      result.worktree_branch,
+      result.branch,
+      context.completed_branch,
+      context.worktree_branch,
+      context.branch
+    );
+    var headSha = firstPresent(
+      result.completed_commit,
+      result.reviewed_commit,
+      context.completed_commit,
+      context.reviewed_commit
+    );
 
-  if (!branch && worktreePath) {
-    var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
-    if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
-      branch = branchResult.trim();
+    if (!branch && worktreePath) {
+      var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
+      if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
+        branch = branchResult.trim();
+      }
     }
-  }
-  if (!headSha && worktreePath) {
-    var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-    if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
-      headSha = headResult.trim();
+    if (!headSha && worktreePath) {
+      var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+      if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
+        headSha = headResult.trim();
+      }
     }
+
+    if (!worktreePath && !branch && !headSha) {
+      continue;
+    }
+    if (row.status !== "completed") {
+      agentdesk.log.info(
+        "[merge] Card " + cardId + " terminal merge reusing " + row.status + " work dispatch " + row.id
+      );
+    }
+    return {
+      worktree_path: worktreePath,
+      branch: branch,
+      head_sha: headSha
+    };
   }
 
-  if (!worktreePath && !branch && !headSha) return null;
-  return {
-    worktree_path: worktreePath,
-    branch: branch,
-    head_sha: headSha
-  };
+  return null;
 }
 
 function execGitOrThrow(args) {
@@ -1693,3 +1706,5 @@ function notifyAgentMainChannel(agentId, prNum, title) {
 }
 
 agentdesk.registerPolicy(mergeAutomation);
+
+})();
