@@ -1250,19 +1250,26 @@ mod tests {
                 UNIQUE(entry_id, dispatch_id)
             );
             CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
-                run_id          TEXT NOT NULL,
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
                 phase           INTEGER NOT NULL,
                 status          TEXT NOT NULL DEFAULT 'pending',
                 verdict         TEXT,
-                dispatch_id     TEXT UNIQUE,
+                dispatch_id     TEXT REFERENCES task_dispatches(id) ON DELETE CASCADE
+                                    CHECK(dispatch_id IS NULL OR TRIM(dispatch_id) <> ''),
                 pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
                 next_phase      INTEGER,
                 final_phase     INTEGER NOT NULL DEFAULT 0,
-                anchor_card_id  TEXT,
+                anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
                 failure_reason  TEXT,
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
-            );",
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_run_phase_dispatch_key
+                ON auto_queue_phase_gates(run_id, phase, COALESCE(dispatch_id, ''));
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_dispatch_id
+                ON auto_queue_phase_gates(dispatch_id);
+            ",
         )
         .unwrap();
     }
