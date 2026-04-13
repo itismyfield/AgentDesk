@@ -385,6 +385,26 @@ fn apply_review_target_context(
     }
 }
 
+pub(crate) const REVIEW_QUALITY_SCOPE_REMINDER: &str =
+    "기존 DoD/기능 검증과 함께 아래 품질 항목도 반드시 확인하세요.";
+pub(crate) const REVIEW_VERDICT_IMPROVE_GUIDANCE: &str = "기능이 맞더라도 아래 품질 항목에서 실제 문제가 하나라도 보이면 `VERDICT: improve`로 판정하세요.";
+pub(crate) const REVIEW_QUALITY_CHECKLIST: [&str; 5] = [
+    "race condition / 동시성 이슈: 공유 상태 경쟁, TOCTOU, 중복 처리, 순서 역전",
+    "에러 핸들링 누락: unwrap/panic, 빈 catch, 실패·timeout·retry 누락",
+    "edge case: null/빈 배열, 타임아웃, 네트워크 실패, 재시도 후 중복 상태",
+    "리소스 정리 누락: drop, cleanup, stash/worktree/session restore 정리 여부",
+    "기존 코드와의 경로 충돌: 같은 상태를 여러 곳에서 수정하거나 기존 자동화와 상충",
+];
+
+fn inject_review_quality_context(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    obj.entry("review_quality_scope_reminder".to_string())
+        .or_insert_with(|| json!(REVIEW_QUALITY_SCOPE_REMINDER));
+    obj.entry("review_verdict_guidance".to_string())
+        .or_insert_with(|| json!(REVIEW_VERDICT_IMPROVE_GUIDANCE));
+    obj.entry("review_quality_checklist".to_string())
+        .or_insert_with(|| json!(REVIEW_QUALITY_CHECKLIST));
+}
+
 fn inject_review_merge_base_context(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if obj.contains_key("merge_base") {
         return;
@@ -600,6 +620,7 @@ fn build_review_context(
         }
 
         inject_review_merge_base_context(obj);
+        inject_review_quality_context(obj);
 
         // Inject from_provider/target_provider for cross-provider review validation
         if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
@@ -3656,5 +3677,63 @@ mod tests {
                 .contains("repo-root HEAD fallback is unsafe while tracked changes exist"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn review_context_includes_quality_checklist_and_verdict_guidance() {
+        let db = test_db();
+        seed_card(&db, "card-review-quality", "review");
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let completed_commit = crate::services::platform::git_head_commit(repo_dir).unwrap();
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-quality', 'card-review-quality', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": repo_dir,
+                    "completed_branch": "main",
+                    "completed_commit": completed_commit,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-quality", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        let checklist = parsed["review_quality_checklist"]
+            .as_array()
+            .expect("checklist array must exist");
+
+        assert_eq!(
+            parsed["review_quality_scope_reminder"],
+            REVIEW_QUALITY_SCOPE_REMINDER
+        );
+        assert_eq!(
+            parsed["review_verdict_guidance"],
+            REVIEW_VERDICT_IMPROVE_GUIDANCE
+        );
+        assert_eq!(checklist.len(), REVIEW_QUALITY_CHECKLIST.len());
+        assert!(checklist.iter().any(|item| {
+            item.as_str()
+                .unwrap_or_default()
+                .contains("race condition / 동시성 이슈")
+        }));
+        assert!(checklist.iter().any(|item| {
+            item.as_str()
+                .unwrap_or_default()
+                .contains("에러 핸들링 누락")
+        }));
     }
 }

@@ -274,6 +274,35 @@ fn review_dispatch_message_with_branch() {
 }
 
 #[test]
+fn review_dispatch_message_includes_quality_checklist_and_improve_guidance() {
+    let message = format_dispatch_message(
+        "dispatch-quality",
+        "[Review R1] card-1",
+        Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+        Some(19),
+        true,
+        Some("abc12345deadbeef"),
+        Some("codex"),
+        Some("wt/feature-branch"),
+        Some("review"),
+        Some(
+            &serde_json::json!({
+                "review_quality_scope_reminder": crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER,
+                "review_verdict_guidance": crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE,
+                "review_quality_checklist": crate::dispatch::REVIEW_QUALITY_CHECKLIST,
+            })
+            .to_string(),
+        ),
+    );
+
+    assert!(message.contains(crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER));
+    assert!(message.contains("race condition / 동시성 이슈"));
+    assert!(message.contains("에러 핸들링 누락"));
+    assert!(message.contains("리소스 정리 누락"));
+    assert!(message.contains(crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE));
+}
+
+#[test]
 fn review_dispatch_message_with_merge_base_diff_instructions() {
     let message = format_dispatch_message(
         "dispatch-merge-base",

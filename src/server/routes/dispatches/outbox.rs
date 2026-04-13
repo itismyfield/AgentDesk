@@ -818,6 +818,29 @@ pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     )
 }
 
+fn review_quality_checklist(context_json: &serde_json::Value) -> Vec<String> {
+    let checklist = context_json
+        .get("review_quality_checklist")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if checklist.is_empty() {
+        crate::dispatch::REVIEW_QUALITY_CHECKLIST
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect()
+    } else {
+        checklist
+    }
+}
+
 // ── Message formatting ──────────────────────────────────────────
 
 pub(super) fn format_dispatch_message(
@@ -929,6 +952,20 @@ pub(super) fn format_dispatch_message(
                 ));
             }
         }
+        let review_scope_reminder = context_json
+            .get("review_quality_scope_reminder")
+            .and_then(|value| value.as_str())
+            .unwrap_or(crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER);
+        let review_verdict_guidance = context_json
+            .get("review_verdict_guidance")
+            .and_then(|value| value.as_str())
+            .unwrap_or(crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE);
+        let quality_checklist = review_quality_checklist(&context_json);
+        message.push_str(&format!("\n\n{review_scope_reminder}"));
+        for item in quality_checklist {
+            message.push_str(&format!("\n- {item}"));
+        }
+        message.push_str(&format!("\n{review_verdict_guidance}"));
         // Append verdict API call instructions for the counter-model reviewer
         let commit_arg = reviewed_commit
             .map(|c| format!(r#","commit":"{}""#, c))
