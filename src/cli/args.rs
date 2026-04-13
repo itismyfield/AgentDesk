@@ -308,6 +308,9 @@ pub(crate) enum Commands {
         path: String,
         /// Optional JSON body
         body: Option<String>,
+        /// Repeatable custom header, e.g. --header 'X-Channel-Id:1234567890'
+        #[arg(long = "header", value_name = "NAME:VALUE")]
+        headers: Vec<String>,
     },
     /// List session termination events
     Terminations {
