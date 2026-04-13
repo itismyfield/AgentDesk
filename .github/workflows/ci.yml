@@ -89,7 +89,7 @@ jobs:
             ${{ runner.os }}-cargo-recovery-
 
       - name: High-risk recovery lane
-        run: cargo test --bin agentdesk high_risk_recovery::
+        run: "cargo test --bin agentdesk high_risk_recovery::"
         env:
           RUST_BACKTRACE: 1
 
