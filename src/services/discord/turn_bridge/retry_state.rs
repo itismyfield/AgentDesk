@@ -26,6 +26,35 @@ pub(super) fn should_reset_gemini_retry_attempt_state(
         || has_post_tool_text
 }
 
+fn normalized_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
+    let mut offset = response_sent_offset.min(full_response.len());
+    while offset > 0 && !full_response.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+pub(super) fn sync_response_delivery_state(
+    full_response: &str,
+    response_sent_offset: &mut usize,
+    inflight_state: &mut InflightTurnState,
+) {
+    *response_sent_offset = normalized_response_sent_offset(full_response, *response_sent_offset);
+    inflight_state.full_response = full_response.to_string();
+    inflight_state.response_sent_offset = *response_sent_offset;
+}
+
+pub(super) fn clear_response_delivery_state(
+    full_response: &mut String,
+    response_sent_offset: &mut usize,
+    inflight_state: &mut InflightTurnState,
+) {
+    full_response.clear();
+    *response_sent_offset = 0;
+    inflight_state.full_response.clear();
+    inflight_state.response_sent_offset = 0;
+}
+
 pub(super) fn reset_gemini_retry_attempt_state(
     full_response: &mut String,
     current_tool_line: &mut Option<String>,
@@ -37,20 +66,17 @@ pub(super) fn reset_gemini_retry_attempt_state(
     response_sent_offset: &mut usize,
     inflight_state: &mut InflightTurnState,
 ) {
-    full_response.clear();
+    clear_response_delivery_state(full_response, response_sent_offset, inflight_state);
     *current_tool_line = None;
     *prev_tool_status = None;
     *last_tool_name = None;
     *last_tool_summary = None;
     *any_tool_used = false;
     *has_post_tool_text = false;
-    *response_sent_offset = 0;
-    inflight_state.full_response.clear();
     inflight_state.current_tool_line = None;
     inflight_state.prev_tool_status = None;
     inflight_state.any_tool_used = false;
     inflight_state.has_post_tool_text = false;
-    inflight_state.response_sent_offset = 0;
 }
 
 pub(super) fn handle_gemini_retry_boundary(

@@ -10,8 +10,9 @@ use super::memory_lifecycle::{
     spawn_memory_capture_task, take_memento_reflect_request,
 };
 use super::retry_state::{
-    clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
-    should_reset_gemini_retry_attempt_state,
+    clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
+    reset_gemini_retry_attempt_state, should_reset_gemini_retry_attempt_state,
+    sync_response_delivery_state,
 };
 use super::skill_usage::extract_skill_id_from_tool_use;
 use super::stale_resume::{
@@ -572,6 +573,70 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     assert!(!inflight_state.any_tool_used);
     assert!(!inflight_state.has_post_tool_text);
     assert_eq!(inflight_state.response_sent_offset, 0);
+}
+
+#[test]
+fn clear_response_delivery_state_resets_offset_for_handoff_cleanup() {
+    let mut full_response = "partial answer".to_string();
+    let mut response_sent_offset = 42usize;
+    let mut inflight_state = InflightTurnState::new(
+        ProviderKind::Gemini,
+        1479671298497183835,
+        Some("adk-gm".to_string()),
+        343742347365974026,
+        1,
+        2,
+        "resume me".to_string(),
+        Some("latest".to_string()),
+        Some("AgentDesk-gemini-adk-gm".to_string()),
+        Some("/tmp/out.jsonl".to_string()),
+        Some("/tmp/in.fifo".to_string()),
+        0,
+    );
+    inflight_state.full_response = full_response.clone();
+    inflight_state.response_sent_offset = response_sent_offset;
+
+    clear_response_delivery_state(
+        &mut full_response,
+        &mut response_sent_offset,
+        &mut inflight_state,
+    );
+
+    assert!(full_response.is_empty());
+    assert_eq!(response_sent_offset, 0);
+    assert!(inflight_state.full_response.is_empty());
+    assert_eq!(inflight_state.response_sent_offset, 0);
+}
+
+#[test]
+fn sync_response_delivery_state_clamps_offset_after_api_friction_cleanup() {
+    let full_response = "응답".to_string();
+    let mut response_sent_offset = 5usize;
+    let mut inflight_state = InflightTurnState::new(
+        ProviderKind::Gemini,
+        1479671298497183835,
+        Some("adk-gm".to_string()),
+        343742347365974026,
+        1,
+        2,
+        "resume me".to_string(),
+        Some("latest".to_string()),
+        Some("AgentDesk-gemini-adk-gm".to_string()),
+        Some("/tmp/out.jsonl".to_string()),
+        Some("/tmp/in.fifo".to_string()),
+        0,
+    );
+    inflight_state.response_sent_offset = 99;
+
+    sync_response_delivery_state(
+        &full_response,
+        &mut response_sent_offset,
+        &mut inflight_state,
+    );
+
+    assert_eq!(response_sent_offset, 3);
+    assert_eq!(inflight_state.full_response, full_response);
+    assert_eq!(inflight_state.response_sent_offset, 3);
 }
 
 #[test]

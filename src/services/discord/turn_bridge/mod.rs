@@ -45,7 +45,8 @@ use memory_lifecycle::{
 };
 use recall_feedback::{analyze_recall_feedback_turn, submit_pending_feedbacks};
 use retry_state::{
-    clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
+    clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
+    reset_session_for_auto_retry, sync_response_delivery_state,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
@@ -1080,7 +1081,11 @@ pub(super) fn spawn_turn_bridge(
                     false
                 };
                 if handed_off {
-                    full_response = String::new();
+                    clear_response_delivery_state(
+                        &mut full_response,
+                        &mut response_sent_offset,
+                        &mut inflight_state,
+                    );
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] ↻ Recovery session died — queued internal handoff instead of Discord auto-retry (channel {})",
@@ -1361,7 +1366,11 @@ pub(super) fn spawn_turn_bridge(
             if !late_api_friction.reports.is_empty() {
                 api_friction_reports.extend(late_api_friction.reports);
                 full_response = late_api_friction.cleaned_response;
-                inflight_state.full_response = full_response.clone();
+                sync_response_delivery_state(
+                    &full_response,
+                    &mut response_sent_offset,
+                    &mut inflight_state,
+                );
             }
             for error in late_api_friction.parse_errors {
                 let ts = chrono::Local::now().format("%H:%M:%S");
