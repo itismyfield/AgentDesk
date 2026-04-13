@@ -209,6 +209,7 @@ impl TurnGateway for DiscordGateway {
                 true,
                 has_more_queued_turns,
                 true,
+                intervention.merge_consecutive,
                 intervention.reply_context.clone(),
             )
             .await
