@@ -147,7 +147,7 @@ export function RankBadge({ xp, size = "default" }: { xp: number; size?: "defaul
   return (
     <span
       className={cx(
-        "inline-flex items-center font-black uppercase tracking-wider",
+        "inline-flex items-center font-black uppercase tracking-widest",
         size === "large" ? dashboardBadge.large : dashboardBadge.default,
       )}
       style={{

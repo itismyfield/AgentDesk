@@ -1,7 +1,7 @@
 import AgentAvatar from "../AgentAvatar";
 import type { Agent } from "../../types";
 import { getRankTier, RankBadge, XpBar, type TFunction } from "./model";
-import { cx, dashboardBadge, dashboardCard } from "./ui";
+import { cx, dashboardBadge, dashboardCard, dashboardText } from "./ui";
 
 export interface HudStat {
   id: string;
@@ -76,7 +76,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
           />
           <div className="relative flex items-center justify-between">
             <div className="min-w-0">
-              <p className="text-xs sm:text-xs font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] truncate" style={{ color: "var(--th-text-muted)" }}>
+              <p className={cx(dashboardText.label, "truncate")} style={{ color: "var(--th-text-muted)" }}>
                 {stat.label}
               </p>
               <p
@@ -142,7 +142,7 @@ export function DashboardRankingBoard({
             🏆
           </span>
           <div>
-            <h2 className="dashboard-ranking-gradient text-lg font-black uppercase tracking-wider">
+            <h2 className="dashboard-ranking-gradient text-lg font-black uppercase tracking-widest">
               {t({ ko: "랭킹 보드", en: "RANKING BOARD", ja: "ランキングボード", zh: "排行榜" })}
             </h2>
             <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
