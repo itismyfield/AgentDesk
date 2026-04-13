@@ -85,7 +85,6 @@ fn selection_reason_needs_fallback(value: Option<&str>) -> bool {
         || (reason.starts_with("안건의 ")
             && reason.contains("축을 기준으로")
             && reason.contains("조합으로 정리했어"))
-        || (!reason.contains('(') && reason.chars().count() <= 48)
 }
 
 fn tokenize_selection_reason_text(text: &str) -> Vec<String> {
@@ -112,14 +111,7 @@ fn tokenize_selection_reason_text(text: &str) -> Vec<String> {
 }
 
 fn compact_reason_fragment(value: &str) -> String {
-    let trimmed = value.trim();
-    let mut chars = trimmed.chars();
-    let compact: String = chars.by_ref().take(24).collect();
-    if chars.next().is_some() {
-        format!("{compact}…")
-    } else {
-        compact
-    }
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn clean_reason_signal_fragment(value: &str) -> Option<String> {
@@ -1808,6 +1800,21 @@ mod tests {
             build_meeting_start_command("일반 안건", None),
             "/meeting start 일반 안건"
         );
+    }
+
+    #[test]
+    fn short_human_selection_reason_does_not_need_fallback() {
+        assert!(!selection_reason_needs_fallback(Some("초기 조합 선정")));
+        assert!(!selection_reason_needs_fallback(Some(
+            "후속 업데이트에서도 선정 사유 유지"
+        )));
+    }
+
+    #[test]
+    fn compact_reason_fragment_preserves_full_text_without_ellipsis() {
+        let fragment = compact_reason_fragment("긴   선정   사유   문장 전체");
+        assert_eq!(fragment, "긴 선정 사유 문장 전체");
+        assert!(!fragment.contains('…'));
     }
 
     #[test]
