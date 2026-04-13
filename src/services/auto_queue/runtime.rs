@@ -146,10 +146,24 @@ pub async fn reset_slot_thread_bindings(
     agent_id: &str,
     slot_index: i64,
 ) -> Result<(usize, usize, usize), String> {
+    reset_slot_thread_bindings_excluding(db, agent_id, slot_index, None).await
+}
+
+pub async fn reset_slot_thread_bindings_excluding(
+    db: &Db,
+    agent_id: &str,
+    slot_index: i64,
+    exclude_dispatch_id: Option<&str>,
+) -> Result<(usize, usize, usize), String> {
     let conn = db
         .separate_conn()
         .map_err(|err| format!("db open failed for slot reset: {err}"))?;
-    if crate::db::auto_queue::slot_has_active_dispatch(&conn, agent_id, slot_index) {
+    if crate::db::auto_queue::slot_has_active_dispatch_excluding(
+        &conn,
+        agent_id,
+        slot_index,
+        exclude_dispatch_id,
+    ) {
         return Err(format!(
             "slot {slot_index} for agent {agent_id} has active dispatch"
         ));

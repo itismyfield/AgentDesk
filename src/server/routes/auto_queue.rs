@@ -2861,12 +2861,11 @@ pub(crate) fn activate_with_deps(
                 drop(conn);
             }
 
-            if recovered_state
-                .as_ref()
-                .is_some_and(ActivateCardState::has_active_dispatch)
-            {
+            if recovered_state.as_ref().is_some_and(|state| {
+                state.latest_dispatch_id.is_some() || state.status != post_walk.status
+            }) {
                 tracing::warn!(
-                    "[auto-queue] create_dispatch errored for entry {} but card recovered active dispatch status={} latest_dispatch_id={:?} latest_dispatch_status={:?}; keeping reservation",
+                    "[auto-queue] create_dispatch errored for entry {} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
                     entry_id,
                     recovered_state
                         .as_ref()
@@ -2874,10 +2873,7 @@ pub(crate) fn activate_with_deps(
                         .unwrap_or("unknown"),
                     recovered_state
                         .as_ref()
-                        .and_then(|state| state.latest_dispatch_id.as_ref()),
-                    recovered_state
-                        .as_ref()
-                        .and_then(|state| state.latest_dispatch_status.as_deref())
+                        .and_then(|state| state.latest_dispatch_id.as_ref())
                 );
                 continue;
             }

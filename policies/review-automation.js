@@ -383,9 +383,19 @@ function extractRepoFromIssueUrl(url) {
   return prTracking.extractRepoFromIssueUrl(url);
 }
 
-function extractDispatchTarget(row) {
-  var result = parseJsonObject(row && row.result);
-  var context = parseJsonObject(row && row.context);
+function loadLatestCompletedWorkTarget(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT result, context FROM task_dispatches " +
+    "WHERE kanban_card_id = ? " +
+    "AND dispatch_type IN ('implementation', 'rework') " +
+    "AND status = 'completed' " +
+    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
+    [cardId]
+  );
+  if (rows.length === 0) return null;
+
+  var result = parseJsonObject(rows[0].result);
+  var context = parseJsonObject(rows[0].context);
   var worktreePath = firstPresent(
     result.completed_worktree_path,
     result.worktree_path,
@@ -403,10 +413,8 @@ function extractDispatchTarget(row) {
   var headSha = firstPresent(
     result.completed_commit,
     result.reviewed_commit,
-    result.head_sha,
     context.completed_commit,
-    context.reviewed_commit,
-    context.head_sha
+    context.reviewed_commit
   );
 
   if (!branch && worktreePath) {
@@ -428,24 +436,6 @@ function extractDispatchTarget(row) {
     branch: branch,
     head_sha: headSha
   };
-}
-
-function loadLatestCompletedDispatchTarget(cardId, dispatchTypes) {
-  var placeholders = dispatchTypes.map(function() { return "?"; }).join(",");
-  var rows = agentdesk.db.query(
-    "SELECT result, context FROM task_dispatches " +
-    "WHERE kanban_card_id = ? " +
-    "AND dispatch_type IN (" + placeholders + ") " +
-    "AND status = 'completed' " +
-    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
-    [cardId].concat(dispatchTypes)
-  );
-  return rows.length > 0 ? extractDispatchTarget(rows[0]) : null;
-}
-
-function loadLatestCompletedWorkTarget(cardId) {
-  return loadLatestCompletedDispatchTarget(cardId, ["implementation", "rework"])
-    || loadLatestCompletedDispatchTarget(cardId, ["review", "review-decision"]);
 }
 
 function loadPrTracking(cardId) {

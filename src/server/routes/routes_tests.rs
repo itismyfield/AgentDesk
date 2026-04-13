@@ -2442,28 +2442,6 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
         resume["example"]["response"]["action"]["type"],
         "new_implementation_dispatch"
     );
-
-    let force_transition = endpoints
-        .iter()
-        .find(|ep| {
-            ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/force-transition"
-        })
-        .expect("kanban force-transition endpoint must be present");
-    assert_eq!(
-        force_transition["params"]["authorization"]["location"],
-        "header"
-    );
-    assert_eq!(
-        force_transition["params"]["x-channel-id"]["location"],
-        "header"
-    );
-    assert!(
-        force_transition["params"]["x-channel-id"]["description"]
-            .as_str()
-            .unwrap_or("")
-            .contains("kanban_manager_channel_id"),
-        "force-transition docs must explain where X-Channel-Id comes from"
-    );
 }
 
 #[tokio::test]

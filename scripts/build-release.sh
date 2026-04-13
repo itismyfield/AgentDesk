@@ -132,7 +132,11 @@ mkdir -p "$STAGING"
 cp "$BINARY" "$STAGING/"
 chmod +x "$STAGING/$BINARY_NAME"
 
-# Dashboard
+# Dashboard — rebuild to ensure dist matches current source
+if [ -d "dashboard" ] && command -v npm &>/dev/null; then
+  echo "▸ Building dashboard..."
+  (cd dashboard && npm run build --silent)
+fi
 if [ -d "dashboard/dist" ]; then
   mkdir -p "$STAGING/dashboard"
   cp -r dashboard/dist "$STAGING/dashboard/dist"

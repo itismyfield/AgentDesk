@@ -425,8 +425,8 @@ impl MementoBackend {
         args.insert("relevant".to_string(), json!(request.relevant));
         args.insert("sufficient".to_string(), json!(request.sufficient));
 
-        insert_optional_arg(&mut args, "session_id", request.session_id);
-        insert_optional_arg(&mut args, "search_event_id", request.search_event_id);
+        insert_optional_arg(&mut args, "sessionId", request.session_id);
+        insert_optional_arg(&mut args, "searchEventId", request.search_event_id);
 
         let fragment_ids = request
             .fragment_ids
@@ -435,12 +435,12 @@ impl MementoBackend {
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>();
         if !fragment_ids.is_empty() {
-            args.insert("fragment_ids".to_string(), json!(fragment_ids));
+            args.insert("fragmentIds".to_string(), json!(fragment_ids));
         }
 
         insert_optional_arg(&mut args, "suggestion", request.suggestion);
         insert_optional_arg(&mut args, "context", request.context);
-        insert_optional_arg(&mut args, "trigger_type", request.trigger_type);
+        insert_optional_arg(&mut args, "triggerType", request.trigger_type);
 
         self.call_tool(&config, "tool_feedback", Value::Object(args))
             .await
@@ -1710,10 +1710,10 @@ mod tests {
         assert!(requests[1].contains("\"tool_name\":\"recall\""));
         assert!(requests[1].contains("\"relevant\":true"));
         assert!(requests[1].contains("\"sufficient\":false"));
-        assert!(requests[1].contains("\"session_id\":\"session-1\""));
-        assert!(requests[1].contains("\"search_event_id\":\"search-1\""));
-        assert!(requests[1].contains("\"fragment_ids\":[\"frag-1\",\"frag-2\"]"));
-        assert!(requests[1].contains("\"trigger_type\":\"automatic\""));
+        assert!(requests[1].contains("\"sessionId\":\"session-1\""));
+        assert!(requests[1].contains("\"searchEventId\":\"search-1\""));
+        assert!(requests[1].contains("\"fragmentIds\":[\"frag-1\",\"frag-2\"]"));
+        assert!(requests[1].contains("\"triggerType\":\"automatic\""));
         assert_eq!(
             usage,
             crate::services::memory::TokenUsage {

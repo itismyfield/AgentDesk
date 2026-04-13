@@ -1469,19 +1469,7 @@ var timeouts = {
         );
 
         var agentContext = resolveSessionAgentContext(s, agents);
-        var primaryChannel = agentContext.agent_id ? agentdesk.agents.resolvePrimaryChannel(agentContext.agent_id) : null;
-        var notifyTarget = primaryChannel ? ("channel:" + primaryChannel) : getPMDChannel();
-        if (notifyTarget) {
-          sendNotifyAlert(
-            notifyTarget,
-            "💤 [Idle 세션 자동 종료] " + agentContext.agent_label + "\n" +
-            "agent_id: `" + (agentContext.agent_id || "unknown") + "`\n" +
-            "provider: `" + (s.provider || "unknown") + "`\n" +
-            "session_key: `" + s.session_key + "`\n" +
-            "idle: `" + idleMin + "분`\n" +
-            "원인: " + reasonLabel + " → tmux kill"
-          );
-        }
+        agentdesk.log.info("[timeouts] idle kill: " + (agentContext.agent_id || "unknown") + " idle=" + idleMin + "m reason=" + reasonLabel);
       }
     }
 

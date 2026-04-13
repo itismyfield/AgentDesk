@@ -7,8 +7,8 @@ use crate::db::agents::{
     resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
     resolve_agent_primary_channel_on_conn,
 };
-use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch};
-use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
+use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch_excluding};
+use crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding;
 use rusqlite::OptionalExtension;
 use std::sync::OnceLock;
 
@@ -485,7 +485,7 @@ fn allocate_manual_slot_binding(
 ) -> Option<SlotThreadBinding> {
     for slot_index in 0..SLOT_THREAD_MAX_SLOTS {
         ensure_agent_slot_pool_rows(conn, agent_id, slot_index + 1).ok()?;
-        if slot_has_active_dispatch(conn, agent_id, slot_index) {
+        if slot_has_active_dispatch_excluding(conn, agent_id, slot_index, Some(dispatch_id)) {
             continue;
         }
         persist_dispatch_slot_index(conn, dispatch_id, slot_index).ok()?;
@@ -679,7 +679,13 @@ async fn reset_stale_slot_thread_if_needed(
         total_message_sent,
         age_limit_hit,
     );
-    reset_slot_thread_bindings(db, &slot_binding.agent_id, slot_binding.slot_index).await?;
+    reset_slot_thread_bindings_excluding(
+        db,
+        &slot_binding.agent_id,
+        slot_binding.slot_index,
+        Some(dispatch_id),
+    )
+    .await?;
     Ok(true)
 }
 
