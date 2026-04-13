@@ -1541,7 +1541,10 @@ mod tests {
         let (status, body) = force_kill_session(
             State(state),
             Path("host:codex-agent-force".to_string()),
-            Json(ForceKillOptions { retry: true }),
+            Json(ForceKillOptions {
+                retry: true,
+                reason: None,
+            }),
         )
         .await;
 
@@ -1703,7 +1706,10 @@ mod tests {
         let (status, body) = force_kill_session(
             State(state),
             Path(session_key.clone()),
-            Json(ForceKillOptions { retry: false }),
+            Json(ForceKillOptions {
+                retry: false,
+                reason: None,
+            }),
         )
         .await;
 
