@@ -454,7 +454,10 @@ mod outbox_boundary {
         );
 
         // Verify notify row is done and a follow-up status sync row is queued.
-        assert_eq!(outbox_status_for_action(&db, "d-160-1", "notify"), vec!["done"]);
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160-1", "notify"),
+            vec!["done"]
+        );
         assert_eq!(
             outbox_status_for_action(&db, "d-160-1", "status_reaction"),
             vec!["pending"]
@@ -467,8 +470,15 @@ mod outbox_boundary {
 
         // Second batch drains the queued status reaction.
         let processed2 = process_outbox_batch(&db, &mock).await;
-        assert_eq!(processed2, 1, "status reaction should be processed on next drain");
-        assert_eq!(mock.notify_count(), 1, "No additional notify calls after dispatch");
+        assert_eq!(
+            processed2, 1,
+            "status reaction should be processed on next drain"
+        );
+        assert_eq!(
+            mock.notify_count(),
+            1,
+            "No additional notify calls after dispatch"
+        );
         assert!(
             mock.call_log().contains(&MockCall::StatusReaction {
                 dispatch_id: "d-160-1".into(),
@@ -591,17 +601,26 @@ mod outbox_boundary {
         );
 
         // Notify rows are done and each dispatch gets a queued status sync.
-        assert_eq!(outbox_status_for_action(&db, "d-160o-a", "notify"), vec!["done"]);
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-a", "notify"),
+            vec!["done"]
+        );
         assert_eq!(
             outbox_status_for_action(&db, "d-160o-a", "status_reaction"),
             vec!["pending"]
         );
-        assert_eq!(outbox_status_for_action(&db, "d-160o-b", "notify"), vec!["done"]);
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-b", "notify"),
+            vec!["done"]
+        );
         assert_eq!(
             outbox_status_for_action(&db, "d-160o-b", "status_reaction"),
             vec!["pending"]
         );
-        assert_eq!(outbox_status_for_action(&db, "d-160o-c", "notify"), vec!["done"]);
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-c", "notify"),
+            vec!["done"]
+        );
         assert_eq!(
             outbox_status_for_action(&db, "d-160o-c", "status_reaction"),
             vec!["pending"]
