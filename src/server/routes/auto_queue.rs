@@ -1059,6 +1059,11 @@ fn dependency_inline_regex() -> &'static regex::Regex {
     })
 }
 
+fn markdown_header_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^#{1,6}\s").expect("markdown header regex must compile"))
+}
+
 fn bare_dependency_list_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1151,7 +1156,7 @@ fn extract_dependency_numbers_from_text(
             continue;
         }
 
-        if trimmed_line.starts_with('#') && active_section.is_some() {
+        if active_section.is_some() && markdown_header_regex().is_match(trimmed_line) {
             active_section = None;
         }
 
@@ -4353,6 +4358,26 @@ mod tests {
                 .iter()
                 .any(|signal| signal == "metadata:json:depends_on"),
             "json-based dependency extraction should be recorded in signals"
+        );
+    }
+
+    #[test]
+    fn extract_dependency_numbers_keeps_section_open_for_issue_ref_lines() {
+        let card = candidate(
+            497,
+            "medium",
+            Some("## 선행 작업\n#494\n- #495\n## 컨텍스트\n#493"),
+            None,
+        );
+
+        let parsed = extract_dependency_parse_result(&card);
+        assert_eq!(parsed.numbers, vec![494, 495]);
+        assert!(
+            parsed
+                .signals
+                .iter()
+                .any(|signal| signal.contains("description:section:## 선행 작업")),
+            "issue-ref lines inside dependency sections must remain section-scoped"
         );
     }
 
