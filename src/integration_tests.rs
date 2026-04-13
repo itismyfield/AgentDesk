@@ -1693,6 +1693,189 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auto_queue_activate_concurrent_calls_dispatch_once() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+                 VALUES ('card-aq-concurrent', 'AQ Concurrent', 'ready', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-aq-concurrent', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+                 VALUES ('entry-aq-concurrent', 'run-aq-concurrent', 'card-aq-concurrent', 'agent-1', 'pending', 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            db.clone(),
+            engine.clone(),
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let make_worker = || {
+            let deps = deps.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                crate::server::routes::auto_queue::activate_with_deps(
+                    &deps,
+                    crate::server::routes::auto_queue::ActivateBody {
+                        run_id: Some("run-aq-concurrent".to_string()),
+                        repo: None,
+                        agent_id: None,
+                        thread_group: None,
+                        unified_thread: None,
+                        active_only: Some(true),
+                    },
+                )
+            })
+        };
+
+        let first_handle = make_worker();
+        let second_handle = make_worker();
+        let first = first_handle.join().unwrap();
+        let second = second_handle.join().unwrap();
+        assert_eq!(first.0, axum::http::StatusCode::OK);
+        assert_eq!(second.0, axum::http::StatusCode::OK);
+
+        let total_dispatched =
+            first.1.0["count"].as_u64().unwrap_or(0) + second.1.0["count"].as_u64().unwrap_or(0);
+        assert_eq!(
+            total_dispatched, 1,
+            "concurrent activate must reserve and dispatch the entry exactly once"
+        );
+
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-concurrent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (card_status, latest_dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-concurrent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let dispatch_status: Option<String> =
+            latest_dispatch_id.as_deref().and_then(|dispatch_id| {
+                conn.query_row(
+                    "SELECT status FROM task_dispatches WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .ok()
+            });
+        let entry_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_count, 1, "only one dispatch row must be created");
+        assert_eq!(
+            card_status, "in_progress",
+            "concurrent activate must leave the card on the active implementation path"
+        );
+        assert_eq!(
+            dispatch_status.as_deref(),
+            Some("pending"),
+            "the surviving dispatch must remain pending after concurrent activation"
+        );
+        assert_eq!(
+            entry_status, "dispatched",
+            "the shared entry must remain dispatched after the winning activate call"
+        );
+        assert_eq!(
+            entry_dispatch_id, latest_dispatch_id,
+            "recovered concurrent activate must keep the entry attached to the surviving dispatch"
+        );
+    }
+
+    #[test]
+    fn auto_queue_on_tick_recovers_orphan_dispatched_entry_to_pending() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-aq-orphan", "in_progress");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-aq-orphan', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-aq-orphan', 'run-aq-orphan', 'card-aq-orphan', 'agent-1', 'dispatched', 0, datetime('now', '-5 minutes'), datetime('now', '-5 minutes'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let (status, dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-orphan'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let transition_source: String = conn
+            .query_row(
+                "SELECT trigger_source FROM auto_queue_entry_transitions \
+                 WHERE entry_id = 'entry-aq-orphan' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert!(
+            dispatch_id.is_none(),
+            "orphan recovery must not invent a replacement dispatch id"
+        );
+        assert_eq!(
+            transition_source, "tick_recovery",
+            "orphan recovery should record the periodic recovery source"
+        );
+    }
+
     // ── Scenario 6: Dispatch roundtrip — create → complete_dispatch → PM gate → review ──
     //
     // Tests the full dispatch lifecycle using the canonical completion path:
@@ -3189,6 +3372,220 @@ mod tests {
         assert_eq!(phase_gate_json["status"], "pending");
         assert_eq!(phase_gate_json["batch_phase"], 1);
         assert_eq!(phase_gate_json["next_phase"], 2);
+    }
+
+    #[tokio::test]
+    async fn auto_queue_phase_gate_blocks_resume_then_completes_final_run_on_pass() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-phase-final", "done");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-final', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let phase_gate_dispatch = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-phase-final",
+            "agent-1",
+            "phase-gate",
+            "[phase-gate P2] Final",
+            &json!({
+                "auto_queue": true,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-phase-final",
+                    "batch_phase": 2,
+                    "next_phase": serde_json::Value::Null,
+                    "final_phase": true,
+                    "pass_verdict": "phase_gate_passed",
+                    "expected_gate_count": 1
+                }
+            }),
+        )
+        .expect("phase gate dispatch should be created");
+        let phase_gate_dispatch_id = phase_gate_dispatch["id"].as_str().unwrap().to_string();
+        set_kv(
+            &db,
+            "aq_phase_gate:run-phase-final:2",
+            &json!({
+                "run_id": "run-phase-final",
+                "batch_phase": 2,
+                "next_phase": serde_json::Value::Null,
+                "final_phase": true,
+                "anchor_card_id": "card-phase-final",
+                "status": "pending",
+                "dispatch_ids": [phase_gate_dispatch_id.clone()],
+                "created_at": "2026-04-13T00:00:00Z"
+            })
+            .to_string(),
+        );
+
+        let state = AppState::test_state(db.clone(), engine.clone());
+        let (resume_status, resume_body) =
+            crate::server::routes::auto_queue::resume_run(axum::extract::State(state)).await;
+        assert_eq!(resume_status, axum::http::StatusCode::OK);
+        assert_eq!(resume_body.0["resumed_runs"].as_u64(), Some(0));
+        assert_eq!(resume_body.0["blocked_runs"].as_u64(), Some(1));
+        assert_eq!(
+            kv_value(&db, "aq_phase_gate:run-phase-final:2").is_some(),
+            true,
+            "resume must leave the blocking phase gate untouched"
+        );
+
+        let completed = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &phase_gate_dispatch_id,
+            &json!({
+                "verdict": "phase_gate_passed",
+                "summary": "phase gate approved"
+            }),
+        )
+        .expect("phase gate completion should succeed");
+        assert_eq!(completed["status"], "completed");
+
+        let run_status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-final'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            run_status, "completed",
+            "final phase-gate pass should resume and complete the paused run"
+        );
+        assert!(
+            kv_value(&db, "aq_phase_gate:run-phase-final:2").is_none(),
+            "successful gate completion must clear the persisted phase gate state"
+        );
+    }
+
+    #[test]
+    fn auto_queue_cancel_releases_slots_and_clears_linked_sessions() {
+        let db = test_db();
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-cancel-live", "in_progress");
+        seed_card(&db, "card-cancel-pending", "ready");
+        seed_dispatch(
+            &db,
+            "dispatch-cancel-live",
+            "card-cancel-live",
+            "implementation",
+            "dispatched",
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-cancel-cleanup', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-cancel-live', 'run-cancel-cleanup', 'card-cancel-live', 'agent-1', 'dispatched', 'dispatch-cancel-live', 0, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, slot_index, priority_rank, created_at) \
+                 VALUES ('entry-cancel-pending', 'run-cancel-cleanup', 'card-cancel-pending', 'agent-1', 'pending', 0, 1, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map) \
+                 VALUES ('agent-1', 0, 'run-cancel-cleanup', 0, '{\"main\":\"9001\"}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, active_dispatch_id, last_heartbeat) \
+                 VALUES ('test-slot-session', 'agent-1', 'codex', 'working', '9001', 'dispatch-cancel-live', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = db.separate_conn().expect("separate conn");
+        let body = crate::server::routes::auto_queue::cancel_with_conn(None, &conn);
+        assert_eq!(body["cancelled_runs"].as_u64(), Some(1));
+        assert_eq!(body["cancelled_dispatches"].as_u64(), Some(1));
+        assert_eq!(body["cancelled_entries"].as_u64(), Some(2));
+        assert_eq!(body["released_slots"].as_u64(), Some(1));
+        assert_eq!(body["cleared_slot_sessions"].as_u64(), Some(1));
+        drop(conn);
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-cleanup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let entry_statuses: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT id, status FROM auto_queue_entries WHERE run_id = 'run-cancel-cleanup' ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let (assigned_run_id, assigned_thread_group): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group FROM auto_queue_slots \
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (session_status, active_dispatch_id, session_info): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, session_info FROM sessions WHERE session_key = 'test-slot-session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-cancel-live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(run_status, "cancelled");
+        assert_eq!(
+            entry_statuses,
+            vec![
+                ("entry-cancel-live".to_string(), "skipped".to_string()),
+                ("entry-cancel-pending".to_string(), "skipped".to_string()),
+            ],
+            "cancel should skip both in-flight and pending entries after cleanup"
+        );
+        assert_eq!(dispatch_status, "cancelled");
+        assert!(assigned_run_id.is_none());
+        assert!(assigned_thread_group.is_none());
+        assert_eq!(session_status, "idle");
+        assert!(active_dispatch_id.is_none());
+        assert_eq!(session_info.as_deref(), Some("Slot thread reset"));
     }
 
     #[test]

@@ -235,6 +235,73 @@ fn clear_and_release_slots_for_runs(
     (released_slots.len(), cleared_sessions)
 }
 
+pub(crate) fn cancel_with_conn(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    conn: &rusqlite::Connection,
+) -> serde_json::Value {
+    let target_run_ids = load_run_ids_with_status(conn, &["active", "paused"]).unwrap_or_default();
+    let cancelled_dispatches =
+        cancel_live_dispatches_for_runs(conn, &target_run_ids, "auto_queue_cancel");
+    let (released_slots, cleared_slot_sessions) =
+        clear_and_release_slots_for_runs(health_registry, conn, &target_run_ids);
+    let cancelled_runs = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'cancelled', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
+            [],
+        )
+        .unwrap_or(0);
+    let entry_ids: Vec<String> = if target_run_ids.is_empty() {
+        Vec::new()
+    } else {
+        let placeholders = std::iter::repeat("?")
+            .take(target_run_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id FROM auto_queue_entries
+             WHERE run_id IN ({placeholders})
+               AND status IN ('pending', 'dispatched')"
+        );
+        conn.prepare(&sql)
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map(rusqlite::params_from_iter(target_run_ids.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok()
+                .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default()
+    };
+    let mut cancelled_entries = 0usize;
+    for entry_id in entry_ids {
+        match crate::db::auto_queue::update_entry_status_on_conn(
+            conn,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+            "run_cancel",
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        ) {
+            Ok(result) if result.changed => cancelled_entries += 1,
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "[auto-queue] failed to cancel entry {} during run cancel: {}",
+                entry_id,
+                error
+            ),
+        }
+    }
+
+    json!({
+        "ok": true,
+        "cancelled_entries": cancelled_entries,
+        "cancelled_runs": cancelled_runs,
+        "cancelled_dispatches": cancelled_dispatches,
+        "released_slots": released_slots,
+        "cleared_slot_sessions": cleared_slot_sessions,
+    })
+}
+
 #[derive(Debug, Clone)]
 struct GroupPlan {
     entries: Vec<PlannedEntry>,
@@ -2519,22 +2586,24 @@ pub(crate) fn activate_with_deps(
         };
 
         if post_walk.entry_status != "pending" {
-            if post_walk.entry_status == "dispatched" {
-                dispatched.push(deps.entry_json(&entry_id));
-            }
             continue;
         }
 
         if post_walk.status == "done" {
             let conn = deps.db.separate_conn().unwrap();
-            conn.execute(
-                "UPDATE auto_queue_entries
-                 SET status = 'skipped',
-                     completed_at = COALESCE(completed_at, datetime('now'))
-                 WHERE id = ?1 AND status = 'pending'",
-                [&entry_id],
-            )
-            .ok();
+            if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+                &conn,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+                "activate_done_skip",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            ) {
+                tracing::warn!(
+                    "[auto-queue] failed to skip done card entry {} during activate: {}",
+                    entry_id,
+                    error
+                );
+            }
             drop(conn);
             continue;
         }
@@ -2545,17 +2614,25 @@ pub(crate) fn activate_with_deps(
                 .as_ref()
                 .expect("active dispatch state requires dispatch id");
             let conn = deps.db.separate_conn().unwrap();
-            conn.execute(
-                "UPDATE auto_queue_entries
-                 SET status = 'dispatched',
-                     dispatch_id = ?1,
-                     dispatched_at = COALESCE(dispatched_at, datetime('now'))
-                 WHERE id = ?2 AND status = 'pending'",
-                rusqlite::params![dispatch_id, entry_id],
-            )
-            .ok();
+            match crate::db::auto_queue::update_entry_status_on_conn(
+                &conn,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                "activate_attach_existing_dispatch",
+                &crate::db::auto_queue::EntryStatusUpdateOptions {
+                    dispatch_id: Some(dispatch_id.clone()),
+                    slot_index: None,
+                },
+            ) {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    "[auto-queue] failed to attach existing dispatch {} to entry {}: {}",
+                    dispatch_id,
+                    entry_id,
+                    error
+                ),
+            }
             drop(conn);
-            dispatched.push(deps.entry_json(&entry_id));
             continue;
         }
 
@@ -2653,6 +2730,59 @@ pub(crate) fn activate_with_deps(
         });
 
         if dispatch_result.is_err() {
+            let recovered_state = {
+                let conn = deps.db.separate_conn().unwrap();
+                let recovered = load_activate_card_state(&conn, &card_id, &entry_id).ok();
+                drop(conn);
+                recovered
+            };
+
+            if let Some(dispatch_id) = recovered_state
+                .as_ref()
+                .filter(|state| state.has_active_dispatch())
+                .and_then(|state| state.latest_dispatch_id.clone())
+            {
+                let conn = deps.db.separate_conn().unwrap();
+                match crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    &entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                    "activate_dispatch_error_recover",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions {
+                        dispatch_id: Some(dispatch_id),
+                        slot_index,
+                    },
+                ) {
+                    Ok(_) => {
+                        drop(conn);
+                        continue;
+                    }
+                    Err(error) => tracing::warn!(
+                        "[auto-queue] failed to recover entry {} after create_dispatch error: {}",
+                        entry_id,
+                        error
+                    ),
+                }
+                drop(conn);
+            }
+
+            if recovered_state.as_ref().is_some_and(|state| {
+                state.latest_dispatch_id.is_some() || state.status != post_walk.status
+            }) {
+                tracing::warn!(
+                    "[auto-queue] create_dispatch errored for entry {} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
+                    entry_id,
+                    recovered_state
+                        .as_ref()
+                        .map(|state| state.status.as_str())
+                        .unwrap_or("unknown"),
+                    recovered_state
+                        .as_ref()
+                        .and_then(|state| state.latest_dispatch_id.as_ref())
+                );
+                continue;
+            }
+
             let conn = deps.db.separate_conn().unwrap();
             if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
                 &conn,
@@ -3563,71 +3693,9 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             );
         }
     };
-    let target_run_ids = load_run_ids_with_status(&conn, &["active", "paused"]).unwrap_or_default();
-    let cancelled_dispatches =
-        cancel_live_dispatches_for_runs(&conn, &target_run_ids, "auto_queue_cancel");
-    let (released_slots, cleared_slot_sessions) =
-        clear_and_release_slots_for_runs(state.health_registry.clone(), &conn, &target_run_ids);
-    let cancelled_runs = conn
-        .execute(
-            "UPDATE auto_queue_runs SET status = 'cancelled', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
-            [],
-        )
-        .unwrap_or(0);
-    let entry_ids: Vec<String> = if target_run_ids.is_empty() {
-        Vec::new()
-    } else {
-        let placeholders = std::iter::repeat("?")
-            .take(target_run_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT id FROM auto_queue_entries
-             WHERE run_id IN ({placeholders})
-               AND status IN ('pending', 'dispatched')"
-        );
-        conn.prepare(&sql)
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params_from_iter(target_run_ids.iter()), |row| {
-                    row.get::<_, String>(0)
-                })
-                .ok()
-                .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            })
-            .unwrap_or_default()
-    };
-    let mut cancelled_entries = 0usize;
-    for entry_id in entry_ids {
-        match crate::db::auto_queue::update_entry_status_on_conn(
-            &conn,
-            &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
-            "run_cancel",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        ) {
-            Ok(result) if result.changed => cancelled_entries += 1,
-            Ok(_) => {}
-            Err(error) => crate::auto_queue_log!(
-                warn,
-                "cancel_entry_skip_failed",
-                AutoQueueLogContext::new().entry(&entry_id),
-                "[auto-queue] failed to cancel entry {} during run cancel: {}",
-                entry_id,
-                error
-            ),
-        }
-    }
     (
         StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "cancelled_entries": cancelled_entries,
-            "cancelled_runs": cancelled_runs,
-            "cancelled_dispatches": cancelled_dispatches,
-            "released_slots": released_slots,
-            "cleared_slot_sessions": cleared_slot_sessions,
-        })),
+        Json(cancel_with_conn(state.health_registry.clone(), &conn)),
     )
 }
 
