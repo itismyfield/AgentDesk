@@ -419,7 +419,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
     // All dispatch types now inject worktree_path into context via resolve_card_worktree().
-    let dispatch_type_str = dispatch_info_cached
+    let mut dispatch_type_str = dispatch_info_cached
         .as_ref()
         .and_then(|info| info.dispatch_type.clone());
     let dispatch_context_hints = parse_dispatch_context_hints(
