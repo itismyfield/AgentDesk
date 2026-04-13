@@ -2054,6 +2054,19 @@ pub(crate) fn activate_with_deps(
     };
 
     let active_group_count = active_groups.len() as i64;
+    let mut occupied_agents: HashSet<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT agent_id
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1 AND status = 'dispatched'",
+            )
+            .unwrap();
+        stmt.query_map([&run_id], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            .unwrap_or_default()
+    };
 
     // Find pending groups not currently active, ordered by group number
     let pending_groups: Vec<i64> = {
@@ -2157,15 +2170,17 @@ pub(crate) fn activate_with_deps(
 
     // Add new groups from available slots (dynamic — check remaining capacity)
     for &grp in &pending_groups {
-        if (active_group_count + groups_to_dispatch.len() as i64) >= max_concurrent {
-            break;
-        }
         if !groups_to_dispatch.contains(&grp) {
             groups_to_dispatch.push(grp);
         }
     }
 
+    let mut dispatched_groups_this_activate = 0_i64;
     for group in &groups_to_dispatch {
+        if (active_group_count + dispatched_groups_this_activate) >= max_concurrent {
+            break;
+        }
+
         // Get first pending entry in this group
         let conn = deps.db.separate_conn().unwrap();
         let entry = crate::db::auto_queue::first_pending_entry_for_group(
@@ -2186,6 +2201,16 @@ pub(crate) fn activate_with_deps(
             .agent(&agent_id)
             .thread_group(*group)
             .batch_phase(batch_phase);
+
+        if occupied_agents.contains(&agent_id) {
+            crate::auto_queue_log!(
+                info,
+                "activate_same_agent_guard_blocked",
+                entry_log_ctx.clone(),
+                "[auto-queue] Skipping group {group} for {agent_id}: agent already dispatched in this activate cycle or run"
+            );
+            continue;
+        }
 
         let initial_state = {
             let conn = deps.db.separate_conn().unwrap();
@@ -2277,6 +2302,8 @@ pub(crate) fn activate_with_deps(
             ) {
                 ActivatePreflightOutcome::Continue => {}
                 ActivatePreflightOutcome::Dispatched(entry_json) => {
+                    occupied_agents.insert(agent_id.clone());
+                    dispatched_groups_this_activate += 1;
                     dispatched.push(entry_json);
                     continue;
                 }
@@ -2468,6 +2495,8 @@ pub(crate) fn activate_with_deps(
                                     error
                                 );
                             }
+                            occupied_agents.insert(agent_id.clone());
+                            dispatched_groups_this_activate += 1;
                             dispatched.push(deps.entry_json(&entry_id));
                             dispatched.push(deps.entry_json(&entry_id));
                             crate::auto_queue_log!(
@@ -2576,6 +2605,8 @@ pub(crate) fn activate_with_deps(
 
         if post_walk.entry_status != "pending" {
             if post_walk.entry_status == "dispatched" {
+                occupied_agents.insert(agent_id.clone());
+                dispatched_groups_this_activate += 1;
                 dispatched.push(deps.entry_json(&entry_id));
             }
             continue;
@@ -2611,6 +2642,8 @@ pub(crate) fn activate_with_deps(
             )
             .ok();
             drop(conn);
+            occupied_agents.insert(agent_id.clone());
+            dispatched_groups_this_activate += 1;
             dispatched.push(deps.entry_json(&entry_id));
             continue;
         }
@@ -2626,6 +2659,8 @@ pub(crate) fn activate_with_deps(
         ) {
             ActivatePreflightOutcome::Continue => {}
             ActivatePreflightOutcome::Dispatched(entry_json) => {
+                occupied_agents.insert(agent_id.clone());
+                dispatched_groups_this_activate += 1;
                 dispatched.push(entry_json);
                 continue;
             }
@@ -2766,6 +2801,8 @@ pub(crate) fn activate_with_deps(
         }
         drop(conn);
 
+        occupied_agents.insert(agent_id.clone());
+        dispatched_groups_this_activate += 1;
         dispatched.push(deps.entry_json(&entry_id));
     }
 
