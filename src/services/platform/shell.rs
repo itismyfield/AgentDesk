@@ -458,6 +458,53 @@ pub fn find_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option
 mod tests {
     use super::*;
 
+    fn git_binary() -> &'static std::ffi::OsString {
+        static GIT_BINARY: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+        GIT_BINARY.get_or_init(|| {
+            if let Some(configured) = std::env::var_os("AGENTDESK_TEST_GIT") {
+                if !configured.is_empty() {
+                    return configured;
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Ok(output) = Command::new(r"C:\Windows\System32\where.exe")
+                    .arg("git")
+                    .output()
+                {
+                    if output.status.success() {
+                        if let Some(path) = String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                        {
+                            return path.into();
+                        }
+                    }
+                }
+                for candidate in [
+                    r"C:\Program Files\Git\cmd\git.exe",
+                    r"C:\Program Files\Git\bin\git.exe",
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                    r"C:\Program Files (x86)\Git\bin\git.exe",
+                ] {
+                    if std::path::Path::new(candidate).exists() {
+                        return candidate.into();
+                    }
+                }
+                "git.exe".into()
+            }
+            #[cfg(not(windows))]
+            {
+                "git".into()
+            }
+        })
+    }
+
+    fn git_command() -> Command {
+        Command::new(git_binary())
+    }
+
     #[test]
     fn shell_command_echo_works() {
         #[cfg(unix)]
@@ -504,42 +551,42 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
 
         // Init bare origin
-        Command::new("git")
+        git_command()
             .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
             .unwrap();
 
         // Init non-bare repo with explicit main branch and add origin
-        Command::new("git")
+        git_command()
             .args(["init", "-b", "main"])
             .current_dir(repo.path())
             .output()
             .unwrap();
         // Set git identity (CI environments may not have global user config)
-        Command::new("git")
+        git_command()
             .args(["config", "user.email", "test@test.com"])
             .current_dir(repo.path())
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(repo.path())
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(repo.path())
             .output()
             .unwrap();
 
         // Create initial commit on main and push to establish origin/main
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "initial"])
             .current_dir(repo.path())
             .output()
             .unwrap();
-        let push = Command::new("git")
+        let push = git_command()
             .args(["push", "-u", "origin", "main"])
             .current_dir(repo.path())
             .output()
@@ -562,7 +609,7 @@ mod tests {
 
         // Create a worktree branch with a commit referencing #42
         let wt_dir = repo.path().join("wt-42");
-        Command::new("git")
+        git_command()
             .args([
                 "worktree",
                 "add",
@@ -573,14 +620,14 @@ mod tests {
             .current_dir(repo_dir)
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "fix: something (#42)"])
             .current_dir(wt_dir.to_str().unwrap())
             .output()
             .unwrap();
 
         // Merge the worktree branch into local main (simulating fast-forward)
-        Command::new("git")
+        git_command()
             .args(["merge", "wt/fix-42"])
             .current_dir(repo_dir)
             .output()
@@ -598,7 +645,7 @@ mod tests {
         assert_eq!(info.branch, "wt/fix-42");
 
         // Cleanup worktree
-        Command::new("git")
+        git_command()
             .args(["worktree", "remove", "--force", wt_dir.to_str().unwrap()])
             .current_dir(repo_dir)
             .output()
@@ -614,7 +661,7 @@ mod tests {
 
         // Create two worktrees, both with commits mentioning #99
         let wt1_dir = repo.path().join("wt-generic");
-        Command::new("git")
+        git_command()
             .args([
                 "worktree",
                 "add",
@@ -625,14 +672,14 @@ mod tests {
             .current_dir(repo_dir)
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "chore: related to #99"])
             .current_dir(wt1_dir.to_str().unwrap())
             .output()
             .unwrap();
 
         let wt2_dir = repo.path().join("wt-99");
-        Command::new("git")
+        git_command()
             .args([
                 "worktree",
                 "add",
@@ -643,7 +690,7 @@ mod tests {
             .current_dir(repo_dir)
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "fix: the real fix (#99)"])
             .current_dir(wt2_dir.to_str().unwrap())
             .output()
@@ -659,7 +706,7 @@ mod tests {
 
         // Cleanup worktrees
         for d in [&wt1_dir, &wt2_dir] {
-            Command::new("git")
+            git_command()
                 .args(["worktree", "remove", "--force", d.to_str().unwrap()])
                 .current_dir(repo_dir)
                 .output()
@@ -674,7 +721,7 @@ mod tests {
         let repo_dir = repo.path().to_str().unwrap();
 
         let wt1_dir = repo.path().join("wt-old");
-        Command::new("git")
+        git_command()
             .args([
                 "worktree",
                 "add",
@@ -686,7 +733,7 @@ mod tests {
             .output()
             .unwrap();
         // Older commit with backdated author date
-        Command::new("git")
+        git_command()
             .args([
                 "commit",
                 "--allow-empty",
@@ -700,7 +747,7 @@ mod tests {
             .unwrap();
 
         let wt2_dir = repo.path().join("wt-new");
-        Command::new("git")
+        git_command()
             .args([
                 "worktree",
                 "add",
@@ -712,7 +759,7 @@ mod tests {
             .output()
             .unwrap();
         // Newer commit (current date)
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "recent work on #77"])
             .current_dir(wt2_dir.to_str().unwrap())
             .output()
@@ -727,7 +774,7 @@ mod tests {
         );
 
         for d in [&wt1_dir, &wt2_dir] {
-            Command::new("git")
+            git_command()
                 .args(["worktree", "remove", "--force", d.to_str().unwrap()])
                 .current_dir(repo_dir)
                 .output()
@@ -740,14 +787,14 @@ mod tests {
         let (repo, _origin) = setup_test_repo();
         let repo_dir = repo.path().to_str().unwrap();
 
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "fix: target commit (#269)"])
             .current_dir(repo_dir)
             .output()
             .unwrap();
         let expected = git_head_commit(repo_dir).unwrap();
 
-        Command::new("git")
+        git_command()
             .args(["commit", "--allow-empty", "-m", "chore: unrelated"])
             .current_dir(repo_dir)
             .output()
@@ -774,12 +821,12 @@ mod tests {
         let untracked = repo.path().join("untracked.txt");
 
         std::fs::write(&tracked, "v1\n").unwrap();
-        Command::new("git")
+        git_command()
             .args(["add", "tracked.txt"])
             .current_dir(repo_dir)
             .output()
             .unwrap();
-        Command::new("git")
+        git_command()
             .args(["commit", "-m", "add tracked fixture"])
             .current_dir(repo_dir)
             .output()
