@@ -64,7 +64,7 @@
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
 | `db::schema` | `src/db/schema.rs` | 1687 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
-| `db::session_transcripts` | `src/db/session_transcripts.rs` | 786 |  |
+| `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 3883 | giant-file |
 | `engine` | `src/engine/mod.rs` | 1496 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
@@ -112,7 +112,7 @@
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 616 |  |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 694 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 94 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 4226 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 4240 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 134 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 316 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 164 |  |
