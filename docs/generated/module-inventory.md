@@ -103,7 +103,7 @@
 | `receipt` | `src/receipt.rs` | 1540 | giant-file |
 | `reconcile` | `src/reconcile.rs` | 539 |  |
 | `runtime` | `src/runtime.rs` | 112 |  |
-| `runtime_layout` | `src/runtime_layout.rs` | 2901 | giant-file |
+| `runtime_layout` | `src/runtime_layout.rs` | 2955 | giant-file |
 | `server` | `src/server/mod.rs` | 1090 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 141 |  |
@@ -167,8 +167,8 @@
 | `services::api_friction` | `src/services/api_friction.rs` | 1286 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 867 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 221 |  |
-| `services::claude` | `src/services/claude.rs` | 2238 | giant-file |
-| `services::codex` | `src/services/codex.rs` | 1244 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 2259 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 1261 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 525 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 1914 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 716 |  |
@@ -228,7 +228,7 @@
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 122 |  |
 | `services::dispatches` | `src/services/dispatches.rs` | 331 |  |
-| `services::gemini` | `src/services/gemini.rs` | 1551 | giant-file |
+| `services::gemini` | `src/services/gemini.rs` | 1568 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 145 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 344 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 113 |  |
@@ -242,10 +242,10 @@
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 178 |  |
 | `services::process` | `src/services/process.rs` | 638 |  |
 | `services::provider` | `src/services/provider.rs` | 1925 | giant-file |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 183 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 285 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 247 |  |
-| `services::qwen` | `src/services/qwen.rs` | 2165 | giant-file |
+| `services::qwen` | `src/services/qwen.rs` | 2182 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1047 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 635 |  |
