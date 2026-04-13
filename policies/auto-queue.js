@@ -657,14 +657,22 @@ function _dedupePhaseGateDispatchIds(dispatchIds) {
 }
 
 function _loadValidPhaseGateDispatchIds(dispatchIds) {
+  if (dispatchIds.length === 0) return [];
+
+  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
+  var rows = agentdesk.db.query(
+    "SELECT id FROM task_dispatches WHERE id IN (" + placeholders + ")",
+    dispatchIds
+  );
+  var validIds = {};
+  for (var i = 0; i < rows.length; i++) {
+    validIds[rows[i].id] = true;
+  }
+
   var valid = [];
-  for (var i = 0; i < dispatchIds.length; i++) {
-    var dispatchId = dispatchIds[i];
-    var rows = agentdesk.db.query(
-      "SELECT 1 FROM task_dispatches WHERE id = ? LIMIT 1",
-      [dispatchId]
-    );
-    if (rows.length > 0) {
+  for (var j = 0; j < dispatchIds.length; j++) {
+    var dispatchId = dispatchIds[j];
+    if (validIds[dispatchId]) {
       valid.push(dispatchId);
     }
   }

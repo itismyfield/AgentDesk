@@ -1,5 +1,6 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, params_from_iter};
+use std::collections::HashSet;
 
 const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
 const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
@@ -844,11 +845,13 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             UNIQUE(entry_id, dispatch_id)
         );
         CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
             phase           INTEGER NOT NULL,
             status          TEXT NOT NULL DEFAULT 'pending',
             verdict         TEXT,
-            dispatch_id     TEXT UNIQUE REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            dispatch_id     TEXT REFERENCES task_dispatches(id) ON DELETE CASCADE
+                                CHECK(dispatch_id IS NULL OR TRIM(dispatch_id) <> ''),
             pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
             next_phase      INTEGER,
             final_phase     INTEGER NOT NULL DEFAULT 0,
@@ -866,14 +869,9 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_dispatch
             ON auto_queue_entry_dispatch_history(dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_created
-            ON auto_queue_entry_dispatch_history(created_at);
-        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_phase
-            ON auto_queue_phase_gates(run_id, phase);
-        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_status
-            ON auto_queue_phase_gates(run_id, status);
-        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_phase_dispatch
-            ON auto_queue_phase_gates(phase, dispatch_id);",
+            ON auto_queue_entry_dispatch_history(created_at);",
     )?;
+    ensure_auto_queue_phase_gate_table_shape(conn)?;
 
     ensure_auto_queue_column(
         conn,
@@ -1009,6 +1007,350 @@ fn auto_queue_has_column(conn: &Connection, table: &str, column: &str) -> bool {
         |row| row.get(0),
     )
     .unwrap_or(false)
+}
+
+fn auto_queue_index_exists(conn: &Connection, index_name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+        [index_name],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+#[derive(Debug)]
+struct LegacyAutoQueuePhaseGateRow {
+    rowid: i64,
+    run_id: String,
+    phase: i64,
+    status: String,
+    verdict: Option<String>,
+    dispatch_id: Option<String>,
+    pass_verdict: String,
+    next_phase: Option<i64>,
+    final_phase: i64,
+    anchor_card_id: Option<String>,
+    failure_reason: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn ensure_auto_queue_phase_gate_table_shape(conn: &Connection) -> Result<()> {
+    let needs_rebuild = !auto_queue_has_column(conn, "auto_queue_phase_gates", "id");
+    if needs_rebuild {
+        rebuild_auto_queue_phase_gates_table(conn)?;
+    } else {
+        ensure_auto_queue_phase_gate_indexes(conn)?;
+    }
+    Ok(())
+}
+
+fn ensure_auto_queue_phase_gate_indexes(conn: &Connection) -> Result<()> {
+    if auto_queue_index_exists(conn, "uq_aq_phase_gates_run_phase_dispatch_key")
+        && auto_queue_index_exists(conn, "uq_aq_phase_gates_dispatch_id")
+        && auto_queue_index_exists(conn, "idx_aq_phase_gates_run_phase")
+        && auto_queue_index_exists(conn, "idx_aq_phase_gates_run_status")
+        && auto_queue_index_exists(conn, "idx_aq_phase_gates_phase_dispatch")
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_run_phase_dispatch_key
+            ON auto_queue_phase_gates(run_id, phase, COALESCE(dispatch_id, ''));
+         CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_dispatch_id
+            ON auto_queue_phase_gates(dispatch_id);
+         CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_phase
+            ON auto_queue_phase_gates(run_id, phase);
+         CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_status
+            ON auto_queue_phase_gates(run_id, status);
+         CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_phase_dispatch
+            ON auto_queue_phase_gates(phase, dispatch_id);",
+    )?;
+    Ok(())
+}
+
+fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_aq_phase_gates_run_phase;
+         DROP INDEX IF EXISTS idx_aq_phase_gates_run_status;
+         DROP INDEX IF EXISTS idx_aq_phase_gates_phase_dispatch;
+         DROP INDEX IF EXISTS uq_aq_phase_gates_run_phase_dispatch_key;
+         DROP INDEX IF EXISTS uq_aq_phase_gates_dispatch_id;
+         ALTER TABLE auto_queue_phase_gates RENAME TO auto_queue_phase_gates_legacy;
+         CREATE TABLE auto_queue_phase_gates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
+            phase           INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            verdict         TEXT,
+            dispatch_id     TEXT REFERENCES task_dispatches(id) ON DELETE CASCADE
+                                CHECK(dispatch_id IS NULL OR TRIM(dispatch_id) <> ''),
+            pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+            next_phase      INTEGER,
+            final_phase     INTEGER NOT NULL DEFAULT 0,
+            anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+            failure_reason  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+         );",
+    )?;
+
+    let mut rows = conn
+        .prepare(
+            "SELECT
+                rowid,
+                run_id,
+                phase,
+                status,
+                verdict,
+                dispatch_id,
+                COALESCE(NULLIF(TRIM(pass_verdict), ''), 'phase_gate_passed') AS pass_verdict,
+                next_phase,
+                CASE
+                    WHEN LOWER(TRIM(CAST(COALESCE(final_phase, 0) AS TEXT))) IN ('1', 'true')
+                        THEN 1
+                    ELSE 0
+                END AS final_phase,
+                anchor_card_id,
+                failure_reason,
+                CAST(created_at AS TEXT),
+                CAST(updated_at AS TEXT)
+             FROM auto_queue_phase_gates_legacy",
+        )?
+        .query_map([], |row| {
+            Ok(LegacyAutoQueuePhaseGateRow {
+                rowid: row.get(0)?,
+                run_id: row.get(1)?,
+                phase: row.get(2)?,
+                status: row.get(3)?,
+                verdict: row.get(4)?,
+                dispatch_id: row.get(5)?,
+                pass_verdict: row.get(6)?,
+                next_phase: row.get(7)?,
+                final_phase: row.get(8)?,
+                anchor_card_id: row.get(9)?,
+                failure_reason: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let valid_run_ids = load_existing_ids(
+        conn,
+        "auto_queue_runs",
+        &rows
+            .iter()
+            .map(|row| row.run_id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let valid_dispatch_ids = load_existing_ids(
+        conn,
+        "task_dispatches",
+        &rows
+            .iter()
+            .filter_map(|row| row.dispatch_id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let valid_anchor_card_ids = load_existing_ids(
+        conn,
+        "kanban_cards",
+        &rows
+            .iter()
+            .filter_map(|row| row.anchor_card_id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+
+    let mut normalized_rows = Vec::new();
+    for mut row in rows.drain(..) {
+        row.run_id = row.run_id.trim().to_string();
+        if row.run_id.is_empty() || !valid_run_ids.contains(row.run_id.as_str()) {
+            continue;
+        }
+
+        row.status = if row.status.trim().is_empty() {
+            "pending".to_string()
+        } else {
+            row.status.trim().to_string()
+        };
+        row.verdict = row
+            .verdict
+            .take()
+            .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
+        row.dispatch_id = row.dispatch_id.take().and_then(|value| {
+            let value = value.trim();
+            if value.is_empty() || !valid_dispatch_ids.contains(value) {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        });
+        row.anchor_card_id = row.anchor_card_id.take().and_then(|value| {
+            let value = value.trim();
+            if value.is_empty() || !valid_anchor_card_ids.contains(value) {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        });
+        row.failure_reason = row
+            .failure_reason
+            .take()
+            .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
+        row.created_at = row
+            .created_at
+            .take()
+            .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
+        row.updated_at = row
+            .updated_at
+            .take()
+            .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
+        row.final_phase = if row.final_phase != 0 { 1 } else { 0 };
+
+        normalized_rows.push(row);
+    }
+
+    let groups_with_dispatch = normalized_rows
+        .iter()
+        .filter(|row| row.dispatch_id.is_some())
+        .map(|row| (row.run_id.clone(), row.phase))
+        .collect::<HashSet<_>>();
+
+    normalized_rows.retain(|row| {
+        row.dispatch_id.is_some()
+            || !groups_with_dispatch.contains(&(row.run_id.clone(), row.phase))
+    });
+
+    normalized_rows.sort_by(|left, right| {
+        phase_gate_status_priority(&left.status)
+            .cmp(&phase_gate_status_priority(&right.status))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+            .then_with(|| right.rowid.cmp(&left.rowid))
+    });
+
+    let mut seen_dispatch_ids = HashSet::new();
+    let mut seen_group_dispatch_keys = HashSet::new();
+    for row in normalized_rows {
+        if let Some(dispatch_id) = row.dispatch_id.as_ref() {
+            if !seen_dispatch_ids.insert(dispatch_id.clone()) {
+                continue;
+            }
+        }
+
+        let group_dispatch_key = (
+            row.run_id.clone(),
+            row.phase,
+            row.dispatch_id.clone().unwrap_or_default(),
+        );
+        if !seen_group_dispatch_keys.insert(group_dispatch_key) {
+            continue;
+        }
+
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id,
+                phase,
+                status,
+                verdict,
+                dispatch_id,
+                pass_verdict,
+                next_phase,
+                final_phase,
+                anchor_card_id,
+                failure_reason,
+                created_at,
+                updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                COALESCE(?11, CURRENT_TIMESTAMP),
+                COALESCE(?12, COALESCE(?11, CURRENT_TIMESTAMP))
+            )",
+            rusqlite::params![
+                row.run_id,
+                row.phase,
+                row.status,
+                row.verdict,
+                row.dispatch_id,
+                row.pass_verdict,
+                row.next_phase,
+                row.final_phase,
+                row.anchor_card_id,
+                row.failure_reason,
+                row.created_at,
+                row.updated_at,
+            ],
+        )?;
+    }
+
+    ensure_auto_queue_phase_gate_indexes(conn)?;
+    conn.execute_batch("DROP TABLE auto_queue_phase_gates_legacy;")?;
+    Ok(())
+}
+
+fn phase_gate_status_priority(status: &str) -> i32 {
+    match status {
+        "failed" => 0,
+        "pending" => 1,
+        "passed" => 2,
+        _ => 3,
+    }
+}
+
+fn load_existing_ids(conn: &Connection, table: &str, ids: &[String]) -> Result<HashSet<String>> {
+    let mut normalized_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for id in ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        normalized_ids.push(trimmed.to_string());
+    }
+
+    if normalized_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let placeholders = (0..normalized_ids.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = match table {
+        "auto_queue_runs" | "task_dispatches" | "kanban_cards" => {
+            format!("SELECT id FROM {table} WHERE id IN ({placeholders})")
+        }
+        _ => unreachable!("unexpected id lookup table"),
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(normalized_ids.iter()), |row| {
+        row.get::<_, String>(0)
+    })?;
+
+    let mut existing = HashSet::new();
+    for row in rows {
+        existing.insert(row?);
+    }
+    Ok(existing)
+}
+
+fn filter_existing_dispatch_ids(conn: &Connection, dispatch_ids: &[String]) -> Result<Vec<String>> {
+    let existing_dispatch_ids = load_existing_ids(conn, "task_dispatches", dispatch_ids)?;
+    let mut filtered = Vec::new();
+    let mut seen = HashSet::new();
+    for dispatch_id in dispatch_ids {
+        let trimmed = dispatch_id.trim();
+        if trimmed.is_empty()
+            || !existing_dispatch_ids.contains(trimmed)
+            || !seen.insert(trimmed.to_string())
+        {
+            continue;
+        }
+        filtered.push(trimmed.to_string());
+    }
+    Ok(filtered)
 }
 
 fn backfill_auto_queue_dispatch_ids(conn: &Connection) -> Result<()> {
@@ -1176,17 +1518,8 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
             })
             .unwrap_or_default();
 
-        let valid_dispatch_ids = dispatch_ids
-            .into_iter()
-            .filter(|dispatch_id| {
-                conn.query_row(
-                    "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
-                    [dispatch_id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
+        let valid_dispatch_ids = filter_existing_dispatch_ids(conn, &dispatch_ids)?;
+        let final_phase = if final_phase { 1 } else { 0 };
 
         if valid_dispatch_ids.is_empty() {
             conn.execute(
@@ -1992,5 +2325,179 @@ mod tests {
             )
             .unwrap();
         assert!(!legacy_key_exists);
+    }
+
+    #[test]
+    fn auto_queue_phase_gates_enforce_foreign_keys_and_uniqueness() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-phase-fk', 'Phase Gate FK', 'ready', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-phase-fk', 'test/repo', 'agent-1', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at, context
+             ) VALUES (
+                'dispatch-phase-fk',
+                'card-phase-fk',
+                'agent-1',
+                'phase-gate',
+                'pending',
+                'Phase Gate FK',
+                datetime('now'),
+                datetime('now'),
+                '{}'
+             )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES ('run-phase-fk', 1, 'pending', NULL, 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, dispatch_id, pass_verdict
+                 ) VALUES ('run-phase-fk', 1, 'pending', NULL, 'phase_gate_passed')",
+                [],
+            )
+            .is_err()
+        );
+
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES ('run-phase-fk', 2, 'pending', 'dispatch-phase-fk', 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, dispatch_id, pass_verdict
+                 ) VALUES ('run-phase-fk', 3, 'pending', 'dispatch-phase-fk', 'phase_gate_passed')",
+                [],
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, dispatch_id, pass_verdict
+                 ) VALUES ('run-phase-fk', 4, 'pending', 'dispatch-missing', 'phase_gate_passed')",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migrate_rebuilds_legacy_auto_queue_phase_gates_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE auto_queue_runs (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT,
+                agent_id    TEXT,
+                status      TEXT DEFAULT 'active',
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+            CREATE TABLE auto_queue_phase_gates (
+                run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
+                phase           INTEGER NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                verdict         TEXT,
+                dispatch_id     TEXT UNIQUE REFERENCES task_dispatches(id) ON DELETE CASCADE,
+                pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+                next_phase      INTEGER,
+                final_phase     INTEGER NOT NULL DEFAULT 0,
+                anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+                failure_reason  TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-phase-legacy', 'Legacy Gate', 'ready', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-phase-legacy', 'test/repo', 'agent-1', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, anchor_card_id, pass_verdict
+             ) VALUES ('run-phase-legacy', 1, 'pending', NULL, 'card-phase-legacy', 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, anchor_card_id, pass_verdict
+             ) VALUES ('run-phase-legacy', 1, 'failed', NULL, 'card-phase-legacy', 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(auto_queue_has_column(&conn, "auto_queue_phase_gates", "id"));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_phase_gates
+                 WHERE run_id = 'run-phase-legacy' AND phase = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_phase_gates
+                 WHERE run_id = 'run-phase-legacy' AND phase = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
     }
 }
