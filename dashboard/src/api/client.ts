@@ -10,6 +10,7 @@ import type {
   DashboardStats,
   TokenAnalyticsResponse,
   RoundTableMeeting,
+  RoundTableMeetingChannelOption,
   SkillCatalogEntry,
   TaskDispatch,
 } from "../types";
@@ -1188,7 +1189,19 @@ export async function getRoundTableMeetings(): Promise<RoundTableMeeting[]> {
 export async function getRoundTableMeeting(
   id: string,
 ): Promise<RoundTableMeeting> {
-  return request(`/api/round-table-meetings/${id}`);
+  const data = await request<{ meeting: RoundTableMeeting }>(
+    `/api/round-table-meetings/${id}`,
+  );
+  return data.meeting;
+}
+
+export async function getRoundTableMeetingChannels(): Promise<
+  RoundTableMeetingChannelOption[]
+> {
+  const data = await request<{ channels: RoundTableMeetingChannelOption[] }>(
+    "/api/round-table-meetings/channels",
+  );
+  return data.channels;
 }
 
 export async function deleteRoundTableMeeting(
@@ -1270,14 +1283,18 @@ export async function discardAllRoundTableIssues(id: string): Promise<{
 export async function startRoundTableMeeting(
   agenda: string,
   channelId: string,
-  primaryProvider?: string,
-): Promise<{ ok: boolean }> {
+  primaryProvider: string,
+  reviewerProvider: string,
+  fixedParticipants: string[] = [],
+): Promise<{ ok: boolean; message?: string }> {
   return request("/api/round-table-meetings/start", {
     method: "POST",
     body: JSON.stringify({
       agenda,
       channel_id: channelId,
-      primary_provider: primaryProvider ?? null,
+      primary_provider: primaryProvider,
+      reviewer_provider: reviewerProvider,
+      fixed_participants: fixedParticipants,
     }),
   });
 }

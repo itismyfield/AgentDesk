@@ -367,6 +367,12 @@ pub struct MeetingSettings {
     pub channel_name: String,
     #[serde(default)]
     pub max_rounds: Option<u32>,
+    #[serde(
+        default,
+        alias = "maxParticipants",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_participants: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_agent: Option<MeetingSummaryAgentDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -407,6 +413,24 @@ pub struct MeetingAgentDef {
     pub keywords: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_file: Option<String>,
+    #[serde(
+        default,
+        alias = "domainSummary",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub domain_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strengths: Vec<String>,
+    #[serde(default, alias = "taskTypes", skip_serializing_if = "Vec::is_empty")]
+    pub task_types: Vec<String>,
+    #[serde(default, alias = "antiSignals", skip_serializing_if = "Vec::is_empty")]
+    pub anti_signals: Vec<String>,
+    #[serde(
+        default,
+        alias = "providerHint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
