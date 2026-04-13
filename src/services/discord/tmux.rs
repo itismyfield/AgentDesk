@@ -13,7 +13,8 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    format_tool_input, normalize_empty_lines, send_long_message_raw, truncate_str,
+    format_tool_input, normalize_empty_lines, replace_long_message_raw, send_long_message_raw,
+    streaming_split_boundary, truncate_str,
 };
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
@@ -878,6 +879,7 @@ pub(super) async fn tmux_output_watcher(
         let mut spin_idx: usize = 0;
         let mut placeholder_msg_id: Option<serenity::MessageId> = None;
         let mut last_edit_text = String::new();
+        let mut response_sent_offset = 0usize;
 
         // Process any complete lines we already have
         let initial_outcome = process_watcher_lines(
@@ -994,6 +996,94 @@ pub(super) async fn tmux_output_watcher(
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
 
+                    loop {
+                        let current_portion =
+                            full_response.get(response_sent_offset..).unwrap_or("");
+                        if current_portion.is_empty() {
+                            break;
+                        }
+
+                        let status_block = super::formatting::build_placeholder_status_block(
+                            indicator,
+                            tool_state.prev_tool_status.as_deref(),
+                            tool_state.current_tool_line.as_deref(),
+                            &full_response,
+                            narrate_progress,
+                        );
+                        let footer = format!("\n\n{status_block}");
+                        let body_budget =
+                            DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+                        let normalized = normalize_empty_lines(current_portion);
+                        let display_snapshot = {
+                            let body = tail_with_ellipsis(&normalized, body_budget);
+                            format!("{}{}", body, footer)
+                        };
+                        let Some(msg_id) = placeholder_msg_id else {
+                            break;
+                        };
+                        let Some(split_at) = streaming_split_boundary(current_portion, body_budget)
+                        else {
+                            break;
+                        };
+
+                        let frozen_chunk = normalize_empty_lines(&current_portion[..split_at]);
+                        rate_limit_wait(&shared, channel_id).await;
+                        match channel_id
+                            .edit_message(
+                                &http,
+                                msg_id,
+                                serenity::EditMessage::new().content(&frozen_chunk),
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                rate_limit_wait(&shared, channel_id).await;
+                                match channel_id
+                                    .send_message(
+                                        &http,
+                                        serenity::CreateMessage::new().content(&status_block),
+                                    )
+                                    .await
+                                {
+                                    Ok(message) => {
+                                        placeholder_msg_id = Some(message.id);
+                                        response_sent_offset += split_at;
+                                        last_edit_text = status_block;
+                                    }
+                                    Err(error) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::warn!(
+                                            "  [{ts}] ⚠ tmux rollover placeholder send failed in channel {}: {}",
+                                            channel_id.get(),
+                                            error
+                                        );
+                                        rate_limit_wait(&shared, channel_id).await;
+                                        let _ = channel_id
+                                            .edit_message(
+                                                &http,
+                                                msg_id,
+                                                serenity::EditMessage::new()
+                                                    .content(&display_snapshot),
+                                            )
+                                            .await;
+                                        last_edit_text = display_snapshot;
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] ⚠ tmux rollover freeze failed for msg {} in channel {}: {}",
+                                    msg_id.get(),
+                                    channel_id.get(),
+                                    error
+                                );
+                                break;
+                            }
+                        }
+                    }
+
                     let status_block = super::formatting::build_placeholder_status_block(
                         indicator,
                         tool_state.prev_tool_status.as_deref(),
@@ -1003,10 +1093,11 @@ pub(super) async fn tmux_output_watcher(
                     );
                     let footer = format!("\n\n{status_block}");
                     let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
-                    let display_text = if full_response.is_empty() {
+                    let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
+                    let display_text = if current_portion.is_empty() {
                         status_block.clone()
                     } else {
-                        let normalized = normalize_empty_lines(&full_response);
+                        let normalized = normalize_empty_lines(current_portion);
                         let body = tail_with_ellipsis(&normalized, body_budget.max(1));
                         format!("{}{}", body, footer)
                     };
@@ -1438,12 +1529,14 @@ pub(super) async fn tmux_output_watcher(
         }
 
         let has_assistant_response = !full_response.trim().is_empty();
+        let current_response = full_response.get(response_sent_offset..).unwrap_or("");
+        let has_current_response = !current_response.trim().is_empty();
 
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
         let relay_ok = if has_assistant_response {
             let formatted = super::formatting::format_for_discord_with_provider(
-                &full_response,
+                current_response,
                 &watcher_provider,
             );
             let prefixed = formatted.to_string();
@@ -1457,31 +1550,23 @@ pub(super) async fn tmux_output_watcher(
             let mut relay_ok = true;
             match placeholder_msg_id {
                 Some(msg_id) => {
-                    // Update the placeholder with final response (may need splitting)
-                    if prefixed.len() <= DISCORD_MSG_LIMIT {
-                        rate_limit_wait(&shared, channel_id).await;
-                        let _ = channel_id
-                            .edit_message(
-                                &http,
-                                msg_id,
-                                serenity::EditMessage::new().content(&prefixed),
-                            )
-                            .await;
-                    } else {
-                        // Response too long — delete placeholder and send via send_long_message_raw
-                        let _ = channel_id.delete_message(&http, msg_id).await;
+                    if has_current_response {
                         if let Err(e) =
-                            send_long_message_raw(&http, channel_id, &prefixed, &shared).await
+                            replace_long_message_raw(&http, channel_id, msg_id, &prefixed, &shared)
+                                .await
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
                             relay_ok = false;
                         }
+                    } else {
+                        let _ = channel_id.delete_message(&http, msg_id).await;
                     }
                 }
                 None => {
-                    if let Err(e) =
-                        send_long_message_raw(&http, channel_id, &prefixed, &shared).await
+                    if has_current_response
+                        && let Err(e) =
+                            send_long_message_raw(&http, channel_id, &prefixed, &shared).await
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!("  [{ts}] 👁 Failed to relay: {e}");

@@ -392,6 +392,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_streaming_split_boundary_prefers_paragraph_breaks() {
+        use super::streaming_split_boundary;
+
+        let text = "alpha line\n\nbeta section continues";
+        let split_at = streaming_split_boundary(text, 14).unwrap();
+
+        assert_eq!(&text[..split_at], "alpha line\n\n");
+    }
+
+    #[test]
+    fn test_streaming_split_boundary_falls_back_to_word_boundary() {
+        use super::streaming_split_boundary;
+
+        let text = "alpha beta gamma";
+        let split_at = streaming_split_boundary(text, 12).unwrap();
+
+        assert_eq!(&text[..split_at], "alpha beta ");
+    }
+
     // ── filter_codex_tool_logs tests ─────────────────────────────────────
 
     #[test]
@@ -545,6 +565,38 @@ pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
         }
         i
     }
+}
+
+pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usize> {
+    if max_len == 0 || text.len() <= max_len {
+        return None;
+    }
+
+    let safe_end = floor_char_boundary(text, max_len);
+    if safe_end == 0 {
+        return None;
+    }
+
+    let window = &text[..safe_end];
+    let paragraph_split = window.rfind("\n\n").map(|idx| idx + 2);
+    let newline_split = window.rfind('\n').map(|idx| idx + 1);
+    let whitespace_split = window
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8());
+
+    let preferred = paragraph_split
+        .or(newline_split)
+        .or(whitespace_split)
+        .unwrap_or(safe_end);
+    let split_at = if preferred < safe_end / 2 {
+        safe_end
+    } else {
+        preferred
+    };
+
+    Some(floor_char_boundary(text, split_at))
 }
 
 /// Truncate a string to max_len bytes at a safe UTF-8 and line boundary
