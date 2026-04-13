@@ -29,6 +29,9 @@ pub enum Intent {
         dispatch_type: String,
         title: String,
     },
+    /// Auto-queue activation (used to defer bridge calls out of hook execution).
+    #[serde(rename = "activate_auto_queue")]
+    ActivateAutoQueue { body: serde_json::Value },
     /// Raw SQL execution (replaces agentdesk.db.execute)
     /// Retained as escape hatch; prefer typed intents above.
     #[serde(rename = "execute_sql")]
@@ -81,7 +84,11 @@ pub struct CreatedDispatch {
 ///
 /// Intents are applied in order. Failures are logged and skipped (fail-soft)
 /// to prevent one bad intent from blocking the rest.
-pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecutionResult {
+pub fn execute_intents(
+    db: &crate::db::Db,
+    engine: Option<&crate::engine::PolicyEngine>,
+    intents: Vec<Intent>,
+) -> IntentExecutionResult {
     let mut result = IntentExecutionResult {
         transitions: Vec::new(),
         created_dispatches: Vec::new(),
@@ -132,6 +139,15 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
                     Ok(created) => result.created_dispatches.push(created),
                     Err(e) => {
                         tracing::warn!(dispatch_type, title, error = %e, "create-dispatch intent failed");
+                        result.errors += 1;
+                    }
+                }
+            }
+            Intent::ActivateAutoQueue { body } => {
+                match execute_activate_auto_queue(db, engine, body) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "auto-queue activate intent failed");
                         result.errors += 1;
                     }
                 }
@@ -343,6 +359,30 @@ fn execute_create_dispatch(
     })
 }
 
+fn execute_activate_auto_queue(
+    db: &crate::db::Db,
+    engine: Option<&crate::engine::PolicyEngine>,
+    body: serde_json::Value,
+) -> anyhow::Result<()> {
+    let engine =
+        engine.ok_or_else(|| anyhow::anyhow!("auto-queue activation intent requires engine"))?;
+    let body: crate::server::routes::auto_queue::ActivateBody = serde_json::from_value(body)?;
+    let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+        db.clone(),
+        engine.clone(),
+    );
+    let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
+    if response.0.get("error").is_some() {
+        return Err(anyhow::anyhow!(
+            "{}",
+            response.0["error"]
+                .as_str()
+                .unwrap_or("auto-queue activation failed")
+        ));
+    }
+    Ok(())
+}
+
 fn json_to_sqlite(val: &serde_json::Value) -> rusqlite::types::Value {
     match val {
         serde_json::Value::Null => rusqlite::types::Value::Null,
@@ -443,7 +483,7 @@ mod tests {
     #[test]
     fn test_execute_empty_intents() {
         let db = test_db();
-        let result = execute_intents(&db, vec![]);
+        let result = execute_intents(&db, None, vec![]);
         assert!(result.transitions.is_empty());
         assert!(result.created_dispatches.is_empty());
         assert_eq!(result.errors, 0);
@@ -456,7 +496,7 @@ mod tests {
             sql: "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('test', 'hello')".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 0);
 
         let conn = db.lock().unwrap();
@@ -476,7 +516,7 @@ mod tests {
             value: "myval".into(),
             ttl_seconds: 0,
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 0);
 
         let conn = db.lock().unwrap();
@@ -497,7 +537,7 @@ mod tests {
             bot: "announce".into(),
             source: "system".into(),
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 0);
 
         let conn = db.lock().unwrap();
@@ -518,7 +558,7 @@ mod tests {
             sql: "UPDATE kanban_cards SET status = 'done' WHERE id = 'x'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -530,7 +570,7 @@ mod tests {
             from: "requested".into(),
             to: "in_progress".into(),
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -541,7 +581,7 @@ mod tests {
             sql: "UPDATE kanban_cards SET review_status = 'rework' WHERE id = 'x'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -552,7 +592,7 @@ mod tests {
             sql: "UPDATE kanban_cards SET latest_dispatch_id = 'abc' WHERE id = 'x'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -563,7 +603,7 @@ mod tests {
             sql: "DELETE FROM task_dispatches WHERE id = 'dispatch-1'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -588,7 +628,7 @@ mod tests {
             sql: "INSERT INTO card_review_state (card_id, state) VALUES ('x', 'idle')".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -599,7 +639,7 @@ mod tests {
             sql: "UPDATE card_review_state SET state = 'reviewing' WHERE card_id = 'x'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -706,7 +746,7 @@ mod tests {
                 .into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -718,7 +758,7 @@ mod tests {
             sql: "REPLACE INTO card_review_state (card_id, state) VALUES ('c1', 'idle')".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 
@@ -730,7 +770,7 @@ mod tests {
             sql: "DELETE FROM card_review_state WHERE card_id = 'c1'".into(),
             params: vec![],
         }];
-        let result = execute_intents(&db, intents);
+        let result = execute_intents(&db, None, intents);
         assert_eq!(result.errors, 1);
     }
 }

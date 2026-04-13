@@ -29,6 +29,13 @@ pub(super) fn register_auto_queue_ops<'js>(
             activate_raw(&db_activate, &bridge_activate, &body_json)
         })?,
     )?;
+    let bridge_should_defer = bridge.clone();
+    auto_queue_obj.set(
+        "__shouldDeferActivateRaw",
+        Function::new(ctx.clone(), move || -> bool {
+            should_defer_activate(&bridge_should_defer)
+        })?,
+    )?;
 
     ad.set("autoQueue", auto_queue_obj)?;
 
@@ -51,6 +58,18 @@ pub(super) fn register_auto_queue_ops<'js>(
                 }
                 if (body.active_only === undefined) {
                     body.active_only = true;
+                }
+                if (aq.__shouldDeferActivateRaw()) {
+                    agentdesk.__pendingIntents.push({
+                        type: "activate_auto_queue",
+                        body: body
+                    });
+                    return {
+                        ok: true,
+                        deferred: true,
+                        count: 0,
+                        dispatched: []
+                    };
                 }
                 var result = JSON.parse(aq.__activateRaw(JSON.stringify(body)));
                 if (result.error) throw new Error(result.error);
@@ -101,6 +120,13 @@ fn activate_raw(db: &Db, bridge: &BridgeHandle, body_json: &str) -> String {
         crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(db.clone(), engine);
     let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
     response.0.to_string()
+}
+
+fn should_defer_activate(bridge: &BridgeHandle) -> bool {
+    bridge
+        .upgrade_engine()
+        .map(|engine| engine.is_actor_thread())
+        .unwrap_or(false)
 }
 
 fn update_entry_status_raw(

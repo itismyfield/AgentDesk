@@ -194,6 +194,32 @@ fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
     Some(elapsed.num_milliseconds().max(0))
 }
 
+fn load_restored_provider_session_id(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel_name: &str,
+) -> Option<String> {
+    let tmux_name = provider.build_tmux_session_name(channel_name);
+    let session_keys =
+        super::adk_session::build_session_key_candidates(token_hash, provider, &tmux_name);
+
+    db.and_then(|db| {
+        db.lock().ok().and_then(|conn| {
+            session_keys.iter().find_map(|session_key| {
+                conn.query_row(
+                    "SELECT claude_session_id FROM sessions WHERE session_key = ?1 AND provider = ?2",
+                    rusqlite::params![session_key, provider.as_str()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .filter(|session_id| !session_id.is_empty())
+            })
+        })
+    })
+}
+
 fn clear_provider_overload_retry_state(channel_id: ChannelId) {
     PROVIDER_OVERLOAD_RETRY_STATE.remove(&channel_id.get());
 }
@@ -1558,9 +1584,12 @@ pub(super) async fn tmux_output_watcher(
                 channel_id.get()
             );
         }
-
-        let work_completion_context =
-            has_assistant_response.then(|| serde_json::json!({ "agent_response_present": true }));
+        let current_worktree_path = {
+            let mut data = shared.core.lock().await;
+            data.sessions
+                .get_mut(&channel_id)
+                .and_then(|session| session.validated_path(channel_id.get()))
+        };
 
         let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
             let dispatch_type = shared.db.as_ref().and_then(|db| {
@@ -1583,12 +1612,27 @@ pub(super) async fn tmux_output_watcher(
                         );
                         false
                     } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                        let mut work_completion_context =
+                            super::turn_bridge::build_work_dispatch_completion_result(
+                                shared.db.as_ref(),
+                                did,
+                                "watcher_completed",
+                                false,
+                                current_worktree_path.as_deref(),
+                                Some(&full_response),
+                            );
+                        if let Some(obj) = work_completion_context.as_object_mut() {
+                            obj.insert(
+                                "agent_response_present".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
                         match crate::dispatch::finalize_dispatch(
                             db,
                             engine,
                             did,
                             "watcher_completed",
-                            work_completion_context.as_ref(),
+                            Some(&work_completion_context),
                         ) {
                             Ok(_) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1603,24 +1647,46 @@ pub(super) async fn tmux_output_watcher(
                                 tracing::warn!(
                                     "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
                                 );
+                                let mut fallback_result =
+                                    super::turn_bridge::build_work_dispatch_completion_result(
+                                        shared.db.as_ref(),
+                                        did,
+                                        "watcher_db_fallback",
+                                        true,
+                                        current_worktree_path.as_deref(),
+                                        Some(&full_response),
+                                    );
+                                if let Some(obj) = fallback_result.as_object_mut() {
+                                    obj.insert(
+                                        "agent_response_present".to_string(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                }
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
                                     did,
-                                    &serde_json::json!({
-                                        "completion_source": "watcher_db_fallback",
-                                        "needs_reconcile": true,
-                                        "agent_response_present": true,
-                                    }),
+                                    &fallback_result,
                                 )
                             }
                         }
                     } else {
+                        let mut fallback_result =
+                            super::turn_bridge::build_work_dispatch_completion_result(
+                                shared.db.as_ref(),
+                                did,
+                                "watcher_db_fallback",
+                                true,
+                                current_worktree_path.as_deref(),
+                                Some(&full_response),
+                            );
+                        if let Some(obj) = fallback_result.as_object_mut() {
+                            obj.insert(
+                                "agent_response_present".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
                         super::turn_bridge::runtime_db_fallback_complete_with_result(
                             did,
-                            &serde_json::json!({
-                                "completion_source": "watcher_db_fallback",
-                                "needs_reconcile": true,
-                                "agent_response_present": true,
-                            }),
+                            &fallback_result,
                         )
                     }
                 }
@@ -2485,6 +2551,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
             let remote_profile =
                 load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+            let persisted_session_id = load_restored_provider_session_id(
+                shared.db.as_ref(),
+                &shared.token_hash,
+                &provider,
+                channel_name,
+            );
             let configured_path =
                 super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
 
@@ -2492,8 +2564,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 data.sessions
                     .entry(*channel_id)
                     .or_insert_with(|| super::DiscordSession {
-                        session_id: None,
-                        memento_context_loaded: false,
+                        session_id: persisted_session_id.clone(),
+                        memento_context_loaded: persisted_session_id.is_some(),
                         memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
@@ -2509,6 +2581,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
                         born_generation: super::runtime_store::load_generation(),
                     });
+
+            if session.session_id.is_none() && persisted_session_id.is_some() {
+                session.restore_provider_session(persisted_session_id.clone());
+            }
 
             // Restore current_path: DB cwd (worktree-aware) > last_sessions (yaml, main workspace)
             if session.current_path.is_none() {
@@ -2697,10 +2773,10 @@ mod tests {
     use super::{
         PROVIDER_OVERLOAD_RETRY_STATE, ProviderOverloadDecision, RestartHandoffScope,
         WatcherToolState, clear_provider_overload_retry_state, detect_provider_overload_message,
-        is_auth_error_message, is_prompt_too_long_message, normalized_retry_payload_text,
-        process_watcher_lines, provider_overload_fingerprint, provider_overload_retry_delay,
-        record_provider_overload_retry, resolve_dispatched_thread_dispatch_from_conn,
-        resolve_restart_handoff_scope,
+        is_auth_error_message, is_prompt_too_long_message, load_restored_provider_session_id,
+        normalized_retry_payload_text, process_watcher_lines, provider_overload_fingerprint,
+        provider_overload_retry_delay, record_provider_overload_retry,
+        resolve_dispatched_thread_dispatch_from_conn, resolve_restart_handoff_scope,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
@@ -2808,6 +2884,52 @@ mod tests {
         let resolved =
             resolve_dispatched_thread_dispatch_from_conn(&conn, 1_492_091_380_045_189_131);
         assert_eq!(resolved.as_deref(), Some("session-dispatch"));
+    }
+
+    #[test]
+    fn restored_live_tmux_session_loads_namespaced_provider_session_id() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz",
+            &provider,
+            &provider.build_tmux_session_name("adk-cdx"),
+        );
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions (session_key, provider, claude_session_id) VALUES (?1, ?2, ?3)",
+                rusqlite::params![session_key, provider.as_str(), "persisted-sid-1"],
+            )
+            .unwrap();
+
+        assert_eq!(
+            load_restored_provider_session_id(Some(&db), "tokenxyz", &provider, "adk-cdx")
+                .as_deref(),
+            Some("persisted-sid-1")
+        );
+    }
+
+    #[test]
+    fn restored_live_tmux_session_falls_back_to_legacy_session_key() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let session_key = crate::services::discord::adk_session::build_legacy_session_key(
+            &provider.build_tmux_session_name("adk-cdx"),
+        );
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions (session_key, provider, claude_session_id) VALUES (?1, ?2, ?3)",
+                rusqlite::params![session_key, provider.as_str(), "legacy-sid-1"],
+            )
+            .unwrap();
+
+        assert_eq!(
+            load_restored_provider_session_id(Some(&db), "tokenxyz", &provider, "adk-cdx")
+                .as_deref(),
+            Some("legacy-sid-1")
+        );
     }
 
     #[test]
