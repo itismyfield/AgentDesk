@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
 use crate::services::provider::ProviderKind;
+use crate::utils::format::tail_with_ellipsis;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
@@ -392,6 +393,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_streaming_split_boundary_prefers_paragraph_breaks() {
+        use super::streaming_split_boundary;
+
+        let text = "alpha line\n\nbeta section continues";
+        let split_at = streaming_split_boundary(text, 14).unwrap();
+
+        assert_eq!(&text[..split_at], "alpha line\n\n");
+    }
+
+    #[test]
+    fn test_streaming_split_boundary_falls_back_to_word_boundary() {
+        use super::streaming_split_boundary;
+
+        let text = "alpha beta gamma";
+        let split_at = streaming_split_boundary(text, 12).unwrap();
+
+        assert_eq!(&text[..split_at], "alpha beta ");
+    }
+
+    #[test]
+    fn test_plan_streaming_rollover_keeps_raw_frozen_chunk() {
+        use super::plan_streaming_rollover;
+
+        let current_portion = format!("{}\n\n\n{}", "a".repeat(1500), "b".repeat(700));
+        let plan = plan_streaming_rollover(&current_portion, "⏳ status").unwrap();
+
+        assert_eq!(plan.frozen_chunk, current_portion[..plan.split_at]);
+        assert!(plan.frozen_chunk.contains("\n\n\n"));
+    }
+
     // ── filter_codex_tool_logs tests ─────────────────────────────────────
 
     #[test]
@@ -544,6 +576,83 @@ pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
             i -= 1;
         }
         i
+    }
+}
+
+pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usize> {
+    if max_len == 0 || text.len() <= max_len {
+        return None;
+    }
+
+    let safe_end = floor_char_boundary(text, max_len);
+    if safe_end == 0 {
+        return None;
+    }
+
+    let window = &text[..safe_end];
+    let paragraph_split = window.rfind("\n\n").map(|idx| idx + 2);
+    let newline_split = window.rfind('\n').map(|idx| idx + 1);
+    let whitespace_split = window
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8());
+
+    let preferred = paragraph_split
+        .or(newline_split)
+        .or(whitespace_split)
+        .unwrap_or(safe_end);
+    let split_at = if preferred < safe_end / 2 {
+        safe_end
+    } else {
+        preferred
+    };
+
+    Some(floor_char_boundary(text, split_at))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StreamingRolloverPlan {
+    pub(super) display_snapshot: String,
+    pub(super) frozen_chunk: String,
+    pub(super) split_at: usize,
+}
+
+fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &str) -> String {
+    let footer = format!("\n\n{status_block}");
+    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let normalized = normalize_empty_lines(current_portion);
+    let body = tail_with_ellipsis(&normalized, body_budget);
+    format!("{}{}", body, footer)
+}
+
+pub(super) fn plan_streaming_rollover(
+    current_portion: &str,
+    status_block: &str,
+) -> Option<StreamingRolloverPlan> {
+    if current_portion.is_empty() {
+        return None;
+    }
+
+    let footer = format!("\n\n{status_block}");
+    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let split_at = streaming_split_boundary(current_portion, body_budget)?;
+
+    Some(StreamingRolloverPlan {
+        display_snapshot: build_streaming_placeholder_snapshot(current_portion, status_block),
+        frozen_chunk: current_portion[..split_at].to_string(),
+        split_at,
+    })
+}
+
+pub(super) fn build_streaming_placeholder_text(
+    current_portion: &str,
+    status_block: &str,
+) -> String {
+    if current_portion.is_empty() {
+        status_block.to_string()
+    } else {
+        build_streaming_placeholder_snapshot(current_portion, status_block)
     }
 }
 

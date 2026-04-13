@@ -106,6 +106,10 @@ fn turn_duration_ms(started_at: std::time::Instant) -> i64 {
     i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
+fn response_portion_after_offset(full_response: &str, response_sent_offset: usize) -> &str {
+    full_response.get(response_sent_offset..).unwrap_or("")
+}
+
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -160,7 +164,7 @@ pub(super) fn spawn_turn_bridge(
         let mut restart_recovery_handoff = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
-        let current_msg_id = bridge.current_msg_id;
+        let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut new_session_id = bridge.new_session_id.clone();
@@ -702,11 +706,70 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
-            let current_portion = if response_sent_offset < full_response.len() {
-                &full_response[response_sent_offset..]
-            } else {
-                ""
-            };
+            loop {
+                let current_portion =
+                    response_portion_after_offset(&full_response, response_sent_offset);
+                if done || current_portion.is_empty() {
+                    break;
+                }
+
+                let indicator = SPINNER[spin_idx % SPINNER.len()];
+                let status_block = super::formatting::build_placeholder_status_block(
+                    indicator,
+                    prev_tool_status.as_deref(),
+                    current_tool_line.as_deref(),
+                    &full_response,
+                    narrate_progress,
+                );
+                let Some(plan) =
+                    super::formatting::plan_streaming_rollover(current_portion, &status_block)
+                else {
+                    break;
+                };
+
+                match gateway
+                    .edit_message(channel_id, current_msg_id, &plan.frozen_chunk)
+                    .await
+                {
+                    Ok(()) => match gateway.send_message(channel_id, &status_block).await {
+                        Ok(next_msg_id) => {
+                            response_sent_offset += plan.split_at;
+                            current_msg_id = next_msg_id;
+                            last_edit_text = status_block;
+                            last_status_edit = tokio::time::Instant::now() - status_interval;
+                            inflight_state.current_msg_id = current_msg_id.get();
+                            inflight_state.current_msg_len = last_edit_text.len();
+                            inflight_state.response_sent_offset = response_sent_offset;
+                            inflight_state.full_response = full_response.clone();
+                            state_dirty = true;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[discord] failed to create rollover placeholder in channel {}: {}",
+                                channel_id,
+                                error
+                            );
+                            let _ = gateway
+                                .edit_message(channel_id, current_msg_id, &plan.display_snapshot)
+                                .await;
+                            last_edit_text = plan.display_snapshot;
+                            break;
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            "[discord] failed to freeze rollover chunk for message {} in channel {}: {}",
+                            current_msg_id,
+                            channel_id,
+                            error
+                        );
+                        break;
+                    }
+                }
+            }
+
+            let current_portion =
+                response_portion_after_offset(&full_response, response_sent_offset);
             let status_block = super::formatting::build_placeholder_status_block(
                 indicator,
                 prev_tool_status.as_deref(),
@@ -714,15 +777,8 @@ pub(super) fn spawn_turn_bridge(
                 &full_response,
                 narrate_progress,
             );
-            let footer = format!("\n\n{status_block}");
-            let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
-            let normalized = normalize_empty_lines(current_portion);
-            let stable_display_text = if current_portion.is_empty() {
-                status_block.clone()
-            } else {
-                let body = tail_with_ellipsis(&normalized, body_budget.max(1));
-                format!("{}{}", body, footer)
-            };
+            let stable_display_text =
+                super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
 
             if stable_display_text != last_edit_text
                 && !done
@@ -991,16 +1047,20 @@ pub(super) fn spawn_turn_bridge(
                 crate::services::process::kill_pid_tree(pid);
             }
 
-            full_response = if full_response.trim().is_empty() {
+            let remaining_response =
+                response_portion_after_offset(&full_response, response_sent_offset);
+            let terminal_response = if remaining_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
-                let formatted =
-                    super::formatting::format_for_discord_with_provider(&full_response, &provider);
+                let formatted = super::formatting::format_for_discord_with_provider(
+                    remaining_response,
+                    &provider,
+                );
                 format!("{}\n\n[Stopped]", formatted)
             };
 
             let _ = gateway
-                .replace_message(channel_id, current_msg_id, &full_response)
+                .replace_message(channel_id, current_msg_id, &terminal_response)
                 .await;
 
             gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
@@ -1231,7 +1291,8 @@ pub(super) fn spawn_turn_bridge(
                 tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
             }
 
-            let mut delivery_response = full_response.clone();
+            let mut delivery_response =
+                response_portion_after_offset(&full_response, response_sent_offset).to_string();
             if let Some(warning) = review_dispatch_warning.as_deref() {
                 let warning = warning.trim();
                 if !warning.is_empty() {

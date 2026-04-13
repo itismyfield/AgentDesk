@@ -16,6 +16,12 @@ use crate::services::provider::ProviderKind;
 type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub(super) trait TurnGateway: Send + Sync {
+    fn send_message<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>>;
+
     fn edit_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -102,6 +108,21 @@ impl DiscordGateway {
 }
 
 impl TurnGateway for DiscordGateway {
+    fn send_message<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            rate_limit_wait(&self.shared, channel_id).await;
+            channel_id
+                .send_message(&self.http, serenity::CreateMessage::new().content(content))
+                .await
+                .map(|message| message.id)
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn edit_message<'a>(
         &'a self,
         channel_id: ChannelId,
