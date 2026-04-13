@@ -180,6 +180,7 @@ fn build_race_requeued_intervention(
     user_text: &str,
     reply_context: Option<String>,
     reply_to_user_message: bool,
+    merge_consecutive: bool,
 ) -> Intervention {
     Intervention {
         author_id: request_owner,
@@ -190,9 +191,7 @@ fn build_race_requeued_intervention(
         created_at: std::time::Instant::now(),
         reply_context,
         has_reply_boundary: reply_to_user_message,
-        merge_consecutive: !user_text.starts_with('!')
-            && !user_text.starts_with('/')
-            && !user_text.starts_with("DISPATCH:"),
+        merge_consecutive,
     }
 }
 
@@ -208,6 +207,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     reply_to_user_message: bool,
     defer_watcher_resume: bool,
     wait_for_completion: bool,
+    merge_consecutive: bool,
     reply_context: Option<String>,
 ) -> Result<(), Error> {
     let original_channel_id = channel_id;
@@ -763,6 +763,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 user_text,
                 reply_context.clone(),
                 reply_to_user_message,
+                merge_consecutive,
             ),
         )
         .await;
@@ -2810,6 +2811,7 @@ Any other message is sent to {p}.
                 false,
                 false,
                 false,
+                false,
                 None,
             )
             .await?;
@@ -3085,10 +3087,26 @@ mod tests {
             "hello",
             None,
             true,
+            true,
         );
 
         assert!(queued.has_reply_boundary);
         assert!(queued.reply_context.is_none());
         assert!(queued.merge_consecutive);
+    }
+
+    #[test]
+    fn race_requeue_preserves_non_mergeable_turns() {
+        let queued = build_race_requeued_intervention(
+            UserId::new(7),
+            MessageId::new(8),
+            "hello",
+            None,
+            false,
+            false,
+        );
+
+        assert!(!queued.has_reply_boundary);
+        assert!(!queued.merge_consecutive);
     }
 }

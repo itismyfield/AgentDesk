@@ -1263,7 +1263,8 @@ pub(super) async fn kickoff_idle_queues(
             true,     // reply_to_user_message
             has_more, // defer_watcher_resume
             false,    // wait_for_completion — don't block, let channels run concurrently
-            None,     // reply_context
+            intervention.merge_consecutive,
+            None, // reply_context
         )
         .await
         {

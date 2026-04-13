@@ -262,6 +262,7 @@ pub(in crate::services::discord) async fn cmd_cc(
             false,
             false,
             false,
+            false,
             None,
         )
         .await?;
@@ -319,6 +320,7 @@ pub(in crate::services::discord) async fn cmd_cc(
         &skill_prompt,
         &ctx.data().shared,
         &ctx.data().token,
+        false,
         false,
         false,
         false,
