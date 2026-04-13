@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::AppState;
 use crate::services::{auto_queue::AutoQueueLogContext, provider::ProviderKind};
@@ -118,6 +118,12 @@ struct PlannedEntry {
     priority_rank: i64,
     batch_phase: i64,
     reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DependencyParseResult {
+    numbers: Vec<i64>,
+    signals: Vec<String>,
 }
 
 fn load_run_ids_with_status(
@@ -1028,22 +1034,203 @@ fn planning_sort_key(card: &GenerateCandidate, idx: usize) -> (i32, usize) {
     (priority_sort_key(&card.priority), idx)
 }
 
-fn extract_dependency_numbers(card: &GenerateCandidate) -> Vec<i64> {
-    let mut deps = HashSet::new();
-    let sources = [card.description.as_deref(), card.metadata.as_deref()];
-    let re = regex::Regex::new(r"#(\d+)").expect("dependency regex must compile");
-    for text in sources.into_iter().flatten() {
-        for cap in re.captures_iter(text) {
-            if let Ok(num) = cap[1].parse::<i64>() {
-                if Some(num) != card.github_issue_number {
-                    deps.insert(num);
+fn dependency_issue_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"#(\d+)").expect("dependency regex must compile"))
+}
+
+fn dependency_section_header_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^\s*(?:#{1,6}\s*)?(dependencies?|dependency|depends on|선행 작업|선행작업|의존성)\s*:?\s*$",
+        )
+        .expect("dependency section regex must compile")
+    })
+}
+
+fn dependency_inline_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^\s*(?:[-*]\s*)?(?:#{1,6}\s*)?(dependencies?|dependency|depends on|선행 작업|선행작업|의존성)\s*:?\s+(.+)$",
+        )
+        .expect("dependency inline regex must compile")
+    })
+}
+
+fn bare_dependency_list_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^\s*#\d+(?:[\s,]+#\d+)*\s*$")
+            .expect("dependency bare-list regex must compile")
+    })
+}
+
+fn insert_dependency_number(deps: &mut HashSet<i64>, self_issue_number: Option<i64>, num: i64) {
+    if Some(num) != self_issue_number {
+        deps.insert(num);
+    }
+}
+
+fn collect_dependency_numbers_from_issue_refs(
+    text: &str,
+    deps: &mut HashSet<i64>,
+    self_issue_number: Option<i64>,
+) -> bool {
+    let mut matched = false;
+    for cap in dependency_issue_regex().captures_iter(text) {
+        if let Ok(num) = cap[1].parse::<i64>() {
+            matched = true;
+            insert_dependency_number(deps, self_issue_number, num);
+        }
+    }
+    matched
+}
+
+fn collect_dependency_numbers_from_json_value(
+    value: &Value,
+    deps: &mut HashSet<i64>,
+    self_issue_number: Option<i64>,
+) -> bool {
+    match value {
+        Value::Number(num) => num
+            .as_i64()
+            .map(|issue_number| {
+                insert_dependency_number(deps, self_issue_number, issue_number);
+                true
+            })
+            .unwrap_or(false),
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            let mut matched =
+                collect_dependency_numbers_from_issue_refs(trimmed, deps, self_issue_number);
+            if let Ok(issue_number) = trimmed.trim_start_matches('#').parse::<i64>() {
+                insert_dependency_number(deps, self_issue_number, issue_number);
+                matched = true;
+            }
+            matched
+        }
+        Value::Array(items) => {
+            let mut matched = false;
+            for item in items {
+                matched |=
+                    collect_dependency_numbers_from_json_value(item, deps, self_issue_number);
+            }
+            matched
+        }
+        _ => false,
+    }
+}
+
+fn extract_dependency_numbers_from_text(
+    text: &str,
+    source_label: &str,
+    allow_bare_ref_list: bool,
+    deps: &mut HashSet<i64>,
+    signals: &mut HashSet<String>,
+    self_issue_number: Option<i64>,
+) {
+    let trimmed = text.trim();
+    if allow_bare_ref_list && bare_dependency_list_regex().is_match(trimmed) {
+        if collect_dependency_numbers_from_issue_refs(trimmed, deps, self_issue_number) {
+            signals.insert(format!("{source_label}:bare-list"));
+        }
+        return;
+    }
+
+    let mut active_section: Option<String> = None;
+    for line in text.lines() {
+        let trimmed_line = line.trim();
+        if trimmed_line.is_empty() {
+            continue;
+        }
+
+        if dependency_section_header_regex().is_match(trimmed_line) {
+            active_section = Some(trimmed_line.to_string());
+            continue;
+        }
+
+        if trimmed_line.starts_with('#') && active_section.is_some() {
+            active_section = None;
+        }
+
+        if let Some(caps) = dependency_inline_regex().captures(trimmed_line) {
+            let signal = format!("{source_label}:inline:{}", caps[1].trim().to_lowercase());
+            if let Some(rest) = caps.get(2) {
+                if collect_dependency_numbers_from_issue_refs(
+                    rest.as_str(),
+                    deps,
+                    self_issue_number,
+                ) {
+                    signals.insert(signal);
                 }
+            }
+            continue;
+        }
+
+        if let Some(section_label) = active_section.as_ref() {
+            if collect_dependency_numbers_from_issue_refs(trimmed_line, deps, self_issue_number) {
+                signals.insert(format!("{source_label}:section:{section_label}"));
             }
         }
     }
-    let mut out: Vec<i64> = deps.into_iter().collect();
-    out.sort_unstable();
-    out
+}
+
+fn extract_dependency_parse_result(card: &GenerateCandidate) -> DependencyParseResult {
+    let mut deps = HashSet::new();
+    let mut signals = HashSet::new();
+
+    if let Some(description) = card.description.as_deref() {
+        extract_dependency_numbers_from_text(
+            description,
+            "description",
+            false,
+            &mut deps,
+            &mut signals,
+            card.github_issue_number,
+        );
+    }
+
+    if let Some(metadata) = card.metadata.as_deref() {
+        if let Ok(value) = serde_json::from_str::<Value>(metadata) {
+            if let Some(object) = value.as_object() {
+                for (key, field_value) in object {
+                    if key.eq_ignore_ascii_case("depends_on")
+                        || key.eq_ignore_ascii_case("dependencies")
+                    {
+                        if collect_dependency_numbers_from_json_value(
+                            field_value,
+                            &mut deps,
+                            card.github_issue_number,
+                        ) {
+                            signals.insert(format!("metadata:json:{key}"));
+                        }
+                    }
+                }
+            }
+        } else {
+            extract_dependency_numbers_from_text(
+                metadata,
+                "metadata",
+                true,
+                &mut deps,
+                &mut signals,
+                card.github_issue_number,
+            );
+        }
+    }
+
+    let mut numbers: Vec<i64> = deps.into_iter().collect();
+    numbers.sort_unstable();
+    let mut signals: Vec<String> = signals.into_iter().collect();
+    signals.sort();
+
+    DependencyParseResult { numbers, signals }
+}
+
+fn extract_dependency_numbers(card: &GenerateCandidate) -> Vec<i64> {
+    extract_dependency_parse_result(card).numbers
 }
 
 fn normalize_similarity_path(raw: &str) -> Option<String> {
@@ -1657,27 +1844,69 @@ pub async fn generate(
         })
         .collect();
     let mut filtered_cards = Vec::with_capacity(cards.len());
+    let mut dependency_status_cache: HashMap<i64, Option<String>> = HashMap::new();
     let mut excluded_count = 0usize;
     for card in &cards {
-        let dep_numbers = extract_dependency_numbers(card);
-        let has_unresolved_external_dependency = dep_numbers.iter().any(|dep_num| {
-            if issue_to_idx.contains_key(dep_num) {
-                return false;
-            }
-            let dep_status: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM kanban_cards WHERE github_issue_number = ?1",
-                    [dep_num],
-                    |row| row.get(0),
-                )
-                .ok();
-            dep_status.as_deref() != Some("done")
-        });
+        let dep_parse = extract_dependency_parse_result(card);
+        crate::auto_queue_log!(
+            info,
+            "generate.dependency_parse",
+            AutoQueueLogContext::new()
+                .card(card.card_id.as_str())
+                .agent(card.agent_id.as_str()),
+            "issue_number={} parsed_dependencies={:?} signals={:?}",
+            card.github_issue_number
+                .map(|issue_number| format!("#{issue_number}"))
+                .unwrap_or_else(|| "<none>".to_string()),
+            dep_parse.numbers,
+            dep_parse.signals
+        );
 
-        if has_unresolved_external_dependency {
-            excluded_count += 1;
-        } else {
+        let unresolved_external_dependencies: Vec<String> = dep_parse
+            .numbers
+            .iter()
+            .filter_map(|dep_num| {
+                if issue_to_idx.contains_key(dep_num) {
+                    return None;
+                }
+                let dep_status = dependency_status_cache
+                    .entry(*dep_num)
+                    .or_insert_with(|| {
+                        conn.query_row(
+                            "SELECT status FROM kanban_cards WHERE github_issue_number = ?1",
+                            [dep_num],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                    })
+                    .clone();
+                if dep_status.as_deref() == Some("done") {
+                    None
+                } else {
+                    Some(format!(
+                        "#{dep_num}:{}",
+                        dep_status.as_deref().unwrap_or("missing")
+                    ))
+                }
+            })
+            .collect();
+
+        if unresolved_external_dependencies.is_empty() {
             filtered_cards.push(card.clone());
+        } else {
+            crate::auto_queue_log!(
+                info,
+                "generate.exclude_unresolved_dependencies",
+                AutoQueueLogContext::new()
+                    .card(card.card_id.as_str())
+                    .agent(card.agent_id.as_str()),
+                "issue_number={} unresolved_external_dependencies={:?}",
+                card.github_issue_number
+                    .map(|issue_number| format!("#{issue_number}"))
+                    .unwrap_or_else(|| "<none>".to_string()),
+                unresolved_external_dependencies
+            );
+            excluded_count += 1;
         }
     }
 
@@ -4058,7 +4287,10 @@ pub async fn submit_order(
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerateCandidate, QueueEntryOrder, build_group_plan, reorder_entry_ids};
+    use super::{
+        GenerateCandidate, QueueEntryOrder, build_group_plan, extract_dependency_numbers,
+        extract_dependency_parse_result, reorder_entry_ids,
+    };
     use std::collections::HashMap;
 
     fn entry(id: &str, status: &str, agent_id: &str) -> QueueEntryOrder {
@@ -4083,6 +4315,52 @@ mod tests {
             metadata: metadata.map(str::to_string),
             github_issue_number: Some(issue_number),
         }
+    }
+
+    #[test]
+    fn extract_dependency_numbers_ignores_context_issue_references_in_description() {
+        let card = candidate(
+            497,
+            "medium",
+            Some("## 컨텍스트\n관련: #494\n이미 해결한 #493을 참고"),
+            None,
+        );
+
+        assert_eq!(extract_dependency_numbers(&card), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn extract_dependency_numbers_parses_explicit_sections_and_json_metadata() {
+        let card = candidate(
+            497,
+            "medium",
+            Some("## 선행 작업\n- #494\n- #495\n## 컨텍스트\n관련: #493"),
+            Some(r##"{"depends_on":[496,"#497","#498"]}"##),
+        );
+
+        let parsed = extract_dependency_parse_result(&card);
+        assert_eq!(parsed.numbers, vec![494, 495, 496, 498]);
+        assert!(
+            parsed
+                .signals
+                .iter()
+                .any(|signal| signal.contains("description:section:## 선행 작업")),
+            "section-based dependency extraction should be recorded in signals"
+        );
+        assert!(
+            parsed
+                .signals
+                .iter()
+                .any(|signal| signal == "metadata:json:depends_on"),
+            "json-based dependency extraction should be recorded in signals"
+        );
+    }
+
+    #[test]
+    fn extract_dependency_numbers_allows_bare_dependency_lists_in_metadata() {
+        let card = candidate(202, "medium", None, Some("#201 #203"));
+
+        assert_eq!(extract_dependency_numbers(&card), vec![201, 203]);
     }
 
     #[test]
