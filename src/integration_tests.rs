@@ -584,6 +584,125 @@ mod tests {
         (result, String::from_utf8_lossy(&captured).to_string())
     }
 
+    fn set_phase_gate_state(
+        db: &db::Db,
+        run_id: &str,
+        phase: i64,
+        status: &str,
+        dispatch_ids: &[&str],
+        next_phase: Option<i64>,
+        final_phase: bool,
+        anchor_card_id: Option<&str>,
+        verdict: Option<&str>,
+        failure_reason: Option<&str>,
+    ) {
+        let conn = db.lock().unwrap();
+        let final_phase = if final_phase { 1 } else { 0 };
+        if dispatch_ids.is_empty() {
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, verdict, dispatch_id, pass_verdict,
+                    next_phase, final_phase, anchor_card_id, failure_reason
+                ) VALUES (?1, ?2, ?3, ?4, NULL, 'phase_gate_passed', ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                ],
+            )
+            .unwrap();
+            return;
+        }
+
+        for dispatch_id in dispatch_ids {
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, verdict, dispatch_id, pass_verdict,
+                    next_phase, final_phase, anchor_card_id, failure_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'phase_gate_passed', ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    dispatch_id,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    fn phase_gate_state(db: &db::Db, run_id: &str, phase: i64) -> Option<serde_json::Value> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT dispatch_id, status, verdict, next_phase, final_phase, anchor_card_id, failure_reason
+                 FROM auto_queue_phase_gates
+                 WHERE run_id = ?1 AND phase = ?2
+                 ORDER BY dispatch_id ASC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(rusqlite::params![run_id, phase], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+
+        if rows.is_empty() {
+            return None;
+        }
+
+        let failed = rows.iter().find(|row| row.1 == "failed");
+        let dispatch_ids = rows
+            .iter()
+            .filter_map(|row| row.0.clone())
+            .collect::<Vec<_>>();
+        let status = if failed.is_some() {
+            "failed"
+        } else if !dispatch_ids.is_empty() && rows.iter().all(|row| row.1 == "passed") {
+            "passed"
+        } else {
+            rows[0].1.as_str()
+        };
+
+        let mut value = serde_json::json!({
+            "run_id": run_id,
+            "batch_phase": phase,
+            "next_phase": rows[0].3,
+            "final_phase": rows[0].4 != 0,
+            "anchor_card_id": rows[0].5,
+            "status": status,
+            "dispatch_ids": dispatch_ids,
+        });
+        if let Some(failed_row) = failed {
+            value["failed_dispatch_id"] = serde_json::json!(failed_row.0);
+            value["failed_verdict"] = serde_json::json!(failed_row.2);
+            value["failed_reason"] = serde_json::json!(failed_row.6);
+        }
+        Some(value)
+    }
+
     fn escalation_pending_reasons(db: &db::Db, card_id: &str) -> Vec<String> {
         kv_value(db, &format!("pm_pending:{card_id}"))
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -1129,6 +1248,20 @@ mod tests {
                 trigger_source  TEXT,
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(entry_id, dispatch_id)
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
+                run_id          TEXT NOT NULL,
+                phase           INTEGER NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                verdict         TEXT,
+                dispatch_id     TEXT UNIQUE,
+                pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+                next_phase      INTEGER,
+                final_phase     INTEGER NOT NULL DEFAULT 0,
+                anchor_card_id  TEXT,
+                failure_reason  TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
         )
         .unwrap();
@@ -3420,16 +3553,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let phase_gate_state: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'aq_phase_gate:run-review-disabled-phase:1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
         drop(conn);
 
-        let phase_gate_json: serde_json::Value = serde_json::from_str(&phase_gate_state).unwrap();
+        let phase_gate_json = phase_gate_state(&db, "run-review-disabled-phase", 1)
+            .expect("phase gate state must exist");
         assert_eq!(
             run_status, "paused",
             "multi-phase review-disabled terminal transition must pause the run for phase gate"
@@ -3483,20 +3610,17 @@ mod tests {
         )
         .expect("phase gate dispatch should be created");
         let phase_gate_dispatch_id = phase_gate_dispatch["id"].as_str().unwrap().to_string();
-        set_kv(
+        set_phase_gate_state(
             &db,
-            "aq_phase_gate:run-phase-final:2",
-            &json!({
-                "run_id": "run-phase-final",
-                "batch_phase": 2,
-                "next_phase": serde_json::Value::Null,
-                "final_phase": true,
-                "anchor_card_id": "card-phase-final",
-                "status": "pending",
-                "dispatch_ids": [phase_gate_dispatch_id.clone()],
-                "created_at": "2026-04-13T00:00:00Z"
-            })
-            .to_string(),
+            "run-phase-final",
+            2,
+            "pending",
+            &[phase_gate_dispatch_id.as_str()],
+            None,
+            true,
+            Some("card-phase-final"),
+            None,
+            None,
         );
 
         let state = AppState::test_state(db.clone(), engine.clone());
@@ -3506,7 +3630,7 @@ mod tests {
         assert_eq!(resume_body.0["resumed_runs"].as_u64(), Some(0));
         assert_eq!(resume_body.0["blocked_runs"].as_u64(), Some(1));
         assert_eq!(
-            kv_value(&db, "aq_phase_gate:run-phase-final:2").is_some(),
+            phase_gate_state(&db, "run-phase-final", 2).is_some(),
             true,
             "resume must leave the blocking phase gate untouched"
         );
@@ -3537,7 +3661,7 @@ mod tests {
             "final phase-gate pass should resume and complete the paused run"
         );
         assert!(
-            kv_value(&db, "aq_phase_gate:run-phase-final:2").is_none(),
+            phase_gate_state(&db, "run-phase-final", 2).is_none(),
             "successful gate completion must clear the persisted phase gate state"
         );
     }
@@ -4359,16 +4483,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let phase_gate_state: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'aq_phase_gate:run-547-phase:1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
         drop(conn);
 
-        let phase_gate_json: serde_json::Value = serde_json::from_str(&phase_gate_state).unwrap();
+        let phase_gate_json =
+            phase_gate_state(&db, "run-547-phase", 1).expect("phase gate state must exist");
         assert_eq!(entry_status, "done");
         assert_eq!(
             run_status, "paused",

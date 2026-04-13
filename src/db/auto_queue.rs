@@ -708,13 +708,12 @@ pub fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> 
 }
 
 pub fn run_has_blocking_phase_gate(conn: &Connection, run_id: &str) -> bool {
-    let key_pattern = format!("aq_phase_gate:{run_id}:%");
     conn.query_row(
         "SELECT COUNT(*) > 0
-         FROM kv_meta
-         WHERE key LIKE ?1
-           AND json_extract(COALESCE(value, '{}'), '$.status') IN ('pending', 'failed')",
-        [key_pattern],
+         FROM auto_queue_phase_gates
+         WHERE run_id = ?1
+           AND status IN ('pending', 'failed')",
+        [run_id],
         |row| row.get(0),
     )
     .unwrap_or(false)
