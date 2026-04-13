@@ -1300,7 +1300,7 @@ async fn start_meeting_with_reviewer(
     }
 
     // Create a Discord thread for the meeting so all output is contained there.
-    let thread_name = format!("Meeting: {}", &agenda[..agenda.len().min(90)]);
+    let thread_name = format!("Meeting: {}", truncate_for_meeting(agenda, 90));
     let msg_channel: ChannelId = match create_meeting_thread(http, channel_id, &thread_name).await {
         Some(tid) => {
             // Save thread_id in Meeting struct
@@ -1432,7 +1432,10 @@ async fn start_meeting_with_reviewer(
     // Persist the in-progress status through the internal API so office view can
     // show the active meeting even when auth is enabled.
     if let Some(payload) = adk_payload {
-        persist_meeting_status(payload).await?;
+        if let Err(error) = persist_meeting_status(payload).await {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err(error);
+        }
     }
 
     // Run meeting rounds
@@ -2902,7 +2905,7 @@ mod tests {
         display_query_hash, effective_round_count, meeting_query_hash, meeting_slot_state,
         parse_meeting_start_text, parse_participant_selection_response,
         resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
-        thread_query_hash, validate_fixed_participants,
+        thread_query_hash, truncate_for_meeting, validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -3383,6 +3386,15 @@ mod tests {
             display_query_hash(&canonical_thread_hash)
         )));
         assert!(md.contains("> **선정 사유**: 핵심 전문성 조합을 우선해 선정"));
+    }
+
+    #[test]
+    fn test_truncate_for_meeting_preserves_utf8_boundaries() {
+        let agenda = "멀티바이트🙂문자를 포함한 아주 긴 회의 안건 제목";
+        let truncated = truncate_for_meeting(agenda, 8);
+
+        assert_eq!(truncated, "멀티바이트🙂문자...");
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 
     #[test]
