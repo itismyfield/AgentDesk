@@ -39,14 +39,17 @@ src/
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── kanban.rs
+│   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── schema.rs
+│   ├── session_agent_resolution.rs
 │   └── session_transcripts.rs
 ├── dispatch/
 │   └── mod.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── agent_ops.rs
+│   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
 │   │   ├── config_ops.rs
 │   │   ├── db_ops.rs
@@ -172,6 +175,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── skill_usage.rs
