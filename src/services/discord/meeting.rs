@@ -2107,7 +2107,10 @@ async fn execute_agent_turn(
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
 ) -> Result<String, String> {
-    let specialist_provider = participant.provider.clone().unwrap_or(primary_provider);
+    let specialist_provider = participant
+        .provider
+        .clone()
+        .unwrap_or_else(|| primary_provider.clone());
     let role_binding = participant.role_binding();
     let role_context = if !participant.prompt_file.is_empty() {
         load_role_prompt(&role_binding).unwrap_or_default()
@@ -2127,6 +2130,11 @@ async fn execute_agent_turn(
     let system_prompt = meeting_readonly_system_prompt(participant, &role_context, &memory_context);
     let allowed_tools = meeting_readonly_allowed_tools();
     let working_dir = participant_working_dir(participant);
+    let critique_provider = if specialist_provider == reviewer_provider {
+        primary_provider.clone()
+    } else {
+        reviewer_provider.clone()
+    };
 
     let draft_prompt = format!(
         r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
@@ -2215,7 +2223,7 @@ async fn execute_agent_turn(
         draft = draft.trim(),
     );
     let critique = match execute_provider_stage(
-        reviewer_provider,
+        critique_provider,
         "meeting turn critique",
         critique_prompt,
         MEETING_TURN_STAGE_TIMEOUT_SECS,

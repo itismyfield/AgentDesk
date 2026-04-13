@@ -254,21 +254,46 @@ async fn reset_stale_slot_thread_if_needed(
     };
 
     let thread_info_url = format!("https://discord.com/api/v10/channels/{thread_id}");
-    let response = client
+    let response = match client
         .get(&thread_info_url)
         .header("Authorization", format!("Bot {}", token))
         .send()
         .await
-        .map_err(|err| format!("failed to inspect slot thread {thread_id}: {err}"))?;
+    {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] stale slot thread probe failed for dispatch {}: thread={} error={}",
+                dispatch_id,
+                thread_id,
+                err
+            );
+            return Ok(false);
+        }
+    };
 
     if !response.status().is_success() {
+        tracing::debug!(
+            "[dispatch] stale slot thread probe returned status {} for dispatch {} thread={}",
+            response.status(),
+            dispatch_id,
+            thread_id
+        );
         return Ok(false);
     }
 
-    let thread_info = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("failed to parse slot thread {thread_id}: {err}"))?;
+    let thread_info = match response.json::<serde_json::Value>().await {
+        Ok(thread_info) => thread_info,
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] stale slot thread probe parse failed for dispatch {}: thread={} error={}",
+                dispatch_id,
+                thread_id,
+                err
+            );
+            return Ok(false);
+        }
+    };
     let total_message_sent = thread_info
         .get("total_message_sent")
         .and_then(|value| value.as_u64())
