@@ -1633,9 +1633,8 @@ pub(super) fn spawn_turn_bridge(
                         if let Err(e) = gateway
                             .dispatch_queued_turn(
                                 channel_id,
-                                intervention.message_id,
+                                &intervention,
                                 &request_owner_name,
-                                &intervention.text,
                                 has_more_queued_turns,
                             )
                             .await

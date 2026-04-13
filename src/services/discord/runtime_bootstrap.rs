@@ -10,6 +10,37 @@ pub(crate) struct RunBotContext {
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
 }
 
+fn restored_intervention_message_ids(item: &Intervention) -> Vec<u64> {
+    let mut item_ids: Vec<u64> = item.source_message_ids.iter().map(|id| id.get()).collect();
+    if item_ids.is_empty() {
+        item_ids.push(item.message_id.get());
+    } else if !item_ids.contains(&item.message_id.get()) {
+        item_ids.push(item.message_id.get());
+    }
+    item_ids
+}
+
+fn enqueue_restored_intervention(
+    existing_ids: &mut std::collections::HashSet<u64>,
+    queue: &mut Vec<Intervention>,
+    item: Intervention,
+) -> bool {
+    let item_ids = restored_intervention_message_ids(&item);
+    // Persisted merged queue items may represent multiple source messages. If startup
+    // catch-up already recovered only some of them, dropping the whole item would lose
+    // the unseen messages because the merged text is no longer separable.
+    if item_ids
+        .iter()
+        .all(|message_id| existing_ids.contains(message_id))
+    {
+        return false;
+    }
+
+    existing_ids.extend(item_ids);
+    queue.push(item);
+    true
+}
+
 fn spawn_startup_thread_map_validation(db: crate::db::Db, token: String) {
     tokio::spawn(async move {
         let (checked, cleared) =
@@ -188,9 +219,13 @@ async fn execute_handoff_turns(
             Intervention {
                 author_id: serenity::UserId::new(1), // system-generated sentinel
                 message_id: placeholder.id,
+                source_message_ids: vec![placeholder.id],
                 text: handoff_prompt,
                 mode: InterventionMode::Soft,
                 created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             },
         )
         .await;
@@ -801,8 +836,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                         skipped += 1;
                                         continue;
                                     }
-                                    if existing_ids.insert(item.message_id.get()) {
-                                        queue.push(item);
+                                    if enqueue_restored_intervention(
+                                        &mut existing_ids,
+                                        &mut queue,
+                                        item,
+                                    ) {
                                         added += 1;
                                     } else {
                                         skipped += 1;
@@ -1258,5 +1296,61 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
         tracing::info!(
             "  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poise::serenity_prelude::{MessageId, UserId};
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    fn make_intervention(message_id: u64, source_message_ids: &[u64], text: &str) -> Intervention {
+        Intervention {
+            author_id: UserId::new(42),
+            message_id: MessageId::new(message_id),
+            source_message_ids: source_message_ids
+                .iter()
+                .copied()
+                .map(MessageId::new)
+                .collect(),
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: true,
+        }
+    }
+
+    #[test]
+    fn enqueue_restored_intervention_keeps_partially_overlapping_merged_item() {
+        let mut existing_ids = HashSet::from([100u64]);
+        let mut queue = Vec::new();
+
+        assert!(enqueue_restored_intervention(
+            &mut existing_ids,
+            &mut queue,
+            make_intervention(101, &[100, 101], "first\nsecond"),
+        ));
+
+        assert_eq!(queue.len(), 1);
+        assert!(existing_ids.contains(&100));
+        assert!(existing_ids.contains(&101));
+    }
+
+    #[test]
+    fn enqueue_restored_intervention_skips_only_when_all_ids_are_known() {
+        let mut existing_ids = HashSet::from([100u64, 101u64]);
+        let mut queue = Vec::new();
+
+        assert!(!enqueue_restored_intervention(
+            &mut existing_ids,
+            &mut queue,
+            make_intervention(101, &[100, 101], "first\nsecond"),
+        ));
+
+        assert!(queue.is_empty());
     }
 }

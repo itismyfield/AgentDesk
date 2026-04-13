@@ -117,9 +117,13 @@ mod tests {
         Intervention {
             author_id: UserId::new(1),
             message_id: MessageId::new(100),
+            source_message_ids: vec![MessageId::new(100)],
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
         }
     }
 
@@ -139,9 +143,13 @@ mod tests {
             vec![Intervention {
                 author_id: UserId::new(42),
                 message_id: MessageId::new(7),
+                source_message_ids: vec![MessageId::new(7)],
                 text: "pending".to_string(),
                 mode: InterventionMode::Soft,
                 created_at,
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             }],
         );
 
@@ -163,9 +171,13 @@ mod tests {
             vec![Intervention {
                 author_id: UserId::new(42),
                 message_id: MessageId::new(7),
+                source_message_ids: vec![MessageId::new(7)],
                 text: "stale".to_string(),
                 mode: InterventionMode::Soft,
                 created_at,
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             }],
         );
 
@@ -186,9 +198,13 @@ mod tests {
             vec![Intervention {
                 author_id: UserId::new(42),
                 message_id: MessageId::new(7),
+                source_message_ids: vec![MessageId::new(7)],
                 text: "pending".to_string(),
                 mode: InterventionMode::Soft,
                 created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             }],
         );
 
@@ -383,6 +399,10 @@ mod tests {
         let old_json = r#"[{"author_id":1,"message_id":100,"text":"hello"}]"#;
         let items: Vec<PendingQueueItem> = serde_json::from_str(old_json).unwrap();
         assert_eq!(items[0].text, "hello");
+        assert!(items[0].source_message_ids.is_empty());
+        assert!(items[0].reply_context.is_none());
+        assert!(!items[0].has_reply_boundary);
+        assert!(!items[0].merge_consecutive);
         assert!(items[0].channel_id.is_none());
         assert!(items[0].channel_name.is_none());
         assert!(items[0].override_channel_id.is_none());
@@ -390,13 +410,21 @@ mod tests {
         let new_item = PendingQueueItem {
             author_id: 1,
             message_id: 100,
+            source_message_ids: vec![100, 101],
             text: "hello".to_string(),
+            reply_context: Some("[Reply context]".to_string()),
+            has_reply_boundary: true,
+            merge_consecutive: true,
             channel_id: Some(42),
             channel_name: Some("test-channel".to_string()),
             override_channel_id: None,
         };
         let json = serde_json::to_string(&new_item).unwrap();
         let parsed: PendingQueueItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_message_ids, vec![100, 101]);
+        assert_eq!(parsed.reply_context.as_deref(), Some("[Reply context]"));
+        assert!(parsed.has_reply_boundary);
+        assert!(parsed.merge_consecutive);
         assert_eq!(parsed.channel_id, Some(42));
         assert_eq!(parsed.channel_name.as_deref(), Some("test-channel"));
     }
@@ -511,7 +539,11 @@ mod tests {
         let item = PendingQueueItem {
             author_id: 1,
             message_id: 100,
+            source_message_ids: vec![100],
             text: "legacy msg".to_string(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
             channel_id: None,
             channel_name: None,
             override_channel_id: None,

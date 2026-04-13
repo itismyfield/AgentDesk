@@ -539,6 +539,7 @@ pub(super) async fn start_restart_handoff_from_state(
             true,
             false,
             false,
+            false,
             None,
         )
         .await
@@ -570,9 +571,13 @@ pub(super) async fn start_restart_handoff_from_state(
             super::Intervention {
                 author_id,
                 message_id: placeholder_id,
+                source_message_ids: vec![placeholder_id],
                 text: handoff_prompt,
                 mode: super::InterventionMode::Soft,
                 created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             },
         )
         .await;

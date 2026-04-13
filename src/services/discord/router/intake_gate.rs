@@ -30,13 +30,20 @@ fn build_soft_intervention(
     author_id: serenity::UserId,
     message_id: serenity::MessageId,
     text: &str,
+    reply_context: Option<String>,
+    has_reply_boundary: bool,
+    merge_consecutive: bool,
 ) -> Intervention {
     Intervention {
         author_id,
         message_id,
+        source_message_ids: vec![message_id],
         text: text.to_string(),
         mode: InterventionMode::Soft,
         created_at: Instant::now(),
+        reply_context,
+        has_reply_boundary,
+        merge_consecutive,
     }
 }
 
@@ -46,14 +53,93 @@ async fn enqueue_soft_intervention(
     author_id: serenity::UserId,
     message_id: serenity::MessageId,
     text: &str,
+    reply_context: Option<String>,
+    has_reply_boundary: bool,
+    merge_consecutive: bool,
 ) -> bool {
     mailbox_enqueue_intervention(
         &data.shared,
         &data.provider,
         channel_id,
-        build_soft_intervention(author_id, message_id, text),
+        build_soft_intervention(
+            author_id,
+            message_id,
+            text,
+            reply_context,
+            has_reply_boundary,
+            merge_consecutive,
+        ),
     )
     .await
+}
+
+fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
+    !is_allowed_bot
+        && !text.starts_with('!')
+        && !text.starts_with('/')
+        && !text.starts_with("DISPATCH:")
+}
+
+async fn build_reply_context(
+    ctx: &serenity::Context,
+    channel_id: serenity::ChannelId,
+    new_message: &serenity::Message,
+) -> Option<String> {
+    let ref_msg = new_message.referenced_message.as_ref()?;
+    let ref_author = &ref_msg.author.name;
+    let ref_content = ref_msg.content.trim();
+    let ref_text = if ref_content.is_empty() {
+        format!("[Reply to {}'s message (no text content)]", ref_author)
+    } else {
+        let truncated = truncate_str(ref_content, 500);
+        format!(
+            "[Reply context]\nAuthor: {}\nContent: {}",
+            ref_author, truncated
+        )
+    };
+
+    let mut context_parts = Vec::new();
+    if let Ok(preceding) = channel_id
+        .messages(
+            &ctx.http,
+            serenity::builder::GetMessages::new()
+                .before(ref_msg.id)
+                .limit(4),
+        )
+        .await
+    {
+        let mut msgs: Vec<_> = preceding
+            .iter()
+            .filter(|m| !m.content.trim().is_empty())
+            .collect();
+        msgs.reverse();
+        let mut budget: usize = 1000;
+        for m in msgs
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let entry = format!("{}: {}", m.author.name, truncate_str(m.content.trim(), 300));
+            if entry.len() > budget {
+                break;
+            }
+            budget -= entry.len();
+            context_parts.push(entry);
+        }
+    }
+
+    if context_parts.is_empty() {
+        Some(ref_text)
+    } else {
+        let preceding_ctx = context_parts.join("\n");
+        Some(format!(
+            "[Reply context — preceding conversation]\n{}\n\n{}",
+            preceding_ctx, ref_text
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -562,6 +648,14 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
+            let has_reply_boundary = new_message.message_reference.is_some();
+            let reply_context = if has_reply_boundary {
+                build_reply_context(ctx, channel_id, &new_message).await
+            } else {
+                None
+            };
+            let merge_consecutive = should_merge_consecutive_messages(text, is_allowed_bot);
+
             // ── Dispatch-thread guard ─────────────────────────────────
             // When a dispatch thread is active for this channel, bot messages
             // to the parent channel are queued so they don't start a parallel
@@ -585,6 +679,9 @@ pub(in crate::services::discord) async fn handle_event(
                             user_id,
                             new_message.id,
                             text,
+                            None,
+                            false,
+                            false,
                         )
                         .await;
                         add_reaction(ctx, channel_id, new_message.id, '📬').await;
@@ -606,9 +703,17 @@ pub(in crate::services::discord) async fn handle_event(
             // placeholder.
             if text.starts_with("DISPATCH:") {
                 if mailbox_has_active_turn(&data.shared, channel_id).await {
-                    let _ =
-                        enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
-                            .await;
+                    let _ = enqueue_soft_intervention(
+                        data,
+                        channel_id,
+                        user_id,
+                        new_message.id,
+                        text,
+                        None,
+                        false,
+                        false,
+                    )
+                    .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
@@ -625,9 +730,17 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Queue messages while AI is in progress (executed as next turn after current finishes)
             if mailbox_has_active_turn(&data.shared, channel_id).await {
-                let inserted =
-                    enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
-                        .await;
+                let inserted = enqueue_soft_intervention(
+                    data,
+                    channel_id,
+                    user_id,
+                    new_message.id,
+                    text,
+                    reply_context.clone(),
+                    has_reply_boundary,
+                    merge_consecutive,
+                )
+                .await;
                 let is_shutting_down = data
                     .shared
                     .shutting_down
@@ -666,8 +779,17 @@ pub(in crate::services::discord) async fn handle_event(
                 .reconcile_done
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                let _ = enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
-                    .await;
+                let _ = enqueue_soft_intervention(
+                    data,
+                    channel_id,
+                    user_id,
+                    new_message.id,
+                    text,
+                    reply_context.clone(),
+                    has_reply_boundary,
+                    merge_consecutive,
+                )
+                .await;
                 // Checkpoint: track last processed message
                 data.shared
                     .last_message_ids
@@ -688,8 +810,17 @@ pub(in crate::services::discord) async fn handle_event(
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                let _ = enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
-                    .await;
+                let _ = enqueue_soft_intervention(
+                    data,
+                    channel_id,
+                    user_id,
+                    new_message.id,
+                    text,
+                    reply_context.clone(),
+                    has_reply_boundary,
+                    merge_consecutive,
+                )
+                .await;
 
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -740,8 +871,17 @@ pub(in crate::services::discord) async fn handle_event(
                     None
                 } else {
                     Some(
-                        enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
-                            .await,
+                        enqueue_soft_intervention(
+                            data,
+                            channel_id,
+                            user_id,
+                            new_message.id,
+                            text,
+                            reply_context.clone(),
+                            has_reply_boundary,
+                            merge_consecutive,
+                        )
+                        .await,
                     )
                 }
             };
@@ -805,70 +945,6 @@ pub(in crate::services::discord) async fn handle_event(
             let preview = truncate_str(text, 60);
             tracing::info!("  [{ts}] ◀ [{user_name}] {preview}");
 
-            // Extract reply context if user replied to another message
-            let reply_context = if let Some(ref_msg) = new_message.referenced_message.as_ref() {
-                let ref_author = &ref_msg.author.name;
-                let ref_content = ref_msg.content.trim();
-                let ref_text = if ref_content.is_empty() {
-                    format!("[Reply to {}'s message (no text content)]", ref_author)
-                } else {
-                    let truncated = truncate_str(ref_content, 500);
-                    format!(
-                        "[Reply context]\nAuthor: {}\nContent: {}",
-                        ref_author, truncated
-                    )
-                };
-
-                // Fetch preceding messages for Q&A context (best-effort)
-                let mut context_parts = Vec::new();
-                if let Ok(preceding) = channel_id
-                    .messages(
-                        &ctx.http,
-                        serenity::builder::GetMessages::new()
-                            .before(ref_msg.id)
-                            .limit(4),
-                    )
-                    .await
-                {
-                    // preceding comes newest-first; reverse for chronological order
-                    let mut msgs: Vec<_> = preceding
-                        .iter()
-                        .filter(|m| !m.content.trim().is_empty())
-                        .collect();
-                    msgs.reverse();
-                    // Keep last 2 Q&A-style messages (budget: ~1000 chars total)
-                    let mut budget: usize = 1000;
-                    for m in msgs
-                        .iter()
-                        .rev()
-                        .take(4)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                    {
-                        let entry =
-                            format!("{}: {}", m.author.name, truncate_str(m.content.trim(), 300));
-                        if entry.len() > budget {
-                            break;
-                        }
-                        budget -= entry.len();
-                        context_parts.push(entry);
-                    }
-                }
-
-                if context_parts.is_empty() {
-                    Some(ref_text)
-                } else {
-                    let preceding_ctx = context_parts.join("\n");
-                    Some(format!(
-                        "[Reply context — preceding conversation]\n{}\n\n{}",
-                        preceding_ctx, ref_text
-                    ))
-                }
-            } else {
-                None
-            };
-
             // Checkpoint: message about to be processed as a turn
             data.shared
                 .last_message_ids
@@ -886,6 +962,7 @@ pub(in crate::services::discord) async fn handle_event(
                 false,
                 false,
                 false,
+                merge_consecutive,
                 reply_context,
             )
             .await?;

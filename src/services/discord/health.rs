@@ -827,9 +827,13 @@ impl TestHealthHarness {
             .map(|idx| super::Intervention {
                 author_id: serenity::UserId::new(idx as u64 + 1),
                 message_id: serenity::MessageId::new(idx as u64 + 1),
+                source_message_ids: vec![serenity::MessageId::new(idx as u64 + 1)],
                 text: format!("queued-{idx}"),
                 mode: super::InterventionMode::Soft,
                 created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(&self.shared, &provider, ChannelId::new(channel_id), queue)
@@ -923,9 +927,13 @@ impl TestHealthHarness {
             .map(|(message_id, text)| super::Intervention {
                 author_id: serenity::UserId::new(1),
                 message_id: serenity::MessageId::new(*message_id),
+                source_message_ids: vec![serenity::MessageId::new(*message_id)],
                 text: (*text).to_string(),
                 mode: super::InterventionMode::Soft,
                 created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(

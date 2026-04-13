@@ -8,7 +8,7 @@ use serenity::{ChannelId, MessageId, UserId};
 use super::router::handle_text_message;
 use super::turn_bridge::auto_retry_with_history;
 use super::{
-    SharedData, formatting, rate_limit_wait, resolve_discord_bot_provider,
+    Intervention, SharedData, formatting, rate_limit_wait, resolve_discord_bot_provider,
     validate_live_channel_routing,
 };
 use crate::services::provider::ProviderKind;
@@ -54,9 +54,8 @@ pub(super) trait TurnGateway: Send + Sync {
     fn dispatch_queued_turn<'a>(
         &'a self,
         channel_id: ChannelId,
-        message_id: MessageId,
+        intervention: &'a Intervention,
         request_owner_name: &'a str,
-        text: &'a str,
         has_more_queued_turns: bool,
     ) -> GatewayFuture<'a, Result<(), String>>;
 
@@ -186,9 +185,8 @@ impl TurnGateway for DiscordGateway {
     fn dispatch_queued_turn<'a>(
         &'a self,
         channel_id: ChannelId,
-        message_id: MessageId,
+        intervention: &'a Intervention,
         request_owner_name: &'a str,
-        text: &'a str,
         has_more_queued_turns: bool,
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
@@ -196,20 +194,23 @@ impl TurnGateway for DiscordGateway {
                 return Err("missing live Discord context".to_string());
             };
 
-            formatting::remove_reaction_raw(&self.http, channel_id, message_id, '📬').await;
+            for message_id in &intervention.source_message_ids {
+                formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '📬').await;
+            }
             handle_text_message(
                 &live_turn.ctx,
                 channel_id,
-                message_id,
+                intervention.message_id,
                 live_turn.request_owner,
                 request_owner_name,
-                text,
+                &intervention.text,
                 &self.shared,
                 &live_turn.token,
                 true,
                 has_more_queued_turns,
                 true,
-                None,
+                intervention.merge_consecutive,
+                intervention.reply_context.clone(),
             )
             .await
             .map_err(|e| e.to_string())

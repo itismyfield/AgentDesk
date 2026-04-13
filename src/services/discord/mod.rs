@@ -155,11 +155,15 @@ pub(in crate::services::discord) fn should_phase2_recover_message(
 pub(in crate::services::discord) fn recovery_known_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {
-    let mut ids = snapshot
-        .intervention_queue
-        .iter()
-        .map(|item| item.message_id.get())
-        .collect::<std::collections::HashSet<_>>();
+    let mut ids = std::collections::HashSet::new();
+    for item in &snapshot.intervention_queue {
+        ids.insert(item.message_id.get());
+        ids.extend(
+            item.source_message_ids
+                .iter()
+                .map(|message_id| message_id.get()),
+        );
+    }
     if let Some(active_id) = snapshot.active_user_message_id {
         ids.insert(active_id.get());
     }
@@ -633,9 +637,13 @@ async fn enqueue_internal_followup(
         Intervention {
             author_id: UserId::new(1),
             message_id: reply_message_id,
+            source_message_ids: vec![reply_message_id],
             text: text.into(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
         },
     )
     .await;
@@ -971,9 +979,16 @@ async fn catch_up_missed_messages(
                 Intervention {
                     author_id: msg.author.id,
                     message_id: msg.id,
+                    source_message_ids: vec![msg.id],
                     text: text.to_string(),
                     mode: InterventionMode::Soft,
                     created_at: now,
+                    reply_context: None,
+                    has_reply_boundary: msg.message_reference.is_some(),
+                    merge_consecutive: !msg.author.bot
+                        && !text.starts_with('!')
+                        && !text.starts_with('/')
+                        && !text.starts_with("DISPATCH:"),
                 },
             )
             .await;
@@ -1124,9 +1139,16 @@ async fn catch_up_missed_messages(
                 Intervention {
                     author_id: msg.author.id,
                     message_id: msg.id,
+                    source_message_ids: vec![msg.id],
                     text: text.to_string(),
                     mode: InterventionMode::Soft,
                     created_at: now,
+                    reply_context: None,
+                    has_reply_boundary: msg.message_reference.is_some(),
+                    merge_consecutive: !msg.author.bot
+                        && !text.starts_with('!')
+                        && !text.starts_with('/')
+                        && !text.starts_with("DISPATCH:"),
                 },
             )
             .await;
@@ -1241,7 +1263,8 @@ pub(super) async fn kickoff_idle_queues(
             true,     // reply_to_user_message
             has_more, // defer_watcher_resume
             false,    // wait_for_completion — don't block, let channels run concurrently
-            None,     // reply_context
+            intervention.merge_consecutive,
+            None, // reply_context
         )
         .await
         {
@@ -1805,14 +1828,19 @@ mod tests {
             intervention_queue: vec![Intervention {
                 author_id: UserId::new(42),
                 message_id: MessageId::new(100),
+                source_message_ids: vec![MessageId::new(90), MessageId::new(100)],
                 text: "queued".to_string(),
                 mode: InterventionMode::Soft,
                 created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             }],
             ..Default::default()
         };
 
         let existing = recovery_known_message_ids(&snapshot);
+        assert!(existing.contains(&90));
         assert!(existing.contains(&100));
         assert!(existing.contains(&200));
         assert!(!should_phase2_recover_message(200, None, &existing));

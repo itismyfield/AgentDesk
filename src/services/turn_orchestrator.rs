@@ -25,9 +25,13 @@ pub(crate) enum InterventionMode {
 pub(crate) struct Intervention {
     pub(crate) author_id: UserId,
     pub(crate) message_id: MessageId,
+    pub(crate) source_message_ids: Vec<MessageId>,
     pub(crate) text: String,
     pub(crate) mode: InterventionMode,
     pub(crate) created_at: Instant,
+    pub(crate) reply_context: Option<String>,
+    pub(crate) has_reply_boundary: bool,
+    pub(crate) merge_consecutive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,19 +77,87 @@ fn prune_interventions(queue: &mut Vec<Intervention>) -> Vec<QueueExitEvent> {
     queue_exit_events
 }
 
+fn intervention_age_since(last: &Intervention, current: &Intervention) -> Duration {
+    current
+        .created_at
+        .checked_duration_since(last.created_at)
+        .unwrap_or_default()
+}
+
+fn ensure_source_message_ids(intervention: &mut Intervention) {
+    if intervention.source_message_ids.is_empty() {
+        intervention
+            .source_message_ids
+            .push(intervention.message_id);
+    }
+}
+
+fn push_unique_message_ids(
+    existing: &mut Vec<MessageId>,
+    incoming: impl IntoIterator<Item = MessageId>,
+) {
+    for message_id in incoming {
+        if !existing.contains(&message_id) {
+            existing.push(message_id);
+        }
+    }
+}
+
+fn should_merge_intervention(last: &Intervention, incoming: &Intervention) -> bool {
+    last.mode == InterventionMode::Soft
+        && incoming.mode == InterventionMode::Soft
+        && last.merge_consecutive
+        && incoming.merge_consecutive
+        && last.author_id == incoming.author_id
+        && !last.has_reply_boundary
+        && !incoming.has_reply_boundary
+}
+
 pub(crate) fn enqueue_intervention(
     queue: &mut Vec<Intervention>,
-    intervention: Intervention,
+    mut intervention: Intervention,
 ) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
+    ensure_source_message_ids(&mut intervention);
+
+    if queue
+        .iter()
+        .any(|item| item.source_message_ids.contains(&intervention.message_id))
+    {
+        return EnqueueInterventionResult {
+            enqueued: false,
+            queue_exit_events,
+        };
+    }
 
     if let Some(last) = queue.last() {
         if last.author_id == intervention.author_id
             && last.text == intervention.text
-            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
+            && last.reply_context == intervention.reply_context
+            && last.has_reply_boundary == intervention.has_reply_boundary
+            && intervention_age_since(last, &intervention) <= INTERVENTION_DEDUP_WINDOW
         {
             return EnqueueInterventionResult {
                 enqueued: false,
+                queue_exit_events,
+            };
+        }
+    }
+
+    if let Some(last) = queue.last_mut() {
+        if should_merge_intervention(last, &intervention) {
+            if !last.text.is_empty() && !intervention.text.is_empty() {
+                last.text.push('\n');
+            }
+            last.text.push_str(&intervention.text);
+            last.message_id = intervention.message_id;
+            push_unique_message_ids(
+                &mut last.source_message_ids,
+                intervention.source_message_ids.into_iter(),
+            );
+            last.created_at = intervention.created_at;
+            return EnqueueInterventionResult {
+                enqueued: true,
                 queue_exit_events,
             };
         }
@@ -135,7 +207,10 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
     let mut queue_exit_events = prune_interventions(queue);
     let removed = queue
         .iter()
-        .position(|item| item.mode == InterventionMode::Soft && item.message_id == message_id)
+        .position(|item| {
+            item.mode == InterventionMode::Soft
+                && (item.message_id == message_id || item.source_message_ids.contains(&message_id))
+        })
         .map(|index| queue.remove(index));
     if let Some(ref intervention) = removed {
         queue_exit_events.push(QueueExitEvent::new(
@@ -170,7 +245,15 @@ pub(crate) fn requeue_intervention_front(
 pub(crate) struct PendingQueueItem {
     pub(crate) author_id: u64,
     pub(crate) message_id: u64,
+    #[serde(default)]
+    pub(crate) source_message_ids: Vec<u64>,
     pub(crate) text: String,
+    #[serde(default)]
+    pub(crate) reply_context: Option<String>,
+    #[serde(default)]
+    pub(crate) has_reply_boundary: bool,
+    #[serde(default)]
+    pub(crate) merge_consecutive: bool,
     /// Channel this item belongs to (routing snapshot — used by the kickoff guard).
     #[serde(default)]
     pub(crate) channel_id: Option<u64>,
@@ -210,7 +293,15 @@ pub(crate) fn save_channel_queue(
         .map(|i| PendingQueueItem {
             author_id: i.author_id.get(),
             message_id: i.message_id.get(),
+            source_message_ids: if i.source_message_ids.is_empty() {
+                vec![i.message_id.get()]
+            } else {
+                i.source_message_ids.iter().map(|id| id.get()).collect()
+            },
             text: i.text.clone(),
+            reply_context: i.reply_context.clone(),
+            has_reply_boundary: i.has_reply_boundary,
+            merge_consecutive: i.merge_consecutive,
             channel_id: Some(channel_id.get()),
             channel_name: None,
             override_channel_id: dispatch_role_override,
@@ -251,7 +342,15 @@ pub(crate) fn save_pending_queues(
             .map(|i| PendingQueueItem {
                 author_id: i.author_id.get(),
                 message_id: i.message_id.get(),
+                source_message_ids: if i.source_message_ids.is_empty() {
+                    vec![i.message_id.get()]
+                } else {
+                    i.source_message_ids.iter().map(|id| id.get()).collect()
+                },
                 text: i.text.clone(),
+                reply_context: i.reply_context.clone(),
+                has_reply_boundary: i.has_reply_boundary,
+                merge_consecutive: i.merge_consecutive,
                 channel_id: Some(channel_id.get()),
                 channel_name: None,
                 override_channel_id: override_id,
@@ -308,12 +407,26 @@ pub(crate) fn load_pending_queues(
         }
         let interventions: Vec<Intervention> = items
             .into_iter()
-            .map(|item| Intervention {
-                author_id: UserId::new(item.author_id),
-                message_id: MessageId::new(item.message_id),
-                text: item.text,
-                mode: InterventionMode::Soft,
-                created_at: now,
+            .map(|item| {
+                let mut source_message_ids: Vec<MessageId> = item
+                    .source_message_ids
+                    .into_iter()
+                    .map(MessageId::new)
+                    .collect();
+                if source_message_ids.is_empty() {
+                    source_message_ids.push(MessageId::new(item.message_id));
+                }
+                Intervention {
+                    author_id: UserId::new(item.author_id),
+                    message_id: MessageId::new(item.message_id),
+                    source_message_ids,
+                    text: item.text,
+                    mode: InterventionMode::Soft,
+                    created_at: now,
+                    reply_context: item.reply_context,
+                    has_reply_boundary: item.has_reply_boundary,
+                    merge_consecutive: item.merge_consecutive,
+                }
             })
             .collect();
         if !interventions.is_empty() {
@@ -1253,10 +1366,24 @@ mod tests {
         Intervention {
             author_id: UserId::new(1),
             message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
         }
+    }
+
+    fn make_mergeable_intervention(
+        message_id: u64,
+        text: &str,
+        created_at: Instant,
+    ) -> Intervention {
+        let mut intervention = make_intervention(message_id, text, created_at);
+        intervention.merge_consecutive = true;
+        intervention
     }
 
     fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
@@ -1660,6 +1787,177 @@ mod tests {
                 .all(|event| event.kind == QueueExitKind::Superseded)
         );
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enqueue_merges_consecutive_non_reply_messages_and_persists_source_ids() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-merge-consecutive";
+        let channel_id = ChannelId::new(143);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(20, "first", now),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(21, "second", now + Duration::from_secs(1)),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id.get(), 21);
+        assert_eq!(
+            snapshot.intervention_queue[0]
+                .source_message_ids
+                .iter()
+                .map(|id| id.get())
+                .collect::<Vec<_>>(),
+            vec![20, 21]
+        );
+        assert_eq!(snapshot.intervention_queue[0].text, "first\nsecond");
+
+        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].message_id, 21);
+        assert_eq!(items[0].source_message_ids, vec![20, 21]);
+        assert_eq!(items[0].text, "first\nsecond");
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[tokio::test]
+    async fn enqueue_reply_boundary_breaks_merge_chain() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(144);
+        let handle = registry.handle(channel_id);
+        let persistence =
+            QueuePersistenceContext::new(&ProviderKind::Claude, "reply-boundary", None);
+        let now = Instant::now();
+
+        let mut reply = make_mergeable_intervention(31, "reply", now + Duration::from_secs(1));
+        reply.has_reply_boundary = true;
+        reply.reply_context = Some("[Reply context]".to_string());
+
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(30, "first", now),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+        assert!(handle.enqueue(reply, persistence.clone()).await.enqueued);
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(32, "after", now + Duration::from_secs(2)),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(33, "tail", now + Duration::from_secs(3)),
+                    persistence,
+                )
+                .await
+                .enqueued
+        );
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 3);
+        assert_eq!(snapshot.intervention_queue[0].text, "first");
+        assert_eq!(snapshot.intervention_queue[1].text, "reply");
+        assert_eq!(snapshot.intervention_queue[2].text, "after\ntail");
+        assert_eq!(
+            snapshot.intervention_queue[2]
+                .source_message_ids
+                .iter()
+                .map(|id| id.get())
+                .collect::<Vec<_>>(),
+            vec![32, 33]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_message_matches_any_merged_source_message_id() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-cancel-merged";
+        let channel_id = ChannelId::new(145);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(40, "first", now),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+        assert!(
+            handle
+                .enqueue(
+                    make_mergeable_intervention(41, "second", now + Duration::from_secs(1)),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+
+        let removed = handle
+            .cancel_queued_message(MessageId::new(40), persistence.clone())
+            .await;
+        assert_eq!(removed.queue_exit_events.len(), 1);
+        assert_eq!(removed.queue_exit_events[0].kind, QueueExitKind::Cancelled);
+        let removed = removed
+            .removed
+            .expect("merged item should be removable by original source id");
+        assert_eq!(removed.message_id.get(), 41);
+        assert_eq!(
+            removed
+                .source_message_ids
+                .iter()
+                .map(|id| id.get())
+                .collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+
+        let snapshot = handle.snapshot().await;
+        assert!(snapshot.intervention_queue.is_empty());
+        let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+        assert!(!path.exists());
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
 
     #[tokio::test]
