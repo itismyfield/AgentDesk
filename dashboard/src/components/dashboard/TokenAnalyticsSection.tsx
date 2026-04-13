@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { getTokenAnalytics } from "../../api";
 import type {
   ReceiptSnapshotAgentShare,
@@ -8,6 +8,7 @@ import type {
   TokenAnalyticsResponse,
 } from "../../types";
 import type { TFunction } from "./model";
+import { cx, dashboardBadge, dashboardButton, dashboardCard } from "./ui";
 
 type Period = "7d" | "30d" | "90d";
 
@@ -30,9 +31,20 @@ interface ModelSegment {
   color: string;
 }
 
+type TrendSeriesKey = "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_creation_tokens";
+type TrendPattern = "diagonal" | "dots" | "horizontal" | "cross";
+
+interface TrendLegendItem {
+  key: TrendSeriesKey;
+  color: string;
+  label: string;
+  pattern: TrendPattern;
+}
+
 const analyticsCache = new Map<Period, CachedAnalyticsEntry>();
 const ANALYTICS_CACHE_TTL = 5 * 60_000;
 const PERIOD_OPTIONS: Period[] = ["7d", "30d", "90d"];
+const TREND_PLOT_HEIGHT_PX = 144;
 const MODEL_PALETTES: Record<string, string[]> = {
   Claude: ["#f59e0b", "#fbbf24", "#fb7185", "#f97316"],
   Codex: ["#22c55e", "#14b8a6", "#06b6d4", "#0ea5e9"],
@@ -143,6 +155,48 @@ function periodLabel(period: Period, t: TFunction): string {
   }
 }
 
+function patternFillStyle(color: string, pattern: TrendPattern): CSSProperties {
+  switch (pattern) {
+    case "dots":
+      return {
+        backgroundColor: color,
+        backgroundImage: "radial-gradient(circle at 2px 2px, rgba(255,255,255,0.38) 0 1.25px, transparent 1.35px)",
+        backgroundSize: "7px 7px",
+      };
+    case "horizontal":
+      return {
+        backgroundColor: color,
+        backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 6px)",
+      };
+    case "cross":
+      return {
+        backgroundColor: color,
+        backgroundImage: [
+          "repeating-linear-gradient(45deg, rgba(255,255,255,0.26) 0 2px, transparent 2px 7px)",
+          "repeating-linear-gradient(-45deg, rgba(255,255,255,0.18) 0 2px, transparent 2px 7px)",
+        ].join(", "),
+      };
+    case "diagonal":
+    default:
+      return {
+        backgroundColor: color,
+        backgroundImage: "repeating-linear-gradient(135deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 7px)",
+      };
+  }
+}
+
+function ChartTooltip({ lines }: { lines: string[] }) {
+  return (
+    <div className="dash-chart-tooltip dash-card-pad-compact">
+      <div className="space-y-1 text-[11px] leading-4">
+        {lines.map((line, index) => (
+          <div key={`${index}-${line}`}>{line}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function TokenAnalyticsSection({
   t,
   numberFormatter,
@@ -220,7 +274,7 @@ export default function TokenAnalyticsSection({
               key={option}
               type="button"
               onClick={() => setPeriod(option)}
-              className="rounded-full px-3 py-1.5 text-xs font-semibold transition-colors"
+              className={dashboardButton.sm}
               style={
                 period === option
                   ? {
@@ -238,7 +292,7 @@ export default function TokenAnalyticsSection({
           ))}
           {loading && (
             <span
-              className="rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]"
+              className={cx(dashboardBadge.default, "font-semibold uppercase tracking-[0.18em]")}
               style={{ color: "#fbbf24", background: "rgba(245,158,11,0.12)" }}
             >
               {t({ ko: "동기화", en: "Syncing", ja: "同期中", zh: "同步中" })}
@@ -249,7 +303,7 @@ export default function TokenAnalyticsSection({
 
       <div className="space-y-4">
         <div
-          className="rounded-2xl border p-4 sm:p-5"
+          className={dashboardCard.accentHero}
           style={{
             borderColor: "rgba(245,158,11,0.22)",
             background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
@@ -284,7 +338,7 @@ export default function TokenAnalyticsSection({
         </div>
 
         <div
-          className="rounded-2xl border p-4 sm:p-5"
+          className={dashboardCard.standard}
           style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -351,14 +405,27 @@ export default function TokenAnalyticsSection({
                     {data.heatmap.map((cell) => (
                       <div
                         key={cell.date}
-                        className="h-3 w-3 rounded-[4px] border transition-transform hover:scale-110"
-                        title={`${cell.date} · ${formatTokens(cell.total_tokens)} tokens · ${formatCost(cell.cost)}`}
-                        style={{
-                          background: cell.future ? "rgba(148,163,184,0.04)" : HEATMAP_COLORS[cell.level] ?? HEATMAP_COLORS[0],
-                          borderColor: cell.future ? "rgba(148,163,184,0.05)" : "rgba(255,255,255,0.04)",
-                          opacity: cell.future ? 0.35 : 1,
-                        }}
-                      />
+                        className="group relative h-3 w-3 outline-none"
+                        role="img"
+                        tabIndex={0}
+                        aria-label={`${cell.date}, ${formatTokens(cell.total_tokens)} tokens, ${formatCost(cell.cost)}`}
+                      >
+                        <ChartTooltip
+                          lines={[
+                            cell.date,
+                            `${formatTokens(cell.total_tokens)} tokens`,
+                            formatCost(cell.cost),
+                          ]}
+                        />
+                        <span
+                          className="block h-3 w-3 rounded-[4px] border transition-transform group-hover:scale-110 group-focus-within:scale-110"
+                          style={{
+                            background: cell.future ? "rgba(148,163,184,0.04)" : HEATMAP_COLORS[cell.level] ?? HEATMAP_COLORS[0],
+                            borderColor: cell.future ? "rgba(148,163,184,0.05)" : "rgba(255,255,255,0.04)",
+                            opacity: cell.future ? 0.35 : 1,
+                          }}
+                        />
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -400,7 +467,7 @@ function MetricCard({
 }) {
   return (
     <div
-      className="rounded-2xl border px-4 py-3"
+      className={dashboardCard.nested}
       style={{
         borderColor: `${accent}26`,
         background: "rgba(15,23,42,0.16)",
@@ -428,16 +495,16 @@ function DailyTrendCard({
   trendMax: number;
   t: TFunction;
 }) {
-  const legend = [
-    { key: "input_tokens", color: "#38bdf8", label: t({ ko: "입력", en: "Input", ja: "入力", zh: "输入" }) },
-    { key: "output_tokens", color: "#f97316", label: t({ ko: "출력", en: "Output", ja: "出力", zh: "输出" }) },
-    { key: "cache_read_tokens", color: "#22c55e", label: t({ ko: "캐시 읽기", en: "Cache Read", ja: "キャッシュ読取", zh: "缓存读取" }) },
-    { key: "cache_creation_tokens", color: "#a855f7", label: t({ ko: "캐시 쓰기", en: "Cache Write", ja: "キャッシュ書込", zh: "缓存写入" }) },
-  ] as const;
+  const legend: TrendLegendItem[] = [
+    { key: "input_tokens", color: "#38bdf8", pattern: "diagonal", label: t({ ko: "입력", en: "Input", ja: "入力", zh: "输入" }) },
+    { key: "output_tokens", color: "#f97316", pattern: "dots", label: t({ ko: "출력", en: "Output", ja: "出力", zh: "输出" }) },
+    { key: "cache_read_tokens", color: "#22c55e", pattern: "horizontal", label: t({ ko: "캐시 읽기", en: "Cache Read", ja: "キャッシュ読取", zh: "缓存读取" }) },
+    { key: "cache_creation_tokens", color: "#a855f7", pattern: "cross", label: t({ ko: "캐시 쓰기", en: "Cache Write", ja: "キャッシュ書込", zh: "缓存写入" }) },
+  ];
 
   return (
     <div
-      className="rounded-2xl border p-4 sm:p-5"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -462,7 +529,13 @@ function DailyTrendCard({
         <div className="flex flex-wrap gap-2 text-[11px]">
           {legend.map((item) => (
             <span key={item.key} className="inline-flex items-center gap-1.5" style={{ color: "var(--th-text-muted)" }}>
-              <span className="h-2.5 w-2.5 rounded-full" style={{ background: item.color }} />
+              <span
+                className="h-3.5 w-3.5 rounded-lg border"
+                style={{
+                  ...patternFillStyle(item.color, item.pattern),
+                  borderColor: "rgba(255,255,255,0.12)",
+                }}
+              />
               {item.label}
             </span>
           ))}
@@ -476,40 +549,72 @@ function DailyTrendCard({
       ) : (
         <div className="mt-4 overflow-x-hidden">
           <div className="min-w-0">
-            <div className="flex h-44 items-end gap-1.5">
-              {daily.map((day) => {
-                const totalHeight = Math.max(6, (day.total_tokens / trendMax) * 100);
-                const segments = [
-                  { value: day.input_tokens, color: "#38bdf8" },
-                  { value: day.cache_read_tokens, color: "#22c55e" },
-                  { value: day.cache_creation_tokens, color: "#a855f7" },
-                  { value: day.output_tokens, color: "#f97316" },
-                ].filter((segment) => segment.value > 0);
+            <div className="flex h-44 items-end gap-px sm:gap-1.5">
+              {daily.map((day, index) => {
+                const segments = legend
+                  .map((item) => ({
+                    ...item,
+                    value: day[item.key],
+                  }))
+                  .filter((segment) => segment.value > 0);
+                const totalHeight = Math.max(
+                  8,
+                  Math.round((day.total_tokens / trendMax) * TREND_PLOT_HEIGHT_PX),
+                );
+                const breakdown = segments.map(
+                  (segment) => `${segment.label} ${formatTokens(segment.value)}`,
+                );
+                const compactLabel = index === 0 || index === daily.length - 1 || index % 5 === 0;
 
                 return (
-                  <div key={day.date} className="flex min-w-0 flex-1 flex-col items-center gap-2">
-                    <div
-                      className="flex w-full min-w-[10px] flex-col-reverse overflow-hidden rounded-t-xl border"
-                      title={`${day.date} · ${formatTokens(day.total_tokens)} tokens · ${formatCost(day.cost)}`}
-                      style={{
-                        height: `${totalHeight}%`,
-                        minHeight: 6,
-                        borderColor: "rgba(255,255,255,0.06)",
-                        background: "rgba(255,255,255,0.03)",
-                      }}
-                    >
-                      {segments.map((segment, index) => (
-                        <div
-                          key={`${day.date}-${segment.color}-${index}`}
-                          style={{
-                            height: `${(segment.value / day.total_tokens) * 100}%`,
-                            background: segment.color,
-                          }}
-                        />
-                      ))}
+                  <div
+                    key={day.date}
+                    className="group relative flex w-2 shrink-0 flex-col items-center gap-1 outline-none sm:min-w-0 sm:flex-1 sm:gap-2"
+                    tabIndex={0}
+                    role="img"
+                    aria-label={[
+                      day.date,
+                      `${formatTokens(day.total_tokens)} total tokens`,
+                      formatCost(day.cost),
+                      ...breakdown,
+                    ].join(", ")}
+                  >
+                    <ChartTooltip
+                      lines={[
+                        day.date,
+                        `${formatTokens(day.total_tokens)} tokens`,
+                        formatCost(day.cost),
+                        ...breakdown,
+                      ]}
+                    />
+                    <div className="flex h-36 w-full items-end">
+                      <div
+                        className="flex w-full min-w-[6px] flex-col-reverse overflow-hidden rounded-t-xl border sm:min-w-[10px]"
+                        style={{
+                          height: totalHeight,
+                          minHeight: 8,
+                          maxHeight: TREND_PLOT_HEIGHT_PX,
+                          borderColor: "rgba(255,255,255,0.06)",
+                          background: "rgba(255,255,255,0.03)",
+                        }}
+                      >
+                        {segments.map((segment, index) => (
+                          <div
+                            key={`${day.date}-${segment.color}-${index}`}
+                            style={{
+                              height: `${(segment.value / day.total_tokens) * 100}%`,
+                              ...patternFillStyle(segment.color, segment.pattern),
+                            }}
+                          />
+                        ))}
+                      </div>
                     </div>
-                    <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-                      {day.date.slice(5)}
+                    <span
+                      className="min-h-[1.8rem] text-center text-[9px] leading-3 sm:min-h-0 sm:text-[10px]"
+                      style={{ color: "var(--th-text-muted)" }}
+                    >
+                      <span className="hidden sm:inline">{day.date.slice(5)}</span>
+                      <span className="sm:hidden">{compactLabel ? day.date.slice(5) : ""}</span>
                     </span>
                   </div>
                 );
@@ -535,7 +640,7 @@ function ModelDistributionCard({
 }) {
   return (
     <div
-      className="rounded-2xl border p-4 sm:p-5"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -557,7 +662,7 @@ function ModelDistributionCard({
             })}
           </p>
         </div>
-        <span className="rounded-full px-3 py-1 text-xs font-semibold" style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}>
+        <span className={dashboardBadge.large} style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}>
           {formatTokens(totalTokens)}
         </span>
       </div>
@@ -595,7 +700,7 @@ function ModelDistributionCard({
             {segments.map((segment) => (
               <div
                 key={segment.id}
-                className="rounded-xl border px-3 py-2"
+                className={dashboardCard.nestedCompact}
                 style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}
               >
                 <div className="flex items-center justify-between gap-3">
@@ -641,7 +746,7 @@ function AgentSpendCard({
 
   return (
     <div
-      className="rounded-2xl border p-4 sm:p-5"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -672,7 +777,7 @@ function AgentSpendCard({
       ) : (
         <div className="mt-4 space-y-2.5">
           {agents.map((agent, index) => (
-            <div key={agent.agent} className="rounded-xl border px-3 py-3" style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}>
+            <div key={agent.agent} className={dashboardCard.nested} style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">

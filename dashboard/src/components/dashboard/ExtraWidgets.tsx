@@ -3,6 +3,7 @@ import type { Agent, DashboardStats } from "../../types";
 import * as api from "../../api/client";
 import type { TFunction } from "./model";
 import { getAgentLevel, getAgentTitle } from "../agent-manager/AgentInfoCard";
+import { cx, dashboardBadge, dashboardButton, dashboardCard } from "./ui";
 
 // ── CookingHeart Role Board Widget ──
 
@@ -34,7 +35,7 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.accentStandard}
       style={{
         borderColor: "var(--th-border)",
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #ef4444 10%), var(--th-surface))",
@@ -44,7 +45,7 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
         <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
           🍳 CookingHeart
         </h3>
-        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "rgba(239,68,68,0.15)", color: "#f87171" }}>
+        <span className={dashboardBadge.default} style={{ background: "rgba(239,68,68,0.15)", color: "#f87171" }}>
           {workingCount}/{chAgents.length} {t({ ko: "가동", en: "active", ja: "稼働", zh: "活跃" })}
         </span>
       </div>
@@ -56,7 +57,7 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
           return (
             <div
               key={agent.id}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-lg"
+              className={cx(dashboardCard.nestedCompact, "flex items-center gap-1.5")}
               style={{ background: "var(--th-bg-surface)" }}
             >
               <span className={`w-2 h-2 rounded-full shrink-0 ${isWorking ? "bg-emerald-400" : "bg-gray-400"}`} />
@@ -94,7 +95,7 @@ export function GitHubIssuesWidget({ t, repo }: GitHubIssuesWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex items-center justify-between mb-3">
@@ -109,7 +110,7 @@ export function GitHubIssuesWidget({ t, repo }: GitHubIssuesWidgetProps) {
         {data.issues.map((issue) => (
           <div
             key={issue.number}
-            className="flex items-start gap-2 px-2 py-1.5 rounded-lg"
+            className={cx(dashboardCard.nestedCompact, "flex items-start gap-2")}
             style={{ background: "var(--th-bg-surface)" }}
           >
             <span className="text-xs shrink-0 mt-0.5" style={{ color: "#34d399" }}>
@@ -123,7 +124,7 @@ export function GitHubIssuesWidget({ t, repo }: GitHubIssuesWidgetProps) {
                 {issue.labels.slice(0, 3).map((label) => (
                   <span
                     key={label.name}
-                    className="text-xs px-1 rounded"
+                    className={dashboardBadge.default}
                     style={{ background: `#${label.color}33`, color: `#${label.color}` }}
                   >
                     {label.name}
@@ -195,7 +196,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.accentStandard}
       style={{
         borderColor: "var(--th-border)",
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 92%, #0ea5e9 8%), var(--th-surface))",
@@ -210,7 +211,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
             {t({ ko: "병목과 대기 중인 카드", en: "Bottlenecks and waiting cards", ja: "ボトルネックと待機カード", zh: "瓶颈与等待卡片" })}
           </p>
         </div>
-        <span className="text-xs px-2 py-1 rounded-full bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
+        <span className={dashboardBadge.default} style={{ color: "var(--th-text-secondary)", background: "var(--th-overlay-medium)" }}>
           {kanban.open_total}
         </span>
       </div>
@@ -221,10 +222,10 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
             key={item.key}
             type="button"
             onClick={() => item.value > 0 && handleToggle(item.key)}
-            className="rounded-xl px-3 py-2 text-left transition-all"
+            className={cx(dashboardButton.md, "w-full flex-col items-start text-left transition-all")}
             style={{
               background: expanded === item.key ? `color-mix(in srgb, ${item.color} 12%, var(--th-bg-surface))` : "var(--th-bg-surface)",
-              outline: expanded === item.key ? `1px solid color-mix(in srgb, ${item.color} 40%, transparent)` : "none",
+              borderColor: expanded === item.key ? `color-mix(in srgb, ${item.color} 40%, transparent)` : "rgba(148,163,184,0.14)",
               cursor: item.value > 0 ? "pointer" : "default",
             }}
           >
@@ -257,7 +258,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
           {kanban.top_repos.map((repo) => (
             <div
               key={repo.github_repo}
-              className="flex items-center justify-between gap-3 rounded-xl px-3 py-2"
+              className={cx(dashboardCard.nestedCompact, "flex items-center justify-between gap-3")}
               style={{ background: "var(--th-bg-surface)" }}
             >
               <div className="min-w-0">
@@ -268,7 +269,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
                   {t({ ko: "열린 카드", en: "Open cards", ja: "オープンカード", zh: "开放卡片" })}: {repo.open_count}
                 </div>
               </div>
-              <span className="text-xs px-2 py-1 rounded-full" style={{ color: "#fca5a5", background: "rgba(239,68,68,0.12)" }}>
+              <span className={dashboardBadge.default} style={{ color: "#fca5a5", background: "rgba(239,68,68,0.12)" }}>
                 {repo.pressure_count}
               </span>
             </div>
@@ -291,20 +292,20 @@ function OpsCardRow({ card, t, onAction }: {
 
   return (
     <div
-      className="rounded-xl px-3 py-2 flex flex-col gap-1.5"
+      className={cx(dashboardCard.nestedCompact, "flex flex-col gap-1.5")}
       style={{ background: "var(--th-bg-surface)", border: "1px solid var(--th-border)" }}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span
-              className="text-xs px-1.5 py-0.5 rounded font-semibold uppercase shrink-0"
+              className={cx(dashboardBadge.default, "font-semibold uppercase shrink-0")}
               style={{ color: statusColor, background: `color-mix(in srgb, ${statusColor} 15%, transparent)` }}
             >
               {card.status}
             </span>
             {repo && (
-              <span className="text-xs px-1.5 py-0.5 rounded shrink-0" style={{ color: "var(--th-text-muted)", background: "rgba(255,255,255,0.06)" }}>
+              <span className={dashboardBadge.default} style={{ color: "var(--th-text-muted)", background: "rgba(255,255,255,0.06)" }}>
                 {repo}
               </span>
             )}
@@ -341,7 +342,7 @@ function OpsCardRow({ card, t, onAction }: {
             <button
               type="button"
               onClick={() => onAction(card.id, "retry")}
-              className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+              className={dashboardButton.sm}
               style={{ color: "#67e8f9", background: "rgba(103,232,249,0.12)", border: "1px solid rgba(103,232,249,0.2)" }}
             >
               {t({ ko: "재시도", en: "Retry", ja: "再試行", zh: "重试" })}
@@ -349,7 +350,7 @@ function OpsCardRow({ card, t, onAction }: {
             <button
               type="button"
               onClick={() => onAction(card.id, "ready")}
-              className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+              className={dashboardButton.sm}
               style={{ color: "#a5b4fc", background: "rgba(165,180,252,0.12)", border: "1px solid rgba(165,180,252,0.2)" }}
             >
               {t({ ko: "Ready로", en: "To Ready", ja: "Readyへ", zh: "重置Ready" })}
@@ -359,7 +360,7 @@ function OpsCardRow({ card, t, onAction }: {
         <button
           type="button"
           onClick={() => onAction(card.id, "done")}
-          className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+          className={dashboardButton.sm}
           style={{ color: "#86efac", background: "rgba(134,239,172,0.12)", border: "1px solid rgba(134,239,172,0.2)" }}
         >
           {t({ ko: "Done", en: "Done", ja: "Done", zh: "完成" })}
@@ -390,7 +391,7 @@ export function MachineStatusWidget({ t }: MachineStatusWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>
@@ -400,7 +401,7 @@ export function MachineStatusWidget({ t }: MachineStatusWidgetProps) {
         {machines.map((m) => (
           <div
             key={m.name}
-            className="flex items-center gap-2 px-3 py-2 rounded-xl flex-1"
+            className={cx(dashboardCard.nestedCompact, "flex flex-1 items-center gap-2")}
             style={{ background: "var(--th-bg-surface)" }}
           >
             <span className="text-lg">{m.name === "mac-mini" ? "🖥️" : "💻"}</span>
@@ -445,7 +446,7 @@ export function HeatmapWidget({ agents, t }: HeatmapWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>
@@ -506,7 +507,7 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex items-center justify-between mb-3">
@@ -514,7 +515,9 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
           {t({ ko: "크론잡 타임라인", en: "Cron Timeline", ja: "クロンタイムライン", zh: "定时任务时间线" })}
         </h3>
         <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-          {enabledJobs.length} {t({ ko: "활성", en: "active", ja: "アクティブ", zh: "活跃" })}
+          <span className={dashboardBadge.default} style={{ background: "var(--th-overlay-medium)" }}>
+            {enabledJobs.length} {t({ ko: "활성", en: "active", ja: "アクティブ", zh: "活跃" })}
+          </span>
         </span>
       </div>
       <div className="space-y-1.5 max-h-60 overflow-y-auto">
@@ -533,7 +536,7 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
             return (
               <div
                 key={job.id}
-                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg"
+                className={cx(dashboardCard.nestedCompact, "flex items-center gap-2")}
                 style={{ background: "var(--th-bg-surface)" }}
               >
                 <span
@@ -554,7 +557,7 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
                 </div>
                 {nextRun && (
                   <span
-                    className="text-xs px-1.5 py-0.5 rounded shrink-0"
+                    className={dashboardBadge.default}
                     style={{
                       background: isOverdue ? "rgba(239,68,68,0.15)" : "rgba(99,102,241,0.15)",
                       color: isOverdue ? "#f87171" : "#a5b4fc",
@@ -592,7 +595,7 @@ export function StreakWidget({ agents, t }: StreakWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4 text-center"
+      className={cx(dashboardCard.accentStandard, "text-center")}
       style={{
         borderColor: "var(--th-border)",
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
@@ -640,7 +643,7 @@ export function AchievementWidget({ t }: AchievementWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.accentStandard}
       style={{ borderColor: "var(--th-border)", background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #eab308 10%), var(--th-surface))" }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>
@@ -650,7 +653,7 @@ export function AchievementWidget({ t }: AchievementWidgetProps) {
         {achievements.slice(0, 15).map((ach) => (
           <div
             key={ach.id}
-            className="flex items-center gap-2 px-2 py-1.5 rounded-lg"
+            className={cx(dashboardCard.nestedCompact, "flex items-center gap-2")}
             style={{ background: "var(--th-bg-surface)" }}
           >
             <span className="text-base">{badgeIcon[ach.type] || "🎯"}</span>
@@ -685,7 +688,7 @@ export function MvpWidget({ agents, t, isKo }: MvpWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4 text-center"
+      className={cx(dashboardCard.accentStandard, "text-center")}
       style={{
         borderColor: "var(--th-border)",
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 88%, #eab308 12%), var(--th-surface))",
@@ -780,7 +783,7 @@ export function ActivityFeedWidget({ agents, t }: ActivityFeedWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>
@@ -795,7 +798,7 @@ export function ActivityFeedWidget({ agents, t }: ActivityFeedWidgetProps) {
           {events.map((evt) => (
             <div
               key={evt.id}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-lg"
+              className={cx(dashboardCard.nestedCompact, "flex items-center gap-2")}
               style={{ background: "var(--th-bg-surface)" }}
             >
               <span className="text-sm">{evt.agent_emoji}</span>
@@ -841,7 +844,7 @@ export function SkillTrendWidget({ t }: SkillTrendWidgetProps) {
 
   return (
     <div
-      className="rounded-2xl border p-4"
+      className={dashboardCard.standard}
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>

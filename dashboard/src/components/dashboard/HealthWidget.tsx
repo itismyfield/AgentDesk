@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getHealth, type HealthResponse } from "../../api";
 import type { TFunction } from "./model";
+import { cx, dashboardBadge, dashboardCard } from "./ui";
 
 type HealthMetricLevel = "normal" | "warning" | "danger";
 type HealthPollState = "loading" | "live" | "stale" | "error" | "empty";
@@ -343,7 +344,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
   });
 
   return (
-    <div className="game-panel relative overflow-hidden px-3 py-3 sm:px-4 sm:py-3.5">
+    <div className={cx(dashboardCard.standard, "relative overflow-hidden")}>
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-px"
         style={{ background: `linear-gradient(90deg, transparent, ${theme.accent}, transparent)` }}
@@ -366,7 +367,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
 
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           <span
-            className="rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.18em]"
+            className={cx(dashboardBadge.default, "font-bold uppercase tracking-[0.18em]")}
             style={{
               color: theme.text,
               background: theme.surface,
@@ -376,7 +377,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
             {translateStatus(data?.status ?? "healthy", t)}
           </span>
           <span
-            className="rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.18em]"
+            className={cx(dashboardBadge.default, "font-bold uppercase tracking-[0.18em]")}
             style={{
               color: pollState === "error" ? "#fca5a5" : pollState === "stale" ? "#fbbf24" : "#93c5fd",
               background: pollState === "error" ? "rgba(239,68,68,0.12)" : pollState === "stale" ? "rgba(245,158,11,0.12)" : "rgba(59,130,246,0.12)",
@@ -389,7 +390,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
       </div>
 
       <div
-        className="rounded-2xl px-3 py-2.5"
+        className={dashboardCard.nestedCompact}
         style={{
           background: `linear-gradient(135deg, ${theme.surface}, rgba(15,23,42,0.22))`,
           border: `1px solid ${theme.border}`,
@@ -410,7 +411,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
           {data.degraded_reasons.slice(0, 3).map((reason) => (
             <span
               key={reason}
-              className="rounded-full px-2 py-1 text-[9px] font-medium"
+              className={dashboardBadge.default}
               style={{
                 color: topLevel === "danger" ? "#fca5a5" : "#fbbf24",
                 background: topLevel === "danger" ? "rgba(239,68,68,0.12)" : "rgba(245,158,11,0.10)",
@@ -425,7 +426,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
 
       {error ? (
         <div
-          className="mt-2 rounded-xl px-3 py-2 text-[10px]"
+          className={cx(dashboardCard.nestedCompact, "mt-2 text-[10px]")}
           style={{
             color: data ? "#fbbf24" : "#fca5a5",
             background: data ? "rgba(245,158,11,0.10)" : "rgba(239,68,68,0.12)",
@@ -450,7 +451,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
 
       {pollState === "empty" ? (
         <div
-          className="mt-3 rounded-xl px-3 py-5 text-center text-[11px]"
+          className={cx(dashboardCard.nestedCompact, "mt-3 py-5 text-center text-[11px]")}
           style={{
             color: "var(--th-text-muted)",
             border: "1px dashed rgba(148,163,184,0.22)",
@@ -471,7 +472,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
             return (
               <div
                 key={metric.id}
-                className="rounded-2xl px-3 py-2.5"
+                className={dashboardCard.nestedCompact}
                 style={{
                   border: `1px solid ${metricTheme.border}`,
                   background: `linear-gradient(180deg, ${metricTheme.surface}, rgba(15,23,42,0.22))`,

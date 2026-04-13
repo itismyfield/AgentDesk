@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { UiLanguage } from "../../i18n";
+import { cx, dashboardBadge } from "./ui";
 
 export type Locale = UiLanguage;
 export type TFunction = (messages: Record<Locale, string>) => string;
@@ -141,16 +142,14 @@ export function XpBar({ xp, maxXp, color }: { xp: number; maxXp: number; color: 
   );
 }
 
-export function RankBadge({ xp, size = "md" }: { xp: number; size?: "sm" | "md" | "lg" }) {
+export function RankBadge({ xp, size = "default" }: { xp: number; size?: "default" | "large" }) {
   const tier = getRankTier(xp);
-  const sizeClasses = {
-    sm: "px-1.5 py-0.5 text-xs gap-0.5",
-    md: "px-2 py-0.5 text-xs gap-1",
-    lg: "px-3 py-1 text-xs gap-1",
-  };
   return (
     <span
-      className={`inline-flex items-center rounded-md font-black uppercase tracking-wider ${sizeClasses[size]}`}
+      className={cx(
+        "inline-flex items-center font-black uppercase tracking-wider",
+        size === "large" ? dashboardBadge.large : dashboardBadge.default,
+      )}
       style={{
         background: tier.glow,
         color: tier.color,

@@ -1,6 +1,7 @@
 import AgentAvatar from "../AgentAvatar";
 import type { Agent } from "../../types";
 import { getRankTier, RankBadge, XpBar, type TFunction } from "./model";
+import { cx, dashboardBadge, dashboardCard } from "./ui";
 
 export interface HudStat {
   id: string;
@@ -29,7 +30,13 @@ export function DashboardHeroHeader({
   t,
 }: DashboardHeroHeaderProps) {
   return (
-    <div className="game-panel relative overflow-hidden p-5">
+    <div
+      className={cx(dashboardCard.accentHero, "relative overflow-hidden")}
+      style={{
+        borderColor: "rgba(34,211,238,0.16)",
+        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 94%, #22d3ee 6%), var(--th-card-bg))",
+      }}
+    >
       <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,rgba(0,0,0,0.03)_2px,rgba(0,0,0,0.03)_4px)]" />
 
       <div className="relative">
@@ -60,7 +67,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
       {hudStats.map((stat) => (
         <div
           key={stat.id}
-          className="game-panel group relative overflow-hidden px-2 py-2 sm:p-4 transition-all duration-300 hover:-translate-y-0.5"
+          className={cx(dashboardCard.standard, "group relative overflow-hidden transition-all duration-300 hover:-translate-y-0.5")}
           style={{ borderColor: `${stat.color}25` }}
         >
           <div
@@ -117,7 +124,13 @@ export function DashboardRankingBoard({
   onSelectAgent,
 }: DashboardRankingBoardProps) {
   return (
-    <div className="game-panel relative overflow-hidden p-5">
+    <div
+      className={cx(dashboardCard.accentHero, "relative overflow-hidden")}
+      style={{
+        borderColor: "rgba(251,191,36,0.2)",
+        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 93%, #f59e0b 7%), var(--th-card-bg))",
+      }}
+    >
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-amber-500/[0.03] via-transparent to-transparent" />
 
       <div className="relative mb-6 flex items-center justify-between">
@@ -142,7 +155,14 @@ export function DashboardRankingBoard({
             </p>
           </div>
         </div>
-        <span className="rounded-md border border-surface-light bg-surface-subtle px-2.5 py-1 text-xs font-bold text-slate-400">
+        <span
+          className={dashboardBadge.default}
+          style={{
+            border: "1px solid rgba(148,163,184,0.2)",
+            background: "var(--th-overlay-subtle)",
+            color: "var(--th-text-secondary)",
+          }}
+        >
           TOP {topAgents.length}
         </span>
       </div>
@@ -211,7 +231,8 @@ export function DashboardRankingBoard({
                       <button
                         type="button"
                         onClick={() => onSelectAgent(selectedAgent)}
-                        className="flex flex-col items-center gap-2 text-left transition-transform duration-300 hover:scale-105"
+                        className="flex flex-col items-center gap-2 rounded-xl text-left transition-transform duration-300 hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        style={{ outlineColor: tier.color }}
                       >
                         <div
                           className="relative overflow-hidden rounded-2xl"
@@ -261,7 +282,7 @@ export function DashboardRankingBoard({
                       >
                         {numberFormatter.format(agent.xp)} XP
                       </span>
-                      <RankBadge xp={agent.xp} size="sm" />
+                      <RankBadge xp={agent.xp} size="default" />
                     </div>
 
                     <div
@@ -292,7 +313,7 @@ export function DashboardRankingBoard({
                 return (
                   <div
                     key={agent.id}
-                    className="group flex items-center gap-3 rounded-xl border border-surface-light bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1"
+                    className={cx(dashboardCard.nestedCompact, "group flex items-center gap-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1")}
                     style={{ borderLeftWidth: "3px", borderLeftColor: `${tier.color}60` }}
                   >
                     <span className="w-8 text-center font-mono text-sm font-black" style={{ color: `${tier.color}80` }}>
@@ -302,7 +323,8 @@ export function DashboardRankingBoard({
                       <button
                         type="button"
                         onClick={() => onSelectAgent(selectedAgent)}
-                        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                        className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        style={{ outlineColor: tier.color }}
                       >
                         <div
                           className="flex-shrink-0 overflow-hidden rounded-xl"
@@ -344,7 +366,7 @@ export function DashboardRankingBoard({
                       <span className="font-mono text-xs font-bold" style={{ color: tier.color }}>
                         {numberFormatter.format(agent.xp)}
                       </span>
-                      <RankBadge xp={agent.xp} size="sm" />
+                      <RankBadge xp={agent.xp} size="default" />
                     </div>
                   </div>
                 );
@@ -359,7 +381,7 @@ export function DashboardRankingBoard({
               const selectedAgent = agentMap.get(agent.id);
               return (
                 <div
-                  className="flex items-center gap-4 rounded-xl p-4"
+                  className={cx(dashboardCard.nested, "flex items-center gap-4")}
                   style={{
                     background: `linear-gradient(135deg, ${tier.color}15, transparent)`,
                     border: `1px solid ${tier.color}30`,
@@ -373,7 +395,8 @@ export function DashboardRankingBoard({
                     <button
                       type="button"
                       onClick={() => onSelectAgent(selectedAgent)}
-                      className="flex min-w-0 flex-1 items-center gap-4 text-left"
+                      className="flex min-w-0 flex-1 items-center gap-4 rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      style={{ outlineColor: tier.color }}
                     >
                       <div
                         className="overflow-hidden rounded-2xl"
@@ -415,7 +438,7 @@ export function DashboardRankingBoard({
                     >
                       {numberFormatter.format(agent.xp)} XP
                     </p>
-                    <RankBadge xp={agent.xp} size="md" />
+                    <RankBadge xp={agent.xp} size="large" />
                   </div>
                 </div>
               );

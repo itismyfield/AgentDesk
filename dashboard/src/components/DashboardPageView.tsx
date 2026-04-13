@@ -25,6 +25,7 @@ import {
 import HealthWidget from "./dashboard/HealthWidget";
 import { type TFunction } from "./dashboard/model";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
+import { dashboardButton, dashboardCard } from "./dashboard/ui";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
@@ -291,7 +292,7 @@ function SkillRankingSnapshot({
 }) {
   return (
     <section
-      className="rounded-2xl border p-4 sm:p-5"
+      className={dashboardCard.accentStandard}
       style={{
         borderColor: "var(--th-border)",
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 92%, #f59e0b 8%), var(--th-surface))",
@@ -312,7 +313,7 @@ function SkillRankingSnapshot({
               key={windowId}
               type="button"
               onClick={() => onChangeWindow(windowId)}
-              className="text-[11px] px-2 py-1 rounded-md border"
+              className={dashboardButton.sm}
               style={{
                 borderColor: skillWindow === windowId ? "#f59e0b" : "var(--th-border)",
                 color: skillWindow === windowId ? "#f59e0b" : "var(--th-text-muted)",
