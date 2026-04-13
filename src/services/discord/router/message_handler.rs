@@ -2995,6 +2995,7 @@ mod tests {
             api_port: 9,
             db: None,
             engine: None,
+            health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),
         })
     }

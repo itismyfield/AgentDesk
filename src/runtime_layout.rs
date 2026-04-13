@@ -1119,6 +1119,11 @@ fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSet
         .get("max_rounds")
         .and_then(Value::as_u64)
         .map(|value| value as u32);
+    let max_participants = meeting
+        .get("max_participants")
+        .or_else(|| meeting.get("maxParticipants"))
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
     let summary_agent = meeting
         .get("summary_agent")
         .and_then(role_map_summary_agent_to_config);
@@ -1130,13 +1135,12 @@ fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSet
                 .iter()
                 .filter_map(role_map_meeting_agent_to_config)
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        });
 
     Some(crate::config::MeetingSettings {
         channel_name,
         max_rounds,
-        max_participants: None,
+        max_participants,
         summary_agent,
         available_agents,
     })
@@ -2572,7 +2576,10 @@ agents:
         let meeting = config.meeting.expect("meeting config");
         assert_eq!(meeting.channel_name, "round-table");
         assert_eq!(meeting.max_rounds, Some(4));
-        assert_eq!(meeting.available_agents.len(), 1);
+        assert_eq!(
+            meeting.available_agents.as_ref().map(|agents| agents.len()),
+            Some(1)
+        );
 
         let agent = config
             .agents

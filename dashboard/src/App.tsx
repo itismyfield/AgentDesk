@@ -482,14 +482,13 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
               <DashboardPageView
                 stats={stats}
                 agents={agents}
-                sessions={visibleDispatchedSessions}
                 meetings={roundTableMeetings}
                 settings={settings}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                 onOpenKanbanSignal={openKanbanSignalFocus}
                 onOpenDispatchSessions={openDispatchSessions}
-                onOpenMeetings={openMeetingsView}
                 onOpenSettings={openSettingsView}
+                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
               />
             )}
 

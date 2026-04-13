@@ -777,11 +777,15 @@ mod tests {
         Intervention {
             author_id: UserId::new(1),
             message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: snapshot_now
                 .checked_sub(Duration::from_secs(age_secs))
                 .expect("snapshot instant should be offset far enough for the requested age"),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
         }
     }
 

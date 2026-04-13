@@ -393,8 +393,9 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
         return Vec::new();
     };
 
-    if let Some(meeting) = &config.meeting {
-        let available_agents = &meeting.available_agents;
+    if let Some(meeting) = &config.meeting
+        && let Some(available_agents) = meeting.available_agents.as_ref()
+    {
         if !available_agents.is_empty() {
             let mut peers = Vec::new();
             let mut seen = HashSet::new();
@@ -445,8 +446,12 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let available_agents = if meeting.available_agents.is_empty() {
-        config
+    let available_agents = match meeting.available_agents.as_ref() {
+        Some(explicit_agents) => explicit_agents
+            .iter()
+            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
+            .collect(),
+        None => config
             .agents
             .iter()
             .map(|agent| MeetingAgentConfig {
@@ -466,13 +471,7 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 peer_agents_enabled: true,
                 memory: resolve_memory_settings(None, None),
             })
-            .collect()
-    } else {
-        meeting
-            .available_agents
-            .iter()
-            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
-            .collect()
+            .collect(),
     };
 
     Some(MeetingConfig {

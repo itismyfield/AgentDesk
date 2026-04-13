@@ -178,6 +178,15 @@ pub(crate) fn enqueue_intervention(
     }
 }
 
+pub(crate) fn has_soft_intervention_at(queue: &mut Vec<Intervention>, now: Instant) -> bool {
+    queue.retain(|intervention| now.duration_since(intervention.created_at) <= INTERVENTION_TTL);
+    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
+        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
+        queue.drain(0..overflow);
+    }
+    queue.iter().any(|item| item.mode == InterventionMode::Soft)
+}
+
 pub(crate) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> HasPendingSoftQueueResult {
     let queue_exit_events = prune_interventions(queue);
     HasPendingSoftQueueResult {

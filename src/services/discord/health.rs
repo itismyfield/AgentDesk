@@ -1028,11 +1028,15 @@ impl TestHealthHarness {
             .map(|(idx, age_secs)| super::Intervention {
                 author_id: serenity::UserId::new(idx as u64 + 1),
                 message_id: serenity::MessageId::new(idx as u64 + 1),
+                source_message_ids: vec![serenity::MessageId::new(idx as u64 + 1)],
                 text: format!("queued-aged-{idx}"),
                 mode: super::InterventionMode::Soft,
                 created_at: snapshot_now
                     .checked_sub(std::time::Duration::from_secs(*age_secs))
                     .expect("snapshot instant should be offset far enough for the requested age"),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(
@@ -1354,55 +1358,6 @@ fn is_allowed_send_source(source: &str) -> bool {
     ];
 
     INTERNAL_SOURCES.contains(&source) || super::settings::is_known_agent(source)
-}
-
-pub async fn fetch_channel_name(
-    registry: &HealthRegistry,
-    channel_id: ChannelId,
-    provider: &ProviderKind,
-) -> Option<String> {
-    let http = resolve_bot_http(registry, provider.as_str()).await.ok()?;
-    let channel = channel_id.to_channel(&*http).await.ok()?;
-    channel.guild().map(|guild_channel| guild_channel.name)
-}
-
-pub async fn start_direct_meeting(
-    registry: &HealthRegistry,
-    channel_id: ChannelId,
-    owner_provider: ProviderKind,
-    primary_provider: ProviderKind,
-    reviewer_provider: ProviderKind,
-    agenda: String,
-    fixed_participants: Vec<String>,
-) -> Result<(), String> {
-    let http = resolve_bot_http(registry, owner_provider.as_str())
-        .await
-        .map_err(|(_, body)| body)?;
-
-    let shared = {
-        let providers = registry.providers.lock().await;
-        providers
-            .iter()
-            .find(|entry| entry.name == owner_provider.as_str())
-            .map(|entry| entry.shared.clone())
-            .ok_or_else(|| {
-                format!(
-                    r#"{{"ok":false,"error":"provider runtime not registered: {}"}}"#,
-                    owner_provider.as_str()
-                )
-            })?
-    };
-
-    super::meeting::spawn_direct_start(
-        http,
-        channel_id,
-        agenda,
-        primary_provider,
-        reviewer_provider,
-        fixed_participants,
-        shared,
-    )
-    .await
 }
 
 pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
