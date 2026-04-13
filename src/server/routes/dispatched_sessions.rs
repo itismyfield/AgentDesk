@@ -1071,6 +1071,9 @@ pub struct ForceKillOptions {
     /// If true, mark the dispatch as 'failed' and create a retry dispatch.
     #[serde(default)]
     pub retry: bool,
+    /// Human-readable reason for the kill (e.g. "idle timeout", "slot reclaim").
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 pub(crate) async fn force_kill_session_impl(
@@ -1381,7 +1384,8 @@ pub async fn force_kill_session(
     Path(session_key): Path<String>,
     Json(body): Json<ForceKillOptions>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    force_kill_session_impl(&state, &session_key, body.retry).await
+    let reason = body.reason.as_deref().unwrap_or("force-kill API invoked");
+    force_kill_session_impl_with_reason(&state, &session_key, body.retry, reason).await
 }
 
 /// Legacy body-based wrapper retained for compatibility tests and direct callers.

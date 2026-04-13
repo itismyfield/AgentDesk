@@ -1983,7 +1983,6 @@ pub(super) async fn handle_text_command(
             match stop_lookup {
                 TextStopLookup::Stop(token) => {
                     super::super::turn_bridge::cancel_active_token(&token, true, "!stop");
-                    let _ = msg.reply(&ctx.http, "Turn cancelled.").await;
                 }
                 TextStopLookup::AlreadyStopping => {
                     let _ = msg.reply(&ctx.http, "Already stopping...").await;
