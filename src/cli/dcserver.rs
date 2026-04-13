@@ -977,6 +977,11 @@ pub fn handle_dcserver(token: Option<String>) {
         }
     }
 
+    if let Err(error) = crate::logging::init_tracing() {
+        eprintln!("  ✖ Failed to initialize tracing: {error}");
+        std::process::exit(1);
+    }
+
     // Single-instance guard via flock — prevents race conditions
     #[cfg(unix)]
     let _lock_file = {

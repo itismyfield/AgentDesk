@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use tracing_subscriber::EnvFilter;
 
 pub(crate) struct BootstrapState {
     pub(crate) config: crate::config::Config,
@@ -7,7 +6,7 @@ pub(crate) struct BootstrapState {
 }
 
 pub(crate) fn initialize() -> Result<BootstrapState> {
-    init_tracing()?;
+    crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();
     let legacy_scan = runtime_root
@@ -51,75 +50,4 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     };
 
     Ok(BootstrapState { config, db })
-}
-
-fn tracing_env_filter() -> Result<EnvFilter> {
-    let directive = "agentdesk=info"
-        .parse()
-        .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
-    Ok(EnvFilter::from_default_env().add_directive(directive))
-}
-
-fn build_tracing_subscriber<W>(make_writer: W) -> Result<impl tracing::Subscriber + Send + Sync>
-where
-    W: for<'writer> tracing_subscriber::fmt::writer::MakeWriter<'writer> + Send + Sync + 'static,
-{
-    Ok(tracing_subscriber::fmt()
-        // launchd/systemd append stdout to dcserver.stdout.log; keep tracing on stdout
-        // so watcher/policy-hook/runtime logs land in the file operators inspect first.
-        .with_writer(make_writer)
-        .with_env_filter(tracing_env_filter()?)
-        .finish())
-}
-
-fn init_tracing() -> Result<()> {
-    let subscriber = build_tracing_subscriber(std::io::stdout)?;
-    tracing::subscriber::set_global_default(subscriber)
-        .map_err(|error| anyhow::anyhow!("Failed to initialize tracing subscriber: {error}"))?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build_tracing_subscriber;
-    use std::io;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::writer::MakeWriter;
-
-    #[derive(Clone, Default)]
-    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
-
-    struct SharedBufferGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for SharedBufferGuard {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedBuffer {
-        type Writer = SharedBufferGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedBufferGuard(self.0.clone())
-        }
-    }
-
-    #[test]
-    fn test_build_tracing_subscriber_writes_events_to_configured_writer() {
-        let buffer = SharedBuffer::default();
-        let subscriber = build_tracing_subscriber(buffer.clone()).unwrap();
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::info!("watcher started");
-        });
-
-        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("watcher started"));
-    }
 }
