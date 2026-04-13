@@ -25,8 +25,8 @@ use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use completion_guard::{
-    fail_dispatch_with_retry, guard_review_dispatch_completion,
-    runtime_db_fallback_complete_with_result,
+    build_work_dispatch_completion_result, fail_dispatch_with_retry,
+    guard_review_dispatch_completion, runtime_db_fallback_complete_with_result,
 };
 pub(super) use recovery_text::auto_retry_with_history;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
