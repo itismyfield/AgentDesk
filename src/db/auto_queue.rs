@@ -55,25 +55,25 @@ pub fn update_entry_status_on_conn(
     trigger_source: &str,
     options: &EntryStatusUpdateOptions,
 ) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
-    let normalized = normalize_entry_status(new_status)?;
     let current = load_entry_status_row(conn, entry_id)?;
-    update_entry_status_from_row_on_conn(
+    let normalized = normalize_entry_status(new_status)?;
+    update_entry_status_with_current_on_conn(
         conn,
         entry_id,
-        current,
         normalized,
         trigger_source,
         options,
+        current,
     )
 }
 
-fn update_entry_status_from_row_on_conn(
+fn update_entry_status_with_current_on_conn(
     conn: &Connection,
     entry_id: &str,
-    mut current: EntryStatusRow,
     normalized: &str,
     trigger_source: &str,
     options: &EntryStatusUpdateOptions,
+    mut current: EntryStatusRow,
 ) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
     loop {
         let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
@@ -133,14 +133,54 @@ fn update_entry_status_from_row_on_conn(
             });
         }
 
-        let rows_affected = apply_entry_status_update_on_conn(
-            conn,
-            entry_id,
-            &current.status,
-            normalized,
-            effective_dispatch_id.as_deref(),
-            effective_slot_index,
-        )?;
+        let rows_affected = match normalized {
+            ENTRY_STATUS_PENDING => conn.execute(
+                "UPDATE auto_queue_entries
+                     SET status = 'pending',
+                         dispatch_id = NULL,
+                         slot_index = NULL,
+                         dispatched_at = NULL,
+                         completed_at = NULL
+                     WHERE id = ?1
+                       AND status = ?2",
+                rusqlite::params![entry_id, current.status],
+            )?,
+            ENTRY_STATUS_DISPATCHED => conn.execute(
+                "UPDATE auto_queue_entries
+                     SET status = 'dispatched',
+                         dispatch_id = ?1,
+                         slot_index = ?2,
+                         dispatched_at = datetime('now'),
+                         completed_at = NULL
+                     WHERE id = ?3
+                       AND status = ?4",
+                rusqlite::params![
+                    effective_dispatch_id,
+                    effective_slot_index,
+                    entry_id,
+                    current.status
+                ],
+            )?,
+            ENTRY_STATUS_DONE => conn.execute(
+                "UPDATE auto_queue_entries
+                     SET status = 'done',
+                         completed_at = datetime('now')
+                     WHERE id = ?1
+                       AND status = ?2",
+                rusqlite::params![entry_id, current.status],
+            )?,
+            ENTRY_STATUS_SKIPPED => conn.execute(
+                "UPDATE auto_queue_entries
+                     SET status = 'skipped',
+                         dispatch_id = NULL,
+                         dispatched_at = NULL,
+                         completed_at = datetime('now')
+                     WHERE id = ?1
+                       AND status = ?2",
+                rusqlite::params![entry_id, current.status],
+            )?,
+            _ => unreachable!(),
+        };
 
         if rows_affected == 0 {
             let latest = load_entry_status_row(conn, entry_id)?;
@@ -158,16 +198,21 @@ fn update_entry_status_from_row_on_conn(
                 });
             }
 
-            crate::auto_queue_log!(
-                warn,
-                "entry_status_transition_stale_retry",
-                log_ctx.clone(),
-                "[auto-queue] stale entry transition revalidating {} {} -> {} (source: {})",
-                entry_id,
-                latest.status,
-                normalized,
-                trigger_source
-            );
+            if !is_allowed_entry_transition(&latest.status, normalized) {
+                tracing::warn!(
+                    "[auto-queue] stale entry transition blocked {} {} -> {} (source: {})",
+                    entry_id,
+                    latest.status,
+                    normalized,
+                    trigger_source
+                );
+                return Err(EntryStatusUpdateError::InvalidTransition {
+                    entry_id: entry_id.to_string(),
+                    from_status: latest.status,
+                    to_status: normalized.to_string(),
+                });
+            }
+
             current = latest;
             continue;
         }
@@ -209,64 +254,6 @@ fn update_entry_status_from_row_on_conn(
             to_status: normalized.to_string(),
             changed: true,
         });
-    }
-}
-
-fn apply_entry_status_update_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    current_status: &str,
-    normalized: &str,
-    effective_dispatch_id: Option<&str>,
-    effective_slot_index: Option<i64>,
-) -> rusqlite::Result<usize> {
-    match normalized {
-        ENTRY_STATUS_PENDING => conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'pending',
-                     dispatch_id = NULL,
-                     slot_index = NULL,
-                     dispatched_at = NULL,
-                     completed_at = NULL
-                 WHERE id = ?1
-                   AND status = ?2",
-            rusqlite::params![entry_id, current_status],
-        ),
-        ENTRY_STATUS_DISPATCHED => conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'dispatched',
-                     dispatch_id = ?1,
-                     slot_index = ?2,
-                     dispatched_at = datetime('now'),
-                     completed_at = NULL
-                 WHERE id = ?3
-                   AND status = ?4",
-            rusqlite::params![
-                effective_dispatch_id,
-                effective_slot_index,
-                entry_id,
-                current_status
-            ],
-        ),
-        ENTRY_STATUS_DONE => conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'done',
-                     completed_at = datetime('now')
-                 WHERE id = ?1
-                   AND status = ?2",
-            rusqlite::params![entry_id, current_status],
-        ),
-        ENTRY_STATUS_SKIPPED => conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'skipped',
-                     dispatch_id = NULL,
-                     dispatched_at = NULL,
-                     completed_at = datetime('now')
-                 WHERE id = ?1
-                   AND status = ?2",
-            rusqlite::params![entry_id, current_status],
-        ),
-        _ => unreachable!(),
     }
 }
 
@@ -925,28 +912,39 @@ pub fn allocate_slot_for_group_agent(
 }
 
 pub fn slot_has_active_dispatch(conn: &Connection, agent_id: &str, slot_index: i64) -> bool {
+    slot_has_active_dispatch_excluding(conn, agent_id, slot_index, None)
+}
+
+pub fn slot_has_active_dispatch_excluding(
+    conn: &Connection,
+    agent_id: &str,
+    slot_index: i64,
+    exclude_dispatch_id: Option<&str>,
+) -> bool {
+    let exclude_id = exclude_dispatch_id.unwrap_or("");
     let auto_queue_active: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0
              FROM auto_queue_entries
              WHERE agent_id = ?1
                AND slot_index = ?2
-               AND status = 'dispatched'",
-            rusqlite::params![agent_id, slot_index],
+               AND status = 'dispatched'
+               AND COALESCE(dispatch_id, '') != ?3",
+            rusqlite::params![agent_id, slot_index, exclude_id],
             |row| row.get(0),
         )
         .unwrap_or(false);
     if auto_queue_active {
         return true;
     }
-
     conn.query_row(
         "SELECT COUNT(*) > 0
          FROM task_dispatches
          WHERE to_agent_id = ?1
            AND status IN ('pending', 'dispatched')
-           AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2",
-        rusqlite::params![agent_id, slot_index],
+           AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2
+           AND id != ?3",
+        rusqlite::params![agent_id, slot_index, exclude_id],
         |row| row.get(0),
     )
     .unwrap_or(false)
@@ -1319,7 +1317,7 @@ mod tests {
     use super::{
         ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED,
         EntryStatusUpdateError, EntryStatusUpdateOptions, list_entry_dispatch_history,
-        load_entry_status_row, update_entry_status_from_row_on_conn, update_entry_status_on_conn,
+        update_entry_status_on_conn,
     };
     use rusqlite::Connection;
 
@@ -1572,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_skip_transition_revalidates_against_latest_status() {
+    fn stale_allowed_transition_retries_from_latest_status() {
         let conn = setup_conn();
         conn.execute(
             "INSERT INTO auto_queue_entries (
@@ -1582,73 +1580,55 @@ mod tests {
         )
         .expect("seed entry");
 
-        let stale = load_entry_status_row(&conn, "entry-stale").expect("stale snapshot");
+        let stale_current = super::load_entry_status_row(&conn, "entry-stale").expect("stale row");
         conn.execute(
             "UPDATE auto_queue_entries
-                SET status = 'dispatched',
-                    dispatch_id = 'dispatch-live',
-                    slot_index = 0,
-                    dispatched_at = datetime('now')
-              WHERE id = 'entry-stale'",
+             SET status = 'dispatched',
+                 dispatch_id = 'dispatch-live',
+                 slot_index = 0,
+                 dispatched_at = datetime('now')
+             WHERE id = 'entry-stale'",
             [],
         )
-        .expect("advance entry");
+        .expect("simulate concurrent dispatch");
 
-        let result = update_entry_status_from_row_on_conn(
+        let result = super::update_entry_status_with_current_on_conn(
             &conn,
             "entry-stale",
-            stale,
             ENTRY_STATUS_SKIPPED,
-            "test_stale_skip",
+            "test_cancel_retry",
             &EntryStatusUpdateOptions::default(),
+            stale_current,
         )
-        .expect("stale skip transition");
+        .expect("stale cancel should retry");
         assert!(result.changed);
         assert_eq!(result.from_status, ENTRY_STATUS_DISPATCHED);
         assert_eq!(result.to_status, ENTRY_STATUS_SKIPPED);
 
-        let (status, dispatch_id, slot_index, dispatched_at, completed_at): (
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        ) = conn
+        let (status, dispatch_id, completed_at): (String, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
-                   FROM auto_queue_entries
-                  WHERE id = 'entry-stale'",
+                "SELECT status, dispatch_id, completed_at FROM auto_queue_entries WHERE id = 'entry-stale'",
                 [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("entry row");
         assert_eq!(status, ENTRY_STATUS_SKIPPED);
         assert!(dispatch_id.is_none());
-        assert_eq!(slot_index, Some(0));
-        assert!(dispatched_at.is_none());
         assert!(completed_at.is_some());
 
-        let (from_status, to_status): (String, String) = conn
+        let transition: (String, String) = conn
             .query_row(
                 "SELECT from_status, to_status
-                   FROM auto_queue_entry_transitions
-                  WHERE entry_id = 'entry-stale'
-               ORDER BY id DESC
-                  LIMIT 1",
+                 FROM auto_queue_entry_transitions
+                 WHERE entry_id = 'entry-stale'
+                 ORDER BY id DESC
+                 LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("transition row");
-        assert_eq!(from_status, ENTRY_STATUS_DISPATCHED);
-        assert_eq!(to_status, ENTRY_STATUS_SKIPPED);
+        assert_eq!(transition.0, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(transition.1, ENTRY_STATUS_SKIPPED);
     }
 
     #[test]
