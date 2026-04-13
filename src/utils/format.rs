@@ -186,6 +186,31 @@ pub fn tail_with_ellipsis(text: &str, max_chars: usize) -> String {
     format!("…{}", &text[byte_start..])
 }
 
+/// 문자열 뒤에서 max_bytes 바이트 이내로 자르고, 앞에 "…"을 붙인다.
+/// 최종 문자열의 UTF-8 길이가 max_bytes를 넘지 않도록 보장한다.
+pub fn tail_with_ellipsis_bytes(text: &str, max_bytes: usize) -> String {
+    const ELLIPSIS: &str = "…";
+
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    if max_bytes == 0 {
+        return String::new();
+    }
+
+    if max_bytes < ELLIPSIS.len() {
+        return safe_suffix(text, max_bytes).to_string();
+    }
+
+    if max_bytes == ELLIPSIS.len() {
+        return ELLIPSIS.to_string();
+    }
+
+    let suffix = safe_suffix(text, max_bytes.saturating_sub(ELLIPSIS.len()));
+    format!("{ELLIPSIS}{suffix}")
+}
+
 /// `~` 또는 `~/...` 경로를 홈 디렉토리로 확장한다.
 /// `~user/...` 형태는 확장하지 않고 그대로 반환한다.
 pub fn expand_tilde_path(path: &str) -> std::path::PathBuf {
@@ -280,5 +305,20 @@ mod tests {
         assert_eq!(display_width_suffix("abcdef", 3), "def");
         // CJK: "한글test" → 뒤에서 5칸 = "test" (4칸)... '글'=2칸 넣으면 6칸 초과 → "test"
         assert_eq!(display_width_suffix("한글test", 5), "test");
+    }
+
+    #[test]
+    fn test_tail_with_ellipsis_bytes_ascii_matches_byte_budget() {
+        assert_eq!(tail_with_ellipsis_bytes("abcdef", 5), "…ef");
+        assert_eq!(tail_with_ellipsis_bytes("abcdef", 3), "…");
+        assert_eq!(tail_with_ellipsis_bytes("abcdef", 2), "ef");
+    }
+
+    #[test]
+    fn test_tail_with_ellipsis_bytes_keeps_utf8_boundary_and_limit() {
+        let result = tail_with_ellipsis_bytes("앞부분🙂한글", 10);
+
+        assert!(result.len() <= 10);
+        assert_eq!(result, "…한글");
     }
 }
