@@ -2565,7 +2565,6 @@ pub(crate) fn activate_with_deps(
                             occupied_agents.insert(agent_id.clone());
                             dispatched_groups_this_activate += 1;
                             dispatched.push(deps.entry_json(&entry_id));
-                            dispatched.push(deps.entry_json(&entry_id));
                             crate::auto_queue_log!(
                                 info,
                                 "activate_consultation_dispatched",
@@ -2784,7 +2783,7 @@ pub(crate) fn activate_with_deps(
         }
 
         let conn = deps.db.separate_conn().unwrap();
-        if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+        let reserve_result = crate::db::auto_queue::update_entry_status_on_conn(
             &conn,
             &entry_id,
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
@@ -2793,17 +2792,32 @@ pub(crate) fn activate_with_deps(
                 dispatch_id: None,
                 slot_index,
             },
-        ) {
-            crate::auto_queue_log!(
-                warn,
-                "activate_dispatch_reserve_failed",
-                entry_log_ctx.clone().maybe_slot_index(slot_index),
-                "[auto-queue] failed to reserve entry {} before create_dispatch: {}",
-                entry_id,
-                error
-            );
-            drop(conn);
-            continue;
+        );
+        match reserve_result {
+            Ok(result) => {
+                if !result.changed {
+                    crate::auto_queue_log!(
+                        info,
+                        "activate_dispatch_reserve_already_claimed",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] entry {entry_id} was already reserved by another activate worker; skipping duplicate dispatch creation"
+                    );
+                    drop(conn);
+                    continue;
+                }
+            }
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_dispatch_reserve_failed",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
+                    "[auto-queue] failed to reserve entry {} before create_dispatch: {}",
+                    entry_id,
+                    error
+                );
+                drop(conn);
+                continue;
+            }
         }
         drop(conn);
 
