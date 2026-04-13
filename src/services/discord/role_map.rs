@@ -91,15 +91,163 @@ fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String>
     })
 }
 
+#[derive(Clone, Copy)]
+struct MeetingAgentFallbackProfile {
+    display_name: &'static str,
+    keywords: &'static [&'static str],
+    domain_summary: &'static str,
+    strengths: &'static [&'static str],
+    task_types: &'static [&'static str],
+    anti_signals: &'static [&'static str],
+    provider_hint: &'static str,
+}
+
+fn meeting_agent_fallback_profile(role_id: &str) -> Option<MeetingAgentFallbackProfile> {
+    match role_id {
+        "openclaw-brain" => Some(MeetingAgentFallbackProfile {
+            display_name: "똑똑이 | Brain",
+            keywords: &["analysis", "reasoning", "architecture"],
+            domain_summary: "복잡한 문제를 구조화하고 핵심 가설을 정리하는 분석 전문가",
+            strengths: &["deep reasoning", "system thinking", "tradeoff analysis"],
+            task_types: &["analysis", "architecture review", "decision support"],
+            anti_signals: &["lightweight chit-chat"],
+            provider_hint: "codex",
+        }),
+        "openclaw-realtor" => Some(MeetingAgentFallbackProfile {
+            display_name: "복덕이 | Realtor",
+            keywords: &["real estate", "housing", "location"],
+            domain_summary: "부동산 입지, 매수·임대 판단, 실거주 조건 비교를 다루는 전문가",
+            strengths: &["location review", "pricing sanity-check", "buyer needs fit"],
+            task_types: &["market comparison", "housing recommendation", "risk review"],
+            anti_signals: &["software implementation"],
+            provider_hint: "codex",
+        }),
+        "openclaw-macro" => Some(MeetingAgentFallbackProfile {
+            display_name: "흐름이 | Macro",
+            keywords: &["macro", "economy", "scenario"],
+            domain_summary: "거시지표와 외부 환경 변화를 바탕으로 시나리오와 우선순위를 정리하는 전문가",
+            strengths: &["scenario planning", "signal triage", "priority framing"],
+            task_types: &["macro analysis", "risk planning", "strategy framing"],
+            anti_signals: &["pixel-perfect UI"],
+            provider_hint: "codex",
+        }),
+        "openclaw-qa" => Some(MeetingAgentFallbackProfile {
+            display_name: "큐에이 | QA",
+            keywords: &["qa", "testing", "regression"],
+            domain_summary: "회귀 위험, 검증 포인트, 테스트 설계를 우선적으로 점검하는 품질 전문가",
+            strengths: &["regression analysis", "bug triage", "acceptance coverage"],
+            task_types: &["test planning", "risk review", "quality gate"],
+            anti_signals: &["creative copywriting"],
+            provider_hint: "codex",
+        }),
+        "openclaw-coder" => Some(MeetingAgentFallbackProfile {
+            display_name: "코딩이 | Coder",
+            keywords: &["code", "implementation", "bugfix"],
+            domain_summary: "구현 방법, 코드 변경 범위, 디버깅 경로를 구체화하는 엔지니어링 전문가",
+            strengths: &["implementation planning", "debugging", "refactoring"],
+            task_types: &["coding", "bug fix", "technical design"],
+            anti_signals: &["non-technical lifestyle advice"],
+            provider_hint: "codex",
+        }),
+        "openclaw-maker" => Some(MeetingAgentFallbackProfile {
+            display_name: "뚝딱이 | Maker",
+            keywords: &["automation", "prototype", "tools"],
+            domain_summary: "빠른 프로토타입과 자동화 흐름을 설계하는 제작형 전문가",
+            strengths: &["rapid prototyping", "tooling", "automation"],
+            task_types: &["prototype build", "workflow automation", "integration"],
+            anti_signals: &["long-form policy debate"],
+            provider_hint: "codex",
+        }),
+        "openclaw-baby" => Some(MeetingAgentFallbackProfile {
+            display_name: "쪽쪽이 | Baby",
+            keywords: &["parenting", "baby", "routine"],
+            domain_summary: "육아 루틴, 발달 관찰, 안전 수칙을 중심으로 조언하는 육아 전문가",
+            strengths: &["routine guidance", "development check", "safety messaging"],
+            task_types: &["parenting advice", "care planning", "safety review"],
+            anti_signals: &["financial trading"],
+            provider_hint: "codex",
+        }),
+        "openclaw-designer" => Some(MeetingAgentFallbackProfile {
+            display_name: "기획이 | Designer",
+            keywords: &["product", "ux", "spec"],
+            domain_summary: "제품 구조, UX 흐름, 요구사항 문장을 정리하는 기획·디자인 전문가",
+            strengths: &["ux framing", "spec writing", "information architecture"],
+            task_types: &["product planning", "ux review", "requirement design"],
+            anti_signals: &["low-level runtime debugging"],
+            provider_hint: "codex",
+        }),
+        "openclaw-main" => Some(MeetingAgentFallbackProfile {
+            display_name: "대복이 | Main",
+            keywords: &["coordination", "decision", "synthesis"],
+            domain_summary: "여러 관점을 엮어 최종 결정과 실행 우선순위를 정리하는 조율 전문가",
+            strengths: &["synthesis", "decision framing", "coordination"],
+            task_types: &[
+                "meeting synthesis",
+                "priority setting",
+                "final recommendation",
+            ],
+            anti_signals: &["narrow single-domain drilldown"],
+            provider_hint: "codex",
+        }),
+        "openclaw-gamer" => Some(MeetingAgentFallbackProfile {
+            display_name: "겜돌이 | Gamer",
+            keywords: &["game", "balance", "content"],
+            domain_summary: "게임 시스템, 밸런스, 플레이 감각을 중심으로 검토하는 게임 전문가",
+            strengths: &["gameplay review", "balance analysis", "content feedback"],
+            task_types: &["game design", "balance review", "player experience"],
+            anti_signals: &["legal compliance"],
+            provider_hint: "codex",
+        }),
+        "qwen" => Some(MeetingAgentFallbackProfile {
+            display_name: "qwen",
+            keywords: &["analysis", "summary", "generalist"],
+            domain_summary: "범용 분석과 요약, 대안 비교에 강한 일반 목적 전문가",
+            strengths: &["broad analysis", "summarization", "alternative comparison"],
+            task_types: &["analysis", "brainstorming", "synthesis"],
+            anti_signals: &["repo mutation"],
+            provider_hint: "qwen",
+        }),
+        "openclaw-crypto" => Some(MeetingAgentFallbackProfile {
+            display_name: "코인이 | Crypto",
+            keywords: &["crypto", "market", "onchain"],
+            domain_summary: "가상자산 시장 흐름, 리스크, 온체인 시그널을 다루는 크립토 전문가",
+            strengths: &["market reading", "risk framing", "narrative tracking"],
+            task_types: &[
+                "crypto analysis",
+                "portfolio risk review",
+                "market commentary",
+            ],
+            anti_signals: &["medical advice"],
+            provider_hint: "codex",
+        }),
+        "openclaw-foodie" => Some(MeetingAgentFallbackProfile {
+            display_name: "맛돌이 | Foodie",
+            keywords: &["food", "restaurant", "menu"],
+            domain_summary: "식당 선택, 메뉴 평가, 방문 동선을 구체적으로 제안하는 미식 전문가",
+            strengths: &[
+                "restaurant filtering",
+                "menu recommendation",
+                "visit planning",
+            ],
+            task_types: &["restaurant recommendation", "taste review", "trip planning"],
+            anti_signals: &["source code debugging"],
+            provider_hint: "codex",
+        }),
+        _ => None,
+    }
+}
+
 fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConfig> {
     let role_id = agent
         .get("role_id")
         .or_else(|| agent.get("roleId"))?
         .as_str()?;
+    let fallback = meeting_agent_fallback_profile(role_id);
     let display_name = agent
         .get("display_name")
         .or_else(|| agent.get("displayName"))
         .and_then(|v| v.as_str())
+        .or_else(|| fallback.map(|profile| profile.display_name))
         .unwrap_or(role_id);
     let prompt_file = expand_tilde(
         agent
@@ -109,8 +257,12 @@ fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConf
             .unwrap_or(""),
     );
     let provider_raw = json_string_field(agent, &["provider"]);
-    let provider_hint = json_string_field(agent, &["provider_hint", "providerHint", "provider"]);
-    let provider = provider_raw.as_deref().and_then(ProviderKind::from_str);
+    let provider_hint = json_string_field(agent, &["provider_hint", "providerHint", "provider"])
+        .or_else(|| fallback.map(|profile| profile.provider_hint.to_string()));
+    let provider = provider_raw
+        .as_deref()
+        .and_then(ProviderKind::from_str)
+        .or_else(|| fallback.and_then(|profile| ProviderKind::from_str(profile.provider_hint)));
     let model = json_string_field(agent, &["model"]);
     let reasoning_effort = json_string_field(agent, &["reasoning_effort", "reasoningEffort"]);
     let workspace = json_string_field(agent, &["workspace"]).map(|value| expand_tilde(&value));
@@ -122,7 +274,7 @@ fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConf
     let memory_override = agent.get("memory").and_then(|raw| {
         serde_json::from_value::<MemoryConfigOverride>(raw.clone())
             .map_err(|err| {
-                eprintln!(
+                tracing::warn!(
                     "  [memory] Warning: invalid meeting.available_agents memory block: {err}"
                 );
                 err
@@ -133,18 +285,79 @@ fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConf
     Some(MeetingAgentConfig {
         role_id: role_id.to_string(),
         display_name: display_name.to_string(),
-        keywords: json_string_vec(agent, "keywords"),
+        keywords: {
+            let explicit = json_string_vec(agent, "keywords");
+            if explicit.is_empty() {
+                fallback
+                    .map(|profile| {
+                        profile
+                            .keywords
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                explicit
+            }
+        },
         prompt_file,
-        domain_summary: json_string_field(agent, &["domain_summary", "domainSummary"]),
-        strengths: json_string_vec(agent, "strengths"),
-        task_types: json_string_vec(agent, "task_types")
-            .into_iter()
-            .chain(json_string_vec(agent, "taskTypes"))
-            .collect(),
-        anti_signals: json_string_vec(agent, "anti_signals")
-            .into_iter()
-            .chain(json_string_vec(agent, "antiSignals"))
-            .collect(),
+        domain_summary: json_string_field(agent, &["domain_summary", "domainSummary"])
+            .or_else(|| fallback.map(|profile| profile.domain_summary.to_string())),
+        strengths: {
+            let explicit = json_string_vec(agent, "strengths");
+            if explicit.is_empty() {
+                fallback
+                    .map(|profile| {
+                        profile
+                            .strengths
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                explicit
+            }
+        },
+        task_types: {
+            let explicit = json_string_vec(agent, "task_types")
+                .into_iter()
+                .chain(json_string_vec(agent, "taskTypes"))
+                .collect::<Vec<_>>();
+            if explicit.is_empty() {
+                fallback
+                    .map(|profile| {
+                        profile
+                            .task_types
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                explicit
+            }
+        },
+        anti_signals: {
+            let explicit = json_string_vec(agent, "anti_signals")
+                .into_iter()
+                .chain(json_string_vec(agent, "antiSignals"))
+                .collect::<Vec<_>>();
+            if explicit.is_empty() {
+                fallback
+                    .map(|profile| {
+                        profile
+                            .anti_signals
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                explicit
+            }
+        },
         provider_hint,
         provider,
         model,
@@ -651,6 +864,45 @@ mod tests {
 
             let config = load_meeting_config().expect("meeting config should load");
             assert!(config.available_agents.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_fallback_agents_inherit_known_specialist_metadata() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "123": {
+      "roleId": "openclaw-coder",
+      "promptFile": "~/prompts/coder.md"
+    }
+  },
+  "meeting": {
+    "channel_name": "meeting",
+    "summary_agent": "openclaw-coder"
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            assert_eq!(config.available_agents.len(), 1);
+            let coder = &config.available_agents[0];
+            assert_eq!(coder.role_id, "openclaw-coder");
+            assert_eq!(coder.display_name, "코딩이 | Coder");
+            assert_eq!(
+                coder.domain_summary.as_deref(),
+                Some("구현 방법, 코드 변경 범위, 디버깅 경로를 구체화하는 엔지니어링 전문가")
+            );
+            assert!(
+                coder
+                    .strengths
+                    .contains(&"implementation planning".to_string())
+            );
+            assert!(coder.task_types.contains(&"coding".to_string()));
+            assert_eq!(coder.provider_hint.as_deref(), Some("codex"));
+            assert_eq!(coder.provider, Some(ProviderKind::Codex));
         });
     }
 }

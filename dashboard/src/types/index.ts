@@ -351,6 +351,7 @@ export interface RoundTableMeeting {
   thread_hash?: string | null;
   agenda: string;
   summary: string | null;
+  selection_reason?: string | null;
   status: "in_progress" | "completed" | "cancelled";
   primary_provider: string | null;
   reviewer_provider: string | null;

@@ -82,67 +82,8 @@ struct LegacyBotSettingsEntry {
 
 fn load_legacy_bot_settings_json() -> Option<serde_json::Value> {
     let path = bot_settings_path()?;
-    let content = fs::read_to_string(&path).ok()?;
-    let json = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-
-    // Retire the legacy file if it has no runtime-only data (channel_model_overrides).
-    // Auth fields are already in agentdesk.yaml; this file is only needed for overrides.
-    let has_runtime_data = json
-        .as_object()
-        .map(|obj| {
-            obj.values().any(|entry| {
-                entry
-                    .get("channel_model_overrides")
-                    .and_then(|v| v.as_object())
-                    .is_some_and(|m| !m.is_empty())
-            })
-        })
-        .unwrap_or(false);
-
-    if !has_runtime_data {
-        // Before retiring, ensure provider fields are persisted to yaml.
-        // bot_settings.json may be the only source of provider for some bots.
-        if let Some(obj) = json.as_object() {
-            for (_key, entry) in obj {
-                let token = match entry.get("token").and_then(|v| v.as_str()) {
-                    Some(t) => t.to_string(),
-                    None => continue,
-                };
-                let legacy_provider = entry
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(provider_str) = legacy_provider {
-                    if let Some(bot) = agentdesk_config::find_discord_bot_by_token(&token) {
-                        if bot.provider.is_none() {
-                            // Merge full settings (yaml + legacy) then persist
-                            let full = load_bot_settings(&token);
-                            let mut merged = full;
-                            merged.provider = ProviderKind::from_str_or_unsupported(&provider_str);
-                            persist_bot_auth_to_yaml(&token, &merged);
-                        }
-                    }
-                }
-            }
-        }
-
-        let migrated = path.with_extension("json.migrated");
-        if let Err(e) = fs::rename(&path, &migrated) {
-            tracing::warn!(
-                "Failed to retire '{}' → '{}': {e}",
-                path.display(),
-                migrated.display()
-            );
-        } else {
-            tracing::info!(
-                "[bot-settings] Retired '{}' → '{}' (auth migrated to agentdesk.yaml)",
-                path.display(),
-                migrated.display()
-            );
-        }
-    }
-
-    Some(json)
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&content).ok()
 }
 
 fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
@@ -609,7 +550,7 @@ impl Default for ResolvedMemorySettings {
 fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
     let clamped = value.clamp(min, max);
     if value != clamped {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: {name}={} is out of range; clamping to {clamped}",
             value
         );
@@ -626,7 +567,7 @@ fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
         Some(value) if value.eq_ignore_ascii_case("mem0") => Some("mem0"),
         Some(value) if value.eq_ignore_ascii_case("memento") => Some("memento"),
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: unknown memory.backend '{value}', falling back to auto-detect"
             );
             None
@@ -681,14 +622,14 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
     }
 
     if let Some(state) = crate::services::memory::backend_state(kind) {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: requested backend '{}' unavailable (configured={}, failures={}); falling back to file",
             kind.as_str(),
             state.configured,
             state.consecutive_failures
         );
     } else {
-        tracing::warn!(
+        eprintln!(
             "  [memory] Warning: requested backend '{}' unavailable; falling back to file",
             kind.as_str()
         );
@@ -708,7 +649,7 @@ fn resolve_mem0_profile(raw: Option<&str>) -> String {
             value.to_ascii_lowercase()
         }
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: unknown memory.mem0.profile '{value}', falling back to {DEFAULT_MEM0_PROFILE}"
             );
             DEFAULT_MEM0_PROFILE.to_string()
@@ -720,7 +661,7 @@ fn resolve_confidence_threshold(raw: Option<f64>) -> Option<f64> {
     match raw {
         Some(value) if (0.0..=1.0).contains(&value) => Some(value),
         Some(value) => {
-            tracing::warn!(
+            eprintln!(
                 "  [memory] Warning: memory.mem0.ingestion.confidence_threshold={} is invalid; dropping override",
                 value
             );
@@ -852,19 +793,29 @@ pub(super) fn channel_supports_provider(
         return provider.is_supported();
     }
 
-    let explicit_provider = role_binding
-        .and_then(|binding| binding.provider.as_ref())
-        .cloned()
-        .or_else(|| channel_name.and_then(lookup_suffix_provider));
+    if let Some(bound_provider) = role_binding.and_then(|binding| binding.provider.as_ref()) {
+        return bound_provider == provider;
+    }
+
+    // Check global suffix_map from bot_settings.json
+    if let Some(ch) = channel_name {
+        if let Some(mapped) = lookup_suffix_provider(ch) {
+            return mapped == *provider;
+        }
+    }
 
     // When org.yaml is present, require an explicit channel binding or suffix match.
     // This avoids the legacy "Claude catches all generic channels" behavior leaking
     // into deployments that already opted into explicit org routing.
-    if org_schema::org_schema_exists() && explicit_provider.is_none() {
+    if org_schema::org_schema_exists() {
         return false;
     }
 
-    provider.is_channel_supported(channel_name, is_dm, explicit_provider.as_ref())
+    provider.is_channel_supported(
+        channel_name,
+        is_dm,
+        role_binding.and_then(|binding| binding.provider.as_ref()),
+    )
 }
 
 pub(super) fn bot_settings_allow_channel(

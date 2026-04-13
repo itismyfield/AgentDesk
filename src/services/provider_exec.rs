@@ -38,28 +38,12 @@ pub async fn execute_simple_with_timeout(
     timeout: Duration,
     stage_label: String,
 ) -> Result<String, String> {
-    match provider {
-        ProviderKind::Claude => tokio::task::spawn_blocking(move || {
-            claude::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?,
-        ProviderKind::Codex => tokio::task::spawn_blocking(move || {
-            codex::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?,
-        ProviderKind::Gemini => tokio::task::spawn_blocking(move || {
-            gemini::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?,
-        ProviderKind::Qwen => tokio::task::spawn_blocking(move || {
-            qwen::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?,
-        ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
+    match tokio::time::timeout(timeout, execute_simple(provider, prompt)).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "{stage_label} timed out after {}s",
+            timeout.as_secs()
+        )),
     }
 }
 
