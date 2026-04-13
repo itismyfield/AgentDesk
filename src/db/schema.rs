@@ -2,6 +2,9 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
+const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
+const SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY: &str =
+    "session_transcript_agent_id_backfill:v1";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -82,6 +85,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
+    run_migration_once(
+        conn,
+        SESSION_AGENT_ID_BACKFILL_META_KEY,
+        backfill_session_agent_ids,
+    )?;
+    run_migration_once(
+        conn,
+        SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY,
+        backfill_session_transcript_agent_ids,
+    )?;
+    ensure_memento_feedback_stats_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -147,6 +161,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          UPDATE kanban_cards SET awaiting_dod_at = updated_at WHERE status = 'review' AND review_status = 'awaiting_dod' AND awaiting_dod_at IS NULL;",
     );
     ensure_auto_queue_schema(conn)?;
+    ensure_api_friction_schema(conn)?;
 
     // Unique constraint: one kanban card per GitHub issue per repo.
     // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.
@@ -376,6 +391,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             last_decision       TEXT,
             decided_by          TEXT,
             decided_at          TEXT,
+            approach_change_round INTEGER,
+            session_reset_round INTEGER,
             review_entered_at   TEXT,
             updated_at          TEXT DEFAULT (datetime('now'))
         );",
@@ -426,6 +443,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // #118: Track approach-change round for repeated-finding detection
     let _ = conn.execute(
         "ALTER TABLE card_review_state ADD COLUMN approach_change_round INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE card_review_state ADD COLUMN session_reset_round INTEGER",
         [],
     );
 
@@ -537,6 +558,37 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_retrospectives (
+            id               TEXT PRIMARY KEY,
+            card_id          TEXT NOT NULL REFERENCES kanban_cards(id) ON DELETE CASCADE,
+            dispatch_id      TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            terminal_status  TEXT NOT NULL,
+            repo_id          TEXT,
+            issue_number     INTEGER,
+            title            TEXT NOT NULL,
+            topic            TEXT NOT NULL,
+            content          TEXT NOT NULL,
+            review_round     INTEGER NOT NULL DEFAULT 0,
+            review_notes     TEXT,
+            duration_seconds INTEGER,
+            success          INTEGER NOT NULL DEFAULT 0,
+            result_json      TEXT NOT NULL,
+            memory_payload   TEXT NOT NULL,
+            sync_backend     TEXT,
+            sync_status      TEXT NOT NULL DEFAULT 'skipped',
+            sync_error       TEXT,
+            created_at       DATETIME DEFAULT (datetime('now')),
+            updated_at       DATETIME DEFAULT (datetime('now')),
+            UNIQUE(card_id, dispatch_id, terminal_status)
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_card_created
+            ON card_retrospectives(card_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_issue_created
+            ON card_retrospectives(issue_number, created_at DESC)
+            WHERE issue_number IS NOT NULL;",
+    )?;
+
     // #126: Add expires_at column to kv_meta for TTL support
     {
         let has_expires: bool = conn
@@ -598,6 +650,27 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ste_session_key ON session_termination_events(session_key);
         CREATE INDEX IF NOT EXISTS idx_ste_dispatch_id ON session_termination_events(dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
+    )?;
+
+    // #436: Dispatch status transition audit trail
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dispatch_events (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id       TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            kanban_card_id    TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+            dispatch_type     TEXT,
+            from_status       TEXT,
+            to_status         TEXT NOT NULL,
+            transition_source TEXT NOT NULL,
+            payload_json      TEXT,
+            created_at        DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_dispatch_id
+            ON dispatch_events(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_card_id
+            ON dispatch_events(kanban_card_id);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_created_at
+            ON dispatch_events(created_at);",
     )?;
 
     // #398: Runtime supervisor decision audit
@@ -748,7 +821,33 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, slot_index)
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        TEXT NOT NULL,
+            from_status     TEXT,
+            to_status       TEXT NOT NULL,
+            trigger_source  TEXT NOT NULL,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id        TEXT NOT NULL REFERENCES auto_queue_entries(id) ON DELETE CASCADE,
+            dispatch_id     TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            trigger_source  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entry_id, dispatch_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
+            ON auto_queue_entry_transitions(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
+            ON auto_queue_entry_transitions(created_at);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_entry
+            ON auto_queue_entry_dispatch_history(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_dispatch
+            ON auto_queue_entry_dispatch_history(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_created
+            ON auto_queue_entry_dispatch_history(created_at);",
     )?;
 
     ensure_auto_queue_column(
@@ -800,6 +899,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
     )?;
     backfill_auto_queue_dispatch_ids(conn)?;
+    backfill_auto_queue_dispatch_history(conn)?;
     ensure_auto_queue_column(
         conn,
         "auto_queue_entries",
@@ -812,6 +912,61 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;");
     }
 
+    Ok(())
+}
+
+fn ensure_api_friction_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_friction_events (
+            id                  TEXT PRIMARY KEY,
+            fingerprint         TEXT NOT NULL,
+            endpoint            TEXT NOT NULL,
+            friction_type       TEXT NOT NULL,
+            summary             TEXT NOT NULL,
+            workaround          TEXT,
+            suggested_fix       TEXT,
+            docs_category       TEXT,
+            keywords_json       TEXT NOT NULL DEFAULT '[]',
+            payload_json        TEXT NOT NULL,
+            session_key         TEXT,
+            channel_id          TEXT,
+            provider            TEXT,
+            dispatch_id         TEXT,
+            card_id             TEXT,
+            repo_id             TEXT,
+            github_issue_number INTEGER,
+            task_summary        TEXT,
+            agent_id            TEXT,
+            memory_backend      TEXT,
+            memory_status       TEXT NOT NULL DEFAULT 'pending',
+            memory_error        TEXT,
+            created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_fingerprint
+            ON api_friction_events (fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_dispatch_id
+            ON api_friction_events (dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_created_at
+            ON api_friction_events (created_at DESC);
+        CREATE TABLE IF NOT EXISTS api_friction_issues (
+            fingerprint   TEXT PRIMARY KEY,
+            repo_id       TEXT NOT NULL,
+            endpoint      TEXT NOT NULL,
+            friction_type TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            issue_number  INTEGER,
+            issue_url     TEXT,
+            event_count   INTEGER NOT NULL DEFAULT 0,
+            first_event_at DATETIME,
+            last_event_at DATETIME,
+            last_error    TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_issues_repo
+            ON api_friction_issues (repo_id, updated_at DESC);",
+    )?;
     Ok(())
 }
 
@@ -853,6 +1008,67 @@ fn backfill_auto_queue_dispatch_ids(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn backfill_auto_queue_dispatch_history(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
+            entry_id, dispatch_id, trigger_source, created_at
+        )
+        SELECT
+            id,
+            dispatch_id,
+            'schema_backfill_current',
+            COALESCE(dispatched_at, created_at, CURRENT_TIMESTAMP)
+        FROM auto_queue_entries
+        WHERE NULLIF(TRIM(dispatch_id), '') IS NOT NULL;",
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, context, CAST(created_at AS TEXT)
+         FROM task_dispatches
+         WHERE NULLIF(TRIM(COALESCE(context, '')), '') IS NOT NULL",
+    )?;
+    let dispatches = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+
+    for dispatch in dispatches {
+        let (dispatch_id, context_raw, created_at) = dispatch?;
+        let Ok(context) = serde_json::from_str::<serde_json::Value>(&context_raw) else {
+            continue;
+        };
+        let Some(entry_id) = context
+            .get("entry_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let entry_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM auto_queue_entries WHERE id = ?1)",
+                [entry_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !entry_exists {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
+                entry_id, dispatch_id, trigger_source, created_at
+            ) VALUES (?1, ?2, 'schema_backfill_context', COALESCE(?3, CURRENT_TIMESTAMP))",
+            rusqlite::params![entry_id, dispatch_id, created_at],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_transcripts (
@@ -865,6 +1081,8 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
             dispatch_id       TEXT,
             user_message      TEXT NOT NULL DEFAULT '',
             assistant_message TEXT NOT NULL DEFAULT '',
+            events_json       TEXT NOT NULL DEFAULT '[]',
+            duration_ms       INTEGER,
             created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
@@ -879,7 +1097,163 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
             tokenize = 'unicode61'
         );",
     )?;
+    let _ = conn.execute_batch(
+        "ALTER TABLE session_transcripts ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]';",
+    );
+    let _ = conn.execute_batch("ALTER TABLE session_transcripts ADD COLUMN duration_ms INTEGER;");
     migrate_legacy_session_transcripts_agent_fk(conn)?;
+    Ok(())
+}
+
+fn run_migration_once(
+    conn: &Connection,
+    meta_key: &str,
+    migration: fn(&Connection) -> Result<()>,
+) -> Result<()> {
+    let already_ran = conn
+        .query_row(
+            "SELECT 1 FROM kv_meta WHERE key = ?1 LIMIT 1",
+            [meta_key],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if already_ran {
+        return Ok(());
+    }
+
+    migration(conn)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, '1')",
+        [meta_key],
+    )?;
+    Ok(())
+}
+
+fn backfill_session_agent_ids(conn: &Connection) -> Result<()> {
+    let sessions = conn
+        .prepare(
+            "SELECT session_key, thread_channel_id, active_dispatch_id
+             FROM sessions
+             WHERE NULLIF(TRIM(agent_id), '') IS NULL",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (session_key, thread_channel_id, dispatch_id) in sessions {
+        let Some(agent_id) = crate::db::session_agent_resolution::resolve_agent_id_for_session(
+            conn,
+            None,
+            Some(session_key.as_str()),
+            None,
+            thread_channel_id.as_deref(),
+            dispatch_id.as_deref(),
+        ) else {
+            continue;
+        };
+
+        conn.execute(
+            "UPDATE sessions
+             SET agent_id = ?2
+             WHERE session_key = ?1
+               AND NULLIF(TRIM(agent_id), '') IS NULL",
+            rusqlite::params![session_key, agent_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn backfill_session_transcript_agent_ids(conn: &Connection) -> Result<()> {
+    let transcripts = conn
+        .prepare(
+            "SELECT id, session_key, dispatch_id
+             FROM session_transcripts
+             WHERE NULLIF(TRIM(agent_id), '') IS NULL",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (id, session_key, dispatch_id) in transcripts {
+        let Some(agent_id) = crate::db::session_agent_resolution::resolve_agent_id_for_session(
+            conn,
+            None,
+            session_key.as_deref(),
+            None,
+            None,
+            dispatch_id.as_deref(),
+        ) else {
+            continue;
+        };
+
+        conn.execute(
+            "UPDATE session_transcripts
+             SET agent_id = ?2
+             WHERE id = ?1
+               AND NULLIF(TRIM(agent_id), '') IS NULL",
+            rusqlite::params![id, agent_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memento_feedback_turn_stats (
+            turn_id                       TEXT PRIMARY KEY,
+            stat_date                     TEXT NOT NULL,
+            agent_id                      TEXT NOT NULL,
+            provider                      TEXT NOT NULL,
+            recall_count                  INTEGER NOT NULL DEFAULT 0,
+            manual_tool_feedback_count    INTEGER NOT NULL DEFAULT 0,
+            manual_covered_recall_count   INTEGER NOT NULL DEFAULT 0,
+            auto_tool_feedback_count      INTEGER NOT NULL DEFAULT 0,
+            covered_recall_count          INTEGER NOT NULL DEFAULT 0,
+            created_at                    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_memento_feedback_turn_stats_date_agent
+            ON memento_feedback_turn_stats (stat_date, agent_id, provider);",
+    )?;
+
+    conn.execute_batch(
+        "DROP VIEW IF EXISTS memento_feedback_daily_stats;
+         CREATE VIEW memento_feedback_daily_stats AS
+         SELECT
+            stat_date,
+            agent_id,
+            provider,
+            SUM(recall_count) AS recall_count,
+            SUM(manual_tool_feedback_count + auto_tool_feedback_count) AS tool_feedback_count,
+            SUM(manual_tool_feedback_count) AS manual_tool_feedback_count,
+            SUM(manual_covered_recall_count) AS manual_covered_recall_count,
+            SUM(auto_tool_feedback_count) AS auto_tool_feedback_count,
+            SUM(covered_recall_count) AS covered_recall_count,
+            CASE
+                WHEN SUM(recall_count) > 0
+                    THEN CAST(SUM(manual_covered_recall_count) AS REAL) / SUM(recall_count)
+                ELSE 0.0
+            END AS compliance_rate,
+            CASE
+                WHEN SUM(recall_count) > 0
+                    THEN CAST(SUM(covered_recall_count) AS REAL) / SUM(recall_count)
+                ELSE 0.0
+            END AS coverage_rate
+         FROM memento_feedback_turn_stats
+         GROUP BY stat_date, agent_id, provider;",
+    )?;
+
     Ok(())
 }
 
@@ -914,6 +1288,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id       TEXT,
             user_message      TEXT NOT NULL DEFAULT '',
             assistant_message TEXT NOT NULL DEFAULT '',
+            events_json       TEXT NOT NULL DEFAULT '[]',
+            duration_ms       INTEGER,
             created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
          );
          INSERT INTO session_transcripts (
@@ -926,6 +1302,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id,
             user_message,
             assistant_message,
+            events_json,
+            duration_ms,
             created_at
          )
          SELECT
@@ -938,6 +1316,8 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
             dispatch_id,
             user_message,
             assistant_message,
+            COALESCE(events_json, '[]'),
+            duration_ms,
             created_at
          FROM session_transcripts_legacy;
          DROP TABLE session_transcripts_legacy;
@@ -1156,6 +1536,8 @@ mod tests {
             )
             .unwrap();
         assert!(!table_sql.contains("REFERENCES agents"));
+        assert!(table_sql.contains("events_json"));
+        assert!(table_sql.contains("duration_ms"));
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_transcripts", [], |row| {
@@ -1164,11 +1546,142 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
+        let events_json: String = conn
+            .query_row(
+                "SELECT events_json FROM session_transcripts WHERE turn_id = 'discord:legacy:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events_json, "[]");
+
         let fts_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_transcripts_fts", [], |row| {
                 row.get(0)
             })
             .unwrap();
         assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn migrate_backfills_session_and_transcript_agent_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_alt)
+             VALUES ('project-skillmanager', 'SkillManager', 'project-skillmanager-extremely-verbose-channel-cdx')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-backfill-agent', 'Backfill Agent', 'in_progress', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES (
+                'dispatch-backfill-agent',
+                'card-backfill-agent',
+                'project-skillmanager',
+                'implementation',
+                'dispatched',
+                'Backfill Agent',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE session_transcripts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id           TEXT NOT NULL UNIQUE,
+                session_key       TEXT,
+                channel_id        TEXT,
+                agent_id          TEXT,
+                provider          TEXT,
+                dispatch_id       TEXT,
+                user_message      TEXT NOT NULL DEFAULT '',
+                assistant_message TEXT NOT NULL DEFAULT '',
+                created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+
+        let session_key = "codex/hash123/mac-mini:AgentDesk-codex-project-skillmanager-extremely-v";
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
+             ) VALUES (
+                ?1, NULL, 'codex', 'working', 'dispatch-backfill-agent', datetime('now'), datetime('now')
+             )",
+            [session_key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_transcripts (
+                turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message
+             ) VALUES (
+                'discord:backfill:1', ?1, '1492661418665971792', NULL, 'codex', 'dispatch-backfill-agent', 'legacy user', 'legacy assistant'
+             )",
+            [session_key],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let session_agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_agent_id.as_deref(), Some("project-skillmanager"));
+
+        let transcript_agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM session_transcripts WHERE turn_id = 'discord:backfill:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transcript_agent_id.as_deref(), Some("project-skillmanager"));
+
+        let session_backfill_flag: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [SESSION_AGENT_ID_BACKFILL_META_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_backfill_flag, "1");
+
+        let transcript_backfill_flag: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transcript_backfill_flag, "1");
     }
 }
