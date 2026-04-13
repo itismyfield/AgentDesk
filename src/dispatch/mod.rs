@@ -40,6 +40,38 @@ fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a 
         .filter(|s| !s.is_empty())
 }
 
+pub(crate) fn dispatch_type_force_new_session_default(dispatch_type: Option<&str>) -> Option<bool> {
+    match dispatch_type {
+        Some("implementation") | Some("review") | Some("rework") => Some(true),
+        Some("review-decision") => Some(false),
+        _ => None,
+    }
+}
+
+fn dispatch_context_with_session_strategy(
+    dispatch_type: &str,
+    context: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(default_force_new_session) =
+        dispatch_type_force_new_session_default(Some(dispatch_type))
+    else {
+        return context.clone();
+    };
+
+    let mut context = if context.is_object() {
+        context.clone()
+    } else {
+        json!({})
+    };
+
+    if let Some(obj) = context.as_object_mut() {
+        obj.entry("force_new_session".to_string())
+            .or_insert(json!(default_force_new_session));
+    }
+
+    context
+}
+
 fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
     context
         .get("sidecar_dispatch")
@@ -532,11 +564,7 @@ fn build_review_context(
     to_agent_id: &str,
     context: &serde_json::Value,
 ) -> Result<String> {
-    let mut ctx_val = if context.is_object() {
-        context.clone()
-    } else {
-        json!({})
-    };
+    let mut ctx_val = dispatch_context_with_session_strategy("review", context);
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
             // Prefer the actual target used by the latest completed work dispatch
@@ -988,20 +1016,28 @@ fn create_dispatch_core_internal(
     let (parent_dispatch_id, chain_depth) =
         resolve_parent_dispatch_context(&conn, kanban_card_id, context)?;
 
+    let context_with_session_strategy =
+        dispatch_context_with_session_strategy(dispatch_type, context);
     let context_str = if dispatch_type == "review" {
-        build_review_context(db, kanban_card_id, to_agent_id, context)?
+        build_review_context(
+            db,
+            kanban_card_id,
+            to_agent_id,
+            &context_with_session_strategy,
+        )?
     } else {
         // #259: For ALL non-review dispatch types, prefer explicit worktree
         // context from the caller; otherwise inject the canonical issue
         // worktree so the session uses the right CWD instead of the repo root.
-        let mut base = serde_json::to_string(context)?;
-        let worktree_target =
-            if let Some((wt_path, wt_branch)) = dispatch_context_worktree_target(context)? {
-                Some((wt_path, wt_branch))
-            } else {
-                resolve_card_worktree(db, kanban_card_id)?
-                    .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
-            };
+        let mut base = serde_json::to_string(&context_with_session_strategy)?;
+        let worktree_target = if let Some((wt_path, wt_branch)) =
+            dispatch_context_worktree_target(&context_with_session_strategy)?
+        {
+            Some((wt_path, wt_branch))
+        } else {
+            resolve_card_worktree(db, kanban_card_id)?
+                .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
+        };
 
         if let Some((wt_path, wt_branch)) = worktree_target {
             if let Ok(mut obj) =
@@ -2572,6 +2608,114 @@ mod tests {
         )
         .unwrap();
         assert_eq!(full_dispatch["status"], "pending");
+    }
+
+    #[test]
+    fn dispatch_type_force_new_session_defaults_split_by_dispatch_type() {
+        assert_eq!(
+            dispatch_type_force_new_session_default(Some("implementation")),
+            Some(true)
+        );
+        assert_eq!(
+            dispatch_type_force_new_session_default(Some("review")),
+            Some(true)
+        );
+        assert_eq!(
+            dispatch_type_force_new_session_default(Some("rework")),
+            Some(true)
+        );
+        assert_eq!(
+            dispatch_type_force_new_session_default(Some("review-decision")),
+            Some(false)
+        );
+        assert_eq!(
+            dispatch_type_force_new_session_default(Some("consultation")),
+            None
+        );
+        assert_eq!(dispatch_type_force_new_session_default(None), None);
+    }
+
+    #[test]
+    fn create_dispatch_core_injects_fresh_session_default_for_implementation() {
+        let db = test_db();
+        seed_card(&db, "card-session-default", "ready");
+
+        let (dispatch_id, _, _) = create_dispatch_core(
+            &db,
+            "card-session-default",
+            "agent-1",
+            "implementation",
+            "Fresh implementation",
+            &json!({"key": "value"}),
+        )
+        .unwrap();
+
+        let conn = db.separate_conn().unwrap();
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(context_json["force_new_session"], true);
+        assert_eq!(context_json["key"], "value");
+    }
+
+    #[test]
+    fn create_dispatch_core_keeps_explicit_session_override() {
+        let db = test_db();
+        seed_card(&db, "card-session-override", "ready");
+
+        let (dispatch_id, _, _) = create_dispatch_core(
+            &db,
+            "card-session-override",
+            "agent-1",
+            "implementation",
+            "Warm override",
+            &json!({"force_new_session": false}),
+        )
+        .unwrap();
+
+        let conn = db.separate_conn().unwrap();
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(context_json["force_new_session"], false);
+    }
+
+    #[test]
+    fn create_dispatch_core_injects_warm_resume_default_for_review_decision() {
+        let db = test_db();
+        seed_card(&db, "card-session-review-decision", "review");
+
+        let (dispatch_id, _, _) = create_dispatch_core(
+            &db,
+            "card-session-review-decision",
+            "agent-1",
+            "review-decision",
+            "Warm review decision",
+            &json!({"verdict": "improve"}),
+        )
+        .unwrap();
+
+        let conn = db.separate_conn().unwrap();
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(context_json["force_new_session"], false);
+        assert_eq!(context_json["verdict"], "improve");
     }
 
     #[test]

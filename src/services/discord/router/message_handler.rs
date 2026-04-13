@@ -131,11 +131,14 @@ struct DispatchContextHints {
     force_new_session: bool,
 }
 
-fn parse_dispatch_context_hints(dispatch_context: Option<&str>) -> DispatchContextHints {
-    let Some(raw) = dispatch_context else {
-        return DispatchContextHints::default();
-    };
-    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok();
+fn parse_dispatch_context_hints(
+    dispatch_context: Option<&str>,
+    dispatch_type: Option<&str>,
+) -> DispatchContextHints {
+    let parsed =
+        dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let default_force_new_session =
+        crate::dispatch::dispatch_type_force_new_session_default(dispatch_type).unwrap_or(false);
     DispatchContextHints {
         worktree_path: parsed
             .as_ref()
@@ -147,7 +150,7 @@ fn parse_dispatch_context_hints(dispatch_context: Option<&str>) -> DispatchConte
             .as_ref()
             .and_then(|v| v.get("force_new_session"))
             .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+            .unwrap_or(default_force_new_session),
     }
 }
 
@@ -407,7 +410,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     let is_already_thread = super::super::resolve_thread_parent(&ctx.http, channel_id)
         .await
         .is_some();
-    let mut dispatch_type_str: Option<String> = None;
     // #259: Fetch dispatch metadata once before thread creation so we can extract
     // worktree_path for both thread bootstrap and the subsequent session CWD override.
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
@@ -417,10 +419,14 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
     // All dispatch types now inject worktree_path into context via resolve_card_worktree().
+    let dispatch_type_str = dispatch_info_cached
+        .as_ref()
+        .and_then(|info| info.dispatch_type.clone());
     let dispatch_context_hints = parse_dispatch_context_hints(
         dispatch_info_cached
             .as_ref()
             .and_then(|info| info.context.as_deref()),
+        dispatch_type_str.as_deref(),
     );
     let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
     let dispatch_force_new_session = dispatch_context_hints.force_new_session;
@@ -444,7 +450,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         // Use cached dispatch metadata for thread reuse and cross-channel role override
         let dispatch_info = &dispatch_info_cached;
-        dispatch_type_str = dispatch_info.as_ref().and_then(|i| i.dispatch_type.clone());
         let is_counter_model_dispatch =
             crate::server::routes::dispatches::use_counter_model_channel(
                 dispatch_type_str.as_deref(),
@@ -3031,7 +3036,7 @@ mod tests {
         })
         .to_string();
 
-        let hints = parse_dispatch_context_hints(Some(&raw));
+        let hints = parse_dispatch_context_hints(Some(&raw), Some("review-decision"));
 
         assert_eq!(hints.worktree_path.as_deref(), temp.path().to_str());
         assert!(hints.force_new_session);
@@ -3039,12 +3044,37 @@ mod tests {
 
     #[test]
     fn parse_dispatch_context_hints_ignores_missing_path_but_keeps_reset_flag() {
-        let hints = parse_dispatch_context_hints(Some(
-            r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#,
-        ));
+        let hints = parse_dispatch_context_hints(
+            Some(r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#),
+            Some("review-decision"),
+        );
 
         assert!(hints.worktree_path.is_none());
         assert!(hints.force_new_session);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_defaults_fresh_session_for_work_dispatches() {
+        let implementation = parse_dispatch_context_hints(None, Some("implementation"));
+        let review = parse_dispatch_context_hints(None, Some("review"));
+        let rework = parse_dispatch_context_hints(None, Some("rework"));
+
+        assert!(implementation.force_new_session);
+        assert!(review.force_new_session);
+        assert!(rework.force_new_session);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_defaults_warm_resume_for_review_decision() {
+        let hints = parse_dispatch_context_hints(None, Some("review-decision"));
+        assert!(!hints.force_new_session);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_respects_explicit_override_over_dispatch_type_default() {
+        let hints =
+            parse_dispatch_context_hints(Some(r#"{"force_new_session":false}"#), Some("rework"));
+        assert!(!hints.force_new_session);
     }
 
     #[test]
