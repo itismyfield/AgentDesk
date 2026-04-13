@@ -3488,6 +3488,20 @@ fn ensure_auto_queue_tables(db: &Db) {
             created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, slot_index)
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
+            run_id          TEXT NOT NULL,
+            phase           INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            verdict         TEXT,
+            dispatch_id     TEXT UNIQUE,
+            pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+            next_phase      INTEGER,
+            final_phase     INTEGER NOT NULL DEFAULT 0,
+            anchor_card_id  TEXT,
+            failure_reason  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
         );",
     )
     .unwrap();
@@ -9534,18 +9548,10 @@ async fn activate_run_id_blocks_phase_gate_paused_runs() {
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-phase-gate-paused:1",
-                serde_json::json!({
-                    "run_id": "run-phase-gate-paused",
-                    "batch_phase": 1,
-                    "status": "pending",
-                    "dispatch_ids": ["dispatch-phase-gate-1"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-phase-gate-paused", 1, "pending",],
         )
         .unwrap();
     }
@@ -9636,18 +9642,10 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-resume-gate:1",
-                serde_json::json!({
-                    "run_id": "run-resume-gate",
-                    "batch_phase": 1,
-                    "status": "failed",
-                    "dispatch_ids": ["dispatch-phase-gate-failed"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-resume-gate", 1, "failed",],
         )
         .unwrap();
     }
@@ -10209,18 +10207,10 @@ fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolve
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-finished-gate:1",
-                serde_json::json!({
-                    "run_id": "run-finished-gate",
-                    "batch_phase": 1,
-                    "status": "pending",
-                    "dispatch_ids": ["dispatch-phase-gate-finished"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-finished-gate", 1, "pending",],
         )
         .unwrap();
     }

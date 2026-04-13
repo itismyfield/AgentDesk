@@ -3724,9 +3724,9 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
              WHERE r.status = 'paused'
                AND EXISTS (
                    SELECT 1
-                   FROM kv_meta km
-                   WHERE km.key LIKE 'aq_phase_gate:' || r.id || ':%'
-                     AND json_extract(COALESCE(km.value, '{}'), '$.status') IN ('pending', 'failed')
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.run_id = r.id
+                     AND pg.status IN ('pending', 'failed')
                )",
             [],
             |row| row.get(0),
@@ -3739,9 +3739,9 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
              WHERE status = 'paused'
                AND NOT EXISTS (
                    SELECT 1
-                   FROM kv_meta km
-                   WHERE km.key LIKE 'aq_phase_gate:' || auto_queue_runs.id || ':%'
-                     AND json_extract(COALESCE(km.value, '{}'), '$.status') IN ('pending', 'failed')
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.run_id = auto_queue_runs.id
+                     AND pg.status IN ('pending', 'failed')
                )",
             [],
         )

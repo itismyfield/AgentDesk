@@ -5,6 +5,7 @@ const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
 const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
 const SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY: &str =
     "session_transcript_agent_id_backfill:v1";
+const AUTO_QUEUE_PHASE_GATE_BACKFILL_META_KEY: &str = "auto_queue_phase_gate_backfill:v1";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -160,6 +161,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          UPDATE kanban_cards SET awaiting_dod_at = updated_at WHERE status = 'review' AND review_status = 'awaiting_dod' AND awaiting_dod_at IS NULL;",
     );
     ensure_auto_queue_schema(conn)?;
+    run_migration_once(
+        conn,
+        AUTO_QUEUE_PHASE_GATE_BACKFILL_META_KEY,
+        backfill_auto_queue_phase_gates,
+    )?;
     ensure_api_friction_schema(conn)?;
 
     // Unique constraint: one kanban card per GitHub issue per repo.
@@ -837,6 +843,20 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(entry_id, dispatch_id)
         );
+        CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
+            run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
+            phase           INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            verdict         TEXT,
+            dispatch_id     TEXT UNIQUE REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+            next_phase      INTEGER,
+            final_phase     INTEGER NOT NULL DEFAULT 0,
+            anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+            failure_reason  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
             ON auto_queue_entry_transitions(entry_id);
         CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
@@ -846,7 +866,13 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_dispatch
             ON auto_queue_entry_dispatch_history(dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_aq_entry_dispatch_history_created
-            ON auto_queue_entry_dispatch_history(created_at);",
+            ON auto_queue_entry_dispatch_history(created_at);
+        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_phase
+            ON auto_queue_phase_gates(run_id, phase);
+        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_run_status
+            ON auto_queue_phase_gates(run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_aq_phase_gates_phase_dispatch
+            ON auto_queue_phase_gates(phase, dispatch_id);",
     )?;
 
     ensure_auto_queue_column(
@@ -1065,6 +1091,180 @@ fn backfill_auto_queue_dispatch_history(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
+    let rows = conn
+        .prepare(
+            "SELECT key, value
+             FROM kv_meta
+             WHERE key LIKE 'aq_phase_gate:%'",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (key, raw_value) in &rows {
+        let suffix = key.strip_prefix("aq_phase_gate:").unwrap_or(key);
+        let mut parts = suffix.rsplitn(2, ':');
+        let phase = parts
+            .next()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let run_id_from_key = parts.next().unwrap_or_default().to_string();
+        let Ok(state) = serde_json::from_str::<serde_json::Value>(raw_value) else {
+            continue;
+        };
+
+        let run_id = state
+            .get("run_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(run_id_from_key.as_str())
+            .to_string();
+        let status = state
+            .get("status")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("pending")
+            .to_string();
+        let verdict = state
+            .get("failed_verdict")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let next_phase = state.get("next_phase").and_then(|value| value.as_i64());
+        let final_phase = state
+            .get("final_phase")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let anchor_card_id = state
+            .get("anchor_card_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        let failure_reason = state
+            .get("failed_reason")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        let created_at = state
+            .get("created_at")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        let pass_verdict = state
+            .get("gates")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("pass_verdict"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("phase_gate_passed")
+            .to_string();
+        let dispatch_ids = state
+            .get("dispatch_ids")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let valid_dispatch_ids = dispatch_ids
+            .into_iter()
+            .filter(|dispatch_id| {
+                conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+
+        if valid_dispatch_ids.is_empty() {
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    dispatch_id,
+                    pass_verdict,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, CURRENT_TIMESTAMP), datetime('now'))",
+                rusqlite::params![
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    pass_verdict,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                    created_at,
+                ],
+            )?;
+            continue;
+        }
+
+        for dispatch_id in valid_dispatch_ids {
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    dispatch_id,
+                    pass_verdict,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, CURRENT_TIMESTAMP), datetime('now'))
+                ON CONFLICT(dispatch_id) DO UPDATE SET
+                    run_id = excluded.run_id,
+                    phase = excluded.phase,
+                    status = excluded.status,
+                    verdict = excluded.verdict,
+                    pass_verdict = excluded.pass_verdict,
+                    next_phase = excluded.next_phase,
+                    final_phase = excluded.final_phase,
+                    anchor_card_id = excluded.anchor_card_id,
+                    failure_reason = excluded.failure_reason,
+                    updated_at = datetime('now')",
+                rusqlite::params![
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    dispatch_id,
+                    pass_verdict,
+                    next_phase,
+                    final_phase,
+                    anchor_card_id,
+                    failure_reason,
+                    created_at,
+                ],
+            )?;
+        }
+    }
+
+    conn.execute("DELETE FROM kv_meta WHERE key LIKE 'aq_phase_gate:%'", [])?;
     Ok(())
 }
 
@@ -1682,5 +1882,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(transcript_backfill_flag, "1");
+    }
+
+    #[test]
+    fn backfill_auto_queue_phase_gates_moves_kv_json_into_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-phase-backfill', 'Phase Gate', 'done', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-phase-backfill', 'test/repo', 'agent-1', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at, context
+             ) VALUES (
+                'dispatch-phase-backfill',
+                'card-phase-backfill',
+                'agent-1',
+                'phase-gate',
+                'pending',
+                'Phase Gate',
+                datetime('now'),
+                datetime('now'),
+                '{}'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value)
+             VALUES ('aq_phase_gate:run-phase-backfill:2', ?1)",
+            [serde_json::json!({
+                "run_id": "run-phase-backfill",
+                "batch_phase": 2,
+                "next_phase": 3,
+                "final_phase": false,
+                "anchor_card_id": "card-phase-backfill",
+                "status": "failed",
+                "dispatch_ids": ["dispatch-phase-backfill"],
+                "failed_verdict": "reject",
+                "failed_reason": "needs follow-up",
+                "created_at": "2026-04-13T00:00:00Z",
+                "gates": [
+                    { "pass_verdict": "phase_gate_passed" }
+                ]
+            })
+            .to_string()],
+        )
+        .unwrap();
+
+        backfill_auto_queue_phase_gates(&conn).unwrap();
+
+        let row: (
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT run_id, phase, status, verdict, dispatch_id, next_phase, final_phase, anchor_card_id, failure_reason
+                 FROM auto_queue_phase_gates
+                 WHERE run_id = 'run-phase-backfill' AND phase = 2",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, "run-phase-backfill");
+        assert_eq!(row.1, 2);
+        assert_eq!(row.2, "failed");
+        assert_eq!(row.3.as_deref(), Some("reject"));
+        assert_eq!(row.4.as_deref(), Some("dispatch-phase-backfill"));
+        assert_eq!(row.5, Some(3));
+        assert_eq!(row.6, 0);
+        assert_eq!(row.7.as_deref(), Some("card-phase-backfill"));
+        assert_eq!(row.8.as_deref(), Some("needs follow-up"));
+
+        let legacy_key_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = 'aq_phase_gate:run-phase-backfill:2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!legacy_key_exists);
     }
 }
