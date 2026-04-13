@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 export function cx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -25,3 +27,31 @@ export const dashboardButton = {
   sm: "dash-btn dash-btn-sm",
   md: "dash-btn dash-btn-md",
 } as const;
+
+export const dashboardText = {
+  label: "text-xs font-bold uppercase tracking-widest",
+  labelMuted: "text-xs font-semibold uppercase tracking-widest",
+  bodyDense: "text-xs sm:text-[10px]",
+} as const;
+
+interface DashboardEmptyStateProps {
+  icon: ReactNode;
+  title: string;
+  description?: string;
+  className?: string;
+}
+
+export function DashboardEmptyState({
+  icon,
+  title,
+  description,
+  className,
+}: DashboardEmptyStateProps) {
+  return (
+    <div className={cx("dash-empty-state", dashboardCard.nestedCompact, className)}>
+      <div className="dash-empty-icon" aria-hidden="true">{icon}</div>
+      <div className="dash-empty-title">{title}</div>
+      {description ? <div className="dash-empty-description">{description}</div> : null}
+    </div>
+  );
+}
