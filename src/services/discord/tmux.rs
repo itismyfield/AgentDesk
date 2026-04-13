@@ -1584,9 +1584,12 @@ pub(super) async fn tmux_output_watcher(
                 channel_id.get()
             );
         }
-
-        let work_completion_context =
-            has_assistant_response.then(|| serde_json::json!({ "agent_response_present": true }));
+        let current_worktree_path = {
+            let mut data = shared.core.lock().await;
+            data.sessions
+                .get_mut(&channel_id)
+                .and_then(|session| session.validated_path(channel_id.get()))
+        };
 
         let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
             let dispatch_type = shared.db.as_ref().and_then(|db| {
@@ -1609,12 +1612,27 @@ pub(super) async fn tmux_output_watcher(
                         );
                         false
                     } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                        let mut work_completion_context =
+                            super::turn_bridge::build_work_dispatch_completion_result(
+                                shared.db.as_ref(),
+                                did,
+                                "watcher_completed",
+                                false,
+                                current_worktree_path.as_deref(),
+                                Some(&full_response),
+                            );
+                        if let Some(obj) = work_completion_context.as_object_mut() {
+                            obj.insert(
+                                "agent_response_present".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
                         match crate::dispatch::finalize_dispatch(
                             db,
                             engine,
                             did,
                             "watcher_completed",
-                            work_completion_context.as_ref(),
+                            Some(&work_completion_context),
                         ) {
                             Ok(_) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1629,24 +1647,46 @@ pub(super) async fn tmux_output_watcher(
                                 tracing::warn!(
                                     "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
                                 );
+                                let mut fallback_result =
+                                    super::turn_bridge::build_work_dispatch_completion_result(
+                                        shared.db.as_ref(),
+                                        did,
+                                        "watcher_db_fallback",
+                                        true,
+                                        current_worktree_path.as_deref(),
+                                        Some(&full_response),
+                                    );
+                                if let Some(obj) = fallback_result.as_object_mut() {
+                                    obj.insert(
+                                        "agent_response_present".to_string(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                }
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
                                     did,
-                                    &serde_json::json!({
-                                        "completion_source": "watcher_db_fallback",
-                                        "needs_reconcile": true,
-                                        "agent_response_present": true,
-                                    }),
+                                    &fallback_result,
                                 )
                             }
                         }
                     } else {
+                        let mut fallback_result =
+                            super::turn_bridge::build_work_dispatch_completion_result(
+                                shared.db.as_ref(),
+                                did,
+                                "watcher_db_fallback",
+                                true,
+                                current_worktree_path.as_deref(),
+                                Some(&full_response),
+                            );
+                        if let Some(obj) = fallback_result.as_object_mut() {
+                            obj.insert(
+                                "agent_response_present".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
                         super::turn_bridge::runtime_db_fallback_complete_with_result(
                             did,
-                            &serde_json::json!({
-                                "completion_source": "watcher_db_fallback",
-                                "needs_reconcile": true,
-                                "agent_response_present": true,
-                            }),
+                            &fallback_result,
                         )
                     }
                 }

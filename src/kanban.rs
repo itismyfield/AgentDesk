@@ -385,6 +385,41 @@ fn sync_terminal_card_state(db: &Db, card_id: &str) {
 ///
 /// Hooks cannot re-enter the engine, so transition requests and dispatch
 /// creations are accumulated for post-hook replay.
+fn run_transition_replay_with_isolation<F>(
+    card_id: &str,
+    old_status: &str,
+    new_status: &str,
+    replay: F,
+) -> bool
+where
+    F: FnOnce(),
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(replay)) {
+        Ok(()) => true,
+        Err(_) => {
+            tracing::error!(
+                card_id,
+                old_status,
+                new_status,
+                "[kanban] deferred transition replay panicked; continuing with remaining hooks"
+            );
+            false
+        }
+    }
+}
+
+fn replay_deferred_transition(
+    db: &Db,
+    engine: &PolicyEngine,
+    card_id: &str,
+    old_status: &str,
+    new_status: &str,
+) -> bool {
+    run_transition_replay_with_isolation(card_id, old_status, new_status, || {
+        fire_transition_hooks(db, engine, card_id, old_status, new_status);
+    })
+}
+
 pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
     loop {
         let intent_result = engine.drain_pending_intents();
@@ -396,7 +431,7 @@ pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
         }
 
         for (card_id, old_status, new_status) in &transitions {
-            fire_transition_hooks(db, engine, card_id, old_status, new_status);
+            replay_deferred_transition(db, engine, card_id, old_status, new_status);
         }
     }
 }
@@ -1275,6 +1310,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "tick hook dispatch intent should be persisted");
+    }
+
+    #[test]
+    fn run_transition_replay_with_isolation_catches_panics_and_allows_followup_calls() {
+        let first = run_transition_replay_with_isolation("card-panic", "review", "done", || {
+            panic!("boom");
+        });
+        let called = std::cell::Cell::new(false);
+        let second =
+            run_transition_replay_with_isolation("card-ok", "review", "done", || called.set(true));
+
+        assert!(!first, "panicing replay must be isolated");
+        assert!(second, "follow-up replay should still run");
+        assert!(called.get(), "follow-up replay closure must execute");
     }
 
     /// Regression test for #274: transition_status() fires custom state hooks

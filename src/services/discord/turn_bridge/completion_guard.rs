@@ -525,6 +525,34 @@ fn completion_result_with_context(
     result
 }
 
+pub(in crate::services::discord) fn build_work_dispatch_completion_result(
+    db: Option<&crate::db::Db>,
+    dispatch_id: &str,
+    source: &str,
+    needs_reconcile: bool,
+    adk_cwd: Option<&str>,
+    turn_output: Option<&str>,
+) -> serde_json::Value {
+    let resolved_card_id = db.and_then(|db| {
+        db.separate_conn().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+    });
+    let mut hints = lookup_dispatch_completion_hints(db, dispatch_id, resolved_card_id.as_deref());
+    hints.output_commit = turn_output.and_then(|output| {
+        adk_cwd
+            .filter(|path| std::path::Path::new(path).is_dir())
+            .and_then(|cwd| extract_commit_sha_from_output(output, cwd))
+    });
+    completion_result_with_context(source, needs_reconcile, adk_cwd, &hints)
+}
+
 fn summarize_tracked_change_paths(paths: &[String]) -> Option<String> {
     if paths.is_empty() {
         return None;
@@ -1000,6 +1028,37 @@ mod tests {
         assert_eq!(context["completed_commit"].as_str(), Some(head.as_str()));
         assert_eq!(
             context["completed_worktree_path"].as_str(),
+            repo_dir.to_str()
+        );
+    }
+
+    #[test]
+    fn build_work_dispatch_completion_result_includes_branch_and_source() {
+        let repo = init_repo_with_initial_commit();
+        let repo_dir = repo.path();
+        let short_head = run_git(repo_dir, &["rev-parse", "--short", "HEAD"]);
+
+        let result = build_work_dispatch_completion_result(
+            None,
+            "dispatch-1",
+            "watcher_completed",
+            true,
+            repo_dir.to_str(),
+            Some(&format!("[main {short_head}] test commit")),
+        );
+
+        assert_eq!(
+            result["completion_source"].as_str(),
+            Some("watcher_completed")
+        );
+        assert_eq!(result["needs_reconcile"].as_bool(), Some(true));
+        assert_eq!(
+            result["completed_branch"].as_str(),
+            crate::services::platform::shell::git_branch_name(repo_dir.to_str().unwrap())
+                .as_deref()
+        );
+        assert_eq!(
+            result["completed_worktree_path"].as_str(),
             repo_dir.to_str()
         );
     }
