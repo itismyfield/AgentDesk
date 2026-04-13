@@ -320,9 +320,17 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             ConfigAction::Set { json } => super::client::cmd_config_set(&json),
             ConfigAction::Audit { dry_run } => super::client::cmd_config_audit(dry_run),
         }),
-        Commands::Api { method, path, body } => {
-            exit_for_cli(super::client::cmd_api(&method, &path, body.as_deref()))
-        }
+        Commands::Api {
+            method,
+            path,
+            body,
+            headers,
+        } => exit_for_cli(super::client::cmd_api(
+            &method,
+            &path,
+            body.as_deref(),
+            &headers,
+        )),
         Commands::Terminations {
             card_id,
             dispatch_id,
