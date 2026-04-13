@@ -590,6 +590,24 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         channel_id
     };
+    let active_dispatch_id_for_prompt =
+        super::super::adk_session::lookup_pending_dispatch_for_thread(
+            shared.api_port,
+            channel_id.get(),
+        )
+        .await
+        .or_else(|| dispatch_id_for_thread.clone());
+    let active_dispatch_info = match active_dispatch_id_for_prompt.as_deref() {
+        Some(did) if dispatch_id_for_thread.as_deref() == Some(did) => dispatch_info_cached.clone(),
+        Some(did) => super::lookup_dispatch_info(shared.api_port, did).await,
+        None => None,
+    };
+    if let Some(active_dispatch_type) = active_dispatch_info
+        .as_ref()
+        .and_then(|info| info.dispatch_type.clone())
+    {
+        dispatch_type_str = Some(active_dispatch_type);
+    }
 
     let (mut session_id, mut memento_context_loaded, current_path) = {
         let mut data = shared.core.lock().await;
@@ -661,7 +679,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Derive dispatch prompt profile before memory recall so ReviewLite can
     // skip heavy memory work consistently across local/mem0 backends.
     let dispatch_profile = DispatchProfile::from_dispatch_type(
-        dispatch_id_for_thread
+        active_dispatch_id_for_prompt
             .as_ref()
             .and_then(|_| dispatch_type_str.as_deref()),
     );
@@ -831,12 +849,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
-    // Re-inject formatting + compaction reminder for interactive follow-up
-    // turns. System prompt is only sent at session creation; after context
-    // compaction these rules can be lost.
-    if session_id.is_some() {
-        context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
-    }
     if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
     }
@@ -911,6 +923,14 @@ pub(in crate::services::discord) async fn handle_text_message(
     let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let narrate_progress = settings::load_narrate_progress(shared.db.as_ref());
+    let current_task_context = active_dispatch_info.as_ref().map(|info| {
+        super::super::prompt_builder::CurrentTaskContext {
+            card_title: info.card_title.as_deref(),
+            github_issue_url: info.github_issue_url.as_deref(),
+            issue_body: info.issue_body.as_deref(),
+            deferred_dod: info.deferred_dod.as_ref(),
+        }
+    });
 
     let system_prompt_owned = build_system_prompt(
         &discord_context,
@@ -924,6 +944,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         reply_to_user_message,
         dispatch_profile,
         dispatch_type_str.as_deref(),
+        current_task_context.as_ref(),
         sak_for_system,
         longterm_catalog_for_prompt,
         Some(&memory_settings),
