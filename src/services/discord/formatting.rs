@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
 use crate::services::provider::ProviderKind;
-use crate::utils::format::tail_with_ellipsis;
+use crate::utils::format::tail_with_ellipsis_bytes;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
+const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
+const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
 
 /// All available tools with (name, description, is_destructive)
 pub(super) const ALL_TOOLS: &[(&str, &str, bool)] = &[
@@ -424,6 +426,40 @@ mod tests {
         assert!(plan.frozen_chunk.contains("\n\n\n"));
     }
 
+    #[test]
+    fn test_build_streaming_placeholder_text_keeps_ascii_snapshot_behavior() {
+        use super::{DISCORD_MSG_LIMIT, build_streaming_placeholder_text, normalize_empty_lines};
+
+        let current_portion = format!("{}\n\n{}", "alpha ".repeat(260), "omega ".repeat(120));
+        let status_block = "⏳ status";
+        let footer = format!("\n\n{status_block}");
+        let legacy_body_budget = DISCORD_MSG_LIMIT
+            .saturating_sub(footer.len() + super::STREAMING_PLACEHOLDER_MARGIN)
+            .max(1);
+        let expected_body = crate::utils::format::tail_with_ellipsis(
+            &normalize_empty_lines(&current_portion),
+            legacy_body_budget,
+        );
+
+        assert_eq!(
+            build_streaming_placeholder_text(&current_portion, status_block),
+            format!("{expected_body}{footer}")
+        );
+    }
+
+    #[test]
+    fn test_build_streaming_placeholder_text_respects_utf8_byte_limit() {
+        use super::{DISCORD_MSG_LIMIT, build_streaming_placeholder_text};
+
+        let current_portion = format!("{}\n{}", "한글🙂".repeat(320), "끝".repeat(300));
+        let status_block = "⏳ 상태 업데이트";
+        let placeholder = build_streaming_placeholder_text(&current_portion, status_block);
+
+        assert!(placeholder.len() <= DISCORD_MSG_LIMIT);
+        assert!(placeholder.ends_with(&format!("\n\n{status_block}")));
+        assert!(placeholder.starts_with('…'));
+    }
+
     // ── filter_codex_tool_logs tests ─────────────────────────────────────
 
     #[test]
@@ -620,9 +656,12 @@ pub(super) struct StreamingRolloverPlan {
 
 fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &str) -> String {
     let footer = format!("\n\n{status_block}");
-    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let body_budget = DISCORD_MSG_LIMIT
+        .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_add(UTF8_ELLIPSIS_EXTRA_BYTES)
+        .max(1);
     let normalized = normalize_empty_lines(current_portion);
-    let body = tail_with_ellipsis(&normalized, body_budget);
+    let body = tail_with_ellipsis_bytes(&normalized, body_budget);
     format!("{}{}", body, footer)
 }
 
@@ -635,7 +674,9 @@ pub(super) fn plan_streaming_rollover(
     }
 
     let footer = format!("\n\n{status_block}");
-    let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10).max(1);
+    let body_budget = DISCORD_MSG_LIMIT
+        .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
+        .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
     Some(StreamingRolloverPlan {
