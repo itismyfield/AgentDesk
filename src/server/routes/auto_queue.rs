@@ -1024,6 +1024,10 @@ fn priority_sort_key(priority: &str) -> i32 {
     }
 }
 
+fn planning_sort_key(card: &GenerateCandidate, idx: usize) -> (i32, usize) {
+    (priority_sort_key(&card.priority), idx)
+}
+
 fn extract_dependency_numbers(card: &GenerateCandidate) -> Vec<i64> {
     let mut deps = HashSet::new();
     let sources = [card.description.as_deref(), card.metadata.as_deref()];
@@ -1209,6 +1213,8 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
 
     let n = cards.len();
     let mut dependency_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut dependency_predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut similarity_conflicts: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     let mut parent: Vec<usize> = (0..n).collect();
     let mut dependency_edges = 0usize;
     let mut similarity_edges = 0usize;
@@ -1234,12 +1240,15 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
             if let Some(&dep_idx) = issue_to_idx.get(dep_num) {
                 if dep_idx != idx && seen.insert(dep_idx) {
                     dependency_adj[dep_idx].push(idx);
+                    dependency_predecessors[idx].push(dep_idx);
                     union(&mut parent, dep_idx, idx);
                     dependency_edges += 1;
                 }
             }
         }
     }
+
+    let dependency_roots: Vec<usize> = (0..n).map(|idx| find(&mut parent, idx)).collect();
 
     for left in 0..n {
         for right in (left + 1)..n {
@@ -1253,14 +1262,17 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
             if shared == 0 || score < SIMILARITY_THRESHOLD {
                 continue;
             }
-            union(&mut parent, left, right);
             similarity_edges += 1;
+            if dependency_roots[left] != dependency_roots[right] {
+                similarity_conflicts[left].insert(right);
+                similarity_conflicts[right].insert(left);
+            }
         }
     }
 
     let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
     for idx in 0..n {
-        let root = find(&mut parent, idx);
+        let root = dependency_roots[idx];
         components.entry(root).or_default().push(idx);
     }
 
@@ -1271,7 +1283,7 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
     let mut planned_entries = Vec::with_capacity(n);
     for (group_num, root) in component_roots.iter().enumerate() {
         let mut members = components[root].clone();
-        members.sort_by_key(|idx| (priority_sort_key(&cards[*idx].priority), *idx));
+        members.sort_by_key(|idx| planning_sort_key(&cards[*idx], *idx));
         let member_set: HashSet<usize> = members.iter().copied().collect();
 
         let mut local_in_degree: HashMap<usize, usize> =
@@ -1315,7 +1327,7 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
             .collect();
         let mut sorted = Vec::with_capacity(members.len());
         while !available.is_empty() {
-            available.sort_by_key(|idx| (priority_sort_key(&cards[*idx].priority), *idx));
+            available.sort_by_key(|idx| planning_sort_key(&cards[*idx], *idx));
             let current = available.remove(0);
             sorted.push(current);
             for &next in &dependency_adj[current] {
@@ -1352,7 +1364,6 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
             (false, false) => GroupKind::Independent,
         };
         let group_reason = build_group_reason(kind, &path_labels, &dep_nums, members.len());
-        let mut phases_by_member: HashMap<usize, i64> = HashMap::new();
 
         for (priority_rank, idx) in sorted.into_iter().enumerate() {
             let mut entry_reason = group_reason.clone();
@@ -1361,12 +1372,6 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
                 .copied()
                 .filter(|dep_num| issue_to_idx.contains_key(dep_num))
                 .collect();
-            let batch_phase = deps_in_queue
-                .iter()
-                .filter_map(|dep_num| issue_to_idx.get(dep_num).copied())
-                .map(|dep_idx| phases_by_member.get(&dep_idx).copied().unwrap_or(0) + 1)
-                .max()
-                .unwrap_or(0);
             if !deps_in_queue.is_empty() {
                 let refs = deps_in_queue
                     .iter()
@@ -1375,29 +1380,80 @@ fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
                     .join(", ");
                 entry_reason = format!("{entry_reason} · 선행 {refs}");
             }
-            phases_by_member.insert(idx, batch_phase);
             planned_entries.push(PlannedEntry {
                 card_idx: idx,
                 thread_group: group_num as i64,
                 priority_rank: priority_rank as i64,
-                batch_phase,
+                batch_phase: 0,
                 reason: entry_reason,
             });
         }
     }
 
-    let distinct_agents = cards
+    let mut global_in_degree: Vec<usize> = dependency_predecessors
         .iter()
-        .filter(|card| !card.agent_id.is_empty())
-        .map(|card| card.agent_id.clone())
-        .collect::<HashSet<_>>()
-        .len()
-        .max(1) as i64;
+        .map(|preds| preds.len())
+        .collect();
+    let mut ready: Vec<usize> = (0..n).filter(|idx| global_in_degree[*idx] == 0).collect();
+    let mut dependency_order = Vec::with_capacity(n);
+    let mut emitted = vec![false; n];
+
+    while !ready.is_empty() {
+        ready.sort_by_key(|idx| planning_sort_key(&cards[*idx], *idx));
+        let current = ready.remove(0);
+        if emitted[current] {
+            continue;
+        }
+        emitted[current] = true;
+        dependency_order.push(current);
+        for &next in &dependency_adj[current] {
+            if global_in_degree[next] > 0 {
+                global_in_degree[next] -= 1;
+                if global_in_degree[next] == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+    }
+
+    if dependency_order.len() < n {
+        let mut remaining: Vec<usize> = (0..n).filter(|idx| !emitted[*idx]).collect();
+        remaining.sort_by_key(|idx| planning_sort_key(&cards[*idx], *idx));
+        dependency_order.extend(remaining);
+    }
+
+    let mut batch_phase_by_idx = vec![0i64; n];
+    let mut phase_assigned = vec![false; n];
+    for idx in dependency_order {
+        let earliest_phase = dependency_predecessors[idx]
+            .iter()
+            .copied()
+            .filter(|pred| phase_assigned[*pred])
+            .map(|pred| batch_phase_by_idx[pred] + 1)
+            .max()
+            .unwrap_or(0);
+        let mut batch_phase = earliest_phase;
+        while similarity_conflicts[idx]
+            .iter()
+            .copied()
+            .filter(|other| phase_assigned[*other])
+            .any(|other| batch_phase_by_idx[other] == batch_phase)
+        {
+            batch_phase += 1;
+        }
+        batch_phase_by_idx[idx] = batch_phase;
+        phase_assigned[idx] = true;
+    }
+
+    for planned in &mut planned_entries {
+        planned.batch_phase = batch_phase_by_idx[planned.card_idx];
+    }
+
     let thread_group_count = component_roots.len() as i64;
     let recommended_parallel_threads = if thread_group_count <= 1 {
         1
     } else {
-        thread_group_count.min(distinct_agents).clamp(1, 4)
+        thread_group_count.clamp(1, 4)
     };
 
     GroupPlan {
@@ -3965,13 +4021,30 @@ pub async fn submit_order(
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueEntryOrder, reorder_entry_ids};
+    use super::{GenerateCandidate, QueueEntryOrder, build_group_plan, reorder_entry_ids};
+    use std::collections::HashMap;
 
     fn entry(id: &str, status: &str, agent_id: &str) -> QueueEntryOrder {
         QueueEntryOrder {
             id: id.to_string(),
             status: status.to_string(),
             agent_id: agent_id.to_string(),
+        }
+    }
+
+    fn candidate(
+        issue_number: i64,
+        priority: &str,
+        description: Option<&str>,
+        metadata: Option<&str>,
+    ) -> GenerateCandidate {
+        GenerateCandidate {
+            card_id: format!("card-{issue_number}"),
+            agent_id: "agent-a".to_string(),
+            priority: priority.to_string(),
+            description: description.map(str::to_string),
+            metadata: metadata.map(str::to_string),
+            github_issue_number: Some(issue_number),
         }
     }
 
@@ -4034,5 +4107,79 @@ mod tests {
                 "done-b".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn build_group_plan_spreads_similarity_only_cards_across_groups() {
+        let plan = build_group_plan(&[
+            candidate(
+                523,
+                "high",
+                Some("touches src/services/discord/tmux.rs"),
+                None,
+            ),
+            candidate(
+                545,
+                "medium",
+                Some("touches src/services/discord/tmux.rs"),
+                None,
+            ),
+        ]);
+
+        let entry_by_issue: HashMap<i64, (i64, i64)> = plan
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.card_idx as i64,
+                    (entry.thread_group, entry.batch_phase),
+                )
+            })
+            .collect();
+
+        assert_eq!(plan.thread_group_count, 2);
+        assert_eq!(plan.similarity_edges, 1);
+        assert_eq!(entry_by_issue.get(&0).unwrap().0, 0);
+        assert_eq!(entry_by_issue.get(&1).unwrap().0, 1);
+        assert_eq!(entry_by_issue.get(&0).unwrap().1, 0);
+        assert_eq!(entry_by_issue.get(&1).unwrap().1, 1);
+    }
+
+    #[test]
+    fn build_group_plan_reuses_phases_for_non_conflicting_similarity_chain() {
+        let plan = build_group_plan(&[
+            candidate(101, "high", Some("touches src/a.rs"), None),
+            candidate(102, "medium", Some("touches src/a.rs and src/b.rs"), None),
+            candidate(103, "low", Some("touches src/b.rs"), None),
+        ]);
+
+        let phases_by_idx: HashMap<usize, i64> = plan
+            .entries
+            .iter()
+            .map(|entry| (entry.card_idx, entry.batch_phase))
+            .collect();
+
+        assert_eq!(plan.thread_group_count, 3);
+        assert_eq!(phases_by_idx.get(&0).copied(), Some(0));
+        assert_eq!(phases_by_idx.get(&1).copied(), Some(1));
+        assert_eq!(phases_by_idx.get(&2).copied(), Some(0));
+    }
+
+    #[test]
+    fn build_group_plan_keeps_dependency_chain_in_one_group() {
+        let plan = build_group_plan(&[
+            candidate(201, "high", Some("base work"), None),
+            candidate(202, "medium", Some("depends on #201"), None),
+        ]);
+
+        let entries_by_idx: HashMap<usize, (i64, i64)> = plan
+            .entries
+            .iter()
+            .map(|entry| (entry.card_idx, (entry.thread_group, entry.batch_phase)))
+            .collect();
+
+        assert_eq!(plan.thread_group_count, 1);
+        assert_eq!(entries_by_idx.get(&0).copied(), Some((0, 0)));
+        assert_eq!(entries_by_idx.get(&1).copied(), Some((0, 1)));
     }
 }
