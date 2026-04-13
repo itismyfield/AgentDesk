@@ -1822,6 +1822,136 @@ mod tests {
     }
 
     #[test]
+    fn auto_queue_activate_reverts_reservation_when_latest_dispatch_is_only_historical() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-aq-stale-latest", "in_progress");
+        seed_dispatch(
+            &db,
+            "dispatch-aq-stale-latest",
+            "card-aq-stale-latest",
+            "implementation",
+            "completed",
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-aq-stale-latest', 'repo-1', 'agent-missing', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+                 VALUES ('entry-aq-stale-latest', 'run-aq-stale-latest', 'card-aq-stale-latest', 'agent-missing', 'pending', 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            db.clone(),
+            engine.clone(),
+        );
+        let result = crate::server::routes::auto_queue::activate_with_deps(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-stale-latest".to_string()),
+                repo: None,
+                agent_id: None,
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        );
+        assert_eq!(result.0, axum::http::StatusCode::OK);
+        assert_eq!(
+            result.1.0["count"].as_u64().unwrap_or(0),
+            0,
+            "failed activate should not report a dispatch when reservation is reverted"
+        );
+
+        let conn = db.lock().unwrap();
+        let (entry_status, entry_dispatch_id, slot_index): (String, Option<String>, Option<i64>) =
+            conn.query_row(
+                "SELECT status, dispatch_id, slot_index
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-aq-stale-latest'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let latest_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-stale-latest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let latest_dispatch_status: Option<String> =
+            latest_dispatch_id.as_deref().and_then(|dispatch_id| {
+                conn.query_row(
+                    "SELECT status FROM task_dispatches WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .ok()
+            });
+        let transition_source: String = conn
+            .query_row(
+                "SELECT trigger_source
+                 FROM auto_queue_entry_transitions
+                 WHERE entry_id = 'entry-aq-stale-latest'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-stale-latest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            entry_status, "pending",
+            "historical latest_dispatch_id must not keep the reservation after create_dispatch fails"
+        );
+        assert!(
+            entry_dispatch_id.is_none(),
+            "reverted reservation must clear any transient dispatch attachment"
+        );
+        assert!(
+            slot_index.is_none(),
+            "reverted reservation must release the slot assignment"
+        );
+        assert_eq!(
+            latest_dispatch_id.as_deref(),
+            Some("dispatch-aq-stale-latest"),
+            "activate recovery must not rewrite the historical latest dispatch pointer"
+        );
+        assert_eq!(
+            latest_dispatch_status.as_deref(),
+            Some("completed"),
+            "regression coverage requires the retained latest dispatch to be non-active"
+        );
+        assert_eq!(
+            transition_source, "activate_dispatch_reserve_revert",
+            "failed create_dispatch must explicitly revert the reserved entry"
+        );
+        assert_eq!(
+            dispatch_count, 1,
+            "create_dispatch failure must not insert a replacement dispatch row"
+        );
+    }
+
+    #[test]
     fn auto_queue_on_tick_recovers_orphan_dispatched_entry_to_pending() {
         let db = test_db();
         let engine = test_engine(&db);
