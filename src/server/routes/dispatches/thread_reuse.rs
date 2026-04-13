@@ -714,13 +714,20 @@ pub async fn get_card_thread(
 
     let result: Option<(
         String,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
         Option<String>,
         Option<String>,
         String,
         Option<String>,
     )> = conn
         .query_row(
-            "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
+            "SELECT kc.id, kc.title, kc.github_issue_url, kc.github_issue_number, \
+                    kc.description, kc.deferred_dod_json, \
+                    kc.active_thread_id, td.dispatch_type, \
                     td.to_agent_id, \
                     td.context \
              FROM task_dispatches td \
@@ -734,13 +741,29 @@ pub async fn get_card_thread(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
         .ok();
 
     match result {
-        Some((card_id, _legacy_thread_id, dispatch_type, to_agent_id, dispatch_context)) => {
+        Some((
+            card_id,
+            card_title,
+            github_issue_url,
+            github_issue_number,
+            issue_body,
+            deferred_dod_json,
+            _legacy_thread_id,
+            dispatch_type,
+            to_agent_id,
+            dispatch_context,
+        )) => {
             let primary_channel = resolve_agent_primary_channel_on_conn(&conn, &to_agent_id)
                 .ok()
                 .flatten();
@@ -759,11 +782,19 @@ pub async fn get_card_thread(
             let thread_id = target_channel
                 .and_then(|ch| parse_channel_id(ch))
                 .and_then(|ch_num| get_thread_for_channel(&conn, &card_id, ch_num));
+            let deferred_dod = deferred_dod_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
 
             (
                 StatusCode::OK,
                 Json(json!({
                     "card_id": card_id,
+                    "card_title": card_title,
+                    "github_issue_url": github_issue_url,
+                    "github_issue_number": github_issue_number,
+                    "issue_body": issue_body,
+                    "deferred_dod": deferred_dod,
                     "active_thread_id": thread_id,
                     "dispatch_type": dispatch_type,
                     "discord_channel_id": primary_channel,
