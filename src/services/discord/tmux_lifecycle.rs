@@ -81,7 +81,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
            AND (
              s.session_key = ?1
              OR s.session_key = ?2
-             OR (?3 IS NOT NULL AND s.thread_channel_id = ?3)
+             OR (?3 IS NOT NULL AND s.thread_channel_id = ?3 AND s.provider = ?4)
            )
          ORDER BY
            CASE s.status
@@ -97,6 +97,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
             session_keys[0].as_str(),
             session_keys[1].as_str(),
             thread_channel_id.as_deref(),
+            provider.as_str(),
         ],
         |row| {
             Ok(DispatchTmuxProtection::SessionRow {
@@ -150,6 +151,7 @@ mod tests {
             "
             CREATE TABLE sessions (
                 session_key TEXT,
+                provider TEXT,
                 status TEXT,
                 active_dispatch_id TEXT,
                 created_at TEXT,
@@ -179,9 +181,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO sessions
-             (session_key, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-             VALUES (?1, 'idle', 'dispatch-495', datetime('now'), datetime('now'), '1485506232256168011')",
-            [session_key.as_str()],
+             (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+             VALUES (?1, ?2, 'idle', 'dispatch-495', datetime('now'), datetime('now'), '1485506232256168011')",
+            rusqlite::params![session_key.as_str(), provider.as_str()],
         )
         .unwrap();
 
@@ -209,6 +211,7 @@ mod tests {
             "
             CREATE TABLE sessions (
                 session_key TEXT,
+                provider TEXT,
                 status TEXT,
                 active_dispatch_id TEXT,
                 created_at TEXT,
@@ -251,6 +254,7 @@ mod tests {
             "
             CREATE TABLE sessions (
                 session_key TEXT,
+                provider TEXT,
                 status TEXT,
                 active_dispatch_id TEXT,
                 created_at TEXT,
@@ -285,6 +289,7 @@ mod tests {
             "
             CREATE TABLE sessions (
                 session_key TEXT,
+                provider TEXT,
                 status TEXT,
                 active_dispatch_id TEXT,
                 created_at TEXT,
@@ -310,9 +315,56 @@ mod tests {
         );
         conn.execute(
             "INSERT INTO sessions
-             (session_key, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-             VALUES (?1, 'idle', 'dispatch-stale', datetime('now'), datetime('now'), '1485506232256168011')",
-            [session_key.as_str()],
+             (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+             VALUES (?1, ?2, 'idle', 'dispatch-stale', datetime('now'), datetime('now'), '1485506232256168011')",
+            rusqlite::params![session_key.as_str(), provider.as_str()],
+        )
+        .unwrap();
+
+        let protection = resolve_dispatch_tmux_protection_from_conn(
+            &conn,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some("adk-cdx-t1485506232256168011"),
+        );
+
+        assert_eq!(protection, None);
+    }
+
+    #[test]
+    fn ignores_thread_channel_session_rows_from_other_provider() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                session_key TEXT,
+                provider TEXT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            INSERT INTO task_dispatches (id, status, thread_id, created_at)
+            VALUES ('dispatch-other-provider', 'dispatched', 'other-thread', '2026-04-14 01:01:00');
+            ",
+        )
+        .unwrap();
+
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+             VALUES ('foreign-session', 'claude', 'idle', 'dispatch-other-provider', datetime('now'), datetime('now'), '1485506232256168011')",
+            [],
         )
         .unwrap();
 
