@@ -2607,7 +2607,10 @@ async fn save_meeting_record(
     // Persist meeting data through the direct internal API so auth-protected
     // deployments do not silently drop meeting records.
     if let Some(payload) = adk_payload {
-        persist_meeting_status(payload).await?;
+        if let Err(error) = persist_meeting_status(payload).await {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err(error);
+        }
     }
 
     Ok(true)
