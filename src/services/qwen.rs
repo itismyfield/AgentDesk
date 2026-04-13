@@ -19,8 +19,8 @@ use crate::services::discord::restart_report::{
 };
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
-    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe,
-    tmux_followup_fallback_after_read_error,
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
+    register_child_pid, tmux_followup_fallback_after_read_error,
 };
 use crate::services::provider_runtime::{
     LineStreamEvent, SharedAllowedToolKind, resolve_shared_allowed_tool_compat,
@@ -178,6 +178,13 @@ fn resolve_qwen_binary() -> crate::services::platform::BinaryResolution {
 }
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_cancellable(prompt, None)
+}
+
+pub fn execute_command_simple_cancellable(
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
     let resolution = resolve_qwen_binary();
     let qwen_bin = resolution
         .resolved_path
@@ -187,14 +194,24 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
 
     let mut command = Command::new(&qwen_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    let output = command
+    let mut child = command
         .args(build_simple_exec_args(prompt))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to start Qwen: {}", e))?;
+
+    register_child_pid(cancel_token, child.id());
+    if cancel_requested(cancel_token) {
+        kill_child_tree(&mut child);
+        return Err("Qwen request cancelled".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to read Qwen output: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

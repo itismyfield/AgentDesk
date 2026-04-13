@@ -1119,6 +1119,8 @@ fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSet
         .get("max_rounds")
         .and_then(Value::as_u64)
         .map(|value| value as u32);
+    let max_participants =
+        json_usize_field_from_map(meeting, &["max_participants", "maxParticipants"]);
     let summary_agent = meeting
         .get("summary_agent")
         .and_then(role_map_summary_agent_to_config);
@@ -1136,7 +1138,7 @@ fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSet
     Some(crate::config::MeetingSettings {
         channel_name,
         max_rounds,
-        max_participants: None,
+        max_participants,
         summary_agent,
         available_agents,
     })
@@ -1185,17 +1187,12 @@ fn role_map_meeting_agent_to_config(value: &Value) -> Option<crate::config::Meet
     let role_id = json_string_field_from_map(obj, &["role_id", "roleId"])?;
     let display_name = json_string_field_from_map(obj, &["display_name", "displayName"]);
     let prompt_file = json_string_field_from_map(obj, &["prompt_file", "promptFile"]);
-    let keywords = obj
-        .get("keywords")
-        .and_then(Value::as_array)
-        .map(|keywords| {
-            keywords
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(normalize_non_empty)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let keywords = json_string_list_field_from_map(obj, &["keywords"]);
+    let domain_summary = json_string_field_from_map(obj, &["domain_summary", "domainSummary"]);
+    let strengths = json_string_list_field_from_map(obj, &["strengths"]);
+    let task_types = json_string_list_field_from_map(obj, &["task_types", "taskTypes"]);
+    let anti_signals = json_string_list_field_from_map(obj, &["anti_signals", "antiSignals"]);
+    let provider_hint = json_string_field_from_map(obj, &["provider_hint", "providerHint"]);
 
     Some(crate::config::MeetingAgentEntry::Detailed(
         crate::config::MeetingAgentDef {
@@ -1203,11 +1200,11 @@ fn role_map_meeting_agent_to_config(value: &Value) -> Option<crate::config::Meet
             display_name,
             keywords,
             prompt_file,
-            domain_summary: None,
-            strengths: Vec::new(),
-            task_types: Vec::new(),
-            anti_signals: Vec::new(),
-            provider_hint: None,
+            domain_summary,
+            strengths,
+            task_types,
+            anti_signals,
+            provider_hint,
         },
     ))
 }
@@ -1467,6 +1464,35 @@ fn json_string_field_from_map(
 fn json_bool_field_from_map(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
     keys.iter()
         .find_map(|key| obj.get(*key).and_then(Value::as_bool))
+}
+
+fn json_usize_field_from_map(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        obj.get(*key).and_then(|value| match value {
+            Value::Number(number) => number
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok()),
+            Value::String(raw) => normalize_non_empty(raw).and_then(|value| value.parse().ok()),
+            _ => None,
+        })
+    })
+}
+
+fn json_string_list_field_from_map(
+    obj: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Vec<String> {
+    keys.iter()
+        .find_map(|key| {
+            obj.get(*key).and_then(Value::as_array).map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(normalize_non_empty)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default()
 }
 
 fn rewrite_prompt_paths_json(value: &mut Value, root: &Path) {
@@ -2539,6 +2565,7 @@ agents:
                 "meeting": {
                     "channel_name": "round-table",
                     "max_rounds": 4,
+                    "max_participants": 6,
                     "summary_agent": {
                         "default": "project-agentdesk",
                         "rules": [
@@ -2553,7 +2580,12 @@ agents:
                             "role_id": "project-agentdesk",
                             "display_name": "AgentDesk",
                             "keywords": ["ops"],
-                            "prompt_file": "/tmp/config/role-context/project-agentdesk/IDENTITY.md"
+                            "prompt_file": "/tmp/config/role-context/project-agentdesk/IDENTITY.md",
+                            "domain_summary": "Operations and delivery",
+                            "strengths": ["planning", "coordination"],
+                            "task_types": ["execution", "review"],
+                            "anti_signals": ["legal"],
+                            "provider_hint": "codex"
                         }
                     ]
                 }
@@ -2572,7 +2604,29 @@ agents:
         let meeting = config.meeting.expect("meeting config");
         assert_eq!(meeting.channel_name, "round-table");
         assert_eq!(meeting.max_rounds, Some(4));
+        assert_eq!(meeting.max_participants, Some(6));
         assert_eq!(meeting.available_agents.len(), 1);
+        let available_agent = match &meeting.available_agents[0] {
+            crate::config::MeetingAgentEntry::Detailed(agent) => agent,
+            crate::config::MeetingAgentEntry::RoleId(_) => {
+                panic!("expected detailed meeting agent")
+            }
+        };
+        assert_eq!(available_agent.role_id, "project-agentdesk");
+        assert_eq!(
+            available_agent.domain_summary.as_deref(),
+            Some("Operations and delivery")
+        );
+        assert_eq!(
+            available_agent.strengths,
+            vec!["planning".to_string(), "coordination".to_string()]
+        );
+        assert_eq!(
+            available_agent.task_types,
+            vec!["execution".to_string(), "review".to_string()]
+        );
+        assert_eq!(available_agent.anti_signals, vec!["legal".to_string()]);
+        assert_eq!(available_agent.provider_hint.as_deref(), Some("codex"));
 
         let agent = config
             .agents

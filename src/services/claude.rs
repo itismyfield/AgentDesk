@@ -318,7 +318,14 @@ pub fn is_ai_supported() -> bool {
 /// Used for short synchronous tasks like meeting participant selection.
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_with_model(prompt, None)
+    execute_command_simple_cancellable(prompt, None)
+}
+
+pub fn execute_command_simple_cancellable(
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
+    execute_command_simple_with_model_and_cancel(prompt, None, cancel_token)
 }
 
 /// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
@@ -326,6 +333,14 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
 pub fn execute_command_simple_with_model(
     prompt: &str,
     model_override: Option<&str>,
+) -> Result<String, String> {
+    execute_command_simple_with_model_and_cancel(prompt, model_override, None)
+}
+
+fn execute_command_simple_with_model_and_cancel(
+    prompt: &str,
+    model_override: Option<&str>,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
     let resolution = resolve_claude_binary();
     let claude_bin = resolution
@@ -354,6 +369,12 @@ pub fn execute_command_simple_with_model(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
+
+    register_child_pid(cancel_token, child.id());
+    if cancel_requested(cancel_token) {
+        kill_child_tree(&mut child);
+        return Err("Claude request cancelled".to_string());
+    }
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());

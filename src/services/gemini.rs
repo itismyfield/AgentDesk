@@ -64,6 +64,13 @@ fn resolve_gemini_binary() -> crate::services::platform::BinaryResolution {
 }
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_cancellable(prompt, None)
+}
+
+pub fn execute_command_simple_cancellable(
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
     let resolution = resolve_gemini_binary();
     let gemini_bin = resolution
         .resolved_path
@@ -72,14 +79,24 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut command = Command::new(&gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    let output = command
+    let mut child = command
         .args(build_exec_args(prompt, None, None))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
+
+    register_child_pid(cancel_token, child.id());
+    if is_cancelled(cancel_token) {
+        kill_child_tree(&mut child);
+        return Err("Gemini request cancelled".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to read Gemini output: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
