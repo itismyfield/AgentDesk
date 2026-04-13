@@ -13,12 +13,13 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid,
+    fold_read_output_result, register_child_pid, tmux_followup_fallback_after_read_error,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     insert_process_session, process_session_is_alive, process_session_probe,
-    read_output_file_until_result, remove_process_session, send_process_session_input,
+    read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,
+    send_process_session_input,
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -628,13 +629,75 @@ fn send_followup_to_tmux(
         *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
     }
 
-    let read_result = read_output_file_until_result(
+    let read_result = match read_output_file_until_result_tracked(
         output_path,
         start_offset,
         sender.clone(),
         cancel_token,
         SessionProbe::tmux(tmux_session_name.to_string()),
-    )?;
+    ) {
+        Ok(read_result) => read_result,
+        Err(failure) => {
+            let output_exists = std::fs::metadata(output_path).is_ok();
+            let current_file_len = std::fs::metadata(output_path).ok().map(|meta| meta.len());
+            let input_exists = std::path::Path::new(input_fifo_path).exists();
+            let session_alive = tmux_session_has_live_pane(tmux_session_name);
+            let ready_for_input = session_alive
+                && crate::services::provider::tmux_session_ready_for_input(tmux_session_name);
+
+            if let Some(fallback) = tmux_followup_fallback_after_read_error(
+                start_offset,
+                failure.last_offset,
+                current_file_len,
+                session_alive,
+                ready_for_input,
+                output_exists,
+                input_exists,
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ codex follow-up read failed for {tmux_session_name}: {}; attaching fallback watcher at offset {} (ready_for_input={}, emit_done={})",
+                    failure.error,
+                    fallback.last_offset,
+                    ready_for_input,
+                    fallback.emit_synthetic_done
+                );
+                if fallback.emit_synthetic_done {
+                    let _ = sender.send(StreamMessage::Done {
+                        result: String::new(),
+                        session_id: None,
+                    });
+                }
+                let _ = sender.send(StreamMessage::TmuxReady {
+                    output_path: output_path.to_string(),
+                    input_fifo_path: input_fifo_path.to_string(),
+                    tmux_session_name: tmux_session_name.to_string(),
+                    last_offset: fallback.last_offset,
+                });
+                return Ok(FollowupResult::Delivered);
+            }
+
+            if !session_alive {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ codex follow-up read failed and tmux session died for {tmux_session_name}: {}; recreating session",
+                    failure.error
+                );
+                return Ok(FollowupResult::RecreateSession {
+                    error: failure.error,
+                });
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::error!(
+                "  [{ts}] ✗ codex follow-up read failed with no watcher fallback for {tmux_session_name}: {} (output_exists={}, input_exists={})",
+                failure.error,
+                output_exists,
+                input_exists
+            );
+            return Err(failure.error);
+        }
+    };
 
     Ok(fold_read_output_result(
         read_result,

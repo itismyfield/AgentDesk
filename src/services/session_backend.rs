@@ -11,8 +11,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, Mutex};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOutputFailure {
+    pub error: String,
+    pub last_offset: u64,
+}
 
 /// Configuration for creating a new session.
 pub struct SessionConfig {
@@ -621,17 +628,30 @@ pub fn read_output_file_until_result(
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<ReadOutputResult, String> {
+    read_output_file_until_result_tracked(output_path, start_offset, sender, cancel_token, probe)
+        .map_err(|failure| failure.error)
+}
+
+pub fn read_output_file_until_result_tracked(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+) -> Result<ReadOutputResult, ReadOutputFailure> {
     let mut state = StreamLineState::new();
     let SessionProbe {
         is_alive,
         is_ready_for_input,
     } = probe;
+    let last_offset = Arc::new(AtomicU64::new(start_offset));
     let offset_sender = sender.clone();
     let line_sender = sender.clone();
     let synthetic_sender = sender.clone();
     let error_sender = sender.clone();
+    let last_offset_for_emit = last_offset.clone();
 
-    crate::services::provider::poll_output_file_until_result(
+    let result = crate::services::provider::poll_output_file_until_result(
         output_path,
         start_offset,
         cancel_token,
@@ -639,6 +659,7 @@ pub fn read_output_file_until_result(
         move || is_alive(),
         move || is_ready_for_input(),
         move |offset| {
+            last_offset_for_emit.store(offset, Ordering::Relaxed);
             let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
         },
         move |line, state| process_stream_line(line, &line_sender, state),
@@ -661,7 +682,15 @@ pub fn read_output_file_until_result(
                 });
             }
         },
-    )
+    );
+
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => Err(ReadOutputFailure {
+            error,
+            last_offset: last_offset.load(Ordering::Relaxed),
+        }),
+    }
 }
 
 #[cfg(test)]
