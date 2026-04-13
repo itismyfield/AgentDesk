@@ -683,6 +683,66 @@ mod tests {
         dir
     }
 
+    fn setup_auto_queue_activate_spy_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+
+        for entry in fs::read_dir(&source_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+                continue;
+            }
+            fs::copy(&path, dir.path().join(entry.file_name())).unwrap();
+        }
+
+        fs::write(
+            dir.path().join("zz-auto-queue-activate-spy.js"),
+            r#"
+            var rawActivate = agentdesk.autoQueue.activate;
+            agentdesk.autoQueue.activate = function(runIdOrBody, threadGroup) {
+                var body;
+                if (runIdOrBody && typeof runIdOrBody === "object" && !Array.isArray(runIdOrBody)) {
+                    body = Object.assign({}, runIdOrBody);
+                } else {
+                    body = {
+                        run_id: runIdOrBody || null,
+                        active_only: true
+                    };
+                    if (threadGroup !== null && threadGroup !== undefined) {
+                        body.thread_group = threadGroup;
+                    }
+                }
+                if (body.active_only === undefined) {
+                    body.active_only = true;
+                }
+                var countRows = agentdesk.db.query(
+                    "SELECT value FROM kv_meta WHERE key = ?1",
+                    ["test_auto_queue_activate_count"]
+                );
+                var nextCount = countRows.length > 0
+                    ? (parseInt(countRows[0].value, 10) || 0) + 1
+                    : 1;
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_auto_queue_activate_count", "" + nextCount]
+                );
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_auto_queue_activate_last", JSON.stringify(body)]
+                );
+                return rawActivate(body);
+            };
+            agentdesk.registerPolicy({
+                name: "auto-queue-activate-spy",
+                priority: 9999
+            });
+            "#,
+        )
+        .unwrap();
+        dir
+    }
+
     fn write_codex_inflight(
         runtime_root: &std::path::Path,
         channel_id: &str,
@@ -2599,7 +2659,7 @@ mod tests {
             sql: "INSERT INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
             params: vec![],
         };
-        let result = crate::engine::intent::execute_intents(&db, vec![insert_intent]);
+        let result = crate::engine::intent::execute_intents(&db, None, vec![insert_intent]);
         assert_eq!(
             result.errors, 1,
             "INSERT into card_review_state via ExecuteSQL must be rejected"
@@ -2610,7 +2670,8 @@ mod tests {
             sql: "INSERT OR REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
             params: vec![],
         };
-        let result_replace = crate::engine::intent::execute_intents(&db, vec![replace_intent]);
+        let result_replace =
+            crate::engine::intent::execute_intents(&db, None, vec![replace_intent]);
         assert_eq!(
             result_replace.errors, 1,
             "INSERT OR REPLACE into card_review_state via ExecuteSQL must be rejected"
@@ -2622,7 +2683,7 @@ mod tests {
             params: vec![],
         };
         let result_replace_into =
-            crate::engine::intent::execute_intents(&db, vec![replace_into_intent]);
+            crate::engine::intent::execute_intents(&db, None, vec![replace_into_intent]);
         assert_eq!(
             result_replace_into.errors, 1,
             "REPLACE INTO card_review_state via ExecuteSQL must be rejected"
@@ -2634,7 +2695,7 @@ mod tests {
                 .to_string(),
             params: vec![],
         };
-        let result2 = crate::engine::intent::execute_intents(&db, vec![update_intent]);
+        let result2 = crate::engine::intent::execute_intents(&db, None, vec![update_intent]);
         assert_eq!(
             result2.errors, 1,
             "UPDATE card_review_state via ExecuteSQL must be rejected"
@@ -2645,7 +2706,7 @@ mod tests {
             sql: "DELETE FROM card_review_state WHERE card_id = 'card-158b'".to_string(),
             params: vec![],
         };
-        let result3 = crate::engine::intent::execute_intents(&db, vec![delete_intent]);
+        let result3 = crate::engine::intent::execute_intents(&db, None, vec![delete_intent]);
         assert_eq!(
             result3.errors, 1,
             "DELETE from card_review_state via ExecuteSQL must be rejected"
@@ -3702,6 +3763,211 @@ mod tests {
             metadata["work_resolution_result"]["card_status_target"],
             "ready"
         );
+    }
+
+    #[test]
+    fn scenario_547_implementation_noop_completion_triggers_auto_queue_activate_for_follow_up_entry()
+     {
+        let policies_dir = setup_auto_queue_activate_spy_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        set_kv(&db, "server_port", "8791");
+        seed_card(&db, "card-547-noop", "in_progress");
+        seed_card(&db, "card-547-next", "ready");
+        seed_dispatch(
+            &db,
+            "impl-547-noop",
+            "card-547-noop",
+            "implementation",
+            "pending",
+        );
+
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-547', 'repo', 'agent-1', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at, thread_group, batch_phase) \
+             VALUES ('entry-547-noop', 'run-547', 'card-547-noop', 'agent-1', 'dispatched', 'impl-547-noop', datetime('now'), 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase) \
+             VALUES ('entry-547-next', 'run-547', 'card-547-next', 'agent-1', 'pending', 0, 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "impl-547-noop",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "work_outcome": "noop",
+                "completed_without_changes": true,
+                "card_status_target": "ready",
+                "notes": "already implemented"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(get_card_status(&db, "card-547-noop"), "ready");
+
+        let conn = db.lock().unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-noop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            entry_status, "done",
+            "#547: noop completion must close the active auto-queue entry before continuing"
+        );
+
+        assert_eq!(
+            kv_value(&db, "test_auto_queue_activate_count").as_deref(),
+            Some("1"),
+            "#547: noop completion must trigger exactly one auto-queue activate call"
+        );
+
+        let activate_payload = kv_value(&db, "test_auto_queue_activate_last")
+            .expect("activate payload should be recorded");
+        let activate_json: serde_json::Value = serde_json::from_str(&activate_payload).unwrap();
+        assert_eq!(activate_json["run_id"], "run-547");
+        assert_eq!(activate_json["thread_group"], 0);
+        assert_eq!(activate_json["active_only"], true);
+
+        let next_entry_status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-next'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            next_entry_status, "dispatched",
+            "#547: deferred activate must still dispatch the next queued entry"
+        );
+    }
+
+    #[test]
+    fn scenario_547_implementation_noop_completion_creates_phase_gate_for_multi_phase_run() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-547-phase-1", "in_progress");
+        seed_card(&db, "card-547-phase-2", "ready");
+        seed_dispatch(
+            &db,
+            "impl-547-phase-1",
+            "card-547-phase-1",
+            "implementation",
+            "pending",
+        );
+
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-547-phase', 'test/repo', 'agent-1', 'active', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at, batch_phase, created_at) \
+             VALUES ('entry-547-phase-1', 'run-547-phase', 'card-547-phase-1', 'agent-1', 'dispatched', 'impl-547-phase-1', datetime('now'), 1, datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, created_at) \
+             VALUES ('entry-547-phase-2', 'run-547-phase', 'card-547-phase-2', 'agent-1', 'pending', 2, datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "impl-547-phase-1",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "work_outcome": "noop",
+                "completed_without_changes": true,
+                "card_status_target": "ready",
+                "notes": "already implemented"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(get_card_status(&db, "card-547-phase-1"), "ready");
+
+        let conn = db.lock().unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-phase-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-547-phase'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-547-phase-1' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_gate_state: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'aq_phase_gate:run-547-phase:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json: serde_json::Value = serde_json::from_str(&phase_gate_state).unwrap();
+        assert_eq!(entry_status, "done");
+        assert_eq!(
+            run_status, "paused",
+            "#547: noop completion must still pause multi-phase runs for a gate"
+        );
+        assert_eq!(
+            phase_gate_count, 1,
+            "#547: noop completion must create a phase-gate dispatch when the phase finishes"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 1);
+        assert_eq!(phase_gate_json["next_phase"], 2);
     }
 
     #[test]
