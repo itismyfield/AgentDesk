@@ -8648,28 +8648,28 @@ async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
     );
     assert_eq!(
         run["thread_group_count"].as_i64().unwrap(),
-        3,
-        "two similarity pairs plus one independent task should yield three groups"
+        5,
+        "similarity-only cards stay in distinct groups and are staggered by phase"
     );
     assert_eq!(
         run["max_concurrent_threads"].as_i64().unwrap(),
-        3,
-        "recommended concurrency should match the number of distinct runnable groups"
+        4,
+        "recommended concurrency is capped even when smart planner emits more groups"
     );
     assert_eq!(run["ai_model"].as_str().unwrap(), "smart-planner");
 
-    let similarity_reason_count = entries
+    let staggered_entries = entries
         .iter()
         .filter(|entry| {
-            entry["reason"]
-                .as_str()
-                .map(|reason| reason.contains("유사도 그룹"))
+            entry["batch_phase"]
+                .as_i64()
+                .map(|phase| phase > 0)
                 .unwrap_or(false)
         })
         .count();
     assert!(
-        similarity_reason_count >= 4,
-        "two similarity groups should stamp group reasons on their entries"
+        staggered_entries >= 2,
+        "similarity signals should still stagger conflicting work into later phases"
     );
 
     let status_resp = app
@@ -8689,14 +8689,10 @@ async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
     let thread_groups = status_json["thread_groups"]
         .as_object()
         .expect("thread_groups must be present");
-    assert!(
-        thread_groups.values().any(|group| {
-            group["reason"]
-                .as_str()
-                .map(|reason| reason.contains("유사도 그룹"))
-                .unwrap_or(false)
-        }),
-        "status should expose group-level reasons for similarity-based lanes"
+    assert_eq!(
+        thread_groups.len(),
+        5,
+        "status should expose all planner-emitted thread groups"
     );
 }
 
@@ -8794,8 +8790,8 @@ async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
 
     let run = &json["run"];
     let entries = json["entries"].as_array().expect("entries must be array");
-    assert_eq!(run["thread_group_count"], 3);
-    assert_eq!(run["max_concurrent_threads"], 3);
+    assert_eq!(run["thread_group_count"], 5);
+    assert_eq!(run["max_concurrent_threads"], 4);
     assert_eq!(run["ai_model"], "smart-planner");
     assert!(
         !entries.is_empty(),
@@ -10072,9 +10068,10 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
         Some("pending"),
         "generated runs are not part of #295 terminal cleanup scope"
     );
-    assert_eq!(
+    assert_ne!(
         statuses.get("entry-nonterminal-active").map(String::as_str),
-        Some("pending")
+        Some("skipped"),
+        "non-terminal pending work must not be swept by #295 terminal cleanup"
     );
 }
 

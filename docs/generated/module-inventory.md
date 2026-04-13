@@ -68,7 +68,7 @@
 | `dispatch` | `src/dispatch/mod.rs` | 3883 | giant-file |
 | `engine` | `src/engine/mod.rs` | 1496 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
-| `engine::intent` | `src/engine/intent.rs` | 776 |  |
+| `engine::intent` | `src/engine/intent.rs` | 814 |  |
 | `engine::loader` | `src/engine/loader.rs` | 281 |  |
 | `engine::ops` | `src/engine/ops.rs` | 156 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 167 |  |
@@ -87,7 +87,7 @@
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 221 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 106 |  |
 | `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 299 |  |
-| `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 64 |  |
+| `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 96 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
 | `engine::transition` | `src/engine/transition.rs` | 1342 | giant-file |
 | `error` | `src/error.rs` | 188 |  |
@@ -189,10 +189,10 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 1455 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 279 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 1739 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 1920 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 362 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 248 |  |
-| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3418 | giant-file |
+| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3433 | giant-file |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1081 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 295 |  |

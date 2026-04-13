@@ -21,17 +21,38 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn load_agentdesk_config() -> Option<Config> {
+fn load_agentdesk_config_with_path() -> Option<(Config, std::path::PathBuf)> {
     let root = crate::config::runtime_root()?;
     for path in [
         crate::runtime_layout::config_file_path(&root),
         crate::runtime_layout::legacy_config_file_path(&root),
     ] {
         if path.is_file() {
-            return crate::config::load_from_path(&path).ok();
+            return crate::config::load_from_path(&path)
+                .ok()
+                .map(|config| (config, path));
         }
     }
     None
+}
+
+fn load_agentdesk_config() -> Option<Config> {
+    load_agentdesk_config_with_path().map(|(config, _)| config)
+}
+
+fn meeting_available_agents_explicitly_empty(config_path: &std::path::Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("meeting")
+        .and_then(|meeting| meeting.get("available_agents"))
+        .and_then(|agents| agents.as_sequence())
+        .map(|agents| agents.is_empty())
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -429,7 +450,7 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
 }
 
 pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
-    let config = load_agentdesk_config()?;
+    let (config, config_path) = load_agentdesk_config_with_path()?;
     let meeting = config.meeting.as_ref()?;
     let summary_agent = match meeting.summary_agent.as_ref()? {
         MeetingSummaryAgentDef::Static(agent) => SummaryAgentConfig::Static(agent.clone()),
@@ -445,35 +466,38 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let available_agents = if meeting.available_agents.is_empty() {
-        config
-            .agents
-            .iter()
-            .map(|agent| MeetingAgentConfig {
-                role_id: agent.id.clone(),
-                display_name: agent_display_name(agent),
-                keywords: agent.keywords.clone(),
-                prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
-                domain_summary: None,
-                strengths: Vec::new(),
-                task_types: Vec::new(),
-                anti_signals: Vec::new(),
-                provider_hint: Some(agent.provider.clone()),
-                provider: ProviderKind::from_str(&agent.provider),
-                model: None,
-                reasoning_effort: None,
-                workspace: default_workspace(&agent.id),
-                peer_agents_enabled: true,
-                memory: resolve_memory_settings(None, None),
-            })
-            .collect()
-    } else {
-        meeting
-            .available_agents
-            .iter()
-            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
-            .collect()
-    };
+    let explicit_empty_available_agents =
+        meeting_available_agents_explicitly_empty(config_path.as_path());
+    let available_agents =
+        if meeting.available_agents.is_empty() && !explicit_empty_available_agents {
+            config
+                .agents
+                .iter()
+                .map(|agent| MeetingAgentConfig {
+                    role_id: agent.id.clone(),
+                    display_name: agent_display_name(agent),
+                    keywords: agent.keywords.clone(),
+                    prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
+                    domain_summary: None,
+                    strengths: Vec::new(),
+                    task_types: Vec::new(),
+                    anti_signals: Vec::new(),
+                    provider_hint: Some(agent.provider.clone()),
+                    provider: ProviderKind::from_str(&agent.provider),
+                    model: None,
+                    reasoning_effort: None,
+                    workspace: default_workspace(&agent.id),
+                    peer_agents_enabled: true,
+                    memory: resolve_memory_settings(None, None),
+                })
+                .collect()
+        } else {
+            meeting
+                .available_agents
+                .iter()
+                .filter_map(|entry| meeting_agent_from_entry(&config, entry))
+                .collect()
+        };
 
     Some(MeetingConfig {
         channel_name: meeting.channel_name.clone(),

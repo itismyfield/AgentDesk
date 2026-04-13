@@ -72,6 +72,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // #135: Per-repo and per-agent pipeline override (JSON)
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN pipeline_config TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN context TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
     let _ =
         conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
@@ -897,6 +898,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "auto_queue_entries",
         "dispatch_id",
         "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "task_dispatches",
+        "context",
+        "ALTER TABLE task_dispatches ADD COLUMN context TEXT;",
     )?;
     backfill_auto_queue_dispatch_ids(conn)?;
     backfill_auto_queue_dispatch_history(conn)?;

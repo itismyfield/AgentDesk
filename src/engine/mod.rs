@@ -563,11 +563,7 @@ impl PolicyEngine {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
-        Self::fire_hook_with_guard(&inner, hook, payload)
+        self.try_fire_hook(hook, payload)
     }
 
     fn fire_hook_with_guard(

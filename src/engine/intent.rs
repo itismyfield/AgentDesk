@@ -47,6 +47,12 @@ pub enum Intent {
         bot: String,
         source: String,
     },
+    /// Emit a runtime supervisor signal after the current hook completes.
+    #[serde(rename = "emit_supervisor_signal")]
+    EmitSupervisorSignal {
+        signal_name: String,
+        evidence: serde_json::Value,
+    },
     /// KV store set (replaces agentdesk.kv.set)
     #[serde(rename = "set_kv")]
     SetKV {
@@ -166,6 +172,19 @@ pub fn execute_intents(
             } => {
                 if let Err(e) = execute_queue_message(db, &target, &content, &bot, &source) {
                     tracing::warn!(target, bot, source, error = %e, "queue-message intent failed");
+                    result.errors += 1;
+                }
+            }
+            Intent::EmitSupervisorSignal {
+                signal_name,
+                evidence,
+            } => {
+                if let Err(e) = execute_emit_supervisor_signal(db, engine, &signal_name, evidence) {
+                    tracing::warn!(
+                        signal_name,
+                        error = %e,
+                        "emit-supervisor-signal intent failed"
+                    );
                     result.errors += 1;
                 }
             }
@@ -438,6 +457,23 @@ fn execute_queue_message(
         "queued message intent"
     );
     Ok(())
+}
+
+fn execute_emit_supervisor_signal(
+    db: &crate::db::Db,
+    engine: Option<&crate::engine::PolicyEngine>,
+    signal_name: &str,
+    evidence: serde_json::Value,
+) -> anyhow::Result<()> {
+    let engine =
+        engine.ok_or_else(|| anyhow::anyhow!("supervisor signal intent requires engine"))?;
+    let signal =
+        crate::supervisor::SupervisorSignal::try_from(signal_name).map_err(anyhow::Error::msg)?;
+    let supervisor = crate::supervisor::RuntimeSupervisor::new(db.clone(), engine.clone());
+    supervisor
+        .emit_signal(signal, evidence)
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
 }
 
 fn execute_set_kv(
