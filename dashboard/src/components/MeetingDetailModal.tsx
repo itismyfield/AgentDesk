@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { RoundTableMeeting, RoundTableEntry } from "../types";
-import { formatProviderFlow } from "./MeetingProviderFlow";
+import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
 import {
   formatMeetingReferenceHash,
   getDisplayMeetingReferenceHashes,
@@ -239,24 +239,11 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               <MarkdownContent content={meeting.summary} className="text-sm" />
             </SurfaceCard>
           ) : (
-            <div
-              className="rounded-2xl p-4 text-sm"
-              style={{
-                background: "rgba(148,163,184,0.08)",
-                border: "1px solid rgba(148,163,184,0.14)",
-                color: "var(--th-text-muted)",
-              }}
-            >
+            <SurfaceEmptyState className="rounded-3xl p-4 text-sm">
               {meeting.status === "cancelled"
-                ? t({
-                    ko: "취소된 회의라 요약이 생성되지 않았습니다.",
-                    en: "No summary generated for cancelled meeting.",
-                  })
-                : t({
-                    ko: "아직 요약이 저장되지 않았습니다.",
-                    en: "No summary saved yet.",
-                  })}
-            </div>
+                ? t({ ko: "취소된 회의라 요약이 생성되지 않았습니다.", en: "No summary generated for cancelled meeting." })
+                : t({ ko: "아직 요약이 저장되지 않았습니다.", en: "No summary saved yet." })}
+            </SurfaceEmptyState>
           )}
 
           {sortedRounds.map((round) => {
@@ -304,16 +291,10 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                     {summaryEntries.map((entry) => (
                       <SurfaceNotice
                         key={entry.id ?? `s-${entry.seq}`}
-                        className="rounded-xl p-3 text-sm"
-                        style={{
-                          background: "rgba(99,102,241,0.1)",
-                          border: "1px solid rgba(99,102,241,0.2)",
-                        }}
+                        tone="accent"
+                        className="rounded-2xl text-sm"
                       >
-                        <div
-                          className="text-xs font-semibold mb-1"
-                          style={{ color: "#818cf8" }}
-                        >
+                        <div className="text-xs font-semibold mb-1" style={{ color: "var(--th-text-primary)" }}>
                           {entry.speaker_name}
                         </div>
                         <MarkdownContent content={entry.content} />
@@ -327,18 +308,8 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         </div>
 
         {/* Footer */}
-        <div
-          className="flex justify-end p-4 border-t"
-          style={{ borderColor: "var(--th-border)" }}
-        >
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-surface-subtle"
-            style={{
-              borderColor: "var(--th-border)",
-              color: "var(--th-text-muted)",
-            }}
-          >
+        <div className="flex justify-end p-4 border-t" style={{ borderColor: "var(--th-border)" }}>
+          <SurfaceActionButton onClick={onClose} tone="neutral">
             {t({ ko: "닫기", en: "Close" })}
           </SurfaceActionButton>
         </div>

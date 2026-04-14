@@ -120,23 +120,6 @@ export function isReviewCard(card: KanbanCard): boolean {
   return !!(card.latest_dispatch_type && REVIEW_DISPATCH_TYPES.has(card.latest_dispatch_type));
 }
 
-export function hasManualInterventionReason(card: KanbanCard | null | undefined): boolean {
-  return Boolean(card?.blocked_reason);
-}
-
-export function isManualInterventionCard(card: KanbanCard | null | undefined): boolean {
-  if (!card) return false;
-  const reviewStatus = card.review_status;
-  return (
-    card.status === "blocked"
-    || card.status === "pending_decision"
-    || hasManualInterventionReason(card)
-    || (card.status === "review"
-      && reviewStatus != null
-      && MANUAL_INTERVENTION_REVIEW_STATUSES.has(reviewStatus))
-  );
-}
-
 export function getBoardColumnStatus(status: KanbanCardStatus): KanbanCardStatus {
   return status;
 }

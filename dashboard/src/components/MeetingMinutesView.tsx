@@ -30,6 +30,7 @@ import {
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, {
   getProviderMeta,
+  providerFlowCaption,
 } from "./MeetingProviderFlow";
 import {
   formatMeetingReferenceHash,
@@ -340,6 +341,7 @@ export default function MeetingMinutesView({
   const [channelId, setChannelId] = useState(
     () => initialChannelId ?? (localStorage.getItem(STORAGE_KEY) || ""),
   );
+  const [showChannelEdit, setShowChannelEdit] = useState(false);
   const [primaryProvider, setPrimaryProvider] = useState<string>("claude");
   const [reviewerProvider, setReviewerProvider] = useState<string>("");
   const [starting, setStarting] = useState(false);
@@ -862,55 +864,52 @@ export default function MeetingMinutesView({
 
   return (
     <div
-      className={
-        embedded
-          ? "space-y-4"
-          : "mx-auto w-full max-w-4xl min-w-0 space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
-      }
-      style={
-        embedded
-          ? undefined
-          : {
-              paddingBottom:
-                "max(10rem, calc(10rem + env(safe-area-inset-bottom)))",
-            }
-      }
+      className="mx-auto w-full max-w-4xl min-w-0 space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
+      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      {/* Header */}
-      <div
-        className={`flex items-center justify-between ${embedded ? "" : "mb-6"}`}
-      >
-        {!embedded && (
-          <div className="flex items-center gap-3">
-            <FileText className="text-amber-400" size={24} />
-            <div>
-              <h1
-                className="text-xl font-bold"
-                style={{ color: "var(--th-text-heading)" }}
-              >
-                {t({ ko: "회의 기록", en: "Meeting Records" })}
-              </h1>
-              <p
-                className="text-xs mt-0.5"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {t({
-                  ko: "라운드 테이블 상세와 후속 일감 상태를 함께 관리합니다.",
-                  en: "Manage round-table details and follow-up issue status together.",
-                })}
-              </p>
-            </div>
-            <span
-              className="text-xs px-2 py-0.5 rounded-full"
-              style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}
-            >
-              {meetings.length}
+      <SurfaceSection
+        eyebrow={t({ ko: "Round Table", en: "Round Table" })}
+        title={t({ ko: "회의 기록", en: "Meeting Records" })}
+        description={t({
+          ko: "라운드 테이블 상세, 교차검증 흐름, 후속 일감 상태를 한 화면에서 관리합니다.",
+          en: "Manage round-table detail, cross-review flow, and follow-up issue state in one place.",
+        })}
+        badge={t({ ko: `${meetings.length}개 기록`, en: `${meetings.length} records` })}
+        actions={(
+          <SurfaceActionButton
+            tone={showStartForm ? "neutral" : "accent"}
+            onClick={() => setShowStartForm((v) => !v)}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <Plus size={14} />
+              {showStartForm
+                ? t({ ko: "입력 닫기", en: "Close Form" })
+                : t({ ko: "새 회의", en: "New Meeting" })}
             </span>
-          </div>
+          </SurfaceActionButton>
         )}
-        <button
-          onClick={() => setShowStartForm((v) => !v)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+      >
+        <div className="mt-4 flex flex-wrap gap-3">
+          <SurfaceMetricPill
+            label={t({ ko: "활성 회의", en: "Active Meetings" })}
+            value={t({ ko: `${activeMeetingCount}건 진행 중`, en: `${activeMeetingCount} in progress` })}
+            tone={activeMeetingCount > 0 ? "accent" : "neutral"}
+          />
+          <SurfaceMetricPill
+            label={t({ ko: "완료 기록", en: "Completed" })}
+            value={t({ ko: `${completedMeetingCount}건`, en: `${completedMeetingCount} records` })}
+            tone="success"
+          />
+          <SurfaceMetricPill
+            label={t({ ko: "후속 정리", en: "Follow-ups" })}
+            value={t({ ko: `${unresolvedIssueCount}건 미해결`, en: `${unresolvedIssueCount} unresolved` })}
+            tone={unresolvedIssueCount > 0 ? "warn" : "info"}
+          />
+        </div>
+
+        <SurfaceNotice
+          className="mt-4"
+          tone={unresolvedIssueCount > 0 ? "warn" : "info"}
         >
           <div className="text-sm leading-6">
             {unresolvedIssueCount > 0
@@ -1043,19 +1042,17 @@ export default function MeetingMinutesView({
 
       {/* Empty state */}
       {meetings.length === 0 && !showStartForm && (
-        <div
-          className="text-center py-16"
-          style={{ color: "var(--th-text-muted)" }}
+        <SurfaceSection
+          eyebrow={t({ ko: "Archive", en: "Archive" })}
+          title={t({ ko: "회의 타임라인", en: "Meeting Timeline" })}
+          description={t({ ko: "최근 회의가 쌓이면 여기서 흐름과 후속 작업을 이어서 관리합니다.", en: "Recent meetings accumulate here for follow-up tracking." })}
         >
-          <FileText size={48} className="mx-auto mb-4 opacity-30" />
-          <p>{t({ ko: "회의 기록이 없습니다", en: "No meeting records" })}</p>
-          <p className="text-sm mt-1">
-            {t({
-              ko: '"새 회의" 버튼으로 라운드 테이블을 시작하세요',
-              en: 'Start a round table with the "New Meeting" button',
-            })}
-          </p>
-        </div>
+          <SurfaceEmptyState className="mt-4 py-16 text-center">
+            <FileText size={48} className="mx-auto mb-4 opacity-30" />
+            <p>{t({ ko: "회의 기록이 없습니다", en: "No meeting records" })}</p>
+            <p className="text-sm mt-1">{t({ ko: "\"새 회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"New Meeting\" button" })}</p>
+          </SurfaceEmptyState>
+        </SurfaceSection>
       )}
 
       {/* Meeting list */}
@@ -1078,14 +1075,22 @@ export default function MeetingMinutesView({
           const selectedRepo = getSelectedRepo(m);
           const repoOptions = getRepoOptions(selectedRepo);
           const isSavingRepo = !!savingRepoIds[m.id];
-          const canRetryIssues =
-            hasProposedIssues &&
-            !issueProgress.allResolved &&
-            !!selectedRepo &&
-            !isSavingRepo;
+          const canRetryIssues = hasProposedIssues && !issueProgress.allResolved && !!selectedRepo && !isSavingRepo;
           const meetingHashDisplay = formatMeetingReferenceHash(m.meeting_hash);
           const threadHashDisplay = formatMeetingReferenceHash(m.thread_hash);
           const selectionReason = normalizeSelectionReason(m.selection_reason);
+          const progressTone = issueProgress.allCreated
+            ? "success"
+            : issueProgress.failed > 0
+              ? "warn"
+              : issueProgress.discarded > 0
+                ? "neutral"
+                : "info";
+          const createButtonTone = issueProgress.allCreated || issueProgress.allResolved
+            ? "neutral"
+            : issueProgress.failed > 0
+              ? "warn"
+              : "accent";
 
           return (
             <SurfaceCard
@@ -1230,33 +1235,28 @@ export default function MeetingMinutesView({
 
               {/* PMD Summary bubble */}
               {m.summary && (
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <div
-                    className="w-7 h-7 rounded-lg overflow-hidden shrink-0"
-                    style={{ background: "var(--th-bg-surface)" }}
-                  >
-                    <img
-                      src="/sprites/7-D-1.png"
-                      alt="PMD"
-                      className="w-full h-full object-cover"
-                      style={{ imageRendering: "pixelated" }}
-                    />
-                  </div>
-                  <div
-                    className="min-w-0 flex-1 overflow-hidden rounded-xl rounded-tl-sm px-3 py-2 text-sm"
-                    style={{
-                      background: "rgba(99,102,241,0.08)",
-                      border: "1px solid rgba(99,102,241,0.15)",
-                      color: "var(--th-text)",
-                    }}
-                  >
-                    <div className="mb-1 flex min-w-0 flex-wrap items-center justify-between gap-2">
-                      <div
-                        className="text-xs font-semibold"
-                        style={{ color: "#818cf8" }}
-                      >
-                        {t({ ko: "PMD 요약", en: "PMD Summary" })}
-                      </div>
+                <SurfaceNotice
+                  tone="accent"
+                  className="items-start"
+                  leading={(
+                    <div className="mt-0.5 h-8 w-8 rounded-xl overflow-hidden shrink-0" style={{ background: "var(--th-bg-surface)" }}>
+                      <img
+                        src="/sprites/7-D-1.png"
+                        alt="PMD"
+                        className="w-full h-full object-cover"
+                        style={{ imageRendering: "pixelated" }}
+                      />
+                    </div>
+                  )}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                      <div className="text-xs font-semibold" style={{ color: "var(--th-text-primary)" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
+                      {(m.primary_provider || m.reviewer_provider) && (
+                        <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                          {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
+                        </div>
+                      )}
                     </div>
                     <div className="text-sm" style={{ color: "var(--th-text)" }}>
                       <MarkdownContent content={m.summary} />
@@ -1313,28 +1313,41 @@ export default function MeetingMinutesView({
                                   bg: "rgba(148,163,184,0.12)",
                                   border: "rgba(148,163,184,0.18)",
                                 }
-                              : issueState === "failed"
-                                ? {
-                                    label: t({ ko: "실패", en: "Failed" }),
-                                    color: "#fbbf24",
-                                    bg: "rgba(245,158,11,0.12)",
-                                    border: "rgba(245,158,11,0.18)",
-                                  }
-                                : {
-                                    label: t({ ko: "대기", en: "Pending" }),
-                                    color: "#60a5fa",
-                                    bg: "rgba(96,165,250,0.12)",
-                                    border: "rgba(96,165,250,0.18)",
-                                  };
+                              : {
+                                  label: t({ ko: "대기", en: "Pending" }),
+                                  color: "#60a5fa",
+                                  bg: "rgba(96,165,250,0.12)",
+                                  border: "rgba(96,165,250,0.18)",
+                                };
+                        const issueTone = issueState === "created"
+                          ? "success"
+                          : issueState === "discarded"
+                            ? "neutral"
+                            : issueState === "failed"
+                              ? "warn"
+                              : "info";
 
                         return (
                           <SurfaceNotice
                             key={i}
-                            className="min-w-0 overflow-hidden rounded-lg px-3 py-2 text-xs"
-                            style={{
-                              background: statusMeta.bg,
-                              border: `1px solid ${statusMeta.border}`,
-                            }}
+                            tone={issueTone}
+                            compact
+                            className="items-start"
+                            action={(
+                              (issueState === "pending" || issueState === "failed") && (
+                                <SurfaceActionButton
+                                  tone="neutral"
+                                  compact
+                                  onClick={() => void handleDiscardIssue(m.id, issue)}
+                                  disabled={isDiscardingIssue}
+                                >
+                                  <span className="inline-flex items-center gap-1">
+                                    <Trash2 size={11} />
+                                    {isDiscardingIssue ? t({ ko: "폐기 중...", en: "Discarding..." }) : t({ ko: "폐기", en: "Discard" })}
+                                  </span>
+                                </SurfaceActionButton>
+                              )
+                            )}
                           >
                             <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                               <div className="min-w-0 flex-1">
@@ -1381,40 +1394,6 @@ export default function MeetingMinutesView({
                                     </a>
                                   )}
                               </div>
-                              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                                <span
-                                  className="rounded-full px-2 py-0.5 text-xs font-semibold"
-                                  style={{
-                                    background: statusMeta.bg,
-                                    color: statusMeta.color,
-                                  }}
-                                >
-                                  {statusMeta.label}
-                                </span>
-                                {(issueState === "pending" ||
-                                  issueState === "failed") && (
-                                  <button
-                                    onClick={() =>
-                                      void handleDiscardIssue(m.id, issue)
-                                    }
-                                    disabled={isDiscardingIssue}
-                                    className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
-                                    style={{
-                                      background: "rgba(148,163,184,0.12)",
-                                      color: "#cbd5e1",
-                                      border: "1px solid rgba(148,163,184,0.2)",
-                                    }}
-                                  >
-                                    <Trash2 size={11} />
-                                    {isDiscardingIssue
-                                      ? t({
-                                          ko: "폐기 중...",
-                                          en: "Discarding...",
-                                        })
-                                      : t({ ko: "폐기", en: "Discard" })}
-                                  </button>
-                                )}
-                              </div>
                             </div>
                             <div className="mt-2">
                               <span
@@ -1433,17 +1412,7 @@ export default function MeetingMinutesView({
               )}
 
               {hasProposedIssues && (
-                <div
-                  className="text-xs"
-                  style={{
-                    color:
-                      issueProgress.failed > 0
-                        ? "#fbbf24"
-                        : issueProgress.discarded > 0
-                          ? "#cbd5e1"
-                          : "var(--th-text-muted)",
-                  }}
-                >
+                <SurfaceNotice tone={progressTone} compact>
                   {getIssueProgressText(issueProgress)}
                 </SurfaceNotice>
               )}

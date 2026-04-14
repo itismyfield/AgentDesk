@@ -556,64 +556,9 @@ function KanbanCardArticle({
         );
       })()}
 
-      {(parentCard || childCards.length > 0) && (
-        <div
-          className="mt-2 rounded-xl border px-2.5 py-2 text-[11px] space-y-2"
-          style={{
-            borderColor: "rgba(96,165,250,0.28)",
-            backgroundColor: "rgba(30,64,175,0.1)",
-            color: "#dbeafe",
-          }}
-        >
-          {parentCard && (
-            <div className="min-w-0">
-              <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: "#93c5fd" }}>
-                {tr("상위 카드", "Parent")}
-              </div>
-              <div className="mt-1 flex items-center gap-2">
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: COLUMN_DEFS.find((item) => item.status === parentCard.status)?.accent ?? "#93c5fd" }}
-                />
-                <span className="truncate">
-                  {parentCard.github_issue_number ? `#${parentCard.github_issue_number} ` : ""}
-                  {parentCard.title}
-                </span>
-              </div>
-            </div>
-          )}
-          {childCards.length > 0 && (
-            <div className="min-w-0">
-              <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: "#93c5fd" }}>
-                {tr("하위 카드", "Children")} {childCards.length}
-              </div>
-              <div className="mt-1 space-y-1">
-                {childCards.slice(0, 3).map((child) => (
-                  <div key={child.id} className="flex items-center gap-2">
-                    <span
-                      className="h-2 w-2 shrink-0 rounded-full"
-                      style={{ backgroundColor: COLUMN_DEFS.find((item) => item.status === child.status)?.accent ?? "#93c5fd" }}
-                    />
-                    <span className="truncate">
-                      {child.github_issue_number ? `#${child.github_issue_number} ` : ""}
-                      {child.title}
-                    </span>
-                  </div>
-                ))}
-                {childCards.length > 3 && (
-                  <div style={{ color: "rgba(219,234,254,0.72)" }}>
-                    + {childCards.length - 3} {tr("개 더", "more")}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {hasManualInterventionReason(card) && card.blocked_reason && (
-        <div className="mt-2 rounded-md px-2.5 py-2 text-xs" style={{ backgroundColor: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}>
-          <span className="font-semibold">{tr("수동 개입 사유", "Manual intervention reason")}:</span>{" "}
+      {card.blocked_reason && (
+        <SurfaceNotice tone="danger" compact className="mt-2 text-xs">
+          <span className="font-semibold">{tr("차단 사유", "Blocked reason")}:</span>{" "}
           {card.blocked_reason}
         </SurfaceNotice>
       )}

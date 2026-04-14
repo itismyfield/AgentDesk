@@ -281,14 +281,9 @@ export default function KanbanCardDetail({
           </SurfaceActionButton>
         </div>
 
-        {/* Pipeline progress visualization */}
-        {selectedCard.pipeline_stage_id && (
-          <PipelineProgress
-            tr={tr}
-            locale={locale}
-            cardId={selectedCard.id}
-            currentStageId={selectedCard.pipeline_stage_id}
-          />
+        {/* Pipeline progress - removed with PipelineConfigView */}
+        {false && selectedCard.pipeline_stage_id && (
+          <div />
         )}
 
         {actionError && (
@@ -396,8 +391,8 @@ export default function KanbanCardDetail({
         </div>
 
         {/* Blocked reason */}
-        {hasManualInterventionReason(selectedCard) && selectedCard.blocked_reason && (
-          <div className="rounded-2xl border p-4" style={{ backgroundColor: "rgba(239,68,68,0.08)", borderColor: "rgba(239,68,68,0.3)" }}>
+        {selectedCard.blocked_reason && (
+          <SurfaceNotice tone="danger" className="block">
             <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
               {tr("수동 개입 사유", "Manual Intervention Reason")}
             </div>
@@ -827,8 +822,8 @@ export default function KanbanCardDetail({
                 tone="neutral"
                 className="text-sm"
               >
-                {tr("백로그로 되돌리기", "Move to backlog")}
-              </button>
+                {tr("카드 취소", "Cancel card")}
+              </SurfaceActionButton>
             )}
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row">

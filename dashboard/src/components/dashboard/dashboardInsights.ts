@@ -218,7 +218,7 @@ export function buildBottleneckGroups(cards: KanbanCard[], now = Date.now()): Bo
     if (reworkCount >= REWORK_ALERT_THRESHOLD) {
       repeatRework.push(buildBottleneckRow(card, ageDays));
     }
-    if (card.status === "blocked" && ageDays >= LONG_BLOCKED_DAYS) {
+    if ((card.status as string) === "blocked" && ageDays >= LONG_BLOCKED_DAYS) {
       longBlocked.push(buildBottleneckRow(card, ageDays));
     }
   }

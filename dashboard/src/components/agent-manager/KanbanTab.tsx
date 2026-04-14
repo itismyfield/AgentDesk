@@ -797,6 +797,11 @@ export default function KanbanTab({
   }, [issues, activeIssueNumbers, cardTypeFilter]);
 
   const totalVisible = filteredCards.length + backlogIssues.length;
+  const selectedRepoLabel = selectedRepo || tr("전체", "All");
+  const selectedAgentScopeLabel = selectedAgentId
+    ? (agents.find((a) => a.id === selectedAgentId)?.name ?? selectedAgentId)
+    : tr("전체", "All");
+  const deferredDodCount = filteredCards.filter((c) => (c as any).dod_status === "deferred").length;
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
   const boardColumns = useMemo(() => effectiveColumnDefs.filter((column) =>

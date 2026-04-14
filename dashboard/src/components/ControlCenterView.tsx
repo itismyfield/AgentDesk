@@ -1,10 +1,8 @@
 import { useCallback, useMemo } from "react";
+import type { Agent, CompanySettings, Department, DispatchedSession, Office, RoundTableMeeting } from "../types";
+import {
   NOTIFICATION_TYPE_COLORS,
   type Notification,
-import type { Agent, CompanySettings, Department, DispatchedSession, Office } from "../types";
-import type { Agent, CompanySettings, Department, DispatchedSession, Office, RoundTableMeeting } from "../types";
-import type { Notification } from "./NotificationCenter";
-import {
 } from "./NotificationCenter";
 import AgentManagerView from "./AgentManagerView";
 import OfficeManagerView from "./OfficeManagerView";
@@ -105,11 +103,6 @@ export default function ControlCenterView({
 }: ControlCenterViewProps) {
   const t = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const recentNotifications = notifications.slice(0, 3);
-  const selectedOfficeName = selectedOfficeId
-    ? offices.find((office) => office.id === selectedOfficeId)?.name_ko
-      || offices.find((office) => office.id === selectedOfficeId)?.name
-      || selectedOfficeId
-    : t("전체", "All");
   const organizationPaneSummary = organizationPane === "dispatch"
     ? t(
       "실시간 파견 세션을 확인하고, 부서 연결과 상태 점검을 한 흐름에서 처리합니다.",
@@ -231,7 +224,7 @@ export default function ControlCenterView({
               <SurfaceMetricPill
                 tone="warn"
                 label={t("미해결 회의", "Open Meetings")}
-                value={unresolvedMeetings}
+                value={0}
                 className="flex-1 sm:flex-none"
               />
             </div>
@@ -270,19 +263,9 @@ export default function ControlCenterView({
               description={isKo ? section.descriptionKo : section.descriptionEn}
               count={section.count}
               active={controlTab === section.id}
-              tone={section.id === "settings" ? "accent" : section.id === "meetings" ? "info" : "neutral"}
+              tone={section.id === "settings" ? "accent" : "neutral"}
               onClick={() => onControlTabChange(section.id)}
-              className="rounded-lg px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors"
-              style={{
-                background: controlTab === section.id ? "rgba(99,102,241,0.16)" : "transparent",
-                color: controlTab === section.id ? "#a5b4fc" : "var(--th-text-muted)",
-              }}
-            >
-              {isKo ? section.labelKo : section.labelEn}
-              {section.count !== undefined && (
-                <span className="ml-1 opacity-60">{section.count}</span>
-              )}
-            </button>
+            />
           ))}
         </div>
       </div>
@@ -308,8 +291,8 @@ export default function ControlCenterView({
                 actions={(
                   <>
                     <SurfaceSegmentButton
-                      onClick={() => onOrganizationPaneChange("directory")}
-                      active={organizationPane === "directory"}
+                      onClick={() => onOrganizationPaneChange("agents")}
+                      active={organizationPane === "agents"}
                       tone="info"
                     >
                       {t("에이전트 디렉터리", "Agent Directory")}

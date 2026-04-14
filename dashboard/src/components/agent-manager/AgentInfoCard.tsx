@@ -261,6 +261,8 @@ export default function AgentInfoCard({
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
   const [loadingBindings, setLoadingBindings] = useState(true);
+  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
+  const [loadingAudit, setLoadingAudit] = useState(true);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
@@ -504,6 +506,11 @@ export default function AgentInfoCard({
   const roleMapBindings = discordBindings.filter(
     (binding) => inferBindingSource(binding) === "role-map",
   );
+  const dbBindings = discordBindings.filter((binding) => inferBindingSource(binding) !== "role-map");
+  const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
+    { label: tr("Agent ID", "Agent ID"), value: agent.id },
+    { label: tr("이름", "Name"), value: agent.name },
+  ];
   const routingChips = [
     {
       label: "DB",
@@ -545,9 +552,7 @@ export default function AgentInfoCard({
     {
       label: "Discord",
       value: `${discordBindings.length}`,
-      fullValue: `${discordBindings.length}`,
-      fullLabel: tr("Discord 경로", "Discord Routes"),
-      tone: discordBindings.length > 0 ? "#a78bfa" : "#94a3b8",
+      tone: discordBindings.length > 0 ? "#10b981" : "#94a3b8",
     },
     {
       label: "ADK",
@@ -557,71 +562,10 @@ export default function AgentInfoCard({
       tone: workingLinkedSessions.length > 0 ? "#38bdf8" : "#94a3b8",
     },
   ];
-  const renderLinkedSessionCard = (
-    session: DispatchedSession,
-    emphasized: boolean,
-  ) => {
-    const providerTone =
-      session.provider === "codex"
-        ? { bg: "rgba(56,189,248,0.18)", text: "#38bdf8", label: "Codex" }
-        : session.provider === "gemini"
-          ? { bg: "rgba(250,204,21,0.18)", text: "#facc15", label: "Gemini" }
-          : session.provider === "qwen"
-            ? { bg: "rgba(34,197,94,0.18)", text: "#86efac", label: "Qwen" }
-            : { bg: "rgba(167,139,250,0.18)", text: "#c4b5fd", label: "Claude" };
-
-    return (
-      <div
-        key={session.id}
-        className="flex items-start justify-between gap-2 rounded-xl border px-3 py-2"
-        style={{
-          borderColor: emphasized
-            ? "rgba(16,185,129,0.26)"
-            : "rgba(148,163,184,0.12)",
-          background: emphasized
-            ? "rgba(16,185,129,0.08)"
-            : "var(--th-bg-surface)",
-        }}
-      >
-        <div className="min-w-0">
-          <div
-            className="text-xs font-medium truncate"
-            style={{ color: "var(--th-text-primary)" }}
-          >
-            {session.name || session.session_key}
-          </div>
-          <div
-            className="mt-0.5 text-xs truncate"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {session.session_info || session.model || "AgentDesk session"}
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-          <span
-            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-            style={{
-              background: providerTone.bg,
-              color: providerTone.text,
-            }}
-          >
-            {providerTone.label}
-          </span>
-          <span
-            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-            style={{
-              background: emphasized
-                ? "rgba(16,185,129,0.15)"
-                : "rgba(100,116,139,0.15)",
-              color: emphasized ? "#34d399" : "#94a3b8",
-            }}
-          >
-            {emphasized ? tr("작업중", "Working") : tr("대기", "Idle")}
-          </span>
-        </div>
-      </div>
-    );
-  };
+  const primaryName = localeName(locale, agent);
+  const secondaryName = locale === "en" ? agent.name_ko || "" : agent.name;
+  const levelInfo = getAgentLevel(agent.stats_xp);
+  const levelTitle = getAgentTitle(agent.stats_xp, isKo);
 
   return (
     <div
@@ -639,757 +583,88 @@ export default function AgentInfoCard({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`${localeName(locale, agent)} — ${tr("직원 상세", "Agent Details")}`}
+        aria-label={`${primaryName} — ${tr("직원 상세", "Agent Details")}`}
         className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[32px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          backdropFilter: "blur(20px)",
-          paddingBottom: "max(env(safe-area-inset-bottom), 0px)",
           WebkitOverflowScrolling: "touch",
           touchAction: "pan-y",
         }}
       >
-        {/* Header */}
-        <div
-          className="flex items-center gap-4 p-5"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div className="relative shrink-0">
-            <AgentAvatar
-              agent={agent}
-              spriteMap={spriteMap}
-              size={56}
-              rounded="xl"
-            />
-            <div
-              className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
-              style={{ borderColor: "var(--th-card-bg)" }}
-            />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div
-              className="font-bold text-base"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              {localeName(locale, agent)}
-            </div>
-            {(() => {
-              const primary = localeName(locale, agent);
-              const sub = locale === "en" ? agent.name_ko || "" : agent.name;
-              return primary !== sub && sub ? (
+        <div className="space-y-4">
+          <SurfaceSection
+            eyebrow={tr("직원 상세", "Agent Details")}
+            title={primaryName}
+            description={primaryName !== secondaryName && secondaryName ? secondaryName : undefined}
+            actions={(
+              <SurfaceActionButton onClick={onClose} tone="neutral" aria-label="Close">
+                {tr("닫기", "Close")}
+              </SurfaceActionButton>
+            )}
+          >
+            <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
+              <div className="relative shrink-0">
+                <AgentAvatar agent={agent} spriteMap={spriteMap} size={64} rounded="xl" />
                 <div
-                  className="text-xs mt-0.5"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {sub}
-                </div>
-              ) : null;
-            })()}
-            <div className="flex items-center gap-1 mt-1">
-              {editingAlias ? (
-                <input
-                  autoFocus
-                  value={aliasValue}
-                  onChange={(e) => setAliasValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") saveAlias();
-                    if (e.key === "Escape") {
-                      setEditingAlias(false);
-                      setAliasValue(agent.alias ?? "");
-                    }
-                  }}
-                  onBlur={saveAlias}
-                  disabled={savingAlias}
-                  placeholder={tr("별명 입력", "Enter alias")}
-                  className="text-xs px-1.5 py-0.5 rounded border outline-none"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    borderColor: "var(--th-input-border)",
-                    color: "var(--th-text-primary)",
-                    width: "120px",
-                  }}
+                  className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
+                  style={{ borderColor: "var(--th-card-bg)" }}
                 />
-              ) : (
-                <button
-                  onClick={() => {
-                    setAliasValue(agent.alias ?? "");
-                    setEditingAlias(true);
-                  }}
-                  className="text-xs px-1.5 py-0.5 rounded hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-                  style={{
-                    color: agent.alias
-                      ? "var(--th-text-secondary)"
-                      : "var(--th-text-muted)",
-                  }}
-                  title={tr("별명 편집", "Edit alias")}
-                >
-                  {agent.alias
-                    ? `aka ${agent.alias}`
-                    : `+ ${tr("별명", "alias")}`}
-                </button>
-              )}
-            </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <span
-                className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
-                style={{
-                  background:
-                    agent.status === "working"
-                      ? "rgba(16,185,129,0.15)"
-                      : agent.status === "break"
-                        ? "rgba(245,158,11,0.15)"
-                        : agent.status === "offline"
-                          ? "rgba(239,68,68,0.15)"
-                          : "rgba(100,116,139,0.15)",
-                  color:
-                    agent.status === "working"
-                      ? "#34d399"
-                      : agent.status === "break"
-                        ? "#fbbf24"
-                        : agent.status === "offline"
-                          ? "#f87171"
-                          : "#94a3b8",
-                }}
-              >
-                {isKo
-                  ? statusLabel[agent.status]?.ko
-                  : statusLabel[agent.status]?.en}
-              </span>
-              {agent.status === "working" && sourceLabel && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "rgba(99,102,241,0.18)",
-                    color: "#a5b4fc",
-                  }}
-                >
-                  {sourceLabel}
-                </span>
-              )}
-              {dept && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {dept.icon} {localeName(locale, dept)}
-                </span>
-              )}
-              {!dept && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {tr("미배정", "Unassigned")}
-                </span>
-              )}
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
-            style={{ color: "var(--th-text-muted)" }}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-
-        <DetailAccordion
-          title={tr("트랜스크립트", "Transcript")}
-          subtitle={tr(
-            "완료된 턴을 다시 살펴보고 필요한 로그만 펼쳐 봅니다.",
-            "Replay completed turns and expand only the logs you need.",
-          )}
-          badge={tr("최근 8개", "Recent 8")}
-          open={transcriptOpen}
-          onToggle={() => setTranscriptOpen((prev) => !prev)}
-        >
-          <TurnTranscriptPanel
-            source={{
-              type: "agent",
-              id: agent.id,
-              refreshSeed: `${agent.status}:${agent.session_info ?? ""}:${agent.current_task_id ?? ""}`,
-            }}
-            isKo={isKo}
-            tr={tr}
-            embedded
-          />
-        </DetailAccordion>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("소속 부서", "Department")}
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedDeptId}
-              onChange={(e) => void saveDepartment(e.target.value)}
-              disabled={savingDept}
-              className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="">{tr("— 미배정 —", "— Unassigned —")}</option>
-              {departments.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.icon} {localeName(locale, d)}
-                </option>
-              ))}
-            </select>
-            <span
-              className="text-xs shrink-0"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {savingDept ? tr("저장 중...", "Saving...") : null}
-            </span>
-          </div>
-        </div>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("메인 Provider", "Main Provider")}
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedProvider}
-              onChange={(e) => void saveProvider(e.target.value)}
-              disabled={savingProvider}
-              className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="claude">Claude</option>
-              <option value="codex">Codex</option>
-              <option value="gemini">Gemini</option>
-              <option value="qwen">Qwen</option>
-            </select>
-            <span
-              className="text-xs shrink-0"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {savingProvider ? tr("저장 중...", "Saving...") : null}
-            </span>
-          </div>
-        </div>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("소속 오피스", "Offices")}
-          </div>
-          {loadingOffices ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : officeMemberships.length === 0 ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 오피스가 없습니다", "No offices")}
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {officeMemberships.map((office) => {
-                const assigned = office.assigned;
-                const savingOffice = !!savingOfficeIds[office.id];
-
-                return (
-                  <button
-                    key={office.id}
-                    onClick={() => void toggleOfficeMembership(office)}
-                    disabled={savingOffice}
-                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
-                    style={
-                      assigned
-                        ? { background: office.color, color: "#ffffff" }
-                        : {
-                            background: "var(--th-bg-surface)",
-                            color: "var(--th-text-secondary)",
-                            border: "1px solid var(--th-card-border)",
-                          }
-                    }
-                  >
-                    <span>
-                      {office.icon} {localeName(locale, office)}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <DetailAccordion
-          title={tr("세션", "Sessions")}
-          subtitle={tr(
-            "working 세션은 바로 보이고 idle 세션은 접어 둡니다.",
-            "Working sessions stay visible while idle sessions are tucked away.",
-          )}
-          badge={
-            loadingClaudeSessions
-              ? tr("불러오는 중", "Loading")
-              : `${workingLinkedSessions.length}/${claudeSessions.length}`
-          }
-          open={sessionsOpen}
-          onToggle={() => setSessionsOpen((prev) => !prev)}
-        >
-          <div className="space-y-3">
-            <div
-              className="rounded-xl border px-3 py-3"
-              style={{
-                borderColor: "rgba(148,163,184,0.12)",
-                background: "var(--th-bg-surface)",
-              }}
-            >
-              <div
-                className="text-xs font-semibold uppercase tracking-widest"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("현재 작업", "Current Work")}
               </div>
-              <div
-                className="mt-2 text-xs leading-relaxed"
-                style={{ color: "var(--th-text-primary)" }}
-              >
-                {currentWorkSummary ||
-                  tr("현재 작업 설명이 없습니다", "No current work detail")}
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {currentWorkElapsedMs != null && (
-                  <span
-                    className="rounded-lg px-2 py-1 text-xs"
-                    style={{
-                      background: "rgba(59,130,246,0.14)",
-                      color: "#93c5fd",
-                    }}
-                  >
-                    {tr("경과", "Elapsed")}:{" "}
-                    {formatElapsedCompact(currentWorkElapsedMs, isKo)}
-                  </span>
-                )}
-                <span
-                  className="rounded-lg px-2 py-1 text-xs"
-                  style={{
-                    background: "rgba(56,189,248,0.14)",
-                    color: "#67e8f9",
-                  }}
-                >
-                  AgentDesk {workingLinkedSessions.length}/{claudeSessions.length}
-                </span>
-              </div>
-              {currentWorkDetails.length > 0 && (
-                <div className="mt-3 space-y-1">
-                  {currentWorkDetails.map((line, idx) => (
-                    <div
-                      key={`${line}:${idx}`}
-                      className="text-xs"
-                      style={{ color: "var(--th-text-secondary)" }}
-                    >
-                      • {line}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {agent.session_info && (
-              <div
-                className="rounded-xl border px-3 py-3"
-                style={{
-                  borderColor: "rgba(148,163,184,0.12)",
-                  background: "rgba(255,255,255,0.03)",
-                }}
-              >
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("세션 메모", "Session Note")}
-                </div>
-                <div
-                  className="mt-2 text-xs leading-relaxed"
-                  style={{ color: "var(--th-text-secondary)" }}
-                >
-                  {agent.session_info}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}
-                  {!loadingClaudeSessions && ` (${claudeSessions.length})`}
-                </div>
-                {!loadingClaudeSessions && idleLinkedSessions.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setIdleSessionsOpen((prev) => !prev)}
-                    className="rounded-full px-2 py-1 text-xs"
-                    style={{
-                      background: "rgba(148,163,184,0.12)",
-                      color: "var(--th-text-muted)",
-                    }}
-                  >
-                    {idleSessionsOpen
-                      ? tr("idle 접기", "Hide idle")
-                      : tr(
-                          `idle ${idleLinkedSessions.length}개`,
-                          `Idle ${idleLinkedSessions.length}`,
-                        )}
-                  </button>
-                )}
-              </div>
-
-              {loadingClaudeSessions ? (
-                <div
-                  className="text-xs py-1"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("불러오는 중...", "Loading...")}
-                </div>
-              ) : claudeSessions.length === 0 ? (
-                <div
-                  className="text-xs py-1"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr(
-                    "연결된 AgentDesk 세션 없음",
-                    "No linked AgentDesk sessions",
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {workingLinkedSessions.length > 0 ? (
-                    <div className="space-y-1.5">
-                      {workingLinkedSessions.map((session) =>
-                        renderLinkedSessionCard(session, true),
-                      )}
-                    </div>
+              <div className="min-w-0 flex-1 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {editingAlias ? (
+                    <input
+                      autoFocus
+                      value={aliasValue}
+                      onChange={(e) => setAliasValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveAlias(); if (e.key === "Escape") { setEditingAlias(false); setAliasValue(agent.alias ?? ""); } }}
+                      onBlur={saveAlias}
+                      disabled={savingAlias}
+                      placeholder={tr("별명 입력", "Enter alias")}
+                      className="rounded-xl border px-2 py-1 text-xs outline-none"
+                      style={{
+                        background: "var(--th-bg-surface)",
+                        borderColor: "var(--th-input-border)",
+                        color: "var(--th-text-primary)",
+                        width: "140px",
+                      }}
+                    />
                   ) : (
-                    <div
-                      className="rounded-xl px-3 py-2 text-xs"
-                      style={{
-                        background: "rgba(148,163,184,0.08)",
-                        color: "var(--th-text-muted)",
-                      }}
+                    <SurfaceActionButton
+                      onClick={() => { setAliasValue(agent.alias ?? ""); setEditingAlias(true); }}
+                      tone="neutral"
+                      compact
+                      title={tr("별명 편집", "Edit alias")}
                     >
-                      {tr(
-                        "현재 working 세션은 없습니다.",
-                        "There are no working sessions right now.",
-                      )}
-                    </div>
+                      {agent.alias ? `aka ${agent.alias}` : `+ ${tr("별명", "alias")}`}
+                    </SurfaceActionButton>
                   )}
-
-                  {idleLinkedSessions.length > 0 && !idleSessionsOpen && (
-                    <div
-                      className="rounded-xl px-3 py-2 text-xs"
-                      style={{
-                        background: "rgba(148,163,184,0.08)",
-                        color: "var(--th-text-muted)",
-                      }}
-                    >
-                      {tr(
-                        `idle 세션 ${idleLinkedSessions.length}개는 접혀 있습니다.`,
-                        `${idleLinkedSessions.length} idle sessions are tucked away.`,
-                      )}
-                    </div>
-                  )}
-
-                  {idleLinkedSessions.length > 0 && idleSessionsOpen && (
-                    <div className="space-y-1.5">
-                      {idleLinkedSessions.map((session) =>
-                        renderLinkedSessionCard(session, false),
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </DetailAccordion>
-
-        {warnings.length > 0 && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("이상 징후", "Warnings")}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {warnings.map((warning) => (
-                <span
-                  key={warning.code}
-                  className="text-xs px-2 py-1 rounded-lg"
-                  style={{
-                    background:
-                      warning.severity === "error"
-                        ? "rgba(239,68,68,0.14)"
-                        : warning.severity === "warning"
-                          ? "rgba(245,158,11,0.14)"
-                          : "rgba(96,165,250,0.14)",
-                    color:
-                      warning.severity === "error"
-                        ? "#fca5a5"
-                        : warning.severity === "warning"
-                          ? "#fcd34d"
-                          : "#93c5fd",
-                  }}
-                >
-                  {isKo ? warning.ko : warning.en}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <DetailAccordion
-          title={tr("라우팅", "Routing")}
-          subtitle={tr(
-            "RoleMap/Primary/Alt/Codex가 이 agent의 Discord 연결 경로를 설명합니다.",
-            "RoleMap/Primary/Alt/Codex explain how this agent is wired to Discord.",
-          )}
-          badge={`${discordBindings.length}`}
-          open={routingOpen}
-          onToggle={() => setRoutingOpen((prev) => !prev)}
-        >
-          <div className="space-y-3">
-            <div className="overflow-x-auto pb-1">
-              <div className="flex min-w-max items-center gap-2">
-                {routingChips.map((chip) => (
-                  <div
-                    key={chip.label}
-                    className="flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1 text-xs"
-                    style={{
-                      borderColor: `${chip.tone}44`,
-                      background: `${chip.tone}14`,
-                    }}
-                    title={`${chip.fullLabel}: ${chip.fullValue}`}
-                  >
-                    <span style={{ color: "var(--th-text-muted)" }}>
-                      {chip.label}
-                    </span>
-                    <span className="font-medium" style={{ color: chip.tone }}>
-                      {chip.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {roleMapBindings.length > 0 && (
-              <div
-                className="text-xs"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr(
-                  "RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.",
-                  "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
-                )}
-              </div>
-            )}
-
-            {discordBindings.length === 0 ? (
-              <div
-                className="text-xs py-1"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("연결된 Discord 경로 없음", "No Discord routes")}
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {discordBindings.map((binding) => {
-                  const source = inferBindingSource(binding);
-                  const sourcePill = bindingSourceLabel(source);
-                  const subtitle =
-                    binding.counterModelChannelId &&
-                    binding.counterModelChannelId !== binding.channelId
-                      ? `counter: ${binding.counterModelChannelId}`
-                      : null;
-
-                  return (
-                    <div
-                      key={`${binding.channelId}:${source}`}
-                      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5"
-                      style={{ background: "var(--th-bg-surface)" }}
-                    >
-                      <span className="text-sm">💬</span>
-                      <div className="min-w-0 flex-1">
-                        <div
-                          className="text-xs font-medium truncate"
-                          style={{ color: "var(--th-text-primary)" }}
-                        >
-                          {binding.channelId}
-                        </div>
-                        {subtitle && (
-                          <div
-                            className="mt-0.5 text-xs truncate"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            {subtitle}
-                          </div>
-                        )}
-                      </div>
-                      <span
-                        className="rounded px-1.5 py-0.5 text-xs"
-                        style={{
-                          background: "rgba(88,101,242,0.15)",
-                          color: "#7289da",
-                        }}
-                      >
-                        {sourcePill}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </DetailAccordion>
-
-        {/* Personality */}
-        {agent.personality && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-1.5"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("성격", "Personality")}
-            </div>
-            <div
-              className="text-xs leading-relaxed whitespace-pre-wrap"
-              style={{ color: "var(--th-text-secondary)" }}
-            >
-              {agent.personality}
-            </div>
-          </div>
-        )}
-
-        {/* Cron Jobs */}
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("크론 작업", "Cron Jobs")}{" "}
-            {!loadingCron && `(${cronJobs.length})`}
-          </div>
-          {loadingCron ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : cronJobs.length === 0 ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 크론 작업이 없습니다", "No cron jobs")}
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {cronJobs.map((job) => (
-                <div
-                  key={job.id}
-                  className="flex items-start gap-2 px-2.5 py-2 rounded-lg"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
                   <span
-                    className={`mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${
-                      job.enabled
-                        ? job.state?.lastStatus === "ok"
-                          ? "bg-emerald-400"
-                          : "bg-amber-400"
-                        : "bg-slate-500"
-                    }`}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div
-                      className="text-xs font-medium truncate"
-                      style={{ color: "var(--th-text-primary)" }}
-                      title={job.name}
-                    >
-                      {job.name}
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                      <span
-                        className="text-xs font-mono"
-                        style={{ color: "var(--th-text-muted)" }}
-                      >
-                        {formatSchedule(job.schedule, isKo)}
-                      </span>
-                      {job.state?.lastRunAtMs && (
-                        <span
-                          className="text-xs"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {tr("최근:", "Last:")}{" "}
-                          {timeAgo(job.state.lastRunAtMs, isKo)}
-                          {job.state.lastDurationMs != null &&
-                            ` (${formatDuration(job.state.lastDurationMs)})`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {!job.enabled && (
+                    className="rounded-full px-2 py-0.5 text-xs font-medium"
+                    style={{
+                      background: agent.status === "working" ? "rgba(16,185,129,0.15)" :
+                        agent.status === "break" ? "rgba(245,158,11,0.15)" :
+                        agent.status === "offline" ? "rgba(239,68,68,0.15)" :
+                        "rgba(100,116,139,0.15)",
+                      color: agent.status === "working" ? "#34d399" :
+                        agent.status === "break" ? "#fbbf24" :
+                        agent.status === "offline" ? "#f87171" :
+                        "#94a3b8",
+                    }}
+                  >
+                    {isKo ? statusLabel[agent.status]?.ko : statusLabel[agent.status]?.en}
+                  </span>
+                  {agent.status === "working" && sourceLabel && (
                     <span
-                      className="text-xs px-1.5 py-0.5 rounded shrink-0"
+                      className="rounded-full px-2 py-0.5 text-xs"
                       style={{
-                        background: "rgba(100,116,139,0.2)",
-                        color: "#94a3b8",
+                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                        color: "var(--th-accent-primary)",
                       }}
                     >
-                      {tr("비활성", "Off")}
+                      {sourceLabel}
                     </span>
                   )}
                   <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
@@ -1761,7 +1036,7 @@ export default function AgentInfoCard({
                         {log.summary}
                       </div>
                       <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        {log.action} • {timeAgo(log.created_at, isKo)}
+                        {log.action} • {timeAgo(log.created_at ?? log.ts, isKo)}
                       </div>
                     </SurfaceCard>
                   ))}

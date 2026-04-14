@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
+import { getStaleLinkedSessions } from "../agent-insights";
 import type {
   Agent,
   CompanySettings,
   DashboardStats,
+  DispatchedSession,
   RoundTableMeeting,
 } from "../types";
 import {
@@ -25,45 +27,56 @@ import {
   type RankedAgent,
 } from "./dashboard/HeroSections";
 import {
+  DashboardDeptAndSquad,
+  type DepartmentPerformance,
+} from "./dashboard/OpsSections";
+import {
   AchievementWidget,
-  AutoQueueHistoryWidget,
-  BottleneckWidget,
+  ActivityFeedWidget,
   CookingHeartRoleBoardWidget,
   CronTimelineWidget,
+  GitHubIssuesWidget,
+  HeatmapWidget,
+  KanbanOpsWidget,
   MachineStatusWidget,
   MvpWidget,
   SkillTrendWidget,
+  StreakWidget,
 } from "./dashboard/ExtraWidgets";
 import HealthWidget from "./dashboard/HealthWidget";
-import { type TFunction } from "./dashboard/model";
+import RateLimitWidget from "./dashboard/RateLimitWidget";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
-import { dashboardButton, dashboardCard } from "./dashboard/ui";
+import { DEPT_COLORS, useNow, type TFunction } from "./dashboard/model";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
-const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
 
-type DashboardKanbanSignal = "review" | "blocked" | "requested" | "stalled";
+type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
   agents: Agent[];
+  sessions: DispatchedSession[];
   meetings: RoundTableMeeting[];
   settings: CompanySettings;
   onSelectAgent?: (agent: Agent) => void;
-  onOpenKanbanSignal?: (signal: DashboardKanbanSignal) => void;
+  onOpenKanbanSignal?: (signal: PulseKanbanSignal) => void;
   onOpenDispatchSessions?: () => void;
   onOpenSettings?: () => void;
-  onRefreshMeetings: () => void;
+  onOpenMeetings?: () => void;
 }
 
 export default function DashboardPageView({
   stats,
   agents,
+  sessions,
   meetings,
   settings,
   onSelectAgent,
+  onOpenKanbanSignal,
+  onOpenDispatchSessions,
   onOpenSettings,
-  onRefreshMeetings,
+  onOpenMeetings,
 }: DashboardPageViewProps) {
   const language = settings.language;
   const localeTag = language === "ko" ? "ko-KR" : language === "ja" ? "ja-JP" : language === "zh" ? "zh-CN" : "en-US";
@@ -74,8 +87,9 @@ export default function DashboardPageView({
     [language],
   );
 
+  const { date, time, briefing } = useNow(localeTag, t);
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
-  const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("30d");
+  const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("7d");
 
   useEffect(() => {
     let mounted = true;
@@ -84,7 +98,7 @@ export default function DashboardPageView({
         const data = await getSkillRanking(skillWindow, 10);
         if (mounted) setSkillRanking(data);
       } catch {
-        // Ignore auth/network errors in dashboard widgets.
+        // ignore auth/network errors in pulse widgets
       }
     };
 
@@ -101,7 +115,7 @@ export default function DashboardPageView({
       <div className="flex items-center justify-center h-full" style={{ color: "var(--th-text-muted)" }}>
         <div className="text-center">
           <div className="text-4xl mb-4 opacity-30">📊</div>
-          <div>{t({ ko: "대시보드 로딩 중...", en: "Loading dashboard...", ja: "ダッシュボード読み込み中...", zh: "仪表板加载中..." })}</div>
+          <div>{t({ ko: "펄스 로딩 중...", en: "Loading pulse...", ja: "Pulse 読み込み中...", zh: "Pulse 加载中..." })}</div>
         </div>
       </div>
     );
@@ -132,6 +146,14 @@ export default function DashboardPageView({
       color: "#94a3b8",
       icon: "⏸️",
     },
+    {
+      id: "dispatched",
+      label: t({ ko: "파견 인력", en: "Dispatched", ja: "派遣", zh: "派遣" }),
+      value: stats.dispatched_count,
+      sub: t({ ko: "외부 세션", en: "External sessions", ja: "外部セッション", zh: "外部会话" }),
+      color: "#fbbf24",
+      icon: "⚡",
+    },
   ];
 
   const topAgents: RankedAgent[] = stats.top_agents.map((agent) => ({
@@ -152,6 +174,55 @@ export default function DashboardPageView({
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
   const maxXp = topAgents.reduce((max, agent) => Math.max(max, agent.xp), 1);
 
+  const totalXpAll = stats.departments.reduce((sum, department) => sum + (department.sum_xp ?? 0), 0);
+  const deptData: DepartmentPerformance[] = stats.departments.map((department, index) => ({
+    id: department.id,
+    name: department.name_ko || department.name,
+    icon: department.icon,
+    done: department.sum_xp ?? 0,
+    total: totalXpAll,
+    ratio: totalXpAll > 0 ? Math.round(((department.sum_xp ?? 0) / totalXpAll) * 100) : 0,
+    color: DEPT_COLORS[index % DEPT_COLORS.length],
+  }));
+
+  const workingAgents = agents.filter((agent) => agent.status === "working");
+  const idleAgents = agents.filter((agent) => agent.status !== "working");
+
+  const staleLinkedSessions = useMemo(() => getStaleLinkedSessions(sessions), [sessions]);
+  const reconnectingSessions = useMemo(
+    () => sessions.filter((session) => session.linked_agent_id && session.status === "disconnected"),
+    [sessions],
+  );
+  const activeMeetings = useMemo(
+    () => meetings.filter((meeting) => meeting.status === "in_progress"),
+    [meetings],
+  );
+  const recentMeetings = useMemo(
+    () => [...meetings].sort((a, b) => {
+      const left = a.started_at || a.created_at;
+      const right = b.started_at || b.created_at;
+      return right - left;
+    }).slice(0, 4),
+    [meetings],
+  );
+  const openMeetingFollowUps = useMemo(
+    () => meetings.reduce((sum, meeting) => sum + countOpenMeetingIssues(meeting), 0),
+    [meetings],
+  );
+
+  const xpChampion = useMemo(
+    () => [...stats.departments].sort((a, b) => (b.sum_xp ?? 0) - (a.sum_xp ?? 0))[0] ?? null,
+    [stats.departments],
+  );
+  const busiestDept = useMemo(
+    () => [...stats.departments].sort((a, b) => b.working_agents - a.working_agents)[0] ?? null,
+    [stats.departments],
+  );
+  const largestDept = useMemo(
+    () => [...stats.departments].sort((a, b) => b.total_agents - a.total_agents)[0] ?? null,
+    [stats.departments],
+  );
+
   return (
     <div
       className="mx-auto h-full w-full max-w-6xl min-w-0 space-y-5 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
@@ -163,6 +234,14 @@ export default function DashboardPageView({
       />
 
       <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
+
+      <HealthWidget t={t} />
+
+      <TokenAnalyticsSection
+        agents={agents}
+        t={t}
+        numberFormatter={numberFormatter}
+      />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
         <div className="space-y-4 min-w-0">
@@ -310,7 +389,7 @@ export default function DashboardPageView({
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <StreakWidget agents={agents} t={t} />
-          <AchievementWidget t={t} />
+          <AchievementWidget t={t} agents={agents} />
           <MvpWidget agents={agents} t={t} isKo={language === "ko"} />
         </div>
 
@@ -399,18 +478,7 @@ export default function DashboardPageView({
         >
           <SkillCatalogView embedded />
         </Suspense>
-      </section>
-
-      <section className="space-y-4">
-        <SectionHeader
-          title={t({ ko: "인프라", en: "Infrastructure", ja: "インフラ", zh: "基础设施" })}
-          subtitle={t({
-            ko: "머신 상태와 자동화 흐름만 유지합니다",
-            en: "Keep machine status and automation flow only",
-            ja: "マシン状態と自動化の流れだけを残します",
-            zh: "仅保留机器状态与自动化流向",
-          })}
-        />
+      </PulseSectionShell>
 
       <PulseSectionShell
         eyebrow={t({ ko: "Systems Floor", en: "Systems Floor", ja: "Systems Floor", zh: "Systems Floor" })}
@@ -429,19 +497,48 @@ export default function DashboardPageView({
         }}
       >
         <MachineStatusWidget t={t} />
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <CronTimelineWidget t={t} />
-          <AutoQueueHistoryWidget t={t} />
+          <HeatmapWidget agents={agents} t={t} />
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <CookingHeartRoleBoardWidget agents={agents} t={t} isKo={language === "ko"} />
+          <GitHubIssuesWidget t={t} repo={stats.kanban.top_repos[0]?.github_repo} />
         </div>
       </PulseSectionShell>
     </div>
   );
 }
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) {
+function countOpenMeetingIssues(meeting: RoundTableMeeting): number {
+  const totalIssues = meeting.proposed_issues?.length ?? 0;
+  if (meeting.status !== "completed" || totalIssues === 0) return 0;
+
+  const results = meeting.issue_creation_results ?? [];
+  if (results.length === 0) {
+    return Math.max(totalIssues - meeting.issues_created, 0);
+  }
+
+  const created = results.filter((result) => result.ok && result.discarded !== true).length;
+  const discarded = results.filter((result) => result.discarded === true).length;
+  return Math.max(totalIssues - created - discarded, 0);
+}
+
+function PulseSectionShell({
+  eyebrow,
+  title,
+  subtitle,
+  badge,
+  children,
+  style,
+}: {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  badge: string;
+  children: ReactNode;
+  style?: CSSProperties;
+}) {
   return (
     <SurfaceSection
       eyebrow={eyebrow}
@@ -643,33 +740,22 @@ function SkillRankingSnapshot({
   t: TFunction;
 }) {
   return (
-    <section
-      className={dashboardCard.accentStandard}
-      style={{
-        borderColor: "var(--th-border)",
-        background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 92%, #f59e0b 8%), var(--th-surface))",
-      }}
-    >
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
-            {t({ ko: "스킬 랭킹", en: "Skill Ranking", ja: "スキルランキング", zh: "技能排行" })}
-          </h3>
-          <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>
-            {t({ ko: "호출량 기준 상위 스킬과 에이전트", en: "Top skills and agents by call volume", ja: "呼び出し量ベースの上位スキルとエージェント", zh: "按调用量统计的热门技能与代理" })}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+    <SurfaceSubsection
+      title={t({ ko: "스킬 랭킹", en: "Skill Ranking", ja: "スキルランキング", zh: "技能排行" })}
+      description={t({
+        ko: "호출량 기준 상위 스킬과 에이전트를 같은 grammar로 정리합니다",
+        en: "Top skills and agents by call volume in the same surface grammar",
+        ja: "呼び出し量ベースの上位スキルとエージェントを同じ文法で整理",
+        zh: "用同一 surface 语法整理热门技能与代理",
+      })}
+      actions={(
+        <>
           {(["7d", "30d", "all"] as const).map((windowId) => (
             <SurfaceSegmentButton
               key={windowId}
               onClick={() => onChangeWindow(windowId)}
-              className={dashboardButton.sm}
-              style={{
-                borderColor: skillWindow === windowId ? "#f59e0b" : "var(--th-border)",
-                color: skillWindow === windowId ? "#f59e0b" : "var(--th-text-muted)",
-                background: skillWindow === windowId ? "rgba(245,158,11,0.12)" : "transparent",
-              }}
+              active={skillWindow === windowId}
+              tone="warn"
             >
               {windowId}
             </SurfaceSegmentButton>
