@@ -681,34 +681,10 @@ fn synchronize_shared_prompt(root: &Path) -> Result<(), String> {
 }
 
 fn shared_prompt_aliases(root: &Path) -> Vec<PathBuf> {
-    let mut aliases = vec![
+    vec![
         config_dir(root).join("_shared.md"),
         managed_agents_root(root).join("_shared.md"),
-        config_dir(root)
-            .join("role-context")
-            .join("_shared.prompt.md"),
-        root.join("role-context").join("_shared.prompt.md"),
-    ];
-
-    if let Some(home) =
-        current_home_dir().filter(|home| manages_home_shared_prompt_aliases(root, home))
-    {
-        aliases.push(home.join(".agentdesk").join("prompts").join("_shared.md"));
-        aliases.push(
-            home.join(".agentdesk")
-                .join("role-context")
-                .join("_shared.prompt.md"),
-        );
-    }
-
-    aliases.sort();
-    aliases.dedup();
-    aliases
-}
-
-fn manages_home_shared_prompt_aliases(root: &Path, home: &Path) -> bool {
-    let release_root = home.join(".adk").join("release");
-    same_canonical_path(root, &release_root)
+    ]
 }
 
 fn migrate_legacy_config_file(root: &Path) -> Result<(), String> {

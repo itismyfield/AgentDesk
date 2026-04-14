@@ -448,8 +448,15 @@ if [ -d "$PROMPTS_STAGED" ]; then
     [ -d "$ADK_REL/config/agents" ] && mv "$ADK_REL/config/agents" "$ADK_REL/config/agents.old"
     mv "$PROMPTS_STAGED" "$ADK_REL/config/agents"
     rm -rf "$ADK_REL/config/agents.old"
-    # Restore symlink for legacy compatibility
     [ ! -e "$ADK_REL/config/agents/_shared.md" ] && ln -s _shared.prompt.md "$ADK_REL/config/agents/_shared.md" 2>/dev/null || true
+
+    # Audit copy: one-way sync to ObsidianVault (non-blocking, failure is not fatal)
+    OBSIDIAN_AGENTS="$HOME/ObsidianVault/RemoteVault/adk-config/agents"
+    if [ -d "$OBSIDIAN_AGENTS" ]; then
+        rsync -a --delete "$ADK_REL/config/agents/" "$OBSIDIAN_AGENTS/" 2>/dev/null \
+            && echo "▸ Audit copy → ObsidianVault" \
+            || echo "▸ Audit copy to ObsidianVault failed (non-fatal)"
+    fi
 fi
 
 # Keep the user-facing CLI wrapper discoverable via PATH.
