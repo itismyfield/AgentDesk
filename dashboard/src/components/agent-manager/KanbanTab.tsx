@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import AutoQueuePanel from "./AutoQueuePanel";
@@ -157,9 +157,6 @@ export default function KanbanTab({
   const [assigningIssue, setAssigningIssue] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [draggingCardId, setDraggingCardId] = useState<string | null>(null);
-  const [dragOverStatus, setDragOverStatus] = useState<KanbanCardStatus | null>(null);
-  const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
   const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
   const [mobileBoardView, setMobileBoardView] = useState<MobileKanbanView>("summary");
@@ -899,64 +896,6 @@ export default function KanbanTab({
       setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
     } finally {
       setAssigningIssue(false);
-    }
-  };
-
-  const handleDrop = async (
-    targetStatus: KanbanCardStatus,
-    beforeCardId: string | null,
-    event: DragEvent<HTMLElement>,
-  ) => {
-    event.preventDefault();
-    setDragOverStatus(null);
-    setDragOverCardId(null);
-    setActionError(null);
-
-    // --- Backlog issue drop ---
-    const issueJson = event.dataTransfer.getData("application/x-backlog-issue");
-    if (issueJson) {
-      setDraggingCardId(null);
-      if (targetStatus === "backlog") return; // no-op: dropped back on backlog
-      try {
-        const issue = JSON.parse(issueJson) as GitHubIssue;
-        const autoAgent = resolveAgentFromLabels(issue.labels);
-        if (autoAgent) {
-          await handleDirectAssignIssue(issue, autoAgent.id);
-        } else {
-          // Open modal for manual agent selection
-          setAssignIssue(issue);
-          const repoSource = repoSources.find((s) => s.repo === selectedRepo);
-          setAssignAssigneeId(repoSource?.default_agent_id ?? "");
-        }
-      } catch (error) {
-        setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
-      }
-      return;
-    }
-
-    // --- Existing card drag ---
-    const draggedId = draggingCardId;
-    setDraggingCardId(null);
-    if (!draggedId) return;
-    if (beforeCardId === draggedId) return;
-    try {
-      if (targetStatus === "requested") {
-        const card = cardsById.get(draggedId);
-        await api.createDispatch({
-          kanban_card_id: draggedId,
-          to_agent_id: card?.assignee_agent_id ?? "",
-          title: card?.title ?? "Dispatch",
-        });
-        window.location.reload();
-      } else {
-        await onUpdateCard(draggedId, {
-          status: targetStatus,
-          before_card_id: beforeCardId,
-        });
-        invalidateCardActivity(draggedId);
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : tr("카드 이동에 실패했습니다.", "Failed to move card."));
     }
   };
 
@@ -1982,31 +1921,15 @@ export default function KanbanTab({
                           backlogIssues={backlogIssues}
                           backlogCount={backlogCount}
                           tr={tr}
-                          locale={locale}
                           compactBoard={compactBoard}
                           initialLoading={initialLoading}
                           loadingIssues={loadingIssues}
-                          draggingCardId={draggingCardId}
-                          dragOverStatus={dragOverStatus}
-                          dragOverCardId={dragOverCardId}
                           closingIssueNumber={closingIssueNumber}
                           assigningIssue={assigningIssue}
-                          dispatchMap={dispatchMap}
-                          dispatches={dispatches}
-                          nowMs={nowMs}
-                          cardsById={repoCardsById}
-                          childCardsByParentId={childCardsByParentId}
-                          liveToolStateByCardId={liveToolStateByCardId}
-                          repoSources={repoSources}
-                          selectedRepo={selectedRepo}
                           getAgentLabel={getAgentLabel}
                           resolveAgentFromLabels={resolveAgentFromLabels}
                           onCardClick={setSelectedCardId}
                           onBacklogIssueClick={setSelectedBacklogIssue}
-                          onSetDraggingCardId={setDraggingCardId}
-                          onSetDragOverStatus={setDragOverStatus}
-                          onSetDragOverCardId={setDragOverCardId}
-                          onDrop={handleDrop}
                           onCloseIssue={handleCloseIssue}
                           onDirectAssignIssue={handleDirectAssignIssue}
                           onOpenAssignModal={handleOpenAssignModal}

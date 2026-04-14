@@ -7,7 +7,7 @@ import {
 } from "react";
 
 import type { GitHubIssue } from "../../api";
-import type { KanbanCard, KanbanCardStatus, KanbanRepoSource, TaskDispatch } from "../../types";
+import type { KanbanCard, KanbanCardStatus } from "../../types";
 import KanbanColumn from "./KanbanColumn";
 import {
   BACKLOG_PAGE_SIZE,
@@ -23,9 +23,6 @@ import {
 // Stubs for read-only KanbanColumn usage (no drag-and-drop or agent features)
 // ---------------------------------------------------------------------------
 
-const emptyDispatchMap = new Map<string, TaskDispatch>();
-const emptyDispatches: TaskDispatch[] = [];
-const emptyRepoSources: KanbanRepoSource[] = [];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const noop = (() => {}) as any;
 const noopGetAgentLabel = (_id: string | null | undefined) => "—";
@@ -448,27 +445,15 @@ export default function KanbanBoard({
                     backlogIssues={[]}
                     backlogCount={columnCards.length}
                     tr={tr}
-                    locale="en"
                     compactBoard={compactBoard}
                     initialLoading={initialLoading}
                     loadingIssues={false}
-                    draggingCardId={null}
-                    dragOverStatus={null}
-                    dragOverCardId={null}
                     closingIssueNumber={null}
                     assigningIssue={false}
-                    dispatchMap={emptyDispatchMap}
-                    dispatches={emptyDispatches}
-                    repoSources={emptyRepoSources}
-                    selectedRepo={selectedRepo}
                     getAgentLabel={noopGetAgentLabel}
                     resolveAgentFromLabels={noopResolveAgent}
                     onCardClick={onCardClick}
                     onBacklogIssueClick={onBacklogIssueClick}
-                    onSetDraggingCardId={noop}
-                    onSetDragOverStatus={noop}
-                    onSetDragOverCardId={noop}
-                    onDrop={noop}
                     onCloseIssue={noop}
                     onDirectAssignIssue={noop}
                     onOpenAssignModal={noop}
