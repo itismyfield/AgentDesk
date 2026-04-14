@@ -31,10 +31,9 @@ var reviewAutomation = {
     if (!entry) return;
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var terminalState = agentdesk.pipeline.terminalState(cfg);
-    var pendingState = agentdesk.pipeline.forceOnlyTargets(agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg), cfg)[0];
 
     // #128: If card entered review with awaiting_dod (DoD incomplete),
-    // skip review dispatch — timeouts.js [D] will escalate to pending_decision after 15 min
+    // skip review dispatch — timeouts.js [D] will escalate to dilemma_pending after 15 min
     if (card.review_status === "awaiting_dod") {
       agentdesk.log.info("[review] Card " + card.id + " is awaiting_dod — skipping review dispatch");
       return;
@@ -85,14 +84,14 @@ var reviewAutomation = {
     // #117: Update canonical card_review_state
     agentdesk.reviewState.sync(card.id, "reviewing", { review_round: newRound });
 
-    // Check review round limit — exceed → pending_decision with PMD notification
+    // Check review round limit — exceed → dilemma_pending with PMD notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
     if (newRound > maxRounds) {
-      agentdesk.kanban.setStatus(card.id, pendingState);
-      agentdesk.kanban.setReviewStatus(card.id, "dilemma_pending", {blocked_reason: "Max review rounds (" + maxRounds + ") exceeded — PM decision needed"});
-      // #117: sync canonical review state
-      agentdesk.reviewState.sync(card.id, "dilemma_pending", { review_round: newRound });
-      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → " + pendingState);
+      escalateToManualIntervention(card.id, "Max review rounds (" + maxRounds + ") exceeded — PM decision needed", {
+        review: true,
+        reviewStateSync: { review_round: newRound }
+      });
+      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → dilemma_pending");
       notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
       return;
     }
@@ -460,8 +459,6 @@ function processVerdict(cardId, verdict, result) {
   var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
   var reviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_passed", cfg) || terminalState;
   var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
-  var forceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
-  var pendingState = forceTargets[0];
 
   var cardCheck = agentdesk.db.query(
     "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
@@ -595,10 +592,10 @@ function processVerdict(cardId, verdict, result) {
               agentdesk.log.warn("[review] Pipeline dispatch failed: " + e);
             }
           } else {
-            agentdesk.kanban.setStatus(cardId, pendingState);
-            agentdesk.db.execute(
-              "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
-              ["Pipeline stage '" + nextStage.stage_name + "' has no assigned agent", cardId]
+            escalateToManualIntervention(
+              cardId,
+              "Pipeline stage '" + nextStage.stage_name + "' has no assigned agent",
+              { review: true }
             );
           }
         }
@@ -710,11 +707,10 @@ function processVerdict(cardId, verdict, result) {
       var priorEmpty = priorRoundNotes.length === 0 || !priorRoundNotes[0].notes;
       if (priorEmpty) {
         agentdesk.log.warn("[review] #118 Empty notes for 2+ consecutive improve/reject rounds on " + cardId + " — escalating to PM");
-        agentdesk.kanban.setStatus(cardId, pendingState);
-        agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {
-          blocked_reason: "리뷰 피드백 없이 2회 이상 연속 " + verdict + " — 유사성 검사 불가, PM 판단 필요"
+        escalateToManualIntervention(cardId, "리뷰 피드백 없이 2회 이상 연속 " + verdict + " — 유사성 검사 불가, PM 판단 필요", {
+          review: true,
+          reviewStateSync: { last_verdict: verdict }
         });
-        agentdesk.reviewState.sync(cardId, "dilemma_pending", { last_verdict: verdict });
         notifyPmdPendingDecision(cardId,
           "리뷰 피드백(notes) 없이 2회 이상 연속 " + verdict + " — " +
           "카운터모델이 notes 없이 verdict를 제출하여 반복 finding 검출 불가");
@@ -737,10 +733,11 @@ function processVerdict(cardId, verdict, result) {
       // Already tried session reset after approach change → escalate to PM
       if (sessionResetRound) {
         agentdesk.log.warn("[review] #420 Session reset already attempted at R" + sessionResetRound +
-          ", findings still repeat at R" + currentRound + " → " + pendingState);
-        agentdesk.kanban.setStatus(cardId, pendingState);
-        agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {blocked_reason: "세션 리셋 후에도 동일 finding 반복 (R" + sessionResetRound + "→R" + currentRound + ") — PM 판단 필요"});
-        agentdesk.reviewState.sync(cardId, "dilemma_pending", { last_verdict: verdict });
+          ", findings still repeat at R" + currentRound + " → dilemma_pending");
+        escalateToManualIntervention(cardId, "세션 리셋 후에도 동일 finding 반복 (R" + sessionResetRound + "→R" + currentRound + ") — PM 판단 필요", {
+          review: true,
+          reviewStateSync: { last_verdict: verdict }
+        });
         notifyPmdPendingDecision(cardId, "세션 리셋 후에도 동일 finding 반복 — R" + sessionResetRound + "에서 세션 리셋을 시도했으나 R" + currentRound + "에서 같은 문제 재발");
         return;
       }

@@ -651,7 +651,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "force",
-                body_param("boolean", false, "Bypass guards for blocked/pending_decision states")
+                body_param("boolean", false, "Bypass guards for manual-intervention review/in-progress states")
                     .with_default(false),
             ),
             (

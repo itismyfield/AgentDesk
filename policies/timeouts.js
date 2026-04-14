@@ -4,10 +4,10 @@
  *
  * Hook: onTick (1분 간격 — Rust 서버에서 주기적으로 fire)
  *
- * [A] Requested 타임아웃 (requested_timeout_min, 기본 45분) → retry_count < 10이면 재시도 대기, ≥ 10이면 pending_decision
- * [B] In-Progress 스테일 (in_progress_stale_min, 기본 120분) → blocked
- * [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) → pending_decision
- * [D] DoD 대기 타임아웃 (15분) → pending_decision
+ * [A] Requested 타임아웃 (requested_timeout_min, 기본 45분) → retry_count < 10이면 재시도 대기, ≥ 10이면 수동 판단 필요
+ * [B] In-Progress 스테일 (in_progress_stale_min, 기본 120분) → 수동 판단 필요
+ * [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) → review(dilemma_pending)
+ * [D] DoD 대기 타임아웃 (15분) → review(dilemma_pending)
  * [E] 자동-수용 결정 타임아웃 → auto-accept + rework
  * [F] 디스패치 큐 타임아웃 (100분) → 제거
  * [G] 스테일 디스패치 정리 (24시간) → failed
@@ -18,7 +18,7 @@
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
  * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
- * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 pending_decision
+ * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 review(dilemma_pending)
  * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill + notify
  */
 
@@ -443,12 +443,9 @@ var timeouts = {
 
   _section_A: function() {
     // ─── [A] Requested 타임아웃 ─────────────────────
-    // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
+    // retry_count < 10이면 수동 판단 대신 failed만 마크 → [J]가 30초 후 재시도
     var aCfg = agentdesk.pipeline.getConfig();
     var aInitial = agentdesk.pipeline.kickoffState(aCfg);
-    var aInProgress = agentdesk.pipeline.nextGatedTarget(aInitial, aCfg);
-    var aForce = agentdesk.pipeline.forceOnlyTargets(aInitial, aCfg);
-    var aPending = aForce[0];
     var requestedInterval = getTimeoutInterval("requested_timeout_min", 45);
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
@@ -491,20 +488,9 @@ var timeouts = {
         agentdesk.log.warn("[timeout] Card " + rc.id + " requested timeout — retry " +
           rc.retry_count + "/" + MAX_DISPATCH_RETRIES + ", will auto-retry in 30s");
       } else {
-        // 10회 재시도 소진 → aPending + PMD 알림
-        agentdesk.kanban.setStatus(rc.id, aPending);
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = 'Timed out waiting for agent (" + MAX_DISPATCH_RETRIES + " retries exhausted)' WHERE id = ?",
-          [rc.id]
-        );
-        agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
-        // #231: Queue deduped PM notification — PM must decide next action
-        var cardInfo = agentdesk.db.query(
-          "SELECT title FROM kanban_cards WHERE id = ?",
-          [rc.id]
-        );
-        var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : rc.id;
-        _queuePMDecision(rc.id, cardTitle, MAX_DISPATCH_RETRIES + " retries exhausted");
+        var requestedReason = "Timed out waiting for agent (" + MAX_DISPATCH_RETRIES + " retries exhausted)";
+        escalateToManualIntervention(rc.id, requestedReason);
+        agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → manual intervention (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
       }
     }
   },
@@ -514,8 +500,6 @@ var timeouts = {
     var bCfg = agentdesk.pipeline.getConfig();
     var bInitial = agentdesk.pipeline.kickoffState(bCfg);
     var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg);
-    var bForce = agentdesk.pipeline.forceOnlyTargets(bInProgress, bCfg);
-    var bBlocked = bForce.length > 1 ? bForce[1] : bForce[0];
     var inProgressInterval = getTimeoutInterval("in_progress_stale_min", 120);
     var staleInProgress = agentdesk.db.query(
       "SELECT kc.id FROM kanban_cards kc " +
@@ -524,20 +508,10 @@ var timeouts = {
       [bInProgress]
     );
     for (var j = 0; j < staleInProgress.length; j++) {
-      agentdesk.kanban.setStatus(staleInProgress[j].id, bBlocked);
       var staleMin = parseInt(agentdesk.config.get("in_progress_stale_min"), 10) || 120;
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'Stalled: no activity for " + staleMin + "+ min' WHERE id = ?",
-        [staleInProgress[j].id]
-      );
-      agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
-      // #231: Queue deduped PM notification — PM must unblock
-      var stalledInfo = agentdesk.db.query(
-        "SELECT title FROM kanban_cards WHERE id = ?",
-        [staleInProgress[j].id]
-      );
-      var stalledTitle = (stalledInfo.length > 0) ? stalledInfo[0].title : staleInProgress[j].id;
-      _queuePMDecision(staleInProgress[j].id, stalledTitle, staleMin + "분+ 활동 없음 → blocked");
+      var stalledReason = "Stalled: no activity for " + staleMin + "+ min";
+      escalateToManualIntervention(staleInProgress[j].id, stalledReason);
+      agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → manual intervention");
     }
   },
 
@@ -547,8 +521,6 @@ var timeouts = {
     var cInitial = agentdesk.pipeline.kickoffState(cCfg);
     var cInProgress = agentdesk.pipeline.nextGatedTarget(cInitial, cCfg);
     var cReview = agentdesk.pipeline.nextGatedTarget(cInProgress, cCfg);
-    var cForce = agentdesk.pipeline.forceOnlyTargets(cInProgress, cCfg);
-    var cPending = cForce[0];
     var staleReviews = agentdesk.db.query(
       "SELECT kc.id as card_id " +
       "FROM kanban_cards kc " +
@@ -561,15 +533,9 @@ var timeouts = {
       [cReview]
     );
     for (var k = 0; k < staleReviews.length; k++) {
-      agentdesk.kanban.setStatus(staleReviews[k].card_id, cPending);
-      agentdesk.kanban.setReviewStatus(staleReviews[k].card_id, null, {suggestion_pending_at: null});
-      // #117: sync canonical review state
-      agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
-      agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
-      // #231: Queue deduped PM notification — PM must decide
-      var staleRevInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [staleReviews[k].card_id]);
-      var staleRevTitle = (staleRevInfo.length > 0) ? staleRevInfo[0].title : staleReviews[k].card_id;
-      _queuePMDecision(staleReviews[k].card_id, staleRevTitle, "stale review — dispatch 완료 30분+ verdict 없음 → pending_decision");
+      var staleReviewReason = "stale review — dispatch 완료 30분+ verdict 없음";
+      escalateToManualIntervention(staleReviews[k].card_id, staleReviewReason, { review: true });
+      agentdesk.log.warn("[timeout] Stale review → dilemma_pending: card " + staleReviews[k].card_id);
     }
   },
 
@@ -579,8 +545,6 @@ var timeouts = {
     var dInitial = agentdesk.pipeline.kickoffState(dCfg);
     var dInProgress = agentdesk.pipeline.nextGatedTarget(dInitial, dCfg);
     var dReview = agentdesk.pipeline.nextGatedTarget(dInProgress, dCfg);
-    var dForce = agentdesk.pipeline.forceOnlyTargets(dInProgress, dCfg);
-    var dPending = dForce[0];
     var stuckDod = agentdesk.db.query(
       "SELECT id FROM kanban_cards " +
       "WHERE status = ? AND review_status = 'awaiting_dod' " +
@@ -588,15 +552,9 @@ var timeouts = {
       [dReview]
     );
     for (var d = 0; d < stuckDod.length; d++) {
-      agentdesk.kanban.setStatus(stuckDod[d].id, dPending);
-      agentdesk.kanban.setReviewStatus(stuckDod[d].id, null, {suggestion_pending_at: null});
-      // #117: sync canonical review state
-      agentdesk.reviewState.sync(stuckDod[d].id, "idle");
-      agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
-      // #231: Queue deduped PM notification
-      var dodInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [stuckDod[d].id]);
-      var dodTitle = (dodInfo.length > 0) ? dodInfo[0].title : stuckDod[d].id;
-      _queuePMDecision(stuckDod[d].id, dodTitle, "DoD 대기 15분 초과 → pending_decision");
+      var dodReason = "DoD 대기 15분 초과";
+      escalateToManualIntervention(stuckDod[d].id, dodReason, { review: true });
+      agentdesk.log.warn("[timeout] DoD await timeout → dilemma_pending: card " + stuckDod[d].id);
     }
   },
 
@@ -609,8 +567,6 @@ var timeouts = {
     var eInProgress = agentdesk.pipeline.nextGatedTarget(eInitial, eCfg);
     var eReview = agentdesk.pipeline.nextGatedTarget(eInProgress, eCfg);
     var eReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(eReview, "review_rework", eCfg) || eInProgress;
-    var eForce = agentdesk.pipeline.forceOnlyTargets(eInProgress, eCfg);
-    var ePending = eForce[0];
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
@@ -672,13 +628,9 @@ var timeouts = {
           agentdesk.reviewState.sync(sc.id, "rework_pending", { last_decision: "auto_accept" });
           agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");
         } catch (e) {
-          // Dispatch failed — route to pending state instead
-          agentdesk.kanban.setStatus(sc.id, ePending);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET blocked_reason = 'Auto-accept rework dispatch failed: " + e + "' WHERE id = ?",
-            [sc.id]
-          );
-          agentdesk.log.error("[timeout] Failed to create rework dispatch for " + sc.id + ": " + e + " → pending_decision");
+          var autoAcceptReason = "Auto-accept rework dispatch failed: " + e;
+          escalateToManualIntervention(sc.id, autoAcceptReason, { review: true });
+          agentdesk.log.error("[timeout] Failed to create rework dispatch for " + sc.id + ": " + e + " → dilemma_pending");
         }
       } else {
         agentdesk.log.warn("[timeout] Auto-accepted card " + sc.id + " but no agent assigned — no rework dispatch");
@@ -696,10 +648,6 @@ var timeouts = {
   _section_G: function() {
     // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
     var gCfg = agentdesk.pipeline.getConfig();
-    var gInitial = agentdesk.pipeline.kickoffState(gCfg);
-    var gInProgress = agentdesk.pipeline.nextGatedTarget(gInitial, gCfg);
-    var gForce = agentdesk.pipeline.forceOnlyTargets(gInProgress, gCfg);
-    var gPending = gForce[0];
     var staleDispatches = agentdesk.db.query(
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
     );
@@ -712,10 +660,10 @@ var timeouts = {
       if (staleDispatches[sd].kanban_card_id) {
         var card = agentdesk.kanban.getCard(staleDispatches[sd].kanban_card_id);
         if (card && !agentdesk.pipeline.isTerminal(card.status, gCfg)) {
-          agentdesk.kanban.setStatus(staleDispatches[sd].kanban_card_id, gPending);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET blocked_reason = 'Stale dispatch auto-failed after 24h' WHERE id = ?",
-            [staleDispatches[sd].kanban_card_id]
+          escalateToManualIntervention(
+            staleDispatches[sd].kanban_card_id,
+            "Stale dispatch auto-failed after 24h",
+            { review: card.status === "review" }
           );
         }
       }
@@ -1383,22 +1331,14 @@ var timeouts = {
 
     // Orphan review = review state with no active dispatch after 5 min.
     // Instead of reimplementing OnReviewEnter safeguards, escalate to
-    // pending_decision so PMD can decide the correct action.
+    // review(dilemma_pending) so PMD can decide the correct action.
     // This avoids partial policy reimplementation (R1/R2 review feedback).
-    var nForce = agentdesk.pipeline.forceOnlyTargets(nInProgress, nCfg);
-    var nPending = nForce[0];
-
     for (var n = 0; n < orphanReviews.length; n++) {
       var oc = orphanReviews[n];
       agentdesk.log.warn("[timeout] Orphan review detected: card " + oc.id +
-        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch → pending_decision");
+        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch → dilemma_pending");
 
-      agentdesk.kanban.setStatus(oc.id, nPending);
-      agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
-      agentdesk.reviewState.sync(oc.id, "idle");
-
-      // #231: Queue deduped PM notification — PM must decide
-      _queuePMDecision(oc.id, (oc.title || oc.id), "orphan review — dispatch 없음 → pending_decision");
+      escalateToManualIntervention(oc.id, "orphan review — dispatch 없음", { review: true });
     }
   },
 

@@ -345,7 +345,7 @@ pub async fn submit_verdict(
             }),
         );
 
-        // Drain pending transitions: processVerdict may call setStatus("done"/"pending_decision")
+        // Drain pending transitions: processVerdict may call setStatus("done"/follow-up state)
         // which queues transitions in __pendingTransitions. Without draining, OnCardTerminal
         // (auto-queue continuation) won't fire until some unrelated event drains the queue (#110).
         loop {

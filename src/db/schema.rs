@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use std::collections::HashSet;
 
 const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
@@ -7,6 +7,7 @@ const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
 const SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY: &str =
     "session_transcript_agent_id_backfill:v1";
 const AUTO_QUEUE_PHASE_GATE_BACKFILL_META_KEY: &str = "auto_queue_phase_gate_backfill:v1";
+const PENDING_BLOCKED_STATUS_BACKFILL_META_KEY: &str = "pending_blocked_status_backfill:v1";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -534,6 +535,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             result TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );",
+    )?;
+    run_migration_once(
+        conn,
+        PENDING_BLOCKED_STATUS_BACKFILL_META_KEY,
+        backfill_pending_blocked_statuses,
     )?;
 
     // Audit logs table for analytics dashboard
@@ -1699,6 +1705,146 @@ fn backfill_session_agent_ids(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn backfill_pending_blocked_statuses(conn: &Connection) -> Result<()> {
+    let legacy_cards = conn
+        .prepare(
+            "SELECT id, status, blocked_reason
+             FROM kanban_cards
+             WHERE status IN ('pending_decision', 'blocked')",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if legacy_cards.is_empty() {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<usize> {
+        let mut migrated = 0usize;
+
+        for (card_id, legacy_status, existing_blocked_reason) in legacy_cards {
+            let prior_status = conn
+                .query_row(
+                    "SELECT from_status FROM kanban_audit_logs
+                     WHERE card_id = ?1 AND to_status = ?2
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                    rusqlite::params![card_id, legacy_status],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|status| {
+                    let trimmed = status.trim();
+                    if trimmed.is_empty() || matches!(trimmed, "pending_decision" | "blocked") {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+
+            let fallback_reason = match legacy_status.as_str() {
+                "pending_decision" => "manual intervention migrated from legacy pending_decision",
+                "blocked" => "manual intervention migrated from legacy blocked",
+                _ => "manual intervention migrated from legacy state",
+            };
+            let blocked_reason = existing_blocked_reason
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .unwrap_or_else(|| fallback_reason.to_string());
+
+            let target_status = match legacy_status.as_str() {
+                "pending_decision" => prior_status.unwrap_or_else(|| "review".to_string()),
+                "blocked" => prior_status.unwrap_or_else(|| "in_progress".to_string()),
+                _ => continue,
+            };
+
+            if target_status == "review" {
+                conn.execute(
+                    "UPDATE kanban_cards
+                     SET status = 'review',
+                         review_status = 'dilemma_pending',
+                         blocked_reason = NULL,
+                         review_entered_at = COALESCE(review_entered_at, updated_at, datetime('now')),
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    [&card_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO card_review_state (
+                         card_id, state, pending_dispatch_id, review_entered_at, updated_at
+                     )
+                     VALUES (
+                         ?1, 'dilemma_pending', NULL,
+                         COALESCE(
+                             (SELECT review_entered_at FROM kanban_cards WHERE id = ?1),
+                             datetime('now')
+                         ),
+                         datetime('now')
+                     )
+                     ON CONFLICT(card_id) DO UPDATE SET
+                         state = 'dilemma_pending',
+                         pending_dispatch_id = NULL,
+                         review_entered_at = COALESCE(
+                             card_review_state.review_entered_at,
+                             excluded.review_entered_at
+                         ),
+                         updated_at = datetime('now')",
+                    [&card_id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE kanban_cards
+                     SET status = ?1,
+                         review_status = NULL,
+                         blocked_reason = ?2,
+                         updated_at = datetime('now')
+                     WHERE id = ?3",
+                    rusqlite::params![target_status, blocked_reason, card_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at)
+                     VALUES (?1, 'idle', NULL, datetime('now'))
+                     ON CONFLICT(card_id) DO UPDATE SET
+                         state = 'idle',
+                         pending_dispatch_id = NULL,
+                         updated_at = datetime('now')",
+                    [&card_id],
+                )?;
+            }
+
+            migrated += 1;
+        }
+
+        Ok(migrated)
+    })();
+
+    match result {
+        Ok(migrated) => {
+            conn.execute_batch("COMMIT")?;
+            tracing::info!(
+                "Migrated {migrated} legacy pending_decision/blocked kanban cards to manual-intervention model"
+            );
+            Ok(())
+        }
+        Err(err) => {
+            conn.execute_batch("ROLLBACK").ok();
+            Err(err)
+        }
+    }
 }
 
 fn backfill_session_transcript_agent_ids(conn: &Connection) -> Result<()> {

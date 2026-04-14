@@ -376,7 +376,7 @@ fn build_user_message(
     reasons: &[String],
 ) -> String {
     format!(
-        "⚠️ [에스컬레이션] {}\n<@{}> pending_decision 판단이 필요합니다.\n사유:\n{}\n선택지: `resume`, `rework`, `dismiss`, `requeue`\n결정 API: `POST /api/pm-decision`",
+        "⚠️ [에스컬레이션] {}\n<@{}> 수동 판단이 필요합니다.\n사유:\n{}\n선택지: `resume`, `rework`, `dismiss`, `requeue`\n결정 API: `POST /api/pm-decision`",
         format_card_label(summary),
         owner_user_id,
         format_reason_lines(reasons)
@@ -392,7 +392,7 @@ fn build_pm_message(
     if let Some(note) = fallback_note {
         lines.push(format!("fallback: {note}"));
     }
-    lines.push("카드가 pending_decision 상태입니다. 다음 조치를 결정해주세요.".to_string());
+    lines.push("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요.".to_string());
     lines.push("사유:".to_string());
     lines.push(format_reason_lines(reasons));
     lines.push("선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string());
@@ -1051,8 +1051,8 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, github_issue_number, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-1', 'Escalation card', 'pending_decision', 'high', 422, 'agent-1', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, priority, review_status, github_issue_number, assigned_agent_id, created_at, updated_at)
+                 VALUES ('card-1', 'Escalation card', 'review', 'high', 'dilemma_pending', 422, 'agent-1', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -1116,8 +1116,8 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, github_issue_number, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-2', 'Fallback card', 'pending_decision', 'high', 434, 'agent-2', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, priority, review_status, github_issue_number, assigned_agent_id, created_at, updated_at)
+                 VALUES ('card-2', 'Fallback card', 'review', 'high', 'dilemma_pending', 434, 'agent-2', datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();

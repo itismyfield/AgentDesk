@@ -391,7 +391,7 @@ pub async fn hook_session(
                             old_card_status,
                             new_s,
                         );
-                        // Drain any transitions accumulated by hooks (e.g., OnReviewEnter → pending_decision)
+                        // Drain any transitions accumulated by hooks (e.g., OnReviewEnter → manual-intervention follow-up)
                         loop {
                             let extra = state.engine.drain_pending_transitions();
                             if extra.is_empty() {
