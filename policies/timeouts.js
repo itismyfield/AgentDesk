@@ -19,14 +19,8 @@
  * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
  * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 pending_decision
- * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill + notify
+ * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill
  */
-
-// Send notification via notify bot (system alerts, not agent communication)
-function sendNotifyAlert(channelTarget, message) {
-  if (!channelTarget) return;
-  agentdesk.message.queue(channelTarget, message, "notify", "system");
-}
 
 // Get PMD channel for alerts
 function getPMDChannel() {

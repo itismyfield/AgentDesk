@@ -1002,10 +1002,10 @@ mod idle_session_cleanup {
         assert!(url.contains("/api/sessions/"));
         assert!(url.contains("host%3Aidle-492-no-dispatch"));
         assert!(url.ends_with("/force-kill"));
-
-        // Idle-kill notification was consolidated into the force-kill API
-        // response path (83cb4b4) — the policy no longer enqueues a separate
-        // message_outbox row, so we only verify the HTTP call above.
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "idle force-kill policy path must not enqueue a duplicate notify alert"
+        );
     }
 
     #[test]
@@ -1065,9 +1065,9 @@ mod idle_session_cleanup {
         let url = http_last["url"].as_str().unwrap_or("");
         assert!(url.contains("host%3Aidle-492-active-dispatch"));
         assert!(url.ends_with("/force-kill"));
-
-        // Idle-kill notification was consolidated into the force-kill API
-        // response path (83cb4b4) — the policy no longer enqueues a separate
-        // message_outbox row, so we only verify the HTTP call above.
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "idle safety TTL policy path must not enqueue a duplicate notify alert"
+        );
     }
 }

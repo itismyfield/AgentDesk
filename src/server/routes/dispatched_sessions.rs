@@ -80,10 +80,6 @@ fn resolve_hook_active_dispatch_id(
         return None;
     }
 
-    if status.eq_ignore_ascii_case("working") {
-        return incoming_dispatch_id;
-    }
-
     incoming_dispatch_id.or_else(|| load_existing_session_active_dispatch_id(conn, session_key))
 }
 
@@ -2234,6 +2230,27 @@ mod tests {
         )
         .await;
         assert_eq!(working_status, StatusCode::OK);
+
+        let (working_refresh_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-sticky".to_string(),
+                agent_id: None,
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(9),
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(working_refresh_status, StatusCode::OK);
 
         let (idle_status, _) = hook_session(
             State(state.clone()),
