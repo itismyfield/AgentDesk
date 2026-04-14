@@ -860,7 +860,6 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             super::DiscordSession {
                 session_id: session_id.map(str::to_string),
-                assistant_turns: 0,
                 memento_context_loaded: session_id.is_some(),
                 memento_reflected: false,
                 current_path: None,

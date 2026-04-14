@@ -218,7 +218,6 @@ pub(in crate::services::discord) async fn cmd_start(
             .entry(channel_id)
             .or_insert_with(|| DiscordSession {
                 session_id: None,
-                assistant_turns: 0,
                 memento_context_loaded: false,
                 memento_reflected: false,
                 current_path: None,

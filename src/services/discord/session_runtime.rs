@@ -5,7 +5,6 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct DiscordSession {
     pub(super) session_id: Option<String>,
-    pub(super) assistant_turns: usize,
     pub(super) memento_context_loaded: bool,
     pub(super) memento_reflected: bool,
     pub(super) current_path: Option<String>,
@@ -53,7 +52,6 @@ pub(super) fn select_restored_session_path(
 impl DiscordSession {
     pub(super) fn clear_provider_session(&mut self) {
         self.session_id = None;
-        self.assistant_turns = 0;
         self.memento_context_loaded = false;
         self.memento_reflected = false;
     }
@@ -135,7 +133,6 @@ impl DiscordSession {
         self.assistant_turns = self.assistant_turns.saturating_add(1);
         self.assistant_turns >= SESSION_MAX_ASSISTANT_TURNS
     }
-
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
@@ -492,7 +489,6 @@ pub(super) async fn auto_restore_session(
             .entry(channel_id)
             .or_insert_with(|| DiscordSession {
                 session_id: None,
-                assistant_turns: 0,
                 memento_context_loaded: false,
                 memento_reflected: false,
                 current_path: None,
@@ -560,7 +556,6 @@ pub(super) async fn bootstrap_thread_session(
         .entry(thread_channel_id)
         .or_insert_with(|| DiscordSession {
             session_id: None,
-            assistant_turns: 0,
             memento_context_loaded: false,
             memento_reflected: false,
             current_path: None,
@@ -799,35 +794,6 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    fn sample_session() -> DiscordSession {
-        DiscordSession {
-            session_id: Some("session-1".to_string()),
-            assistant_turns: 1,
-            memento_context_loaded: true,
-            memento_reflected: false,
-            current_path: Some("/tmp/project".to_string()),
-            history: vec![
-                HistoryItem {
-                    item_type: HistoryType::User,
-                    content: "hello".to_string(),
-                },
-                HistoryItem {
-                    item_type: HistoryType::Assistant,
-                    content: "world".to_string(),
-                },
-            ],
-            pending_uploads: Vec::new(),
-            cleared: false,
-            remote_profile_name: None,
-            channel_id: Some(42),
-            channel_name: Some("adk-cdx".to_string()),
-            category_name: None,
-            last_active: tokio::time::Instant::now(),
-            worktree: None,
-            born_generation: 0,
-        }
-    }
-
     fn run_git(repo_dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -1015,36 +981,6 @@ mod tests {
     #[test]
     fn session_path_is_usable_for_remote_nonlocal_path() {
         assert!(session_path_is_usable("~/repo", Some("mac-mini")));
-    }
-
-    #[test]
-    fn record_completed_turn_hits_turn_cap_on_hundredth_assistant_turn() {
-        let mut session = sample_session();
-        session.assistant_turns = SESSION_MAX_ASSISTANT_TURNS - 1;
-
-        assert!(session.record_completed_turn("final user".to_string(), "final reply".to_string()));
-        assert_eq!(session.assistant_turns, SESSION_MAX_ASSISTANT_TURNS);
-    }
-
-    #[test]
-    fn clear_provider_session_resets_assistant_turn_counter() {
-        let mut session = sample_session();
-        session.assistant_turns = 37;
-
-        session.clear_provider_session();
-
-        assert_eq!(session.assistant_turns, 0);
-        assert!(session.session_id.is_none());
-    }
-
-    #[test]
-    fn clear_transcript_history_resets_turn_counter() {
-        let mut session = sample_session();
-
-        session.clear_transcript_history();
-
-        assert!(session.history.is_empty());
-        assert_eq!(session.assistant_turns, 0);
     }
 
     #[test]
