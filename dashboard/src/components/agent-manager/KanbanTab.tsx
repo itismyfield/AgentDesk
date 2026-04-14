@@ -2,11 +2,8 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import AutoQueuePanel from "./AutoQueuePanel";
+import PipelineVisualEditor from "./PipelineVisualEditor";
 import CardTimeline from "./CardTimeline";
-import PipelineEditor from "./PipelineEditor";
-import PipelineConfigView from "./PipelineConfigView";
-import PipelineOverrideEditor from "./PipelineOverrideEditor";
-import PipelineProgress from "./PipelineProgress";
 import MarkdownContent from "../common/MarkdownContent";
 import KanbanColumn from "./KanbanColumn";
 import type {
@@ -33,6 +30,8 @@ import {
   createChecklistItem,
   formatIso,
   formatTs,
+  hasManualInterventionReason,
+  isManualInterventionCard,
   isReviewCard,
   labelForStatus,
   parseCardMetadata,
@@ -387,14 +386,21 @@ export default function KanbanTab({
       setCardTypeFilter("review");
       setMobileColumnStatus("review");
     } else if (externalStatusFocus === "blocked") {
-      setMobileColumnStatus("blocked");
+      const focusStatus =
+        cards.find((card) => card.review_status === "dilemma_pending")?.status
+        ?? cards.find((card) => hasManualInterventionReason(card) && card.status === "requested")?.status
+        ?? cards.find((card) => hasManualInterventionReason(card) && card.status === "in_progress")?.status
+        ?? "in_progress";
+      setMobileColumnStatus(
+        focusStatus === "review" || focusStatus === "requested" ? focusStatus : "in_progress",
+      );
     } else if (externalStatusFocus === "requested") {
       setMobileColumnStatus("requested");
     } else {
       setMobileColumnStatus("in_progress");
     }
     onClearSignalFocus?.();
-  }, [externalStatusFocus, onClearSignalFocus]);
+  }, [cards, externalStatusFocus, onClearSignalFocus]);
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -589,7 +595,7 @@ export default function KanbanTab({
       if (cardTypeFilter === "issue" && isReviewCard(card)) return false;
       if (cardTypeFilter === "review" && !isReviewCard(card)) return false;
       if (signalStatusFilter === "review" && card.status !== "review") return false;
-      if (signalStatusFilter === "blocked" && card.status !== "blocked") return false;
+      if (signalStatusFilter === "blocked" && !isManualInterventionCard(card)) return false;
       if (signalStatusFilter === "requested" && card.status !== "requested") return false;
       if (
         signalStatusFilter === "stalled"
@@ -733,7 +739,7 @@ export default function KanbanTab({
     : boardColumns;
 
   const canRetryCard = (card: KanbanCard | null) =>
-    Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
+    Boolean(card && (isManualInterventionCard(card) || ["requested", "in_progress"].includes(card.status)));
 
   const canRedispatchCard = (card: KanbanCard | null) =>
     Boolean(card && ["requested", "in_progress"].includes(card.status));
@@ -1034,7 +1040,7 @@ export default function KanbanTab({
   };
   const signalFilterLabel =
     signalStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
-      : signalStatusFilter === "blocked" ? tr("블록됨", "Blocked")
+      : signalStatusFilter === "blocked" ? tr("수동 개입", "Manual intervention")
         : signalStatusFilter === "requested" ? tr("수락 대기", "Waiting acceptance")
           : signalStatusFilter === "stalled" ? tr("진행 정체", "Stale in progress")
             : null;
@@ -1410,7 +1416,7 @@ export default function KanbanTab({
               >
                 <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
                 <option value="review">{tr("리뷰 대기", "Review queue")}</option>
-                <option value="blocked">{tr("블록됨", "Blocked")}</option>
+                <option value="blocked">{tr("수동 개입", "Manual intervention")}</option>
                 <option value="requested">{tr("수락 대기", "Waiting acceptance")}</option>
                 <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
               </select>
@@ -1678,21 +1684,7 @@ export default function KanbanTab({
                 selectedRepo={selectedRepo}
                 selectedAgentId={selectedAgentId}
               />
-              <PipelineConfigView
-                tr={tr}
-                locale={locale}
-                repo={selectedRepo}
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-              />
-              <PipelineOverrideEditor
-                tr={tr}
-                locale={locale}
-                repo={selectedRepo}
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-              />
-              <PipelineEditor
+              <PipelineVisualEditor
                 tr={tr}
                 locale={locale}
                 repo={selectedRepo}
@@ -1984,16 +1976,6 @@ export default function KanbanTab({
                   </button>
                 </div>
 
-                {/* Pipeline progress visualization */}
-                {selectedCard.pipeline_stage_id && (
-                  <PipelineProgress
-                    tr={tr}
-                    locale={locale}
-                    cardId={selectedCard.id}
-                    currentStageId={selectedCard.pipeline_stage_id}
-                  />
-                )}
-
                 <div className="grid gap-3 md:grid-cols-2">
                   <label className="space-y-1">
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("제목", "Title")}</span>
@@ -2089,10 +2071,10 @@ export default function KanbanTab({
                 </div>
 
                 {/* Blocked reason */}
-                {selectedCard.status === "blocked" && selectedCard.blocked_reason && (
+                {hasManualInterventionReason(selectedCard) && selectedCard.blocked_reason && (
                   <div className="rounded-2xl border p-4" style={{ backgroundColor: "rgba(239,68,68,0.08)", borderColor: "rgba(239,68,68,0.3)" }}>
                     <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
-                      {tr("차단 사유", "Blocked Reason")}
+                      {tr("수동 개입 사유", "Manual Intervention Reason")}
                     </div>
                     <div className="text-sm" style={{ color: "#fca5a5" }}>
                       {selectedCard.blocked_reason}

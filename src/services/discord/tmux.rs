@@ -807,24 +807,28 @@ pub(super) async fn tmux_output_watcher(
                 );
             }
             // Notify: tmux session termination with reason
+            // Skip if force-kill already sent its own notification via dispatched_sessions.rs
             {
                 let reason_short = read_tmux_exit_reason(&tmux_session_name)
                     .unwrap_or_else(|| "unknown".to_string());
-                // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
-                let reason_text = reason_short
-                    .strip_prefix('[')
-                    .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-                    .unwrap_or(&reason_short);
-                let reason_truncated: String = reason_text.chars().take(100).collect();
-                if let Some(ref db) = shared.db {
-                    if let Ok(conn) = db.lock() {
-                        let _ = conn.execute(
-                            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                            rusqlite::params![
-                                format!("channel:{}", channel_id.get()),
-                                format!("🔴 세션 종료: {reason_truncated}"),
-                            ],
-                        );
+                let is_force_kill = reason_short.contains("force-kill");
+                if !is_force_kill {
+                    // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
+                    let reason_text = reason_short
+                        .strip_prefix('[')
+                        .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
+                        .unwrap_or(&reason_short);
+                    let reason_truncated: String = reason_text.chars().take(100).collect();
+                    if let Some(ref db) = shared.db {
+                        if let Ok(conn) = db.lock() {
+                            let _ = conn.execute(
+                                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                                rusqlite::params![
+                                    format!("channel:{}", channel_id.get()),
+                                    format!("🔴 세션 종료: {reason_truncated}"),
+                                ],
+                            );
+                        }
                     }
                 }
             }
@@ -834,7 +838,7 @@ pub(super) async fn tmux_output_watcher(
                     .map(|r| r.contains("dispatch turn completed"))
                     .unwrap_or(false);
                 if !is_normal_completion {
-                    let resumed = resume_aborted_restart_turn(
+                    let _ = resume_aborted_restart_turn(
                         channel_id,
                         &http,
                         &shared,
@@ -842,14 +846,6 @@ pub(super) async fn tmux_output_watcher(
                         &output_path,
                     )
                     .await;
-                    if !resumed {
-                        let _ = channel_id
-                            .say(
-                                &http,
-                                "⚠️ 작업 세션이 종료되었습니다. 다음 메시지를 보내면 새 세션이 시작됩니다.",
-                            )
-                            .await;
-                    }
                 }
             }
             break;

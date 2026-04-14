@@ -323,6 +323,16 @@ fi
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
+# Rebuild dashboard so promote never ships a stale dist.
+echo "▸ Building dashboard..."
+(cd "$REPO/dashboard" && npm run build --silent)
+
+# Re-resolve after fresh build (source path may have changed).
+if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
+    echo "✗ Dashboard build succeeded but dist not found — aborting"
+    exit 1
+fi
+
 # Stage dashboard before stopping release so missing dist never causes downtime.
 echo "▸ Staging dashboard..."
 mkdir -p "$ADK_REL/dashboard"
@@ -414,9 +424,18 @@ mv -f "$ADK_REL/bin/agentdesk.new" "$ADK_REL/bin/agentdesk"
 chflags uchg "$ADK_REL/bin/agentdesk"
 
 # Atomic swap: old → .old, staged → dist, cleanup
+if [ ! -d "$DIST_STAGED" ]; then
+    echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"
+    cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+fi
 rm -rf "$ADK_REL/dashboard/dist.old"
-[ -d "$ADK_REL/dashboard/dist" ] && mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
-mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"
+if [ -d "$ADK_REL/dashboard/dist" ]; then
+    mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
+fi
+if ! mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"; then
+    echo "✗ Dashboard swap failed — restoring from backup"
+    [ -d "$ADK_REL/dashboard/dist.old" ] && mv "$ADK_REL/dashboard/dist.old" "$ADK_REL/dashboard/dist"
+fi
 rm -rf "$ADK_REL/dashboard/dist.old"
 
 rm -rf "$ADK_REL/skills.old"

@@ -1498,12 +1498,26 @@ pub(super) fn spawn_turn_bridge(
         if let Some(analysis) = recall_feedback_analysis.as_ref()
             && !analysis.pending_feedbacks.is_empty()
         {
-            let submit_result = submit_pending_feedbacks(
-                &capture_memory_settings,
-                session_id_to_persist.as_deref(),
-                analysis.pending_feedbacks.clone(),
+            let submit_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                submit_pending_feedbacks(
+                    &capture_memory_settings,
+                    session_id_to_persist.as_deref(),
+                    analysis.pending_feedbacks.clone(),
+                ),
             )
-            .await;
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] [memory] submit_pending_feedbacks timed out after 20s for channel {}",
+                        channel_id.get(),
+                    );
+                    Default::default()
+                }
+            };
             auto_feedback_count = submit_result.submitted_count;
             accumulated_memory_input_tokens = accumulated_memory_input_tokens
                 .saturating_add(submit_result.token_usage.input_tokens);
@@ -1572,19 +1586,26 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if let Some(memory_task) = background_memory_task {
-            match memory_task.await {
-                Ok(result) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), memory_task).await {
+                Ok(Ok(result)) => {
                     accumulated_memory_input_tokens = accumulated_memory_input_tokens
                         .saturating_add(result.token_usage.input_tokens);
                     accumulated_memory_output_tokens = accumulated_memory_output_tokens
                         .saturating_add(result.token_usage.output_tokens);
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] [memory] background task join failed for channel {}: {}",
                         channel_id.get(),
                         err
+                    );
+                }
+                Err(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] [memory] background task timed out after 30s for channel {} — skipping token accounting",
+                        channel_id.get(),
                     );
                 }
             }

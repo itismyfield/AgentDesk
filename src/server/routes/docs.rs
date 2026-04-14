@@ -126,31 +126,6 @@ fn body_param(kind: &'static str, required: bool, description: &'static str) -> 
     }
 }
 
-fn header_param(required: bool, description: &'static str) -> ParamDoc {
-    ParamDoc {
-        location: "header",
-        kind: "string",
-        required,
-        description,
-        enum_values: None,
-        default: None,
-    }
-}
-
-fn explicit_bearer_header_param() -> ParamDoc {
-    header_param(
-        true,
-        "Explicit Authorization: Bearer <token> header. Same-origin auth bypass is not accepted for this PMD-only endpoint.",
-    )
-}
-
-fn kanban_manager_channel_header_param() -> ParamDoc {
-    header_param(
-        true,
-        "X-Channel-Id must match the current kanban_manager_channel_id. Discover that value via GET /api/settings/config before calling this endpoint.",
-    )
-}
-
 fn category_description(category: &str) -> &'static str {
     match category {
         "api-friction" => {
@@ -517,8 +492,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
-            ("authorization", explicit_bearer_header_param()),
-            ("x-channel-id", kanban_manager_channel_header_param()),
             (
                 "reason",
                 body_param("string", false, "Why the rereview is needed"),
@@ -535,8 +508,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Batch rereview by GitHub issue number",
         )
         .with_params([
-            ("authorization", explicit_bearer_header_param()),
-            ("x-channel-id", kanban_manager_channel_header_param()),
             (
                 "issues",
                 body_param("number[]", true, "GitHub issue numbers to rereview"),
@@ -557,8 +528,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Force-transition multiple cards",
         )
         .with_params([
-            ("authorization", explicit_bearer_header_param()),
-            ("x-channel-id", kanban_manager_channel_header_param()),
             (
                 "issue_numbers",
                 body_param("number[]", false, "GitHub issue numbers to resolve into cards"),
@@ -590,8 +559,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
-            ("authorization", explicit_bearer_header_param()),
-            ("x-channel-id", kanban_manager_channel_header_param()),
             (
                 "review_status",
                 body_param("string", false, "Optional review status to set after reopen"),
@@ -623,8 +590,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
-            ("authorization", explicit_bearer_header_param()),
-            ("x-channel-id", kanban_manager_channel_header_param()),
             ("status", body_param("string", true, "Target pipeline status")),
             (
                 "cancel_dispatches",

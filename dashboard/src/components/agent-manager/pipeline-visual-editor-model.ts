@@ -48,6 +48,7 @@ export interface GraphEdge {
   path: string;
   labelX: number;
   labelY: number;
+  labelRotated?: boolean;
 }
 
 export interface PipelineGraphLayout {
@@ -293,12 +294,48 @@ export function buildPipelineGraph(
   compact: boolean,
 ): PipelineGraphLayout {
   const columns = Math.max(1, getGraphColumnCount(pipeline.states.length, compact));
-  const nodeWidth = compact ? 256 : 168;
-  const nodeHeight = compact ? 86 : 78;
+  const nodeWidth = compact ? 174 : 168;
+  const nodeHeight = compact ? 66 : 78;
   const columnGap = compact ? 0 : 40;
-  const rowGap = compact ? 54 : 76;
-  const paddingX = compact ? 18 : 28;
-  const paddingY = 24;
+  const rowGap = compact ? 58 : 76;
+  const paddingY = 20;
+
+  const upwardEdgeInfos: { transIdx: number; fi: number; ti: number }[] = [];
+  if (compact) {
+    pipeline.transitions.forEach((t, transIdx) => {
+      if (t.type === "force_only") return;
+      const fi = pipeline.states.findIndex((s) => s.id === t.from);
+      const ti = pipeline.states.findIndex((s) => s.id === t.to);
+      if (fi >= 0 && ti >= 0 && ti < fi) {
+        upwardEdgeInfos.push({ transIdx, fi, ti });
+      }
+    });
+  }
+  const laneWidth = 28;
+  const upwardLaneAssignment = new Map<number, number>();
+  let leftLanes = 0;
+  if (compact && upwardEdgeInfos.length > 0) {
+    const sorted = [...upwardEdgeInfos].sort((a, b) => (a.fi - a.ti) - (b.fi - b.ti));
+    const lanes: { maxRow: number }[] = [];
+    for (const info of sorted) {
+      let assigned = -1;
+      for (let l = 0; l < lanes.length; l++) {
+        if (lanes[l].maxRow <= info.ti) {
+          assigned = l;
+          lanes[l].maxRow = info.fi;
+          break;
+        }
+      }
+      if (assigned < 0) {
+        assigned = lanes.length;
+        lanes.push({ maxRow: info.fi });
+      }
+      upwardLaneAssignment.set(info.transIdx, assigned);
+    }
+    leftLanes = lanes.length;
+  }
+  const leftMargin = leftLanes > 0 ? leftLanes * laneWidth + 14 : 0;
+  const paddingX = (compact ? 14 : 28) + leftMargin;
 
   const nodes: GraphNode[] = pipeline.states.map((state, index) => {
     const column = index % columns;
@@ -324,7 +361,12 @@ export function buildPipelineGraph(
 
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
 
-  const edges: GraphEdge[] = pipeline.transitions.map((transition, index) => {
+  const visibleTransitions = compact
+    ? pipeline.transitions.filter((t) => t.type !== "force_only")
+    : pipeline.transitions;
+
+  const edges: GraphEdge[] = visibleTransitions.map((transition) => {
+    const index = pipeline.transitions.indexOf(transition);
     const fromNode = nodeMap.get(transition.from);
     const toNode = nodeMap.get(transition.to);
     if (!fromNode || !toNode) {
@@ -346,8 +388,8 @@ export function buildPipelineGraph(
       const startY = fromNode.y + fromNode.height / 2;
       const endX = fromNode.x + fromNode.width / 2;
       const endY = fromNode.y;
-      const loopRightX = fromNode.x + fromNode.width + (compact ? 52 : 64);
-      const loopTopY = fromNode.y - (compact ? 40 : 52);
+      const loopRightX = fromNode.x + fromNode.width + (compact ? 42 : 64);
+      const loopTopY = fromNode.y - (compact ? 32 : 52);
       return {
         key: `transition-${index}`,
         index,
@@ -362,11 +404,30 @@ export function buildPipelineGraph(
     }
 
     if (compact) {
-      const startX = fromNode.x + fromNode.width / 2;
-      const startY = fromNode.y + fromNode.height;
-      const endX = toNode.x + toNode.width / 2;
-      const endY = toNode.y;
-      const midY = startY + (endY - startY) / 2;
+      const downward = toNode.y > fromNode.y;
+      if (downward) {
+        const cx = fromNode.x + fromNode.width / 2;
+        const startY = fromNode.y + fromNode.height;
+        const endY = toNode.y;
+        const midY = (startY + endY) / 2;
+        return {
+          key: `transition-${index}`,
+          index,
+          from: transition.from,
+          to: transition.to,
+          type: transition.type,
+          gates: [...(transition.gates ?? [])],
+          path: `M ${cx} ${startY} L ${cx} ${endY}`,
+          labelX: cx,
+          labelY: midY,
+        };
+      }
+      const lane = upwardLaneAssignment.get(index) ?? 0;
+      const laneX = paddingX - leftMargin + (leftLanes - 1 - lane) * laneWidth + 10;
+      const startX = fromNode.x;
+      const startY = fromNode.y + nodeHeight / 2;
+      const endX = toNode.x;
+      const endY = toNode.y + nodeHeight / 2;
       return {
         key: `transition-${index}`,
         index,
@@ -374,9 +435,10 @@ export function buildPipelineGraph(
         to: transition.to,
         type: transition.type,
         gates: [...(transition.gates ?? [])],
-        path: `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`,
-        labelX: (startX + endX) / 2,
-        labelY: midY - 8,
+        path: `M ${startX} ${startY} L ${laneX} ${startY} L ${laneX} ${endY} L ${endX} ${endY}`,
+        labelX: laneX,
+        labelY: (startY + endY) / 2,
+        labelRotated: true,
       };
     }
 
@@ -427,8 +489,9 @@ export function buildPipelineGraph(
   });
 
   const rowCount = Math.max(1, Math.ceil(nodes.length / columns));
-  const width = paddingX * 2 + columns * nodeWidth + Math.max(0, columns - 1) * columnGap;
-  const height = paddingY * 2 + rowCount * nodeHeight + Math.max(0, rowCount - 1) * rowGap;
+  const rightExtra = compact ? 14 : 28;
+  const width = paddingX + rightExtra + columns * nodeWidth + Math.max(0, columns - 1) * columnGap;
+  const height = paddingY + 28 + rowCount * nodeHeight + Math.max(0, rowCount - 1) * rowGap;
 
   return {
     width,

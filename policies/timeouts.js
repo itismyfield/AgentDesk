@@ -1019,7 +1019,7 @@ var timeouts = {
           }
           var forceKillUrl = "http://127.0.0.1:" + apiPort +
             "/api/sessions/" + encodeURIComponent(sess.session_key) + "/force-kill";
-          forceKillResp = agentdesk.http.post(forceKillUrl, { retry: true });
+          forceKillResp = agentdesk.http.post(forceKillUrl, { retry: true, reason: "deadlock timeout — 턴 무응답으로 강제 종료" });
         } catch (e) {
           agentdesk.log.error("[deadlock] force-kill API exception for " + sess.session_key + ": " + e);
           continue;
@@ -1448,7 +1448,7 @@ var timeouts = {
         try {
           var forceKillUrl = "http://127.0.0.1:" + apiPort +
             "/api/sessions/" + encodeURIComponent(s.session_key) + "/force-kill";
-          forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false });
+          forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false, reason: "idle " + idleMin + "분 초과 — 자동 정리" });
         } catch (e) {
           agentdesk.log.error("[idle-kill] force-kill API exception for " + s.session_key + ": " + e);
           continue;
@@ -1469,19 +1469,7 @@ var timeouts = {
         );
 
         var agentContext = resolveSessionAgentContext(s, agents);
-        var primaryChannel = agentContext.agent_id ? agentdesk.agents.resolvePrimaryChannel(agentContext.agent_id) : null;
-        var notifyTarget = primaryChannel ? ("channel:" + primaryChannel) : getPMDChannel();
-        if (notifyTarget) {
-          sendNotifyAlert(
-            notifyTarget,
-            "💤 [Idle 세션 자동 종료] " + agentContext.agent_label + "\n" +
-            "agent_id: `" + (agentContext.agent_id || "unknown") + "`\n" +
-            "provider: `" + (s.provider || "unknown") + "`\n" +
-            "session_key: `" + s.session_key + "`\n" +
-            "idle: `" + idleMin + "분`\n" +
-            "원인: " + reasonLabel + " → tmux kill"
-          );
-        }
+        agentdesk.log.info("[timeouts] idle kill: " + (agentContext.agent_id || "unknown") + " idle=" + idleMin + "m reason=" + reasonLabel);
       }
     }
 

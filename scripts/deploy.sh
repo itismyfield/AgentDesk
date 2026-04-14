@@ -181,7 +181,11 @@ ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
 run_installed_binary_self_check
 rm -f "$BIN_DIR/agentdesk-real"
 
-# Copy dashboard dist if it exists
+# Build and copy dashboard dist
+if [ -d "$PROJECT_DIR/dashboard" ]; then
+  echo "▸ Building dashboard..."
+  (cd "$PROJECT_DIR/dashboard" && npm run build --silent)
+fi
 if [ -d "$PROJECT_DIR/dashboard/dist" ]; then
   mkdir -p "$AD_HOME/dashboard"
   rsync -a --delete "$PROJECT_DIR/dashboard/dist/" "$AD_HOME/dashboard/dist/"

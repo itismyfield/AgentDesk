@@ -1,7 +1,6 @@
 import { useState } from "react";
 import * as api from "../../api";
 import type { KanbanReview } from "../../api";
-import PipelineProgress from "./PipelineProgress";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
@@ -16,6 +15,8 @@ import type {
   UiLanguage,
 } from "../../types";
 import {
+  hasManualInterventionReason,
+  isManualInterventionCard,
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
@@ -28,7 +29,7 @@ import {
 } from "./kanban-utils";
 
 export function canRetryCard(card: KanbanCard | null) {
-  return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
+  return Boolean(card && (isManualInterventionCard(card) || ["requested", "in_progress"].includes(card.status)));
 }
 
 export function canRedispatchCard(card: KanbanCard | null) {
@@ -263,16 +264,6 @@ export default function KanbanCardDetail({
           </button>
         </div>
 
-        {/* Pipeline progress visualization */}
-        {selectedCard.pipeline_stage_id && (
-          <PipelineProgress
-            tr={tr}
-            locale={locale}
-            cardId={selectedCard.id}
-            currentStageId={selectedCard.pipeline_stage_id}
-          />
-        )}
-
         <div className="grid gap-3 md:grid-cols-2">
           <label className="space-y-1">
             <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("제목", "Title")}</span>
@@ -372,10 +363,10 @@ export default function KanbanCardDetail({
         </div>
 
         {/* Blocked reason */}
-        {selectedCard.status === "blocked" && selectedCard.blocked_reason && (
+        {hasManualInterventionReason(selectedCard) && selectedCard.blocked_reason && (
           <div className="rounded-2xl border p-4" style={{ backgroundColor: "rgba(239,68,68,0.08)", borderColor: "rgba(239,68,68,0.3)" }}>
             <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
-              {tr("차단 사유", "Blocked Reason")}
+              {tr("수동 개입 사유", "Manual Intervention Reason")}
             </div>
             <div className="text-sm" style={{ color: "#fca5a5" }}>
               {selectedCard.blocked_reason}

@@ -266,7 +266,9 @@ FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 sudo "$FW" --add "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 sudo "$FW" --unblockapp "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 
-# 3.6. Symlink dashboard dist
+# 3.6. Build & symlink dashboard dist
+echo "▸ Building dashboard..."
+(cd "$REPO/dashboard" && npm run build --silent)
 mkdir -p "$ADK_DEV/dashboard"
 rm -rf "$ADK_DEV/dashboard/dist"
 ln -sfn "$REPO/dashboard/dist" "$ADK_DEV/dashboard/dist"

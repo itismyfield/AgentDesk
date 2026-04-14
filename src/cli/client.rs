@@ -45,33 +45,7 @@ fn parse_error_message(body: &str) -> Option<String> {
         })
 }
 
-fn parse_header_arg(raw: &str) -> Result<(String, String), String> {
-    let (name, value) = raw
-        .split_once(':')
-        .or_else(|| raw.split_once('='))
-        .ok_or_else(|| {
-            format!("Invalid header '{raw}'. Use --header 'Name:Value' or --header 'Name=Value'.")
-        })?;
-    let name = name.trim();
-    let value = value.trim();
-    if name.is_empty() || value.is_empty() {
-        return Err(format!(
-            "Invalid header '{raw}'. Both header name and value are required."
-        ));
-    }
-    Ok((name.to_string(), value.to_string()))
-}
-
 fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
-    request_json_with_headers(method, path, body, &[])
-}
-
-fn request_json_with_headers(
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-    headers: &[String],
-) -> Result<Value, String> {
     let url = if path.starts_with('/') {
         format!("{}{}", api_base(), path)
     } else {
@@ -89,10 +63,6 @@ fn request_json_with_headers(
     };
     if let Some(token) = auth_token() {
         req = req.set("Authorization", &format!("Bearer {token}"));
-    }
-    for raw in headers {
-        let (name, value) = parse_header_arg(raw)?;
-        req = req.set(&name, &value);
     }
 
     let method_upper = method.to_ascii_uppercase();
@@ -215,13 +185,8 @@ fn find_active_dispatch_by_type<'a>(
     })
 }
 
-fn api_call(
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-    headers: &[String],
-) -> Result<Value, String> {
-    request_json_with_headers(method, path, body, headers)
+fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
+    request_json(method, path, body)
 }
 
 fn truncate_cell(value: &str, width: usize) -> String {
@@ -735,14 +700,9 @@ pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `agentdesk api <method> <path> [body] [--header Name:Value]`
-pub fn cmd_api(
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-    headers: &[String],
-) -> Result<(), String> {
-    let value = api_call(method, path, body, headers)?;
+/// `agentdesk api <method> <path> [body]`
+pub fn cmd_api(method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
+    let value = api_call(method, path, body)?;
     print_json(&value);
     Ok(())
 }
@@ -1002,15 +962,13 @@ pub fn cmd_terminations(
 mod tests {
     use super::{
         build_cli_advance_completion_result, cmd_advance, cmd_dispatch,
-        parse_github_repo_from_remote, parse_header_arg, render_cards_table,
-        render_queue_thread_links, request_json_with_headers, runtime_config_payload,
+        parse_github_repo_from_remote, render_cards_table, render_queue_thread_links,
+        runtime_config_payload,
     };
     use axum::extract::{Path, Query, State};
-    use axum::http::HeaderMap;
     use axum::routing::{get, patch, post};
     use axum::{Json, Router};
     use serde_json::json;
-    use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::process::Command;
     use std::sync::MutexGuard;
@@ -1177,19 +1135,6 @@ mod tests {
             axum::http::StatusCode::CONFLICT,
             Json(json!({"error": "should not be called"})),
         )
-    }
-
-    async fn api_header_echo_handler(
-        State(headers_seen): State<Arc<Mutex<BTreeMap<String, String>>>>,
-        headers: HeaderMap,
-    ) -> Json<serde_json::Value> {
-        let mut seen = headers_seen.lock().unwrap();
-        for name in ["x-channel-id", "x-force-reason"] {
-            if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
-                seen.insert(name.to_string(), value.to_string());
-            }
-        }
-        Json(json!({"ok": true}))
     }
 
     fn run_cmd_advance_against_mock_server(
@@ -1379,64 +1324,6 @@ mod tests {
             assert_eq!(payload["groups"][0]["sequential"], true);
             assert_eq!(payload["groups"][1]["issues"], json!([407]));
             assert_eq!(payload["groups"][1]["sequential"], false);
-        });
-    }
-
-    #[test]
-    fn parse_header_arg_accepts_colon_and_equals_forms() {
-        assert_eq!(
-            parse_header_arg("X-Channel-Id: 123").unwrap(),
-            ("X-Channel-Id".to_string(), "123".to_string())
-        );
-        assert_eq!(
-            parse_header_arg("X-Force-Reason=test").unwrap(),
-            ("X-Force-Reason".to_string(), "test".to_string())
-        );
-    }
-
-    #[test]
-    fn request_json_with_headers_applies_custom_headers() {
-        let _lock = env_lock();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async move {
-            let headers_seen = Arc::new(Mutex::new(BTreeMap::new()));
-            let app = Router::new()
-                .route("/api/header-echo", get(api_header_echo_handler))
-                .with_state(headers_seen.clone());
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-
-            let _api_url = EnvVarGuard::set("AGENTDESK_API_URL", &format!("http://{addr}"));
-
-            let result = request_json_with_headers(
-                "GET",
-                "/api/header-echo",
-                None,
-                &[
-                    "X-Channel-Id: pmd-chan-123".to_string(),
-                    "X-Force-Reason=test".to_string(),
-                ],
-            );
-
-            server.abort();
-            assert!(
-                result.is_ok(),
-                "request_json_with_headers failed: {result:?}"
-            );
-
-            let headers_seen = headers_seen.lock().unwrap();
-            assert_eq!(
-                headers_seen.get("x-channel-id").map(String::as_str),
-                Some("pmd-chan-123")
-            );
-            assert_eq!(
-                headers_seen.get("x-force-reason").map(String::as_str),
-                Some("test")
-            );
         });
     }
 

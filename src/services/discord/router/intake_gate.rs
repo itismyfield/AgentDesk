@@ -505,12 +505,14 @@ pub(in crate::services::discord) async fn handle_event(
             // Unowned channels fall through to normal handling.
 
             // #189: Generic DM reply tracking — consume pending entry if present.
-            // The message always falls through to normal handling so the agent
-            // can respond contextually in the DM conversation.
+            // Consumed DM answers must stop here; falling through into normal
+            // message handling produces a bogus "No active session" error in DMs.
             let text = new_message.content.trim();
             if !text.is_empty() {
                 if let Some(ref db) = data.shared.db {
-                    try_handle_pending_dm_reply(db, new_message).await;
+                    if try_handle_pending_dm_reply(db, new_message).await {
+                        return Ok(());
+                    }
                 }
             }
 

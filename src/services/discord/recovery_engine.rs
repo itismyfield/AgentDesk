@@ -374,12 +374,29 @@ pub(super) async fn restore_inflight_turns(
                 } else {
                     !assistant_response.trim().is_empty()
                 };
-                let current_worktree_path = {
-                    let mut data = shared.core.lock().await;
-                    data.sessions
-                        .get_mut(&channel_id)
-                        .and_then(|session| session.validated_path(channel_id.get()))
-                };
+                let completion_context = has_completion_evidence
+                    .then(|| serde_json::json!({ "agent_response_present": true }));
+                let fallback_result = completion_context
+                    .clone()
+                    .map(|mut result| {
+                        if let Some(obj) = result.as_object_mut() {
+                            obj.insert(
+                                "completion_source".to_string(),
+                                serde_json::Value::String("recovery_db_fallback".to_string()),
+                            );
+                            obj.insert(
+                                "needs_reconcile".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
+                        result
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "completion_source": "recovery_db_fallback",
+                            "needs_reconcile": true,
+                        })
+                    });
                 let mut dispatch_completed = recovered_dispatch_id.is_none();
                 if let Some(ref did) = recovered_dispatch_id {
                     if !has_completion_evidence {
@@ -388,36 +405,6 @@ pub(super) async fn restore_inflight_turns(
                             "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                         );
                     } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-                        let mut completion_context =
-                            super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
-                                did,
-                                "recovery_completed_during_downtime",
-                                false,
-                                current_worktree_path.as_deref(),
-                                Some(&assistant_response),
-                            );
-                        if let Some(obj) = completion_context.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
-                        let mut fallback_result =
-                            super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
-                                did,
-                                "recovery_db_fallback",
-                                true,
-                                current_worktree_path.as_deref(),
-                                Some(&assistant_response),
-                            );
-                        if let Some(obj) = fallback_result.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
                         // #143: Use finalize_dispatch directly with retry.
                         for attempt in 1..=3u8 {
                             match crate::dispatch::finalize_dispatch(
@@ -425,7 +412,7 @@ pub(super) async fn restore_inflight_turns(
                                 engine,
                                 did,
                                 "recovery_completed_during_downtime",
-                                Some(&completion_context),
+                                completion_context.as_ref(),
                             ) {
                                 Ok(_) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -482,40 +469,24 @@ pub(super) async fn restore_inflight_turns(
                         }
                     } else {
                         // Db/Engine not available — fall back to direct dispatch update with retry
-                        let mut completion_context =
-                            super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
-                                did,
-                                "recovery_completed_during_downtime",
-                                false,
-                                current_worktree_path.as_deref(),
-                                Some(&assistant_response),
-                            );
-                        if let Some(obj) = completion_context.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
-                        let mut fallback_result =
-                            super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
-                                did,
-                                "recovery_db_fallback",
-                                true,
-                                current_worktree_path.as_deref(),
-                                Some(&assistant_response),
-                            );
-                        if let Some(obj) = fallback_result.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
                         let payload = crate::server::routes::dispatches::UpdateDispatchBody {
-                            status: Some("completed".to_string()),
-                            result: Some(completion_context.clone()),
-                        };
+                                status: Some("completed".to_string()),
+                                result: Some(completion_context.clone().map(|mut result| {
+                                    if let Some(obj) = result.as_object_mut() {
+                                        obj.insert(
+                                            "completion_source".to_string(),
+                                            serde_json::Value::String(
+                                                "recovery_completed_during_downtime".to_string(),
+                                            ),
+                                        );
+                                    }
+                                    result
+                                }).unwrap_or_else(|| {
+                                    serde_json::json!({
+                                        "completion_source": "recovery_completed_during_downtime"
+                                    })
+                                })),
+                            };
                         for attempt in 1..=3u8 {
                             match super::internal_api::update_dispatch(did, payload.clone()).await {
                                 Ok(_) => {
@@ -891,12 +862,26 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 !assistant_response.trim().is_empty()
             };
-            let current_worktree_path = {
-                let mut data = shared.core.lock().await;
-                data.sessions
-                    .get_mut(&channel_id)
-                    .and_then(|session| session.validated_path(channel_id.get()))
-            };
+            let completion_context = has_completion_evidence
+                .then(|| serde_json::json!({ "agent_response_present": true }));
+            let fallback_result = completion_context
+                .clone()
+                .map(|mut result| {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert(
+                            "completion_source".to_string(),
+                            serde_json::Value::String("recovery_output_db_fallback".to_string()),
+                        );
+                        obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+                    }
+                    result
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "completion_source": "recovery_output_db_fallback",
+                        "needs_reconcile": true,
+                    })
+                });
             let mut dispatch_completed = recovered_dispatch_id.is_none();
             if let Some(ref did) = recovered_dispatch_id {
                 let dispatch_type = shared.db.as_ref().and_then(|db| {
@@ -918,43 +903,13 @@ pub(super) async fn restore_inflight_turns(
                                 "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                             );
                         } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-                            let mut completion_context =
-                                super::turn_bridge::build_work_dispatch_completion_result(
-                                    shared.db.as_ref(),
-                                    did,
-                                    "recovery_output_completed",
-                                    false,
-                                    current_worktree_path.as_deref(),
-                                    Some(&assistant_response),
-                                );
-                            if let Some(obj) = completion_context.as_object_mut() {
-                                obj.insert(
-                                    "agent_response_present".to_string(),
-                                    serde_json::Value::Bool(true),
-                                );
-                            }
-                            let mut fallback_result =
-                                super::turn_bridge::build_work_dispatch_completion_result(
-                                    shared.db.as_ref(),
-                                    did,
-                                    "recovery_output_db_fallback",
-                                    true,
-                                    current_worktree_path.as_deref(),
-                                    Some(&assistant_response),
-                                );
-                            if let Some(obj) = fallback_result.as_object_mut() {
-                                obj.insert(
-                                    "agent_response_present".to_string(),
-                                    serde_json::Value::Bool(true),
-                                );
-                            }
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch(
                                     db,
                                     engine,
                                     did,
                                     "recovery_output_completed",
-                                    Some(&completion_context),
+                                    completion_context.as_ref(),
                                 ) {
                                     Ok(_) => {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -987,21 +942,6 @@ pub(super) async fn restore_inflight_turns(
                                     );
                             }
                         } else {
-                            let mut fallback_result =
-                                super::turn_bridge::build_work_dispatch_completion_result(
-                                    shared.db.as_ref(),
-                                    did,
-                                    "recovery_output_db_fallback",
-                                    true,
-                                    current_worktree_path.as_deref(),
-                                    Some(&assistant_response),
-                                );
-                            if let Some(obj) = fallback_result.as_object_mut() {
-                                obj.insert(
-                                    "agent_response_present".to_string(),
-                                    serde_json::Value::Bool(true),
-                                );
-                            }
                             dispatch_completed =
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
                                     did,

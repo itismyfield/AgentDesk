@@ -294,10 +294,6 @@ impl PolicyEngine {
         }
     }
 
-    pub(crate) fn is_actor_thread(&self) -> bool {
-        self.actor.is_actor_thread()
-    }
-
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.actor
@@ -750,7 +746,7 @@ impl PolicyEngine {
         if intents.is_empty() {
             Self::empty_intent_result()
         } else {
-            intent::execute_intents(&self.db, Some(self), intents)
+            intent::execute_intents(&self.db, intents)
         }
     }
 

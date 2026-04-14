@@ -2442,28 +2442,6 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
         resume["example"]["response"]["action"]["type"],
         "new_implementation_dispatch"
     );
-
-    let force_transition = endpoints
-        .iter()
-        .find(|ep| {
-            ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/force-transition"
-        })
-        .expect("kanban force-transition endpoint must be present");
-    assert_eq!(
-        force_transition["params"]["authorization"]["location"],
-        "header"
-    );
-    assert_eq!(
-        force_transition["params"]["x-channel-id"]["location"],
-        "header"
-    );
-    assert!(
-        force_transition["params"]["x-channel-id"]["description"]
-            .as_str()
-            .unwrap_or("")
-            .contains("kanban_manager_channel_id"),
-        "force-transition docs must explain where X-Channel-Id comes from"
-    );
 }
 
 #[tokio::test]
@@ -3510,7 +3488,27 @@ fn ensure_auto_queue_tables(db: &Db) {
             created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, slot_index)
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_phase_gates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          TEXT NOT NULL REFERENCES auto_queue_runs(id) ON DELETE CASCADE,
+            phase           INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            verdict         TEXT,
+            dispatch_id     TEXT REFERENCES task_dispatches(id) ON DELETE CASCADE
+                                CHECK(dispatch_id IS NULL OR TRIM(dispatch_id) <> ''),
+            pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
+            next_phase      INTEGER,
+            final_phase     INTEGER NOT NULL DEFAULT 0,
+            anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+            failure_reason  TEXT,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_run_phase_dispatch_key
+            ON auto_queue_phase_gates(run_id, phase, COALESCE(dispatch_id, ''));
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_aq_phase_gates_dispatch_id
+            ON auto_queue_phase_gates(dispatch_id);",
     )
     .unwrap();
 }
@@ -7854,15 +7852,15 @@ fn seed_parallel_test_cards(db: &Db) -> Vec<String> {
         "agent-4", // F: depends on E
         "agent-4", // G: depends on E and F
     ];
-    // Dependency metadata: cards E(#5), F(#6), G(#7) reference their predecessor
+    // Structured dependency metadata: cards E(#5), F(#6), G(#7) reference their predecessor
     let metadata = [
-        None,          // A: independent
-        None,          // B: independent
-        None,          // C: independent
-        None,          // D: chain start
-        Some("#4"),    // E: depends on D
-        Some("#5"),    // F: depends on E
-        Some("#5 #6"), // G: depends on E and F (still same component)
+        None,                            // A: independent
+        None,                            // B: independent
+        None,                            // C: independent
+        None,                            // D: chain start
+        Some(r#"{"depends_on":[4]}"#),   // E: depends on D
+        Some(r#"{"depends_on":[5]}"#),   // F: depends on E
+        Some(r#"{"depends_on":[5,6]}"#), // G: depends on E and F (still same component)
     ];
 
     for i in 0..7 {
@@ -8758,6 +8756,113 @@ async fn generate_smart_planner_without_file_paths_uses_dependency_only_groups()
 }
 
 #[tokio::test]
+async fn generate_ignores_non_dependency_issue_references_in_description() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-context");
+    seed_auto_queue_card(&db, "card-context-only", 497, "ready", "agent-context");
+    seed_auto_queue_card(&db, "card-referenced-open", 494, "backlog", "agent-context");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET description = ?1
+             WHERE id = 'card-context-only'",
+            ["## 컨텍스트\n관련 작업: #494"],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().expect("entries must be array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "context-only references must not exclude the card"
+    );
+    assert_eq!(entries[0]["github_issue_number"].as_i64(), Some(497));
+}
+
+#[tokio::test]
+async fn generate_excludes_card_with_explicit_external_dependency() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-dependency");
+    seed_auto_queue_card(&db, "card-explicit-dep", 497, "ready", "agent-dependency");
+    seed_auto_queue_card(
+        &db,
+        "card-explicit-target",
+        494,
+        "backlog",
+        "agent-dependency",
+    );
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET description = ?1
+             WHERE id = 'card-explicit-dep'",
+            ["Depends on #494"],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["run"].is_null(),
+        "explicit unresolved dependencies should prevent queue generation"
+    );
+    assert_eq!(
+        json["message"].as_str(),
+        Some("No cards available (1개 외부 의존성 미충족으로 제외)")
+    );
+}
+
+#[tokio::test]
 async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -9552,18 +9657,10 @@ async fn activate_run_id_blocks_phase_gate_paused_runs() {
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-phase-gate-paused:1",
-                serde_json::json!({
-                    "run_id": "run-phase-gate-paused",
-                    "batch_phase": 1,
-                    "status": "pending",
-                    "dispatch_ids": ["dispatch-phase-gate-1"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-phase-gate-paused", 1, "pending",],
         )
         .unwrap();
     }
@@ -9654,18 +9751,10 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-resume-gate:1",
-                serde_json::json!({
-                    "run_id": "run-resume-gate",
-                    "batch_phase": 1,
-                    "status": "failed",
-                    "dispatch_ids": ["dispatch-phase-gate-failed"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-resume-gate", 1, "failed",],
         )
         .unwrap();
     }
@@ -10228,18 +10317,10 @@ fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolve
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value)
-             VALUES (?1, ?2)",
-            rusqlite::params![
-                "aq_phase_gate:run-finished-gate:1",
-                serde_json::json!({
-                    "run_id": "run-finished-gate",
-                    "batch_phase": 1,
-                    "status": "pending",
-                    "dispatch_ids": ["dispatch-phase-gate-finished"]
-                })
-                .to_string()
-            ],
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
+            rusqlite::params!["run-finished-gate", 1, "pending",],
         )
         .unwrap();
     }
