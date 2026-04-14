@@ -36,12 +36,6 @@
 - **IMPORTANT**: 서버는 `$RUNTIME_ROOT/dashboard/dist/`에서 정적 파일 서빙. `dashboard/` 루트에 빌드 출력 복사 금지
 - 이 채널 pair 간에는 같은 프로젝트 기억을 이어간다
 
-## code_principles
-- 기술부채를 만들지 않는다 — "나중에 고치자"는 허용하지 않는다
-- 임시 우회(workaround)보다 근본 해결을 택한다
-- 변경 시 주변 코드 품질이 같거나 나아져야 한다 (보이스카웃 규칙)
-- 불필요한 복잡도를 추가하지 않는다 — 현재 요구에 맞는 최소 설계
-
 ## response_contract
 - 변경 사항은 영향 범위(어떤 화면, 어떤 breakpoint)를 명시한다
 - API/WS 변경이 필요한 경우 project-agentdesk에 handoff할 내용을 구체적으로 정리한다

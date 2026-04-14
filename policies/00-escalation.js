@@ -2,6 +2,76 @@
 // re-notify after a longer interval if the problem is still unresolved.
 var ESCALATION_COOLDOWN_SEC = 600;
 var ESCALATION_PENDING_TTL_SEC = 600;
+var BENIGN_BLOCKED_REASON_PREFIXES = [
+  "ci:waiting",
+  "ci:running",
+  "ci:rerunning",
+  "ci:rework",
+  "deploy:waiting",
+  "deploy:deploying:"
+];
+
+function isBenignBlockedReason(reason) {
+  if (!reason) return false;
+  for (var i = 0; i < BENIGN_BLOCKED_REASON_PREFIXES.length; i++) {
+    if (String(reason).indexOf(BENIGN_BLOCKED_REASON_PREFIXES[i]) === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function manualInterventionFingerprint(status, reviewStatus, blockedReason) {
+  if (reviewStatus === "dilemma_pending") {
+    return "review:dilemma_pending";
+  }
+  if (blockedReason && !isBenignBlockedReason(blockedReason)) {
+    return "blocked:" + blockedReason;
+  }
+  return null;
+}
+
+function loadManualInterventionState(cardId) {
+  var cards = agentdesk.db.query(
+    "SELECT status, review_status, blocked_reason FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (cards.length === 0) return null;
+  var card = cards[0];
+  var fingerprint = manualInterventionFingerprint(card.status, card.review_status, card.blocked_reason);
+  return {
+    status: card.status,
+    review_status: card.review_status,
+    blocked_reason: card.blocked_reason,
+    fingerprint: fingerprint,
+    active: !!fingerprint
+  };
+}
+
+function escalateToManualIntervention(cardId, reason, options) {
+  var state = loadManualInterventionState(cardId);
+  if (!state) return;
+
+  var opts = options || {};
+  if (state.status === "review" || opts.review === true) {
+    agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {
+      blocked_reason: reason,
+      suggestion_pending_at: null,
+      awaiting_dod_at: null
+    });
+    agentdesk.reviewState.sync(cardId, "dilemma_pending", opts.reviewStateSync || {});
+  } else {
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+      [reason, cardId]
+    );
+  }
+
+  agentdesk.log.warn("[manual-intervention] Card " + cardId + " requires manual decision: " + reason);
+  if (!opts.skipEscalate) {
+    escalate(cardId, reason);
+  }
+}
 
 function escalationServerPort() {
   return agentdesk.config.get("server_port");
@@ -23,14 +93,6 @@ function escalationCardTitle(cardId) {
     return "#" + cards[0].github_issue_number + " " + cards[0].title;
   }
   return cards[0].title || cardId;
-}
-
-function escalationCardStatus(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT status FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  return cards.length > 0 ? cards[0].status : null;
 }
 
 function parseCooldownRecord(raw) {
@@ -93,9 +155,13 @@ function flushEscalations() {
   var rows = agentdesk.db.query("SELECT key, value FROM kv_meta WHERE key LIKE 'pm_pending:%'");
   for (var i = 0; i < rows.length; i++) {
     var cardId = rows[i].key.substring("pm_pending:".length);
-    var currentStatus = escalationCardStatus(cardId);
+    var state = loadManualInterventionState(cardId);
     var cooldownKey = "pm_decision_sent:" + cardId;
-    if (!currentStatus) {
+    if (!state) {
+      agentdesk.db.execute("DELETE FROM kv_meta WHERE key IN (?1, ?2)", [rows[i].key, cooldownKey]);
+      continue;
+    }
+    if (!state.active) {
       agentdesk.db.execute("DELETE FROM kv_meta WHERE key IN (?1, ?2)", [rows[i].key, cooldownKey]);
       continue;
     }
@@ -111,7 +177,7 @@ function flushEscalations() {
       var cooldownRecord = parseCooldownRecord(cooldownRows[0].value);
       var sentAt = cooldownRecord ? cooldownRecord.sent_at : 0;
       var now = Math.floor(Date.now() / 1000);
-      var sameAlertState = !cooldownRecord || !cooldownRecord.status || cooldownRecord.status === currentStatus;
+      var sameAlertState = !cooldownRecord || !cooldownRecord.status || cooldownRecord.status === state.fingerprint;
       if (sameAlertState && now - sentAt < ESCALATION_COOLDOWN_SEC) {
         agentdesk.log.info("[escalation] cooldown skip for " + cardId + " (" + (now - sentAt) + "s)");
         continue;
@@ -130,7 +196,7 @@ function flushEscalations() {
     var sentAt = Math.floor(Date.now() / 1000);
     agentdesk.db.execute(
       "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-      [cooldownKey, JSON.stringify({ sent_at: sentAt, status: currentStatus }), String(ESCALATION_COOLDOWN_SEC)]
+      [cooldownKey, JSON.stringify({ sent_at: sentAt, status: state.fingerprint }), String(ESCALATION_COOLDOWN_SEC)]
     );
     agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
   }

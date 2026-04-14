@@ -28,6 +28,7 @@ interface AgentManagerViewProps {
   showTabBar?: boolean;
   title?: string;
   subtitle?: string;
+  scrollable?: boolean;
 }
 
 type Tab = "agents" | "departments" | "dispatch";
@@ -47,6 +48,7 @@ export default function AgentManagerView({
   showTabBar = true,
   title,
   subtitle,
+  scrollable = true,
 }: AgentManagerViewProps) {
   const locale = language;
   const isKo = locale.startsWith("ko");
@@ -287,8 +289,14 @@ export default function AgentManagerView({
 
   return (
     <div
-      className="mx-auto h-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className={`mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6 ${
+        scrollable ? "sm:h-full sm:overflow-y-auto" : ""
+      }`}
+      style={{
+        paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))",
+        WebkitOverflowScrolling: scrollable ? "touch" : undefined,
+        touchAction: scrollable ? "pan-y" : undefined,
+      }}
     >
       {showHeader && (
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -306,8 +314,12 @@ export default function AgentManagerView({
             {(showTabBar || tab === "departments") && tab !== "dispatch" && (
               <button
                 onClick={openCreateDept}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-white/10"
-                style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
+                className="rounded-lg border px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-100"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+                  color: "var(--th-text-secondary)",
+                }}
               >
                 + {tr("부서 추가", "Add Dept")}
               </button>

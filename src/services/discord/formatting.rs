@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
-use crate::services::provider::ProviderKind;
 use crate::utils::format::tail_with_ellipsis_bytes;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -191,43 +190,12 @@ pub(super) fn extract_skill_description(content: &str) -> String {
     "Custom skill".to_string()
 }
 
-/// Build the system-prompt skill notice using one-line descriptions only.
-pub(super) fn format_skills_notice(provider: &ProviderKind, skills: &[(String, String)]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-
-    let header = match provider {
-        ProviderKind::Claude => "Available skills (invoke via the Skill tool):",
-        ProviderKind::Codex => "Available local Codex skills (use them by name when relevant):",
-        ProviderKind::Gemini => "Available local Gemini skills (use them by name when relevant):",
-        ProviderKind::Qwen => "Available local Qwen skills (use them by name when relevant):",
-        ProviderKind::Unsupported(_) => return String::new(),
-    };
-
-    let list = skills
-        .iter()
-        .map(|(name, desc)| format!("  - /{}: {}", name, desc))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        "\n\n{header}\n\
-         The entries below are descriptions only, not the full skill body.\n\
-         If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
-         Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
-         {list}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
-        filter_codex_tool_logs, format_skills_notice, normalize_allowed_tools,
-        preserve_previous_tool_status,
+        filter_codex_tool_logs, normalize_allowed_tools, preserve_previous_tool_status,
     };
-    use crate::services::provider::ProviderKind;
 
     #[test]
     fn test_canonical_tool_name_is_case_insensitive() {
@@ -340,35 +308,6 @@ mod tests {
             extract_skill_description(content),
             "This is the body of the skill."
         );
-    }
-
-    #[test]
-    fn test_format_skills_notice_adds_progressive_disclosure_guidance() {
-        let notice = format_skills_notice(
-            &ProviderKind::Codex,
-            &[(
-                "deploy".to_string(),
-                "Build and deploy the project".to_string(),
-            )],
-        );
-
-        assert!(notice.contains("Available local Codex skills"));
-        assert!(notice.contains("/deploy: Build and deploy the project"));
-        assert!(notice.contains("descriptions only"));
-        assert!(notice.contains("`SKILL.md`"));
-        assert!(notice.contains("`references/`"));
-    }
-
-    #[test]
-    fn test_format_skills_notice_mentions_qwen_local_skills() {
-        let notice = format_skills_notice(
-            &ProviderKind::Qwen,
-            &[("deploy".to_string(), "Ship the current branch".to_string())],
-        );
-
-        assert!(notice.contains("Available local Qwen skills"));
-        assert!(notice.contains("`SKILL.md`"));
-        assert!(notice.contains("/deploy: Ship the current branch"));
     }
 
     #[test]

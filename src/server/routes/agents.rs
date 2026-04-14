@@ -1086,7 +1086,7 @@ pub async fn agent_transcripts(
 }
 
 /// POST /api/agents/:id/signal
-/// Agent sends a status signal (e.g., "blocked" with reason).
+/// Agent sends an operational signal (e.g., "blocked" with reason).
 pub async fn agent_signal(
     State(state): State<super::AppState>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
@@ -1129,20 +1129,10 @@ pub async fn agent_signal(
     };
 
     conn.execute(
-        "UPDATE kanban_cards SET blocked_reason = ?1 WHERE id = ?2",
+        "UPDATE kanban_cards SET blocked_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
         rusqlite::params![reason, card_id],
     )
     .ok();
-    drop(conn);
-
-    let _ = crate::kanban::transition_status_with_opts(
-        &state.db,
-        &state.engine,
-        &card_id,
-        "blocked",
-        "agent-signal",
-        true,
-    );
 
     (
         StatusCode::OK,

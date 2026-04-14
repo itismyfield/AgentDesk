@@ -2,6 +2,7 @@ import { localeName, type UiLanguage } from "../../i18n";
 import type { Agent, Task } from "../../types";
 import AgentAvatar from "../AgentAvatar";
 import { getRankTier, STATUS_LABELS, STATUS_LEFT_BORDER, taskStatusLabel, timeAgo, type TFunction } from "./model";
+import { DashboardEmptyState } from "./ui";
 
 export interface DepartmentPerformance {
   id: string;
@@ -41,7 +42,7 @@ export function DashboardDeptAndSquad({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_1fr]">
       <div className="game-panel p-5">
         <h2
-          className="mb-4 flex items-center gap-2 text-sm font-black uppercase tracking-wider"
+          className="mb-4 flex items-center gap-2 text-sm font-black uppercase tracking-widest"
           style={{ color: "var(--th-text-primary)" }}
         >
           <span
@@ -60,13 +61,17 @@ export function DashboardDeptAndSquad({
         </h2>
 
         {deptData.length === 0 ? (
-          <div
-            className="flex min-h-[200px] flex-col items-center justify-center gap-2 text-sm"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            <span className="text-3xl opacity-30">🏰</span>
-            {t({ ko: "데이터가 없습니다", en: "No data available", ja: "データがありません", zh: "暂无数据" })}
-          </div>
+          <DashboardEmptyState
+            icon="🏰"
+            title={t({ ko: "데이터 없음", en: "No data", ja: "データなし", zh: "暂无数据" })}
+            description={t({
+              ko: "표시할 부서 성과 집계가 아직 없습니다.",
+              en: "Department performance metrics are not available yet.",
+              ja: "表示できる部署パフォーマンス集計がまだありません。",
+              zh: "暂时没有可显示的部门绩效统计。",
+            })}
+            className="min-h-[200px]"
+          />
         ) : (
           <div className="space-y-2.5">
             {deptData.map((dept) => (
@@ -99,7 +104,7 @@ export function DashboardDeptAndSquad({
                 </div>
 
                 <div
-                  className="mt-1.5 flex justify-between text-xs font-semibold uppercase tracking-wider"
+                  className="mt-1.5 flex justify-between text-xs font-semibold uppercase tracking-widest"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   <span>
@@ -118,7 +123,7 @@ export function DashboardDeptAndSquad({
       <div className="game-panel p-5">
         <div className="mb-4 flex items-center justify-between">
           <h2
-            className="flex items-center gap-2 text-sm font-black uppercase tracking-wider"
+            className="flex items-center gap-2 text-sm font-black uppercase tracking-widest"
             style={{ color: "var(--th-text-primary)" }}
           >
             <span
@@ -221,12 +226,15 @@ export function DashboardMissionLog({
     <div className="game-panel p-5">
       <div className="mb-4 flex items-center justify-between">
         <h2
-          className="flex items-center gap-2 text-sm font-black uppercase tracking-wider"
+          className="flex items-center gap-2 text-sm font-black uppercase tracking-widest"
           style={{ color: "var(--th-text-primary)" }}
         >
           <span
-            className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/15 text-sm"
-            style={{ boxShadow: "0 0 8px rgba(139,92,246,0.2)" }}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-sm"
+            style={{
+              background: "color-mix(in srgb, var(--th-accent-primary-soft) 76%, transparent)",
+              boxShadow: "0 0 8px color-mix(in srgb, var(--th-accent-primary) 18%, transparent)",
+            }}
           >
             📡
           </span>
@@ -252,13 +260,17 @@ export function DashboardMissionLog({
       </div>
 
       {recentTasks.length === 0 ? (
-        <div
-          className="flex flex-col items-center justify-center gap-2 py-10 text-sm"
-          style={{ color: "var(--th-text-muted)" }}
-        >
-          <span className="text-3xl opacity-30">📡</span>
-          {t({ ko: "로그 없음", en: "No logs", ja: "ログなし", zh: "暂无日志" })}
-        </div>
+        <DashboardEmptyState
+          icon="📡"
+          title={t({ ko: "로그 없음", en: "No logs", ja: "ログなし", zh: "暂无日志" })}
+          description={t({
+            ko: "아직 표시할 최근 활동 로그가 없습니다.",
+            en: "There are no recent activity logs to show yet.",
+            ja: "表示できる最近の活動ログがまだありません。",
+            zh: "暂时没有可显示的最近活动日志。",
+          })}
+          className="py-10"
+        />
       ) : (
         <div className="space-y-2">
           {recentTasks.map((task) => {
@@ -307,7 +319,7 @@ export function DashboardMissionLog({
 
                 <div className="flex flex-col items-end gap-1">
                   <span
-                    className={`rounded-md border px-2 py-0.5 text-xs font-black uppercase tracking-wider ${statusInfo.color}`}
+                    className={`rounded-md border px-2 py-0.5 text-xs font-black uppercase tracking-widest ${statusInfo.color}`}
                   >
                     {taskStatusLabel(task.status, t)}
                   </span>

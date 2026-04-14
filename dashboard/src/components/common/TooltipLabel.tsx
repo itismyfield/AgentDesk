@@ -4,9 +4,10 @@ interface TooltipLabelProps {
   text: string;
   tooltip: string;
   className?: string;
+  onClick?: () => void;
 }
 
-export default function TooltipLabel({ text, tooltip, className }: TooltipLabelProps) {
+export default function TooltipLabel({ text, tooltip, className, onClick }: TooltipLabelProps) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -17,20 +18,39 @@ export default function TooltipLabel({ text, tooltip, className }: TooltipLabelP
 
   return (
     <span className={`relative flex max-w-full min-w-0 items-center gap-1 ${className || ""}`}>
-      <button
-        type="button"
-        className="min-w-0 flex-1 truncate text-left"
-        title={tooltip}
-        aria-label={tooltip}
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onTouchStart={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {text}
-      </button>
+      {onClick ? (
+        <button
+          type="button"
+          className="min-w-0 flex-1 truncate text-left"
+          title={tooltip}
+          aria-label={tooltip}
+          onMouseEnter={() => setOpen(true)}
+          onMouseLeave={() => setOpen(false)}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onTouchStart={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+        >
+          {text}
+        </button>
+      ) : (
+        <span
+          className="min-w-0 flex-1 truncate"
+          title={tooltip}
+          aria-label={tooltip}
+          tabIndex={0}
+          onMouseEnter={() => setOpen(true)}
+          onMouseLeave={() => setOpen(false)}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onTouchStart={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        >
+          {text}
+        </span>
+      )}
       <span
         className="text-xs shrink-0"
         style={{ color: "var(--th-text-muted)" }}

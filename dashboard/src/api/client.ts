@@ -19,6 +19,7 @@ export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsRespons
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_ANALYTICS_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 500;
 
@@ -32,13 +33,18 @@ export function onApiError(listener: ApiErrorListener | null): void {
   apiErrorListener = listener;
 }
 
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
 function isRetryable(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-async function request<T>(url: string, opts?: RequestInit): Promise<T> {
+async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
+  const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   if (isGet) {
     const existing = inflightGets.get(url);
@@ -53,15 +59,16 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const { timeoutMs: _timeoutMs, ...fetchOpts } = opts ?? {};
         const res = await fetch(`${BASE}${url}`, {
           credentials: "include",
-          ...opts,
+          ...fetchOpts,
           signal: controller.signal,
           headers: {
             "Content-Type": "application/json",
-            ...opts?.headers,
+            ...fetchOpts.headers,
           },
         });
         clearTimeout(timer);
@@ -423,7 +430,9 @@ export async function getStats(officeId?: string): Promise<DashboardStats> {
 }
 
 export async function getTokenAnalytics(period: "7d" | "30d" | "90d" = "30d"): Promise<TokenAnalyticsResponse> {
-  return request(`/api/token-analytics?period=${period}`);
+  return request(`/api/token-analytics?period=${period}`, {
+    timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
+  });
 }
 
 // ── Kanban & Dispatches ──
@@ -1055,6 +1064,18 @@ export async function getSkillRanking(
   return request(`/api/skills/ranking?window=${window}&limit=${limit}`);
 }
 
+export interface SkillTrendPoint {
+  day: string;
+  count: number;
+}
+
+export async function getSkillTrend(days = 30): Promise<SkillTrendPoint[]> {
+  const data = await request<{ trend: SkillTrendPoint[] }>(
+    `/api/skills-trend?days=${days}`,
+  );
+  return data.trend;
+}
+
 // ── GitHub Issues ──
 
 export interface GitHubIssue {
@@ -1324,7 +1345,7 @@ export interface AutoQueueRun {
   id: string;
   repo: string | null;
   agent_id: string | null;
-  status: "generated" | "pending" | "active" | "paused" | "completed";
+  status: "generated" | "pending" | "active" | "paused" | "completed" | "cancelled";
   ai_model: string | null;
   ai_rationale: string | null;
   timeout_minutes: number;
@@ -1334,6 +1355,7 @@ export interface AutoQueueRun {
   completed_at: number | null;
   max_concurrent_threads?: number;
   thread_group_count?: number;
+  deploy_phases?: number[];
 }
 
 export interface AutoQueueThreadLink {
@@ -1379,6 +1401,16 @@ export interface ThreadGroupStatus {
   }[];
 }
 
+export interface PhaseGateInfo {
+  id: number;
+  phase: number;
+  status: "pending" | "passed" | "failed";
+  dispatch_id?: string | null;
+  failure_reason?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface AutoQueueStatus {
   run: AutoQueueRun | null;
   entries: DispatchQueueEntry[];
@@ -1387,6 +1419,36 @@ export interface AutoQueueStatus {
     { pending: number; dispatched: number; done: number; skipped: number }
   >;
   thread_groups?: Record<string, ThreadGroupStatus>;
+  phase_gates?: PhaseGateInfo[];
+}
+
+export interface AutoQueueHistoryRun {
+  id: string;
+  repo: string | null;
+  agent_id: string | null;
+  status: AutoQueueRun["status"] | (string & {});
+  created_at: number;
+  completed_at: number | null;
+  duration_ms: number;
+  entry_count: number;
+  done_count: number;
+  skipped_count: number;
+  pending_count: number;
+  dispatched_count: number;
+  success_rate: number;
+  failure_rate: number;
+}
+
+export interface AutoQueueHistorySummary {
+  total_runs: number;
+  completed_runs: number;
+  success_rate: number;
+  failure_rate: number;
+}
+
+export interface AutoQueueHistoryResponse {
+  summary: AutoQueueHistorySummary;
+  runs: AutoQueueHistoryRun[];
 }
 
 export async function generateAutoQueue(
@@ -1431,6 +1493,18 @@ export async function getAutoQueueStatus(
   if (agentId) params.set("agent_id", agentId);
   const qs = params.toString();
   return request(`/api/auto-queue/status${qs ? `?${qs}` : ""}`);
+}
+
+export async function getAutoQueueHistory(
+  limit = 8,
+  repo?: string | null,
+  agentId?: string | null,
+): Promise<AutoQueueHistoryResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (repo) params.set("repo", repo);
+  if (agentId) params.set("agent_id", agentId);
+  return request(`/api/auto-queue/history?${params.toString()}`);
 }
 
 export async function getPipelineStagesForAgent(

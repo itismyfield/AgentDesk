@@ -24,6 +24,7 @@ import type { OfficeTickerContext } from "./office-view/officeTicker";
 import OfficeInsightPanel from "./office-view/OfficeInsightPanel";
 import { useOfficePixiRuntime } from "./office-view/useOfficePixiRuntime";
 import type { SupportedLocale } from "./office-view/themes-locale";
+import { isManualInterventionCard } from "./agent-manager/kanban-utils";
 
 interface OfficeViewProps {
   agents: Agent[];
@@ -194,7 +195,7 @@ export default function OfficeView({
     const set = new Set<string>();
     if (!kanbanCards) return set;
     for (const card of kanbanCards) {
-      if (card.status === "blocked" && card.assignee_agent_id) set.add(card.assignee_agent_id);
+      if (isManualInterventionCard(card) && card.assignee_agent_id) set.add(card.assignee_agent_id);
     }
     return set;
   }, [kanbanCards]);

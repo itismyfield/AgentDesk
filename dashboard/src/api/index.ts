@@ -42,6 +42,7 @@ export {
   getAgentTranscripts,
   getAgentSkills,
   getSkillRanking,
+  getSkillTrend,
   getHealth,
   getTokenAnalytics,
   getDiscordBindings,
@@ -66,6 +67,7 @@ export {
   generateAutoQueue,
   activateAutoQueue,
   getAutoQueueStatus,
+  getAutoQueueHistory,
   skipAutoQueueEntry,
   updateAutoQueueRun,
   getPipelineStages,
@@ -102,6 +104,9 @@ export type {
   AutoQueueThreadLink,
   AutoQueueRun,
   AutoQueueStatus,
+  AutoQueueHistoryRun,
+  AutoQueueHistorySummary,
+  AutoQueueHistoryResponse,
   DispatchQueueEntry,
   CronJob,
   CronSchedule,
@@ -118,6 +123,7 @@ export type {
   SkillRankingOverallRow,
   SkillRankingByAgentRow,
   SkillRankingResponse,
+  SkillTrendPoint,
   DiscordBinding,
   DiscordChannelInfo,
   CronJobGlobal,
@@ -144,6 +150,7 @@ export type {
   TokenAnalyticsResponse,
   TimelineEvent,
   PipelineConfigResponse,
+  PhaseGateInfo,
 } from "./client";
 
 // ── Sprite processing (stub for PCD — no backend sprite processor) ──

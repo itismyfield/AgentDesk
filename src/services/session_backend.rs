@@ -264,6 +264,8 @@ pub struct StreamLineState {
     pub last_session_id: Option<String>,
     pub last_model: Option<String>,
     pub accum_input_tokens: u64,
+    pub accum_cache_create_tokens: u64,
+    pub accum_cache_read_tokens: u64,
     pub accum_output_tokens: u64,
     pub final_result: Option<String>,
     pub stdout_error: Option<(String, String)>,
@@ -314,7 +316,9 @@ pub fn process_stream_line(
                     .get("cache_creation_input_tokens")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0);
-                state.accum_input_tokens += input_tokens + cache_read + cache_creation;
+                state.accum_input_tokens += input_tokens;
+                state.accum_cache_read_tokens += cache_read;
+                state.accum_cache_create_tokens += cache_creation;
                 if let Some(output_tokens) =
                     usage.get("output_tokens").and_then(|value| value.as_u64())
                 {
@@ -342,7 +346,9 @@ pub fn process_stream_line(
                 .get("output_tokens")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
-            state.accum_input_tokens = input_tokens + cache_read + cache_creation;
+            state.accum_input_tokens = input_tokens;
+            state.accum_cache_read_tokens = cache_read;
+            state.accum_cache_create_tokens = cache_creation;
             state.accum_output_tokens = output_tokens;
         }
 
@@ -361,6 +367,10 @@ pub fn process_stream_line(
                 duration_ms,
                 num_turns,
                 input_tokens: (state.accum_input_tokens > 0).then_some(state.accum_input_tokens),
+                cache_create_tokens: (state.accum_cache_create_tokens > 0)
+                    .then_some(state.accum_cache_create_tokens),
+                cache_read_tokens: (state.accum_cache_read_tokens > 0)
+                    .then_some(state.accum_cache_read_tokens),
                 output_tokens: (state.accum_output_tokens > 0).then_some(state.accum_output_tokens),
             });
         }

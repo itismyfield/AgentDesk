@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import AutoQueuePanel from "./AutoQueuePanel";
@@ -6,6 +6,13 @@ import PipelineVisualEditor from "./PipelineVisualEditor";
 import CardTimeline from "./CardTimeline";
 import MarkdownContent from "../common/MarkdownContent";
 import KanbanColumn from "./KanbanColumn";
+import {
+  SurfaceActionButton,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+  SurfaceSegmentButton,
+} from "../common/SurfacePrimitives";
 import type {
   Agent,
   Department,
@@ -30,6 +37,10 @@ import {
   createChecklistItem,
   formatIso,
   formatTs,
+  getCardDelayBadge,
+  getCardDwellBadge,
+  getCardMetadata,
+  getChecklistSummary,
   hasManualInterventionReason,
   isManualInterventionCard,
   isReviewCard,
@@ -77,8 +88,48 @@ interface KanbanTabProps {
   onClearSignalFocus?: () => void;
 }
 
+const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
+  review: { bg: "rgba(20,184,166,0.16)", text: "#5eead4" },
+  pm: { bg: "rgba(249,115,22,0.16)", text: "#fdba74" },
+  work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
+  general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
+};
+
 const STALE_IN_PROGRESS_MS = 100 * 60_000;
 type MobileKanbanView = "summary" | "minimap";
+type MobileMinimapEntry =
+  | {
+    key: string;
+    kind: "card";
+    card: KanbanCard;
+    label: string;
+  }
+  | {
+    key: string;
+    kind: "issue";
+    issue: GitHubIssue;
+    label: string;
+  };
+
+const SURFACE_FIELD_STYLE = {
+  background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+} as const;
+
+const SURFACE_PANEL_STYLE = {
+  background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+} as const;
+
+const SURFACE_CHIP_STYLE = {
+  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+} as const;
+
+const SURFACE_GHOST_BUTTON_STYLE = {
+  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+} as const;
 
 export default function KanbanTab({
   tr,
@@ -123,9 +174,6 @@ export default function KanbanTab({
   const [assigningIssue, setAssigningIssue] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [draggingCardId, setDraggingCardId] = useState<string | null>(null);
-  const [dragOverStatus, setDragOverStatus] = useState<KanbanCardStatus | null>(null);
-  const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
   const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
   const [mobileBoardView, setMobileBoardView] = useState<MobileKanbanView>("summary");
@@ -409,6 +457,53 @@ export default function KanbanTab({
     return localeName(locale, agent);
   };
 
+  const getTimelineKindLabel = (kind: "review" | "pm" | "work" | "general") => {
+    switch (kind) {
+      case "review":
+        return tr("리뷰", "Review");
+      case "pm":
+        return tr("PM 결정", "PM Decision");
+      case "work":
+        return tr("작업 이력", "Work Log");
+      case "general":
+        return tr("코멘트", "Comment");
+    }
+  };
+
+  const getTimelineStatusLabel = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") => {
+    switch (status) {
+      case "reviewing":
+        return tr("진행 중", "In Progress");
+      case "changes_requested":
+        return tr("수정 필요", "Changes Requested");
+      case "passed":
+        return tr("통과", "Passed");
+      case "decision":
+        return tr("결정", "Decision");
+      case "completed":
+        return tr("완료", "Completed");
+      case "comment":
+        return tr("일반", "General");
+    }
+  };
+
+  const getTimelineStatusStyle = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") => {
+    switch (status) {
+      case "reviewing":
+        return { bg: "rgba(20,184,166,0.16)", text: "#5eead4" };
+      case "changes_requested":
+        return { bg: "rgba(251,113,133,0.16)", text: "#fda4af" };
+      case "passed":
+        return { bg: "rgba(34,197,94,0.18)", text: "#86efac" };
+      case "decision":
+        return { bg: "rgba(249,115,22,0.16)", text: "#fdba74" };
+      case "completed":
+        return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
+      case "comment":
+        return { bg: "rgba(148,163,184,0.12)", text: "#94a3b8" };
+    }
+  };
+
   const repoCards = useMemo(() => {
     if (!selectedRepo) return [] as KanbanCard[];
     return cards.filter((card) => card.github_repo === selectedRepo);
@@ -541,6 +636,19 @@ export default function KanbanTab({
     return mapped;
   }, [inProgressCardsByAgentId, liveTurnAgentIds, liveTurnsByAgentId]);
 
+  const selectedCardMetadata = selectedCard ? getCardMetadata(selectedCard) : null;
+  const selectedCardChecklistSummary = selectedCard ? getChecklistSummary(selectedCard) : null;
+  const selectedCardDelayBadge = selectedCard ? getCardDelayBadge(selectedCard, tr) : null;
+  const selectedCardDwellBadge = selectedCard ? getCardDwellBadge(selectedCard, nowMs, tr) : null;
+  const selectedParentCard = selectedCard?.parent_card_id
+    ? repoCardsById.get(selectedCard.parent_card_id) ?? null
+    : null;
+  const selectedChildCards = selectedCard ? childCardsByParentId.get(selectedCard.id) ?? [] : [];
+  const selectedLiveToolState = selectedCard ? liveToolStateByCardId.get(selectedCard.id) ?? null : null;
+  const selectedLatestDispatch = selectedCard?.latest_dispatch_id
+    ? dispatchMap.get(selectedCard.latest_dispatch_id) ?? null
+    : null;
+
   // Agents that have cards in the current repo (for the per-agent dropdown)
   const repoAgentCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -638,7 +746,7 @@ export default function KanbanTab({
       status: s.stage_name as KanbanCardStatus,
       labelKo: s.stage_name,
       labelEn: s.stage_name,
-      accent: "#e879f9",
+      accent: "#06b6d4",
     }));
     return [...base.slice(0, reviewIdx + 1), ...pipelineCols, ...base.slice(reviewIdx + 1)];
   }, [selectedAgentId, agentPipelineStages]);
@@ -716,6 +824,11 @@ export default function KanbanTab({
   }, [issues, activeIssueNumbers, cardTypeFilter]);
 
   const totalVisible = filteredCards.length + backlogIssues.length;
+  const selectedRepoLabel = selectedRepo || tr("전체", "All");
+  const selectedAgentScopeLabel = selectedAgentId
+    ? (agents.find((a) => a.id === selectedAgentId)?.name ?? selectedAgentId)
+    : tr("전체", "All");
+  const deferredDodCount = filteredCards.filter((c) => (c as any).dod_status === "deferred").length;
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
   const boardColumns = useMemo(() => effectiveColumnDefs.filter((column) =>
@@ -729,9 +842,41 @@ export default function KanbanTab({
       count: column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length,
     };
   }), [backlogIssues.length, boardColumns, cardsByStatus]);
+  const mobileMinimapLanes = useMemo(() => boardColumns.map((column) => {
+    const columnCards = cardsByStatus.get(column.status) ?? [];
+    const items: MobileMinimapEntry[] = column.status === "backlog"
+      ? [
+          ...backlogIssues.map((issue) => ({
+            key: `issue-${issue.number}`,
+            kind: "issue" as const,
+            issue,
+            label: `#${issue.number}`,
+          })),
+          ...columnCards.map((card) => ({
+            key: `card-${card.id}`,
+            kind: "card" as const,
+            card,
+            label: card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`,
+          })),
+        ]
+      : columnCards.map((card) => ({
+          key: `card-${card.id}`,
+          kind: "card" as const,
+          card,
+          label: card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`,
+        }));
+
+    return {
+      column,
+      count: items.length,
+      items,
+    };
+  }), [backlogIssues, boardColumns, cardsByStatus]);
   const focusedMobileSummary = mobileColumnSummaries.find(
     ({ column }) => column.status === mobileColumnStatus,
   ) ?? mobileColumnSummaries[0] ?? null;
+  const focusedMobileSummaryLabelKo = focusedMobileSummary?.column.labelKo ?? "선택된";
+  const focusedMobileSummaryLabelEn = focusedMobileSummary?.column.labelEn ?? "selected";
   const visibleColumns = compactBoard
     ? mobileBoardView === "summary"
       ? boardColumns
@@ -813,64 +958,6 @@ export default function KanbanTab({
       setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
     } finally {
       setAssigningIssue(false);
-    }
-  };
-
-  const handleDrop = async (
-    targetStatus: KanbanCardStatus,
-    beforeCardId: string | null,
-    event: DragEvent<HTMLElement>,
-  ) => {
-    event.preventDefault();
-    setDragOverStatus(null);
-    setDragOverCardId(null);
-    setActionError(null);
-
-    // --- Backlog issue drop ---
-    const issueJson = event.dataTransfer.getData("application/x-backlog-issue");
-    if (issueJson) {
-      setDraggingCardId(null);
-      if (targetStatus === "backlog") return; // no-op: dropped back on backlog
-      try {
-        const issue = JSON.parse(issueJson) as GitHubIssue;
-        const autoAgent = resolveAgentFromLabels(issue.labels);
-        if (autoAgent) {
-          await handleDirectAssignIssue(issue, autoAgent.id);
-        } else {
-          // Open modal for manual agent selection
-          setAssignIssue(issue);
-          const repoSource = repoSources.find((s) => s.repo === selectedRepo);
-          setAssignAssigneeId(repoSource?.default_agent_id ?? "");
-        }
-      } catch (error) {
-        setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
-      }
-      return;
-    }
-
-    // --- Existing card drag ---
-    const draggedId = draggingCardId;
-    setDraggingCardId(null);
-    if (!draggedId) return;
-    if (beforeCardId === draggedId) return;
-    try {
-      if (targetStatus === "requested") {
-        const card = cardsById.get(draggedId);
-        await api.createDispatch({
-          kanban_card_id: draggedId,
-          to_agent_id: card?.assignee_agent_id ?? "",
-          title: card?.title ?? "Dispatch",
-        });
-        window.location.reload();
-      } else {
-        await onUpdateCard(draggedId, {
-          status: targetStatus,
-          before_card_id: beforeCardId,
-        });
-        invalidateCardActivity(draggedId);
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : tr("카드 이동에 실패했습니다.", "Failed to move card."));
     }
   };
 
@@ -1038,6 +1125,16 @@ export default function KanbanTab({
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   };
+  const handleMiniMapCardOpen = (card: KanbanCard) => {
+    focusMobileColumn(card.status, false);
+    setSelectedBacklogIssue(null);
+    setSelectedCardId(card.id);
+  };
+  const handleMiniMapIssueOpen = (issue: GitHubIssue) => {
+    focusMobileColumn("backlog", false);
+    setSelectedCardId(null);
+    setSelectedBacklogIssue(issue);
+  };
   const signalFilterLabel =
     signalStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
       : signalStatusFilter === "blocked" ? tr("수동 개입", "Manual intervention")
@@ -1047,93 +1144,105 @@ export default function KanbanTab({
 
   return (
     <div className="space-y-4 pb-24 md:pb-0 min-w-0 overflow-x-hidden" style={{ paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))" }}>
-      <section
-        className="rounded-2xl border p-4 sm:p-5 space-y-4 min-w-0 overflow-hidden"
+      <SurfaceSection
+        eyebrow={tr("워크 오케스트레이션", "Work orchestration")}
+        title={tr("칸반", "Kanban")}
+        description={tr(
+          "Repo intake, backlog triage, dispatch, review 흐름을 한 표면에서 다룹니다.",
+          "Handle repo intake, backlog triage, dispatch, and review flow from one surface.",
+        )}
+        badge={tr(`${openCount}건 진행`, `${openCount} active`)}
+        className="rounded-[30px] p-4 sm:p-5"
         style={{
-          background: "linear-gradient(135deg, rgba(15,23,42,0.92), rgba(30,41,59,0.78))",
-          borderColor: "rgba(148,163,184,0.28)",
+          borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
         }}
       >
-        {/* Row 1: 칸반 title + count + stalled + settings (settings always right-aligned) */}
-        <div className="flex items-center justify-between gap-2 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold shrink-0" style={{ color: "var(--th-text-heading)" }}>
-              {tr("칸반", "Kanban")}
-            </h2>
-            <span className="text-xs shrink-0 px-2 py-0.5 rounded-full bg-white/8" style={{ color: "var(--th-text-muted)" }}>
-              {initialLoading ? "…" : `${openCount}${tr("건", "")}`}
-            </span>
-            {stalledCards.length > 0 && (
-              <button
-                onClick={() => { setStalledPopup(true); setStalledSelected(new Set()); }}
-                className="shrink-0 text-[11px] px-3 py-2 rounded-full font-medium animate-pulse"
-                style={{ backgroundColor: "rgba(239,68,68,0.2)", color: "#f87171", border: "1px solid rgba(239,68,68,0.4)", minHeight: 44 }}
-              >
-                {tr(`정체 ${stalledCards.length}건`, `${stalledCards.length} stalled`)}
-              </button>
-            )}
-            {(() => {
-              const deferredCount = cards.reduce((sum, c) => {
-                const meta = parseCardMetadata(c.metadata_json);
-                return sum + (meta.deferred_dod?.filter((d) => !d.verified).length ?? 0);
-              }, 0);
-              return deferredCount > 0 ? (
-                <button
-                  onClick={() => setDeferredDodPopup(true)}
-                  className="shrink-0 text-[11px] px-3 py-2 rounded-full font-medium"
-                  style={{ backgroundColor: "rgba(245,158,11,0.2)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)", minHeight: 44 }}
-                >
-                  {tr(`미검증 DoD ${deferredCount}건`, `${deferredCount} deferred DoD`)}
-                </button>
-              ) : null;
-            })()}
-          </div>
-          {/* Desktop-only inline repo tabs + agent selector */}
-          <div className="hidden sm:flex items-center gap-1.5 overflow-x-auto min-w-0">
+        <div className="mt-4 flex flex-wrap gap-2">
+          <SurfaceMetricPill
+            tone="info"
+            label={tr("가시 범위", "Visible scope")}
+            value={initialLoading ? "…" : `${totalVisible}${tr("건", " items")}`}
+            className="flex-1 sm:flex-none"
+          />
+          <SurfaceMetricPill
+            tone="accent"
+            label={tr("Repo 초점", "Repo focus")}
+            value={selectedRepoLabel}
+            className="flex-1 sm:flex-none"
+          />
+          <SurfaceMetricPill
+            tone="neutral"
+            label={tr("담당 범위", "Agent scope")}
+            value={selectedAgentScopeLabel}
+            className="flex-1 sm:flex-none"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {stalledCards.length > 0 && (
+            <SurfaceActionButton
+              tone="danger"
+              onClick={() => { setStalledPopup(true); setStalledSelected(new Set()); }}
+              className="animate-pulse"
+            >
+              {tr(`정체 ${stalledCards.length}건`, `${stalledCards.length} stalled`)}
+            </SurfaceActionButton>
+          )}
+          {deferredDodCount > 0 && (
+            <SurfaceActionButton tone="warn" onClick={() => setDeferredDodPopup(true)}>
+              {tr(`미검증 DoD ${deferredDodCount}건`, `${deferredDodCount} deferred DoD`)}
+            </SurfaceActionButton>
+          )}
+          <SurfaceActionButton
+            tone={settingsOpen ? "info" : "neutral"}
+            onClick={() => setSettingsOpen((prev) => !prev)}
+          >
+            {settingsOpen ? tr("설정 접기", "Close settings") : tr("설정 열기", "Open settings")}
+          </SurfaceActionButton>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-3 min-w-0">
+          <div className="hidden min-w-0 flex-wrap items-center gap-1.5 sm:flex">
             {repoSources.length >= 1 && repoSources.map((source) => (
-              <button
+              <SurfaceSegmentButton
                 key={source.id}
                 onClick={() => setSelectedRepo(source.repo)}
-                className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border truncate max-w-[160px]"
-                style={{
-                  borderColor: selectedRepo === source.repo ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.22)",
-                  backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.18)" : "transparent",
-                  color: selectedRepo === source.repo ? "#bfdbfe" : "var(--th-text-muted)",
-                }}
+                active={selectedRepo === source.repo}
+                tone="info"
+                className="max-w-[180px] truncate"
               >
                 {source.repo.split("/")[1] ?? source.repo}
-              </button>
+              </SurfaceSegmentButton>
             ))}
             {selectedRepo && (() => {
               const agentEntries = Array.from(repoAgentCounts.entries()).sort((a, b) => b[1] - a[1]);
               if (agentEntries.length <= 1) return null;
               if (agentEntries.length <= 4) {
                 return (<>
-                  {repoSources.length > 1 && <span className="text-slate-600 mx-0.5">|</span>}
-                  <button
+                  {repoSources.length > 1 && (
+                    <span className="px-1 text-xs" style={{ color: "var(--th-text-subtle)" }}>
+                      /
+                    </span>
+                  )}
+                  <SurfaceSegmentButton
                     onClick={() => setSelectedAgentId(null)}
-                    className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border"
-                    style={{
-                      borderColor: !selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                      backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.18)" : "transparent",
-                      color: !selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
-                    }}
+                    active={!selectedAgentId}
+                    tone="accent"
                   >
                     {tr(`전체`, `All`)}
-                  </button>
+                  </SurfaceSegmentButton>
                   {agentEntries.map(([aid, count]) => (
-                    <button
+                    <SurfaceSegmentButton
                       key={aid}
                       onClick={() => setSelectedAgentId(aid)}
-                      className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border truncate max-w-[140px]"
-                      style={{
-                        borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                        backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.18)" : "transparent",
-                        color: selectedAgentId === aid ? "#c4b5fd" : "var(--th-text-muted)",
-                      }}
+                      active={selectedAgentId === aid}
+                      tone="accent"
+                      className="max-w-[160px] truncate"
                     >
                       {getAgentLabel(aid)} ({count})
-                    </button>
+                    </SurfaceSegmentButton>
                   ))}
                 </>);
               }
@@ -1143,8 +1252,10 @@ export default function KanbanTab({
                   onChange={(e) => setSelectedAgentId(e.target.value || null)}
                   className="text-xs px-2.5 py-1.5 rounded-lg border bg-transparent min-w-0 max-w-[180px]"
                   style={{
-                    borderColor: selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                    color: selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
+                    borderColor: selectedAgentId
+                      ? "color-mix(in srgb, var(--th-accent-primary) 40%, transparent)"
+                      : "rgba(148,163,184,0.22)",
+                    color: selectedAgentId ? "var(--th-accent-primary)" : "var(--th-text-muted)",
                   }}
                 >
                   <option value="">{tr(`전체`, `All`)}</option>
@@ -1155,18 +1266,6 @@ export default function KanbanTab({
               );
             })()}
           </div>
-          <button
-            onClick={() => setSettingsOpen((prev) => !prev)}
-            className="shrink-0 rounded-lg px-3 py-2 text-xs border"
-            style={{
-              borderColor: settingsOpen ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.22)",
-              color: settingsOpen ? "#93c5fd" : "var(--th-text-muted)",
-              backgroundColor: settingsOpen ? "rgba(59,130,246,0.12)" : "transparent",
-              minHeight: 44,
-            }}
-          >
-            {settingsOpen ? tr("접기", "Close") : tr("설정", "Settings")}
-          </button>
         </div>
 
         {signalFilterLabel && (
@@ -1192,21 +1291,17 @@ export default function KanbanTab({
         )}
 
         {/* Row 2 (mobile only): Repo tabs + Agent selector — on desktop these are in Row 1 */}
-        <div className="flex gap-1.5 overflow-x-auto min-w-0 -mt-1 sm:hidden">
+        <div className="mt-1 flex gap-1.5 overflow-x-auto min-w-0 sm:hidden">
           {repoSources.length >= 1 && repoSources.map((source) => (
-            <button
+            <SurfaceSegmentButton
               key={source.id}
               onClick={() => setSelectedRepo(source.repo)}
-              className="shrink-0 text-xs px-3 py-2 rounded-full border truncate max-w-[180px]"
-              style={{
-                borderColor: selectedRepo === source.repo ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.22)",
-                backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.18)" : "transparent",
-                color: selectedRepo === source.repo ? "#bfdbfe" : "var(--th-text-muted)",
-                minHeight: 44,
-              }}
+              active={selectedRepo === source.repo}
+              tone="info"
+              className="max-w-[180px] truncate"
             >
               {source.repo.split("/")[1] ?? source.repo}
-            </button>
+            </SurfaceSegmentButton>
           ))}
         </div>
 
@@ -1219,33 +1314,24 @@ export default function KanbanTab({
           if (agentCount <= 4) {
             // Tab buttons
             return (
-              <div className="flex gap-1.5 overflow-x-auto min-w-0 -mt-1">
-                <button
+              <div className="mt-1 flex gap-1.5 overflow-x-auto min-w-0">
+                <SurfaceSegmentButton
                   onClick={() => setSelectedAgentId(null)}
-                  className="shrink-0 text-xs px-3 py-2 rounded-full border"
-                  style={{
-                    borderColor: !selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                    backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.18)" : "transparent",
-                    color: !selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
-                    minHeight: 44,
-                  }}
+                  active={!selectedAgentId}
+                  tone="accent"
                 >
                   {tr(`전체 (${repoCards.length})`, `All (${repoCards.length})`)}
-                </button>
+                </SurfaceSegmentButton>
                 {agentEntries.map(([aid, count]) => (
-                  <button
+                  <SurfaceSegmentButton
                     key={aid}
                     onClick={() => setSelectedAgentId(aid)}
-                    className="shrink-0 text-xs px-3 py-2 rounded-full border truncate max-w-[160px]"
-                    style={{
-                      borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                      backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.18)" : "transparent",
-                      color: selectedAgentId === aid ? "#c4b5fd" : "var(--th-text-muted)",
-                      minHeight: 44,
-                    }}
+                    active={selectedAgentId === aid}
+                    tone="accent"
+                    className="max-w-[160px] truncate"
                   >
                     {getAgentLabel(aid)} ({count})
-                  </button>
+                  </SurfaceSegmentButton>
                 ))}
               </div>
             );
@@ -1258,9 +1344,11 @@ export default function KanbanTab({
                 onChange={(e) => setSelectedAgentId(e.target.value || null)}
                 className="text-xs px-3 py-2 rounded-lg border bg-transparent min-w-0 max-w-[220px]"
                 style={{
-                  borderColor: selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                  color: selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
-                  backgroundColor: selectedAgentId ? "rgba(139,92,246,0.12)" : "transparent",
+                  borderColor: selectedAgentId
+                    ? "color-mix(in srgb, var(--th-accent-primary) 40%, transparent)"
+                    : "rgba(148,163,184,0.22)",
+                  color: selectedAgentId ? "var(--th-accent-primary)" : "var(--th-text-muted)",
+                  backgroundColor: selectedAgentId ? "var(--th-accent-primary-soft)" : "transparent",
                   minHeight: 44,
                 }}
               >
@@ -1277,7 +1365,7 @@ export default function KanbanTab({
         </div>
 
         {settingsOpen && (
-          <div className="space-y-3 min-w-0 overflow-hidden">
+          <div className="mt-4 space-y-3 min-w-0 overflow-hidden">
             <div className="flex flex-wrap gap-2">
               {repoSources.length === 0 && (
                 <span className="px-3 py-2 rounded-xl text-sm border border-dashed" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-muted)" }}>
@@ -1287,8 +1375,15 @@ export default function KanbanTab({
               {repoSources.map((source) => (
                 <div
                   key={source.id}
-                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 border text-sm ${selectedRepo === source.repo ? "bg-blue-500/20" : "bg-white/6"}`}
-                  style={{ borderColor: selectedRepo === source.repo ? "rgba(96,165,250,0.45)" : "rgba(148,163,184,0.22)" }}
+                  className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
+                  style={{
+                    borderColor: selectedRepo === source.repo
+                      ? "color-mix(in srgb, #60a5fa 52%, transparent)"
+                      : SURFACE_CHIP_STYLE.borderColor,
+                    background: selectedRepo === source.repo
+                      ? "color-mix(in srgb, var(--th-badge-sky-bg) 78%, var(--th-card-bg) 22%)"
+                      : SURFACE_CHIP_STYLE.background,
+                  }}
                 >
                   <button
                     onClick={() => setSelectedRepo(source.repo)}
@@ -1315,8 +1410,8 @@ export default function KanbanTab({
                 value={repoInput}
                 onChange={(event) => setRepoInput(event.target.value)}
                 placeholder={tr("owner/repo 입력 또는 선택", "Type or pick owner/repo")}
-                className="min-w-0 rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                className="min-w-0 rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               />
               <datalist id="kanban-repo-options">
                 {availableRepos.map((repo) => (
@@ -1334,7 +1429,10 @@ export default function KanbanTab({
             </div>
 
             <div className="flex flex-col gap-2 w-full">
-              <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
+              <label
+                className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
+              >
                 <input
                   type="checkbox"
                   checked={showClosed}
@@ -1346,7 +1444,10 @@ export default function KanbanTab({
                 const currentSource = repoSources.find((s) => s.repo === selectedRepo);
                 if (!currentSource) return null;
                 return (
-                  <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
+                  <label
+                    className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
+                    style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
+                  >
                     <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
                     <select
                       value={currentSource.default_agent_id ?? ""}
@@ -1355,8 +1456,8 @@ export default function KanbanTab({
                         void api.updateKanbanRepoSource(currentSource.id, { default_agent_id: value });
                         setRepoSources((prev) => prev.map((s) => s.id === currentSource.id ? { ...s, default_agent_id: value } : s));
                       }}
-                      className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs bg-white/6 border"
-                      style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
+                      className="min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       <option value="">{tr("없음", "None")}</option>
                       {agents.map((agent) => (
@@ -1373,14 +1474,14 @@ export default function KanbanTab({
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder={tr("제목 / 설명 / 담당자 검색", "Search title / description / assignee")}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                className="rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               />
               <select
                 value={agentFilter}
                 onChange={(event) => setAgentFilter(event.target.value)}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                className="rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               >
                 <option value="all">{tr("전체 에이전트", "All agents")}</option>
                 {agents.map((agent) => (
@@ -1390,8 +1491,8 @@ export default function KanbanTab({
               <select
                 value={deptFilter}
                 onChange={(event) => setDeptFilter(event.target.value)}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                className="rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               >
                 <option value="all">{tr("전체 부서", "All departments")}</option>
                 {departments.map((department) => (
@@ -1401,8 +1502,8 @@ export default function KanbanTab({
               <select
                 value={cardTypeFilter}
                 onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                className="rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               >
                 <option value="all">{tr("전체 카드", "All cards")}</option>
                 <option value="issue">{tr("이슈만", "Issues only")}</option>
@@ -1425,22 +1526,22 @@ export default function KanbanTab({
         )}
 
         {actionError && (
-          <div className="rounded-xl px-3 py-2 text-sm border" style={{ borderColor: "rgba(248,113,113,0.45)", color: "#fecaca", backgroundColor: "rgba(127,29,29,0.22)" }}>
+          <SurfaceNotice tone="danger" className="mt-4">
             {actionError}
-          </div>
+          </SurfaceNotice>
         )}
 
         {/* Assignee selection modal: shown when moving to "ready" without an assignee */}
         {assignBeforeReady && (
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAssignBeforeReady(null)}>
-            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm rounded-2xl border p-5 space-y-4" style={{ backgroundColor: "rgba(2,6,23,0.96)", borderColor: "rgba(148,163,184,0.24)" }}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setAssignBeforeReady(null)}>
+            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm rounded-2xl border p-5 space-y-4" style={{ background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
               <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>{tr("담당자 할당", "Assign Agent")}</h3>
               <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>{tr("준비됨 상태로 이동하려면 담당자를 지정해야 합니다.", "Assign an agent before moving to ready.")}</p>
               <select
                 value={assignBeforeReady.agentId}
                 onChange={(e) => setAssignBeforeReady((prev) => prev ? { ...prev, agentId: e.target.value } : null)}
-                className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                className="w-full rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               >
                 <option value="">{tr("선택...", "Select...")}</option>
                 {agents.map((a) => (
@@ -1448,7 +1549,13 @@ export default function KanbanTab({
                 ))}
               </select>
               <div className="flex justify-end gap-2">
-                <button onClick={() => setAssignBeforeReady(null)} className="rounded-xl px-4 py-2 text-sm bg-white/8" style={{ color: "var(--th-text-secondary)" }}>{tr("취소", "Cancel")}</button>
+                <button
+                  onClick={() => setAssignBeforeReady(null)}
+                  className="rounded-xl border px-4 py-2 text-sm"
+                  style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
+                >
+                  {tr("취소", "Cancel")}
+                </button>
                 <button
                   disabled={!assignBeforeReady.agentId}
                   onClick={async () => {
@@ -1551,7 +1658,7 @@ export default function KanbanTab({
             </div>
             <div className="space-y-1 max-h-60 overflow-y-auto">
               {stalledCards.map((card) => (
-                <label key={card.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 cursor-pointer hover:bg-white/5 text-sm" style={{ color: "var(--th-text-primary)" }}>
+                <label key={card.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-opacity hover:opacity-90" style={{ color: "var(--th-text-primary)" }}>
                   <input
                     type="checkbox"
                     checked={stalledSelected.has(card.id)}
@@ -1604,7 +1711,7 @@ export default function KanbanTab({
             )}
           </div>
         )}
-      </section>
+      </SurfaceSection>
 
       {/* Cancel confirmation modal — ask whether to also close GitHub issues */}
       {cancelConfirm && (() => {
@@ -1612,11 +1719,11 @@ export default function KanbanTab({
           .map((id) => cardsById.get(id))
           .filter((c): c is KanbanCard => !!(c?.github_repo && c.github_issue_number));
         return (
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>
             <div
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-md rounded-2xl border p-5 space-y-4"
-              style={{ backgroundColor: "rgba(2,6,23,0.96)", borderColor: "rgba(148,163,184,0.24)" }}
+              style={{ background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}
             >
               <h3 className="text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
                 {tr("카드 취소 확인", "Cancel cards")}
@@ -1654,8 +1761,8 @@ export default function KanbanTab({
                 <button
                   onClick={() => setCancelConfirm(null)}
                   disabled={cancelBusy}
-                  className="rounded-xl px-4 py-2 text-sm bg-white/8"
-                  style={{ color: "var(--th-text-secondary)" }}
+                  className="rounded-xl border px-4 py-2 text-sm"
+                  style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
                 >
                   {tr("돌아가기", "Go back")}
                 </button>
@@ -1813,13 +1920,13 @@ export default function KanbanTab({
                     </div>
 
                     {mobileBoardView === "summary" ? (
-                      <div className="flex gap-2 overflow-x-auto pb-1">
+                      <div className="grid grid-cols-2 gap-2">
                         {mobileColumnSummaries.map(({ column, count }) => (
                           <button
                             key={column.status}
                             type="button"
                             onClick={() => focusMobileColumn(column.status, true)}
-                            className="shrink-0 rounded-2xl border px-3 py-2 text-left"
+                            className="min-w-0 rounded-2xl border px-3 py-2 text-left"
                             style={{
                               borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
                               backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
@@ -1834,41 +1941,110 @@ export default function KanbanTab({
                         ))}
                       </div>
                     ) : (
-                      <div className="grid grid-cols-2 gap-2">
-                        {mobileColumnSummaries.map(({ column, count }) => (
-                          <button
-                            key={column.status}
-                            type="button"
-                            onClick={() => focusMobileColumn(column.status, false)}
-                            className="rounded-2xl border px-3 py-3 text-left"
-                            style={{
-                              borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
-                              backgroundColor: mobileColumnStatus === column.status ? `${column.accent}16` : "rgba(15,23,42,0.28)",
-                            }}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="inline-flex items-center gap-2 text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: column.accent }} />
-                                {tr(column.labelKo, column.labelEn)}
-                              </span>
-                              <span className="text-lg font-semibold" style={{ color: mobileColumnStatus === column.status ? column.accent : "var(--th-text-primary)" }}>
-                                {count}
-                              </span>
-                            </div>
-                            <div className="mt-2 text-[11px]" style={{ color: mobileColumnStatus === column.status ? column.accent : "var(--th-text-muted)" }}>
-                              {mobileColumnStatus === column.status
-                                ? tr("아래 리스트 표시 중", "Shown below")
-                                : tr("탭해서 집중 보기", "Tap to focus")}
-                            </div>
-                          </button>
-                        ))}
+                      <div className="space-y-3">
+                        {mobileMinimapLanes.map(({ column, count, items }) => {
+                          const isActive = mobileColumnStatus === column.status;
+                          const laneLabel = tr(column.labelKo, column.labelEn);
+                          return (
+                            <section
+                              key={column.status}
+                              className="rounded-2xl border px-3 py-3"
+                              style={{
+                                borderColor: isActive ? `${column.accent}88` : "rgba(148,163,184,0.24)",
+                                backgroundColor: isActive ? `${column.accent}14` : "rgba(15,23,42,0.28)",
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => focusMobileColumn(column.status, false)}
+                                className="flex w-full items-center justify-between gap-2 text-left"
+                              >
+                                <span className="inline-flex items-center gap-2 text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: column.accent }} />
+                                  {laneLabel}
+                                </span>
+                                <span className="text-lg font-semibold" style={{ color: isActive ? column.accent : "var(--th-text-primary)" }}>
+                                  {count}
+                                </span>
+                              </button>
+                              <div className="mt-2 text-[11px]" style={{ color: isActive ? column.accent : "var(--th-text-muted)" }}>
+                                {isActive
+                                  ? tr("아래 리스트가 이 lane에 맞춰집니다.", "The list below stays focused on this lane.")
+                                  : tr("헤더를 탭해 lane을 고정하거나 블록을 탭해 상세를 엽니다.", "Tap the header to pin this lane or tap a block for details.")}
+                              </div>
+
+                              {items.length > 0 ? (
+                                <div
+                                  className="mt-3 grid gap-2"
+                                  style={{ gridTemplateColumns: "repeat(auto-fill, minmax(2.35rem, 1fr))" }}
+                                >
+                                  {items.map((item) => {
+                                    const isCard = item.kind === "card";
+                                    const isSelected = isCard
+                                      ? selectedCardId === item.card.id
+                                      : selectedBacklogIssue?.number === item.issue.number;
+                                    const title = isCard ? item.card.title : item.issue.title;
+                                    return (
+                                      <button
+                                        key={item.key}
+                                        type="button"
+                                        onClick={() => {
+                                          if (isCard) {
+                                            handleMiniMapCardOpen(item.card);
+                                            return;
+                                          }
+                                          handleMiniMapIssueOpen(item.issue);
+                                        }}
+                                        className="group relative aspect-square rounded-xl border transition-transform active:scale-95"
+                                        aria-label={tr(
+                                          `${column.labelKo} ${item.label} ${title} 상세 열기`,
+                                          `Open ${column.labelEn} ${item.label} ${title} details`,
+                                        )}
+                                        title={`${item.label} ${title}`}
+                                        style={{
+                                          borderColor: isSelected ? "rgba(255,255,255,0.78)" : `${column.accent}66`,
+                                          background: isCard
+                                            ? `linear-gradient(180deg, color-mix(in srgb, ${column.accent} 60%, var(--th-card-bg) 40%) 0%, color-mix(in srgb, ${column.accent} 34%, var(--th-bg-surface) 66%) 100%)`
+                                            : `linear-gradient(180deg, color-mix(in srgb, ${column.accent} 36%, var(--th-card-bg) 64%) 0%, color-mix(in srgb, ${column.accent} 18%, var(--th-bg-surface) 82%) 100%)`,
+                                          boxShadow: isSelected ? `0 0 0 2px ${column.accent}` : "none",
+                                        }}
+                                      >
+                                        {!isCard && (
+                                          <span
+                                            className="absolute left-1.5 top-1.5 rounded-full px-1 py-0.5 text-[8px] font-semibold"
+                                            style={{ backgroundColor: "rgba(15,23,42,0.56)", color: "var(--th-text-secondary)" }}
+                                          >
+                                            GH
+                                          </span>
+                                        )}
+                                        <span
+                                          className="absolute inset-x-1.5 bottom-1.5 truncate text-[9px] font-semibold"
+                                          style={{ color: "rgba(255,255,255,0.92)" }}
+                                        >
+                                          {item.label}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div
+                                  className="mt-3 rounded-xl border border-dashed px-3 py-4 text-center text-xs"
+                                  style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)" }}
+                                >
+                                  {tr("표시할 카드가 없습니다.", "No cards to show.")}
+                                </div>
+                              )}
+                            </section>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
                   <div className="rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}>
                     {mobileBoardView === "summary"
                       ? tr("상단 요약바를 탭하면 해당 상태 섹션으로 이동합니다. 카드 상태 변경은 상세 패널에서 처리하세요.", "Tap the summary bar to jump to a lane. Change card status from the detail sheet.")
-                      : tr(`미니맵으로 상태를 고르면 아래에 ${focusedMobileSummary ? tr(focusedMobileSummary.column.labelKo, focusedMobileSummary.column.labelEn) : tr("선택된", "selected")} 리스트만 표시됩니다.`, `Pick a lane in the mini map to show only the ${focusedMobileSummary ? tr(focusedMobileSummary.column.labelKo, focusedMobileSummary.column.labelEn) : "selected"} list below.`)}
+                      : tr(`미니맵 블록을 탭하면 카드 상세가 열리고 아래에는 ${focusedMobileSummaryLabelKo} 리스트만 남깁니다.`, `Tap a mini-map block to open details and keep only the ${focusedMobileSummaryLabelEn} list below.`)}
                   </div>
                 </>
               )}
@@ -1886,31 +2062,15 @@ export default function KanbanTab({
                           backlogIssues={backlogIssues}
                           backlogCount={backlogCount}
                           tr={tr}
-                          locale={locale}
                           compactBoard={compactBoard}
                           initialLoading={initialLoading}
                           loadingIssues={loadingIssues}
-                          draggingCardId={draggingCardId}
-                          dragOverStatus={dragOverStatus}
-                          dragOverCardId={dragOverCardId}
                           closingIssueNumber={closingIssueNumber}
                           assigningIssue={assigningIssue}
-                          dispatchMap={dispatchMap}
-                          dispatches={dispatches}
-                          nowMs={nowMs}
-                          cardsById={repoCardsById}
-                          childCardsByParentId={childCardsByParentId}
-                          liveToolStateByCardId={liveToolStateByCardId}
-                          repoSources={repoSources}
-                          selectedRepo={selectedRepo}
                           getAgentLabel={getAgentLabel}
                           resolveAgentFromLabels={resolveAgentFromLabels}
                           onCardClick={setSelectedCardId}
                           onBacklogIssueClick={setSelectedBacklogIssue}
-                          onSetDraggingCardId={setDraggingCardId}
-                          onSetDragOverStatus={setDragOverStatus}
-                          onSetDragOverCardId={setDragOverCardId}
-                          onDrop={handleDrop}
                           onCloseIssue={handleCloseIssue}
                           onDirectAssignIssue={handleDirectAssignIssue}
                           onOpenAssignModal={handleOpenAssignModal}
@@ -1928,7 +2088,8 @@ export default function KanbanTab({
 
         {selectedCard && (
           <div
-            className={compactBoard ? "fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" : "hidden min-w-0 md:block"}
+            className={compactBoard ? "fixed inset-0 z-50" : "hidden min-w-0 md:block"}
+            style={compactBoard ? { backgroundColor: "var(--th-modal-overlay)" } : undefined}
             onClick={compactBoard ? () => setSelectedCardId(null) : undefined}
           >
             <div className={compactBoard ? "h-full w-full" : "sticky top-0"}>
@@ -1938,8 +2099,8 @@ export default function KanbanTab({
                   ? "h-[100svh] w-full overflow-y-auto px-5 py-5 space-y-4"
                   : "w-full max-h-[calc(100svh-7rem)] overflow-y-auto rounded-3xl border p-5 lg:p-6 space-y-4 shadow-2xl"}
                 style={{
-                  backgroundColor: "rgba(2,6,23,0.96)",
-                  borderColor: compactBoard ? "transparent" : "rgba(148,163,184,0.24)",
+                  background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+                  borderColor: compactBoard ? "transparent" : "color-mix(in srgb, var(--th-border) 72%, transparent)",
                   paddingTop: compactBoard
                     ? "max(1.25rem, calc(1.25rem + env(safe-area-inset-top)))"
                     : undefined,
@@ -1951,14 +2112,14 @@ export default function KanbanTab({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+                      <span className="rounded-full border px-2 py-0.5 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
                         {labelForStatus(selectedCard.status, tr)}
                       </span>
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+                      <span className="rounded-full border px-2 py-0.5 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
                         {priorityLabel(selectedCard.priority, tr)}
                       </span>
                       {selectedCard.github_repo && (
-                        <span className="px-2 py-0.5 rounded-full text-xs bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+                        <span className="rounded-full border px-2 py-0.5 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
                           {selectedCard.github_repo}
                         </span>
                       )}
@@ -1969,8 +2130,8 @@ export default function KanbanTab({
                   </div>
                   <button
                     onClick={() => setSelectedCardId(null)}
-                    className="shrink-0 whitespace-nowrap rounded-xl px-3 py-2 text-sm bg-white/8"
-                    style={{ color: "var(--th-text-secondary)" }}
+                    className="shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-sm"
+                    style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
                   >
                     {tr("닫기", "Close")}
                   </button>
@@ -1982,8 +2143,8 @@ export default function KanbanTab({
                     <input
                       value={editor.title}
                       onChange={(event) => setEditor((prev) => ({ ...prev, title: event.target.value }))}
-                      className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                      style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     />
                   </label>
                   <div className="space-y-1">
@@ -2034,8 +2195,8 @@ export default function KanbanTab({
                     <select
                       value={editor.assignee_agent_id}
                       onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
-                      className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                      style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       <option value="">{tr("없음", "None")}</option>
                       {agents.map((agent) => (
@@ -2048,15 +2209,15 @@ export default function KanbanTab({
                     <select
                       value={editor.priority}
                       onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
-                      className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                      style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       {PRIORITY_OPTIONS.map((priority) => (
                         <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
                       ))}
                     </select>
                   </label>
-                  <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
                     <div style={{ color: "var(--th-text-primary)" }}>
                       {selectedCard.github_issue_url ? (
@@ -2238,6 +2399,186 @@ export default function KanbanTab({
                   );
                 })()}
 
+                {(() => {
+                  const hasSummaryChips = Boolean(
+                    selectedCard.depth > 0
+                    || selectedCardMetadata?.retry_count
+                    || selectedCardMetadata?.failover_count
+                    || selectedCardMetadata?.redispatch_count
+                    || selectedCardChecklistSummary
+                    || selectedCardDwellBadge
+                    || selectedCardDelayBadge,
+                  );
+                  const hasDetailBlocks = Boolean(
+                    selectedParentCard
+                    || selectedChildCards.length > 0
+                    || selectedLiveToolState
+                    || selectedLatestDispatch
+                    || selectedCard.latest_dispatch_status
+                    || selectedCard.latest_dispatch_type
+                    || selectedCardMetadata?.reward,
+                  );
+                  if (!hasSummaryChips && !hasDetailBlocks) return null;
+
+                  return (
+                    <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
+                      <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                        {tr("카드 메타", "Card metadata")}
+                      </div>
+
+                      {hasSummaryChips && (
+                        <div className="flex flex-wrap gap-2">
+                          {selectedCard.depth > 0 && (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
+                              {tr("체인", "Chain")} {selectedCard.depth}
+                            </span>
+                          )}
+                          {selectedCardMetadata?.retry_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
+                              {tr("재시도", "Retry")} {selectedCardMetadata.retry_count}
+                            </span>
+                          ) : null}
+                          {selectedCardMetadata?.failover_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#fca5a5" }}>
+                              {tr("Failover", "Failover")} {selectedCardMetadata.failover_count}
+                            </span>
+                          ) : null}
+                          {selectedCardMetadata?.redispatch_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#fbbf24" }}>
+                              {tr("재디스패치", "Redispatch")} {selectedCardMetadata.redispatch_count}
+                            </span>
+                          ) : null}
+                          {selectedCardChecklistSummary && (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#99f6e4" }}>
+                              {tr("체크리스트", "Checklist")} {selectedCardChecklistSummary}
+                            </span>
+                          )}
+                          {selectedCardDwellBadge && (
+                            <span
+                              className="rounded-full border px-2 py-1 text-xs"
+                              style={{
+                                color: selectedCardDwellBadge.textColor,
+                                backgroundColor: selectedCardDwellBadge.backgroundColor,
+                                borderColor: selectedCardDwellBadge.borderColor,
+                              }}
+                            >
+                              {selectedCardDwellBadge.label} {selectedCardDwellBadge.detail}
+                            </span>
+                          )}
+                          {selectedCardDelayBadge && (
+                            <span
+                              className="rounded-full px-2 py-1 text-xs"
+                              style={{ color: "white", backgroundColor: selectedCardDelayBadge.tone }}
+                            >
+                              {selectedCardDelayBadge.label} {selectedCardDelayBadge.detail}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {hasDetailBlocks && (
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          {(selectedLatestDispatch || selectedCard.latest_dispatch_status || selectedCard.latest_dispatch_type) && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("최신 디스패치", "Latest dispatch")}
+                              </div>
+                              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                {selectedCard.latest_dispatch_id ? `#${selectedCard.latest_dispatch_id.slice(0, 8)}` : "-"}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("상태", "Status")}: {selectedCard.latest_dispatch_status ?? selectedLatestDispatch?.status ?? "-"}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("유형", "Type")}: {selectedCard.latest_dispatch_type ?? selectedLatestDispatch?.dispatch_type ?? "-"}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedCardMetadata?.reward && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("완료 보상", "Completion reward")}
+                              </div>
+                              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                +{selectedCardMetadata.reward.xp} XP
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {getAgentLabel(selectedCardMetadata.reward.agent_id)}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("완료 작업 수", "Tasks done")}: {selectedCardMetadata.reward.tasks_done}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedLiveToolState && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ borderColor: "rgba(59,130,246,0.28)", backgroundColor: "rgba(59,130,246,0.08)" }}>
+                              <div className="text-xs" style={{ color: "#bfdbfe" }}>
+                                {tr("실행 중 도구", "Live tool")}
+                              </div>
+                              <div className="text-sm" style={{ color: "#eff6ff" }}>
+                                {selectedLiveToolState.line}
+                              </div>
+                              <div className="text-xs" style={{ color: "rgba(191,219,254,0.84)" }}>
+                                {getAgentLabel(selectedLiveToolState.agentId)}
+                                {selectedLiveToolState.updatedAt ? ` · ${formatIso(selectedLiveToolState.updatedAt, locale)}` : ""}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedParentCard && (
+                            <div className="rounded-2xl border p-3 space-y-2" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("상위 카드", "Parent card")}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedCardId(selectedParentCard.id)}
+                                className="flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors hover:brightness-110"
+                                style={{ ...SURFACE_CHIP_STYLE }}
+                              >
+                                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                  {selectedParentCard.github_issue_number ? `#${selectedParentCard.github_issue_number}` : `#${selectedParentCard.id.slice(0, 6)}`}
+                                </span>
+                                <span className="min-w-0 truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                  {selectedParentCard.title}
+                                </span>
+                              </button>
+                            </div>
+                          )}
+
+                          {selectedChildCards.length > 0 && (
+                            <div className="rounded-2xl border p-3 space-y-2" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("하위 카드", "Child cards")} ({selectedChildCards.length})
+                              </div>
+                              <div className="space-y-2 max-h-48 overflow-y-auto">
+                                {selectedChildCards.map((childCard) => (
+                                  <button
+                                    key={childCard.id}
+                                    type="button"
+                                    onClick={() => setSelectedCardId(childCard.id)}
+                                    className="flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors hover:brightness-110"
+                                    style={{ ...SURFACE_CHIP_STYLE }}
+                                  >
+                                    <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                      {childCard.github_issue_number ? `#${childCard.github_issue_number}` : `#${childCard.id.slice(0, 6)}`}
+                                    </span>
+                                    <span className="min-w-0 truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                      {childCard.title}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Description / Issue Sections */}
                 {(() => {
                   const parsed = parseIssueSections(editor.description);
@@ -2248,8 +2589,8 @@ export default function KanbanTab({
                         <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("설명", "Description")}</span>
                         {editor.description ? (
                           <div
-                            className="rounded-2xl border p-4 bg-white/5 text-sm"
-                            style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-primary)" }}
+                            className="rounded-2xl border p-4 text-sm"
+                            style={{ ...SURFACE_PANEL_STYLE, color: "var(--th-text-primary)" }}
                           >
                             <MarkdownContent content={editor.description} />
                           </div>
@@ -2267,7 +2608,7 @@ export default function KanbanTab({
                     <div className="space-y-3">
                       {/* 배경 */}
                       {parsed.background && (
-                        <div className="rounded-2xl border p-4 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                        <div className="rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                           <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                             {tr("배경", "Background")}
                           </div>
@@ -2279,7 +2620,7 @@ export default function KanbanTab({
 
                       {/* 내용 */}
                       {parsed.content && (
-                        <div className="rounded-2xl border p-4 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                        <div className="rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                           <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                             {tr("내용", "Content")}
                           </div>
@@ -2293,7 +2634,7 @@ export default function KanbanTab({
                       {editor.review_checklist.length > 0 && (() => {
                         const isGitHubLinked = Boolean(selectedCard.github_issue_number);
                         return (
-                        <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
+                        <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE, borderColor: "rgba(20,184,166,0.3)" }}>
                           <div className="flex items-center justify-between gap-3">
                             <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
                               DoD (Definition of Done)
@@ -2303,7 +2644,7 @@ export default function KanbanTab({
                                 </span>
                               )}
                             </div>
-                            <span className="text-xs px-2 py-1 rounded-full bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
                               {editor.review_checklist.filter((item) => item.done).length}/{editor.review_checklist.length}
                             </span>
                           </div>
@@ -2343,7 +2684,7 @@ export default function KanbanTab({
 
                       {/* 의존성 */}
                       {parsed.dependencies && (
-                        <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(96,165,250,0.25)" }}>
+                        <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE, borderColor: "rgba(96,165,250,0.25)" }}>
                           <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
                             {tr("의존성", "Dependencies")}
                           </div>
@@ -2369,7 +2710,7 @@ export default function KanbanTab({
                 })()}
 
                 {canRedispatchCard(selectedCard) && (
-                  <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div>
                       <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                         {tr("이슈 변경 후 재전송", "Resend with Updated Issue")}
@@ -2387,8 +2728,8 @@ export default function KanbanTab({
                         placeholder={tr("사유 (선택)", "Reason (optional)")}
                         value={redispatchReason}
                         onChange={(e) => setRedispatchReason(e.target.value)}
-                        className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                        style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                        className="w-full rounded-xl border px-3 py-2 text-sm"
+                        style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                       />
                       <button
                         type="button"
@@ -2404,7 +2745,7 @@ export default function KanbanTab({
                 )}
 
                 {canRetryCard(selectedCard) && (
-                  <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div>
                       <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                         {tr("재시도 / 담당자 변경", "Retry / Change Assignee")}
@@ -2417,8 +2758,8 @@ export default function KanbanTab({
                       <select
                         value={retryAssigneeId}
                         onChange={(event) => setRetryAssigneeId(event.target.value)}
-                        className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                        style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                        className="w-full rounded-xl border px-3 py-2 text-sm"
+                        style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                       >
                         {agents.map((agent) => (
                           <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
@@ -2438,19 +2779,19 @@ export default function KanbanTab({
                 )}
 
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 text-sm">
-                  <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("생성", "Created")}</div>
                     <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.created_at, locale)}</div>
                   </div>
-                  <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("요청", "Requested")}</div>
                     <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.requested_at, locale)}</div>
                   </div>
-                  <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("시작", "Started")}</div>
                     <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.started_at, locale)}</div>
                   </div>
-                  <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                     <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("완료", "Completed")}</div>
                     <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.completed_at, locale)}</div>
                   </div>
@@ -2478,7 +2819,7 @@ export default function KanbanTab({
                   };
 
                   return (
-                    <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                    <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                       <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                         {tr("Dispatch 이력", "Dispatch history")}
                         {cardDispatches.length > 0 && (
@@ -2549,7 +2890,7 @@ export default function KanbanTab({
 
                 {/* State transition history (audit log) */}
                 {auditLog.length > 0 && (
-                  <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                  <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                     <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                       {tr("상태 전환 이력", "State Transition History")}
                       <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
@@ -2615,8 +2956,8 @@ export default function KanbanTab({
                   <div className="flex flex-col-reverse gap-2 sm:flex-row">
                     <button
                       onClick={() => setSelectedCardId(null)}
-                      className="rounded-xl px-4 py-2 text-sm bg-white/8"
-                      style={{ color: "var(--th-text-secondary)" }}
+                      className="rounded-xl border px-4 py-2 text-sm"
+                      style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
                     >
                       {tr("닫기", "Close")}
                     </button>
@@ -2637,12 +2978,12 @@ export default function KanbanTab({
       </div>
 
       {assignIssue && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end justify-center sm:items-center p-0 sm:p-4">
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>
           <div
             className="w-full max-w-lg rounded-t-3xl border p-5 sm:rounded-3xl sm:p-6 space-y-4"
             style={{
-              backgroundColor: "rgba(2,6,23,0.96)",
-              borderColor: "rgba(148,163,184,0.24)",
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
               paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
             }}
           >
@@ -2657,8 +2998,8 @@ export default function KanbanTab({
               </div>
               <button
                 onClick={() => setAssignIssue(null)}
-                className="shrink-0 whitespace-nowrap rounded-xl px-3 py-2 text-sm bg-white/8"
-                style={{ color: "var(--th-text-secondary)" }}
+                className="shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
               >
                 {tr("닫기", "Close")}
               </button>
@@ -2669,8 +3010,8 @@ export default function KanbanTab({
               <select
                 value={assignAssigneeId}
                 onChange={(event) => setAssignAssigneeId(event.target.value)}
-                className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                className="w-full rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
               >
                 <option value="">{tr("에이전트 선택", "Select an agent")}</option>
                 {agents.map((agent) => (
@@ -2682,8 +3023,8 @@ export default function KanbanTab({
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
                 onClick={() => setAssignIssue(null)}
-                className="rounded-xl px-4 py-2 text-sm bg-white/8"
-                style={{ color: "var(--th-text-secondary)" }}
+                className="rounded-xl border px-4 py-2 text-sm"
+                style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
               >
                 {tr("취소", "Cancel")}
               </button>
@@ -2701,20 +3042,20 @@ export default function KanbanTab({
       )}
 
       {selectedBacklogIssue && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end justify-center sm:items-center p-0 sm:p-4" onClick={() => setSelectedBacklogIssue(null)}>
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setSelectedBacklogIssue(null)}>
           <div
             onClick={(e) => e.stopPropagation()}
             className="w-full max-w-3xl max-h-[88svh] overflow-y-auto rounded-t-3xl border p-5 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
             style={{
-              backgroundColor: "rgba(2,6,23,0.96)",
-              borderColor: "rgba(148,163,184,0.24)",
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
               paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
             }}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="px-2 py-0.5 rounded-full text-xs bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+                  <span className="rounded-full border px-2 py-0.5 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
                     #{selectedBacklogIssue.number}
                   </span>
                   <span className="px-2 py-0.5 rounded-full text-xs" style={{ backgroundColor: "#64748b33", color: "#64748b" }}>
@@ -2736,8 +3077,8 @@ export default function KanbanTab({
               </div>
               <button
                 onClick={() => setSelectedBacklogIssue(null)}
-                className="rounded-xl px-3 py-2 text-sm bg-white/8 shrink-0"
-                style={{ color: "var(--th-text-secondary)" }}
+                className="shrink-0 rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_GHOST_BUTTON_STYLE, color: "var(--th-text-secondary)" }}
               >
                 {tr("닫기", "Close")}
               </button>
@@ -2747,17 +3088,17 @@ export default function KanbanTab({
               <div className="flex items-center gap-2 text-sm" style={{ color: "var(--th-text-secondary)" }}>
                 <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("담당자", "Assignees")}:</span>
                 {selectedBacklogIssue.assignees.map((a) => (
-                  <span key={a.login} className="px-2 py-0.5 rounded-full text-xs bg-white/8">{a.login}</span>
+                  <span key={a.login} className="rounded-full border px-2 py-0.5 text-xs" style={SURFACE_CHIP_STYLE}>{a.login}</span>
                 ))}
               </div>
             )}
 
             <div className="grid gap-3 md:grid-cols-2 text-sm">
-              <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+              <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("생성", "Created")}</div>
                 <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedBacklogIssue.createdAt, locale)}</div>
               </div>
-              <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+              <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("업데이트", "Updated")}</div>
                 <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedBacklogIssue.updatedAt, locale)}</div>
               </div>
@@ -2769,8 +3110,8 @@ export default function KanbanTab({
                 // Fallback: non-PMD format
                 return selectedBacklogIssue.body ? (
                   <div
-                    className="rounded-2xl border p-4 bg-white/5 text-sm"
-                    style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-primary)" }}
+                    className="rounded-2xl border p-4 text-sm"
+                    style={{ ...SURFACE_PANEL_STYLE, color: "var(--th-text-primary)" }}
                   >
                     <MarkdownContent content={selectedBacklogIssue.body} />
                   </div>
@@ -2784,7 +3125,7 @@ export default function KanbanTab({
               return (
                 <div className="space-y-3">
                   {parsed.background && (
-                    <div className="rounded-2xl border p-4 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                    <div className="rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                       <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("배경", "Background")}
                       </div>
@@ -2794,7 +3135,7 @@ export default function KanbanTab({
                     </div>
                   )}
                   {parsed.content && (
-                    <div className="rounded-2xl border p-4 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                    <div className="rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
                       <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("내용", "Content")}
                       </div>
@@ -2804,7 +3145,7 @@ export default function KanbanTab({
                     </div>
                   )}
                   {parsed.dodItems.length > 0 && (
-                    <div className="rounded-2xl border p-4 bg-white/5 space-y-2" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
+                    <div className="space-y-2 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE, borderColor: "rgba(20,184,166,0.3)" }}>
                       <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
                         DoD (Definition of Done)
                       </div>
@@ -2819,7 +3160,7 @@ export default function KanbanTab({
                     </div>
                   )}
                   {parsed.dependencies && (
-                    <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(96,165,250,0.25)" }}>
+                    <div className="rounded-2xl border p-3" style={{ ...SURFACE_PANEL_STYLE, borderColor: "rgba(96,165,250,0.25)" }}>
                       <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
                         {tr("의존성", "Dependencies")}
                       </div>

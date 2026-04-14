@@ -329,6 +329,7 @@ pub struct AutoQueueRunRecord {
     pub completed_at: Option<i64>,
     pub max_concurrent_threads: i64,
     pub thread_group_count: i64,
+    pub deploy_phases: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +353,21 @@ pub struct StatusEntryRecord {
     pub active_thread_id: Option<String>,
     pub card_status: Option<String>,
     pub review_round: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutoQueueRunHistoryRecord {
+    pub id: String,
+    pub repo: Option<String>,
+    pub agent_id: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+    pub entry_count: i64,
+    pub done_count: i64,
+    pub skipped_count: i64,
+    pub pending_count: i64,
+    pub dispatched_count: i64,
 }
 
 pub fn find_latest_run_id(
@@ -394,7 +410,8 @@ pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQ
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
                 COALESCE(max_concurrent_threads, 1),
-                COALESCE(thread_group_count, 1)
+                COALESCE(thread_group_count, 1),
+                deploy_phases
          FROM auto_queue_runs
          WHERE id = ?1",
         [run_id],
@@ -411,6 +428,7 @@ pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQ
                 completed_at: row.get(8)?,
                 max_concurrent_threads: row.get(9)?,
                 thread_group_count: row.get(10)?,
+                deploy_phases: row.get(11)?,
             })
         },
     )
@@ -475,6 +493,69 @@ pub fn list_status_entries(
     let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), map_status_entry_row)?;
+    rows.collect()
+}
+
+pub fn list_run_history(
+    conn: &Connection,
+    filter: &StatusFilter,
+    limit: usize,
+) -> rusqlite::Result<Vec<AutoQueueRunHistoryRecord>> {
+    let mut sql = String::from(
+        "SELECT r.id, r.repo, r.agent_id, r.status,
+                CAST(strftime('%s', r.created_at) AS INTEGER) * 1000,
+                CASE WHEN r.completed_at IS NOT NULL THEN CAST(strftime('%s', r.completed_at) AS INTEGER) * 1000 END,
+                COUNT(e.id),
+                COALESCE(SUM(CASE WHEN e.status = 'done' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN e.status = 'skipped' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN e.status = 'dispatched' THEN 1 ELSE 0 END), 0)
+         FROM auto_queue_runs r
+         LEFT JOIN auto_queue_entries e ON e.run_id = r.id
+         LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+         WHERE 1 = 1",
+    );
+    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+
+    if let Some(repo) = filter.repo.as_ref().filter(|value| !value.is_empty()) {
+        params.push(Box::new(repo.clone()));
+        sql.push_str(&format!(
+            " AND COALESCE(kc.repo_id, r.repo, '') = ?{}",
+            params.len()
+        ));
+    }
+    if let Some(agent_id) = filter.agent_id.as_ref().filter(|value| !value.is_empty()) {
+        params.push(Box::new(agent_id.clone()));
+        sql.push_str(&format!(
+            " AND COALESCE(e.agent_id, r.agent_id, '') = ?{}",
+            params.len()
+        ));
+    }
+
+    sql.push_str(
+        " GROUP BY r.id, r.repo, r.agent_id, r.status, r.created_at, r.completed_at
+          ORDER BY r.created_at DESC",
+    );
+    params.push(Box::new(limit as i64));
+    sql.push_str(&format!(" LIMIT ?{}", params.len()));
+
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(AutoQueueRunHistoryRecord {
+            id: row.get(0)?,
+            repo: row.get(1)?,
+            agent_id: row.get(2)?,
+            status: row.get(3)?,
+            created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            completed_at: row.get(5)?,
+            entry_count: row.get(6)?,
+            done_count: row.get(7)?,
+            skipped_count: row.get(8)?,
+            pending_count: row.get(9)?,
+            dispatched_count: row.get(10)?,
+        })
+    })?;
     rows.collect()
 }
 
@@ -942,6 +1023,8 @@ pub fn slot_has_active_dispatch_excluding(
          WHERE to_agent_id = ?1
            AND status IN ('pending', 'dispatched')
            AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2
+           AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
+           AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL
            AND id != ?3",
         rusqlite::params![agent_id, slot_index, exclude_id],
         |row| row.get(0),
@@ -1377,6 +1460,12 @@ mod tests {
                 content TEXT,
                 bot TEXT,
                 source TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                to_agent_id TEXT,
+                status TEXT,
+                context TEXT
             );",
         )
         .expect("schema");
@@ -1653,5 +1742,51 @@ mod tests {
             error,
             EntryStatusUpdateError::InvalidTransition { .. }
         ));
+    }
+
+    #[test]
+    fn slot_has_active_dispatch_ignores_sidecar_dispatches() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES (?1, ?2, 'dispatched', ?3)",
+            rusqlite::params![
+                "dispatch-sidecar",
+                "agent-1",
+                serde_json::json!({
+                    "slot_index": 0,
+                    "sidecar_dispatch": true,
+                    "phase_gate": {
+                        "run_id": "run-1",
+                    }
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed sidecar dispatch");
+
+        assert!(
+            !super::slot_has_active_dispatch(&conn, "agent-1", 0),
+            "sidecar phase-gate dispatches must not keep a slot occupied"
+        );
+
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES (?1, ?2, 'dispatched', ?3)",
+            rusqlite::params![
+                "dispatch-primary",
+                "agent-1",
+                serde_json::json!({
+                    "slot_index": 0
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed primary dispatch");
+
+        assert!(
+            super::slot_has_active_dispatch(&conn, "agent-1", 0),
+            "primary dispatches must still block slot reuse"
+        );
     }
 }

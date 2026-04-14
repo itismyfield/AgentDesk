@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::runtime_store::{atomic_write, discord_inflight_root};
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 1;
+const INFLIGHT_STATE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InflightTurnState {
@@ -14,6 +14,12 @@ pub(super) struct InflightTurnState {
     pub provider: String,
     pub channel_id: u64,
     pub channel_name: Option<String>,
+    #[serde(default)]
+    pub logical_channel_id: Option<u64>,
+    #[serde(default)]
+    pub thread_id: Option<u64>,
+    #[serde(default)]
+    pub thread_title: Option<String>,
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
     pub current_msg_id: u64,
@@ -70,6 +76,9 @@ impl InflightTurnState {
             provider: provider.as_str().to_string(),
             channel_id,
             channel_name,
+            logical_channel_id: Some(channel_id),
+            thread_id: None,
+            thread_title: None,
             request_owner_user_id,
             user_msg_id,
             current_msg_id,

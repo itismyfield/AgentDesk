@@ -403,8 +403,8 @@ impl PipelineConfig {
                         t.from == s.id && t.transition_type == TransitionType::Gated
                     })
                     // Must not have gated inbound transitions (free and force_only are ok).
-                    // force_only inbound (e.g., pending_decision → requested) doesn't make
-                    // the state "dispatch-gated" — those are admin/timeout recovery paths.
+                    // force_only inbound recovery transitions don't make the state
+                    // "dispatch-gated" — those are admin/manual-intervention paths.
                     && !self.transitions.iter().any(|t| {
                         t.to == s.id && t.transition_type == TransitionType::Gated
                     })

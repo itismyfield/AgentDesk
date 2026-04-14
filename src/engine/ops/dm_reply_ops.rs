@@ -1,4 +1,5 @@
 use crate::db::Db;
+use crate::services::discord::dm_reply_store::register_pending_dm_reply;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
 // ── DM reply tracking ops ────────────────────────────────────────
@@ -109,27 +110,9 @@ fn dm_reply_register_raw(
     context: &str,
     ttl_seconds: i64,
 ) -> String {
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
-    };
-    let expires_at = if ttl_seconds > 0 {
-        format!("datetime('now', '+{ttl_seconds} seconds')")
-    } else {
-        "NULL".to_string()
-    };
-    let ch = if channel_id.is_empty() {
-        None
-    } else {
-        Some(channel_id)
-    };
-    let sql = format!(
-        "INSERT INTO pending_dm_replies (source_agent, user_id, channel_id, context, expires_at) \
-         VALUES (?1, ?2, ?3, ?4, {expires_at})"
-    );
-    match conn.execute(&sql, rusqlite::params![source_agent, user_id, ch, context]) {
-        Ok(_) => {
-            let id = conn.last_insert_rowid();
+    let ch = (!channel_id.is_empty()).then_some(channel_id);
+    match register_pending_dm_reply(db, source_agent, user_id, ch, context, ttl_seconds) {
+        Ok(id) => {
             tracing::info!(
                 user_id,
                 agent_id = source_agent,
@@ -139,7 +122,7 @@ fn dm_reply_register_raw(
             );
             format!(r#"{{"ok":true,"id":{id}}}"#)
         }
-        Err(e) => format!(r#"{{"error":"insert failed: {e}"}}"#),
+        Err(e) => format!(r#"{{"error":"{e}"}}"#),
     }
 }
 

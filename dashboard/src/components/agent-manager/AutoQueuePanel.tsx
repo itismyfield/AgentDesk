@@ -6,6 +6,7 @@ import type {
   DispatchQueueEntry as DispatchQueueEntryType,
   AutoQueueRun,
   AutoQueueThreadLink,
+  PhaseGateInfo,
 } from "../../api";
 
 import type { Agent, UiLanguage } from "../../types";
@@ -85,9 +86,10 @@ const ENTRY_STATUS_STYLE: Record<
 const RUN_STATUS_STYLE: Record<AutoQueueRun["status"], { bg: string; text: string; label: string; labelEn: string }> = {
   generated: { bg: "rgba(59,130,246,0.18)", text: "#60a5fa", label: "생성됨", labelEn: "Generated" },
   pending: { bg: "rgba(56,189,248,0.2)", text: "#38bdf8", label: "PMD 대기", labelEn: "Awaiting PMD" },
-  active: { bg: "rgba(139,92,246,0.2)", text: "#a78bfa", label: "실행 중", labelEn: "Active" },
+  active: { bg: "rgba(16,185,129,0.2)", text: "#10b981", label: "실행 중", labelEn: "Active" },
   paused: { bg: "rgba(245,158,11,0.2)", text: "#fbbf24", label: "일시정지", labelEn: "Paused" },
   completed: { bg: "rgba(34,197,94,0.2)", text: "#4ade80", label: "완료", labelEn: "Done" },
+  cancelled: { bg: "rgba(248,113,113,0.18)", text: "#f87171", label: "취소됨", labelEn: "Cancelled" },
 };
 
 function reorderPendingIds(ids: string[], fromId: string, toId: string): string[] | null {
@@ -116,13 +118,13 @@ function shiftPendingId(
 // ── Draggable Entry Row ──
 
 const THREAD_GROUP_COLORS = [
-  "#a78bfa",
+  "#10b981",
   "#38bdf8",
-  "#f472b6",
+  "#f59e0b",
   "#fbbf24",
   "#4ade80",
   "#fb923c",
-  "#e879f9",
+  "#ef4444",
   "#22d3ee",
   "#a3e635",
   "#f87171",
@@ -225,14 +227,14 @@ function EntryRow({
       className="flex flex-wrap items-start gap-2 rounded-xl border px-3 py-2 transition-all sm:flex-nowrap sm:items-center"
       style={{
         borderColor: isDropTarget
-          ? "rgba(139,92,246,0.6)"
+          ? "rgba(16,185,129,0.6)"
           : entry.status === "dispatched"
             ? "rgba(245,158,11,0.3)"
             : "rgba(148,163,184,0.15)",
         backgroundColor: isDragging
-          ? "rgba(139,92,246,0.12)"
+          ? "rgba(16,185,129,0.12)"
           : isDropTarget
-            ? "rgba(139,92,246,0.08)"
+            ? "rgba(16,185,129,0.08)"
             : entry.status === "dispatched"
               ? "rgba(245,158,11,0.06)"
               : "var(--th-overlay-medium)",
@@ -567,7 +569,7 @@ export default function AutoQueuePanel({
   selectedAgentId,
 }: Props) {
   const [status, setStatus] = useState<AutoQueueStatus | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -747,6 +749,14 @@ export default function AutoQueuePanel({
 
   const run = status?.run ?? null;
   const entries = status?.entries ?? [];
+  const phaseGates = status?.phase_gates ?? [];
+  const deployPhases = new Set(run?.deploy_phases ?? []);
+  const gatesByPhase = new Map<number, PhaseGateInfo[]>();
+  for (const gate of phaseGates) {
+    const list = gatesByPhase.get(gate.phase) ?? [];
+    list.push(gate);
+    gatesByPhase.set(gate.phase, list);
+  }
   const agentStats: Record<
     string,
     { pending: number; dispatched: number; done: number; skipped: number }
@@ -872,6 +882,97 @@ export default function AutoQueuePanel({
     );
   };
 
+  const renderPhaseGateIndicator = (
+    fromPhase: number,
+    toPhase: number,
+  ) => {
+    const gates = [
+      ...(gatesByPhase.get(fromPhase) ?? []),
+      ...(gatesByPhase.get(toPhase) ?? []),
+    ];
+    const hasDeploy = deployPhases.has(fromPhase) || deployPhases.has(toPhase);
+    if (gates.length === 0 && !hasDeploy) return null;
+
+    const gate = gates[0];
+    const gateStatus = gate?.status ?? "pending";
+    const statusColor =
+      gateStatus === "passed"
+        ? "#4ade80"
+        : gateStatus === "failed"
+          ? "#ef4444"
+          : "#f59e0b";
+    const statusLabel =
+      gateStatus === "passed"
+        ? tr("통과", "Passed")
+        : gateStatus === "failed"
+          ? tr("실패", "Failed")
+          : tr("대기", "Pending");
+
+    return (
+      <div
+        key={`gate-${fromPhase}-${toPhase}`}
+        className="flex items-center gap-2 px-3 py-1.5"
+      >
+        <div
+          className="flex-1 h-px"
+          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+        />
+        <div
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border"
+          style={{
+            borderColor: `${statusColor}40`,
+            backgroundColor: `${statusColor}10`,
+          }}
+        >
+          <span style={{ color: statusColor, fontSize: 14 }}>
+            {gateStatus === "passed" ? "✓" : gateStatus === "failed" ? "✗" : "⏳"}
+          </span>
+          <span
+            className="text-xs font-mono font-semibold"
+            style={{ color: statusColor }}
+          >
+            {tr("게이트", "Gate")}
+          </span>
+          {gate && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded"
+              style={{
+                backgroundColor: `${statusColor}18`,
+                color: statusColor,
+              }}
+            >
+              {statusLabel}
+            </span>
+          )}
+          {hasDeploy && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded"
+              style={{
+                backgroundColor: "rgba(96,165,250,0.18)",
+                color: "#60a5fa",
+              }}
+            >
+              🚀 {tr("배포", "Deploy")}
+            </span>
+          )}
+          {gate?.failure_reason && (
+            <span
+              className="text-xs truncate max-w-[200px]"
+              style={{ color: "#f87171" }}
+              title={gate.failure_reason}
+            >
+              {gate.failure_reason}
+            </span>
+          )}
+        </div>
+        <div
+          className="flex-1 h-px"
+          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+        />
+      </div>
+    );
+  };
+
   const renderThreadGroupCard = (
     groupNum: number,
     groupEntries: DispatchQueueEntryType[],
@@ -964,7 +1065,7 @@ export default function AutoQueuePanel({
     <section
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
-        borderColor: run ? "rgba(139,92,246,0.35)" : "rgba(148,163,184,0.22)",
+        borderColor: run ? "rgba(16,185,129,0.35)" : "rgba(148,163,184,0.22)",
         backgroundColor: "var(--th-bg-surface)",
       }}
     >
@@ -1030,11 +1131,11 @@ export default function AutoQueuePanel({
                 style={{
                   borderColor: noReadyCards
                     ? "rgba(148,163,184,0.2)"
-                    : "rgba(139,92,246,0.4)",
-                  color: noReadyCards ? "var(--th-text-muted)" : "#a78bfa",
+                    : "rgba(16,185,129,0.4)",
+                  color: noReadyCards ? "var(--th-text-muted)" : "#10b981",
                   backgroundColor: noReadyCards
                     ? "rgba(148,163,184,0.05)"
-                    : "rgba(139,92,246,0.1)",
+                    : "rgba(16,185,129,0.1)",
                   cursor: noReadyCards ? "not-allowed" : undefined,
                 }}
                 title={
@@ -1081,7 +1182,7 @@ export default function AutoQueuePanel({
             <button
               onClick={() => void handleRunAction(run, "active")}
               className="text-xs px-2 py-1 rounded-lg border"
-              style={{ borderColor: "rgba(139,92,246,0.3)", color: "#a78bfa" }}
+              style={{ borderColor: "rgba(16,185,129,0.3)", color: "#10b981" }}
             >
               {tr("재개", "Resume")}
             </button>
@@ -1263,11 +1364,11 @@ export default function AutoQueuePanel({
                         style={{
                           backgroundColor:
                             viewMode === "thread"
-                              ? "rgba(139,92,246,0.2)"
+                              ? "rgba(16,185,129,0.2)"
                               : "transparent",
                           color:
                             viewMode === "thread"
-                              ? "#a78bfa"
+                              ? "#10b981"
                               : "var(--th-text-muted)",
                         }}
                       >
@@ -1277,16 +1378,16 @@ export default function AutoQueuePanel({
                     <button
                       onClick={() => setViewMode("all")}
                       className="text-xs px-2 py-1 transition-colors"
-                      style={{
-                        backgroundColor:
-                          viewMode === "all"
-                            ? "rgba(139,92,246,0.2)"
+                        style={{
+                          backgroundColor:
+                            viewMode === "all"
+                            ? "rgba(16,185,129,0.2)"
                             : "transparent",
-                        color:
-                          viewMode === "all"
-                            ? "#a78bfa"
+                          color:
+                            viewMode === "all"
+                            ? "#10b981"
                             : "var(--th-text-muted)",
-                      }}
+                        }}
                     >
                       {tr("전체", "All")}
                     </button>
@@ -1297,11 +1398,11 @@ export default function AutoQueuePanel({
                         style={{
                           backgroundColor:
                             viewMode === "agent"
-                              ? "rgba(139,92,246,0.2)"
+                              ? "rgba(16,185,129,0.2)"
                               : "transparent",
                           color:
                             viewMode === "agent"
-                              ? "#a78bfa"
+                              ? "#10b981"
                               : "var(--th-text-muted)",
                         }}
                       >
@@ -1318,42 +1419,49 @@ export default function AutoQueuePanel({
           {viewMode === "all" && (
             hasBatchPhases ? (
               <div className="space-y-3">
-                {phaseSections.map(([phase, phaseEntries]) =>
-                  renderPhaseBlock(
-                    phase,
-                    phaseEntries,
-                    <div className="space-y-1">
-                      {sortEntriesForDisplay(phaseEntries).map((entry, idx) => (
-                        <div key={entry.id} className="flex items-center gap-1">
-                          <span
-                            className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
-                            style={{
-                              backgroundColor: "rgba(139,92,246,0.12)",
-                              color: "#a78bfa",
-                            }}
-                          >
-                            {getAgentLabel(entry.agent_id)}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <EntryRow
-                              entry={entry}
-                              idx={idx}
-                              tr={tr}
-                              locale={locale}
-                              onSkip={handleSkip}
-                              showThreadGroup={hasThreadGroups}
-                              showBatchPhase={hasBatchPhases}
-                              isDragging={allDrag.dragId === entry.id}
-                              isDropTarget={allDrag.dropTargetId === entry.id}
-                              dragHandlers={allDrag.makeDragHandlers(entry)}
-                              moveControls={allDrag.makeMoveControls(entry)}
-                            />
+                {phaseSections.map(([phase, phaseEntries], sectionIdx) => (
+                  <div key={`phase-section-${phase}`}>
+                    {sectionIdx > 0 &&
+                      renderPhaseGateIndicator(
+                        phaseSections[sectionIdx - 1][0],
+                        phase,
+                      )}
+                    {renderPhaseBlock(
+                      phase,
+                      phaseEntries,
+                      <div className="space-y-1">
+                        {sortEntriesForDisplay(phaseEntries).map((entry, idx) => (
+                          <div key={entry.id} className="flex items-center gap-1">
+                            <span
+                              className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                              style={{
+                                backgroundColor: "rgba(139,92,246,0.12)",
+                                color: "#a78bfa",
+                              }}
+                            >
+                              {getAgentLabel(entry.agent_id)}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <EntryRow
+                                entry={entry}
+                                idx={idx}
+                                tr={tr}
+                                locale={locale}
+                                onSkip={handleSkip}
+                                showThreadGroup={hasThreadGroups}
+                                showBatchPhase={hasBatchPhases}
+                                isDragging={allDrag.dragId === entry.id}
+                                isDropTarget={allDrag.dropTargetId === entry.id}
+                                dragHandlers={allDrag.makeDragHandlers(entry)}
+                                moveControls={allDrag.makeMoveControls(entry)}
+                              />
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>,
-                  ),
-                )}
+                        ))}
+                      </div>,
+                    )}
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="space-y-1">
@@ -1409,7 +1517,7 @@ export default function AutoQueuePanel({
                 </div>
               )}
               {hasBatchPhases
-                ? phaseSections.map(([phase, phaseEntries]) => {
+                ? phaseSections.map(([phase, phaseEntries], sectionIdx) => {
                     const groupsInPhase = new Map<number, DispatchQueueEntryType[]>();
                     for (const entry of phaseEntries) {
                       const groupNum = entry.thread_group ?? 0;
@@ -1417,16 +1525,25 @@ export default function AutoQueuePanel({
                       list.push(entry);
                       groupsInPhase.set(groupNum, list);
                     }
-                    return renderPhaseBlock(
-                      phase,
-                      phaseEntries,
-                      <div className="space-y-2">
-                        {Array.from(groupsInPhase.entries())
-                          .sort(([left], [right]) => left - right)
-                          .map(([groupNum, groupEntries]) =>
-                            renderThreadGroupCard(groupNum, groupEntries),
+                    return (
+                      <div key={`phase-section-${phase}`}>
+                        {sectionIdx > 0 &&
+                          renderPhaseGateIndicator(
+                            phaseSections[sectionIdx - 1][0],
+                            phase,
                           )}
-                      </div>,
+                        {renderPhaseBlock(
+                          phase,
+                          phaseEntries,
+                          <div className="space-y-2">
+                            {Array.from(groupsInPhase.entries())
+                              .sort(([left], [right]) => left - right)
+                              .map(([groupNum, groupEntries]) =>
+                                renderThreadGroupCard(groupNum, groupEntries),
+                              )}
+                          </div>,
+                        )}
+                      </div>
                     );
                   })
                 : Array.from(entriesByThreadGroup.entries())

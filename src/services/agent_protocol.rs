@@ -67,6 +67,8 @@ pub enum StreamMessage {
         #[allow(dead_code)]
         num_turns: Option<u32>,
         input_tokens: Option<u64>,
+        cache_create_tokens: Option<u64>,
+        cache_read_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
     /// tmux session is ready for background monitoring (first turn completed)

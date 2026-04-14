@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::services::discord::dm_reply_store::register_pending_dm_reply;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -39,35 +40,19 @@ pub async fn register_handler(
 
     let db = state.db.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = match db.separate_conn() {
-            Ok(c) => c,
-            Err(e) => return Err(format!("db connection: {e}")),
-        };
-
-        let expires_at = if ttl_seconds > 0 {
-            format!("datetime('now', '+{ttl_seconds} seconds')")
-        } else {
-            "NULL".to_string()
-        };
-
-        let sql = format!(
-            "INSERT INTO pending_dm_replies (source_agent, user_id, channel_id, context, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, {expires_at})"
+        let id = register_pending_dm_reply(
+            &db,
+            &source_agent,
+            &user_id,
+            channel_id.as_deref(),
+            &context_str,
+            ttl_seconds,
+        )?;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
         );
-        match conn.execute(
-            &sql,
-            rusqlite::params![source_agent, user_id, channel_id, context_str],
-        ) {
-            Ok(_) => {
-                let id = conn.last_insert_rowid();
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
-                );
-                Ok(id)
-            }
-            Err(e) => Err(format!("insert failed: {e}")),
-        }
+        Ok::<_, String>(id)
     })
     .await;
 

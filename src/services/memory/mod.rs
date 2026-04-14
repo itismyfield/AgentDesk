@@ -82,6 +82,7 @@ pub(crate) enum SessionEndReason {
     #[allow(dead_code)]
     IdleExpiry,
     LocalSessionReset,
+    TurnCapReached,
 }
 
 impl SessionEndReason {
@@ -89,6 +90,7 @@ impl SessionEndReason {
         match self {
             Self::IdleExpiry => "idle_expiry",
             Self::LocalSessionReset => "local_session_reset",
+            Self::TurnCapReached => "turn_cap_reached",
         }
     }
 }

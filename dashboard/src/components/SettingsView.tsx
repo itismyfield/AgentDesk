@@ -1,6 +1,14 @@
 import { Suspense, lazy, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import type { CompanySettings } from "../types";
 import * as api from "../api";
+import {
+  SettingsCallout,
+  SettingsCard,
+  SettingsEmptyState,
+  SettingsFieldCard,
+  SettingsSection,
+  SettingsSubsection,
+} from "./common/SettingsPrimitives";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 
@@ -37,7 +45,7 @@ type ConfigEntry = {
 };
 
 type ConfigEditValue = string | boolean;
-type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract";
+type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract" | "typed-only" | "backend-followup";
 
 interface AuditNote {
   id: string;
@@ -241,10 +249,10 @@ const CATEGORIES: Array<{
   },
 ];
 
+
 const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
   "pm_decision_gate_enabled",
-  "merge_automation_enabled",
   "narrate_progress",
 ]);
 
@@ -252,6 +260,7 @@ const NUMERIC_CONFIG_KEYS = new Set([
   "max_review_rounds",
   "requested_timeout_min",
   "in_progress_stale_min",
+  "max_chain_depth",
   "context_compact_percent",
   "context_compact_percent_codex",
   "context_compact_percent_claude",
@@ -340,17 +349,17 @@ const SYSTEM_CATEGORY_META = {
     descriptionKo: "리뷰 단계 활성화와 반복 횟수를 정의합니다.",
     descriptionEn: "Defines review enablement and repetition limits.",
   },
-  automation: {
-    titleKo: "자동 머지",
-    titleEn: "Merge Automation",
-    descriptionKo: "자동 머지 허용 여부, 전략, 허용 작성자를 관리합니다.",
-    descriptionEn: "Manages merge automation enablement, strategy, and allowed authors.",
-  },
   timeout: {
     titleKo: "타임아웃",
     titleEn: "Timeouts",
     descriptionKo: "정체 감지와 자동 알림 시점을 조정합니다.",
     descriptionEn: "Tunes stale detection and automatic alert timing.",
+  },
+  dispatch: {
+    titleKo: "디스패치",
+    titleEn: "Dispatch",
+    descriptionKo: "작업 fan-out과 체인 깊이 한계를 관리합니다.",
+    descriptionEn: "Controls task fan-out and chain-depth limits.",
   },
   context: {
     titleKo: "컨텍스트",
@@ -369,21 +378,30 @@ const SYSTEM_CATEGORY_META = {
 const AUDIT_NOTES: AuditNote[] = [
   {
     id: "settings-json-merge",
-    titleKo: "회사 설정 JSON은 full replace 계약",
-    titleEn: "Company settings JSON uses a full-replace contract",
-    descriptionKo: "`/api/settings`는 body 전체를 저장하고, 정리 대상 legacy key는 서버에서 제거합니다. UI는 merged object를 보내고 저장 후 재조회해 서버 canonical state를 다시 맞춥니다.",
-    descriptionEn: "`/api/settings` stores the full body and strips retired legacy keys on the server. The UI sends a merged object and re-fetches afterward to align with the canonical server state.",
+    titleKo: "회사 설정 JSON은 전체 덮어쓰기 모델",
+    titleEn: "Company settings JSON uses full replacement",
+    descriptionKo: "`/api/settings`는 patch merge가 아니라 body 전체를 저장합니다. 설정 UI는 반드시 현재 값과 patch를 합친 merged object를 보내야 hidden key 손실을 막을 수 있습니다.",
+    descriptionEn: "`/api/settings` stores the full body rather than merging patches. The settings UI must send a merged object to avoid losing hidden keys.",
     keys: ["settings"],
-    status: "backend-contract",
+    status: "backend-followup",
   },
   {
     id: "server-port-readonly",
-    titleKo: "`server_port`는 계약상 읽기 전용",
-    titleEn: "`server_port` is contractually read-only",
-    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 다시 기록하고, `/api/settings/config`도 editable=false로 내려줍니다. UI와 API 모두 수정 가능한 값처럼 다루지 않습니다.",
-    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on boot, and `/api/settings/config` now marks it as editable=false. Neither the UI nor the API should treat it as a writable runtime setting.",
+    titleKo: "`server_port`는 사실상 읽기 전용",
+    titleEn: "`server_port` is effectively read-only",
+    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 매번 다시 기록합니다. UI에서 수정 가능한 설정처럼 보이면 오해를 만듭니다.",
+    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on every boot. Treating it as editable in the UI is misleading.",
     keys: ["server_port"],
     status: "read-only",
+  },
+  {
+    id: "context-clear-gap",
+    titleKo: "`context_clear_*`는 설명은 있지만 settings API에 없음",
+    titleEn: "`context_clear_*` is described but not exposed by settings API",
+    descriptionKo: "`SettingsView` 설명에는 등장하지만 `/api/settings/config` whitelist에는 없습니다. dead config인지, 빠진 API 항목인지 ADK 본체 정리가 필요합니다.",
+    descriptionEn: "The UI descriptions reference it, but `/api/settings/config` does not expose it. ADK core should decide whether it is dead config or a missing API field.",
+    keys: ["context_clear_percent", "context_clear_idle_minutes"],
+    status: "backend-followup",
   },
   {
     id: "onboarding-secrets",
@@ -413,13 +431,49 @@ const AUDIT_NOTES: AuditNote[] = [
     status: "managed-elsewhere",
   },
   {
-    id: "merge-automation-surface",
-    titleKo: "merge automation은 개별 정책 키 surface",
-    titleEn: "Merge automation now lives on the policy-key surface",
-    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_strategy_mode`, `merge_allowed_authors`는 `agentdesk.yaml`의 `automation:` baseline 위에 대시보드가 `kv_meta` runtime override를 덮는 구조입니다.",
-    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, `merge_strategy_mode`, and `merge_allowed_authors` now use `agentdesk.yaml` `automation:` as the startup baseline while the dashboard writes `kv_meta` runtime overrides on top.",
-    keys: ["merge_automation_enabled", "merge_strategy", "merge_strategy_mode", "merge_allowed_authors"],
-    status: "backend-contract",
+    id: "typed-only-company-settings",
+    titleKo: "타입에는 있지만 현재 소비/편집 경로가 확인되지 않은 회사 설정",
+    titleEn: "Company settings that exist in types but have no confirmed editor/consumer path",
+    descriptionKo: "현재 audit 기준으로 아래 필드들은 `CompanySettings` 타입에는 있지만 실제 사용처나 편집 화면이 확인되지 않았습니다. 제거/활성화/문서화 중 하나로 정리해야 합니다.",
+    descriptionEn: "In the current audit, the following fields exist in `CompanySettings` but have no confirmed editor or runtime consumer. They should be removed, activated, or documented.",
+    keys: [
+      "autoUpdateEnabled",
+      "autoUpdateNoticePending",
+      "oauthAutoSwap",
+      "officeWorkflowPack",
+      "providerModelConfig",
+      "messengerChannels",
+      "officePackProfiles",
+      "officePackHydratedPacks",
+    ],
+    status: "typed-only",
+  },
+  {
+    id: "merge-automation-gap",
+    titleKo: "merge automation 설정은 policy에서 읽지만 UI/API에는 없음",
+    titleEn: "Merge automation settings are consumed by policy but absent from UI/API",
+    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 `policies/merge-automation.js`에서 실제로 사용되지만 `/api/settings/config` whitelist와 현재 설정 UI에는 없습니다. 운영자가 dashboard에서 설정을 설명/수정할 수 있도록 ADK 본체 정리가 필요합니다.",
+    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are consumed by `policies/merge-automation.js`, but they are absent from `/api/settings/config` and the current settings UI. ADK core cleanup is needed so the dashboard can truthfully explain and edit them.",
+    keys: ["merge_automation_enabled", "merge_strategy", "merge_allowed_authors"],
+    status: "backend-followup",
+  },
+  {
+    id: "workspace-fallback-gap",
+    titleKo: "`workspace`는 policy fallback에서 읽지만 정본이 아님",
+    titleEn: "`workspace` is read as a policy fallback but is not a canonical config surface",
+    descriptionKo: "`policies/timeouts.js`는 마지막 fallback으로 `agentdesk.config.get('workspace')`를 읽지만, `agentdesk.config.get()`은 `kv_meta`만 조회합니다. 실제 workspace 정본은 agent/session/runtime 쪽에 퍼져 있어서 일반 설정값처럼 설명하면 오해가 생깁니다.",
+    descriptionEn: "`policies/timeouts.js` reads `agentdesk.config.get('workspace')` as a final fallback, but `agentdesk.config.get()` only queries `kv_meta`. The real workspace source-of-truth lives across agent, session, and runtime surfaces, so presenting it as a normal setting would be misleading.",
+    keys: ["workspace"],
+    status: "backend-followup",
+  },
+  {
+    id: "max-chain-depth-consumer-gap",
+    titleKo: "`max_chain_depth`는 노출되지만 실제 소비처가 확인되지 않음",
+    titleEn: "`max_chain_depth` is exposed but has no confirmed runtime consumer",
+    descriptionKo: "`/api/settings/config` whitelist에는 포함되어 있지만, 현재 코드 검색 기준으로 실제 런타임 소비처는 확인되지 않았습니다. dead config인지 누락된 연결인지 ADK 본체에서 정리해야 합니다.",
+    descriptionEn: "It is included in the `/api/settings/config` whitelist, but the current code audit did not find a confirmed runtime consumer. ADK core should decide whether it is dead config or a missing integration.",
+    keys: ["max_chain_depth"],
+    status: "backend-followup",
   },
 ];
 
@@ -465,11 +519,13 @@ function auditStatusLabel(status: AuditNoteStatus, isKo: boolean): string {
   if (isKo) {
     if (status === "read-only") return "읽기 전용";
     if (status === "managed-elsewhere") return "별도 관리";
-    return "계약 명시";
+    if (status === "typed-only") return "타입 전용 후보";
+    return "본체 정리 필요";
   }
   if (status === "read-only") return "Read-only";
   if (status === "managed-elsewhere") return "Managed elsewhere";
-  return "Contract clarified";
+  if (status === "typed-only") return "Typed-only candidate";
+  return "Core cleanup needed";
 }
 
 function auditStatusClass(status: AuditNoteStatus): string {
@@ -564,13 +620,13 @@ interface SummaryCardProps {
   accent?: string;
 }
 
-function SummaryCard({ label, value, description, accent = "#6366f1" }: SummaryCardProps) {
+function SummaryCard({ label, value, description, accent = "var(--th-accent-primary)" }: SummaryCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{
         borderColor: "rgba(148,163,184,0.16)",
-        background: `linear-gradient(180deg, color-mix(in srgb, ${accent} 10%, rgba(15,23,42,0.96)) 0%, rgba(15,23,42,0.74) 100%)`,
+        background: `linear-gradient(180deg, color-mix(in srgb, ${accent} 12%, var(--th-card-bg) 88%) 0%, color-mix(in srgb, var(--th-bg-surface) 92%, transparent) 100%)`,
       }}
     >
       <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
@@ -582,7 +638,7 @@ function SummaryCard({ label, value, description, accent = "#6366f1" }: SummaryC
       <p className="mt-2 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
         {description}
       </p>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -594,8 +650,8 @@ interface SurfaceCardProps {
 
 function SurfaceCard({ title, body, footer }: SurfaceCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.34)" }}
     >
       <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
@@ -607,7 +663,7 @@ function SurfaceCard({ title, body, footer }: SurfaceCardProps) {
       <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-secondary)" }}>
         {footer}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -641,8 +697,8 @@ interface AuditNoteCardProps {
 
 function AuditNoteCard({ note, isKo }: AuditNoteCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -669,7 +725,7 @@ function AuditNoteCard({ note, isKo }: AuditNoteCardProps) {
           </span>
         ))}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -722,14 +778,6 @@ export default function SettingsView({
       .then((response) => response.json())
       .then((data: { entries: ConfigEntry[] }) => setConfigEntries(data.entries || []))
       .catch(() => {});
-
-    void api.getEscalationSettings()
-      .then((data) => {
-        setEscalationSettings(data.current);
-        setEscalationBaseline(data.current);
-        setEscalationDefaults(data.defaults);
-      })
-      .catch(() => {});
   }, []);
 
   const companyDirty =
@@ -738,10 +786,6 @@ export default function SettingsView({
     language !== settings.language ||
     theme !== settings.theme;
   const configDirty = Object.keys(configEdits).length > 0;
-  const escalationDirty =
-    escalationSettings !== null &&
-    escalationBaseline !== null &&
-    JSON.stringify(escalationSettings) !== JSON.stringify(escalationBaseline);
   const runtimeFieldCount = CATEGORIES.reduce((sum, category) => sum + category.fields.length, 0);
 
   const inputStyle: CSSProperties = {
@@ -749,9 +793,21 @@ export default function SettingsView({
     border: "1px solid var(--th-border)",
     color: "var(--th-text)",
   };
-  const sectionStyle: CSSProperties = {
-    border: "1px solid rgba(148,163,184,0.16)",
-    background: "linear-gradient(180deg, rgba(15,23,42,0.72) 0%, rgba(15,23,42,0.44) 100%)",
+  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
+  const primaryActionStyle: CSSProperties = {
+    background: "var(--th-accent-primary)",
+  };
+  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const secondaryActionStyle: CSSProperties = {
+    borderColor: "rgba(148,163,184,0.28)",
+    color: "var(--th-text-secondary)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+  };
+  const compactSecondaryActionClass = "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const compactSecondaryActionStyle: CSSProperties = {
+    borderColor: "rgba(148,163,184,0.2)",
+    color: "var(--th-text-muted)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
   };
 
   const handleSave = async () => {
@@ -809,245 +865,101 @@ export default function SettingsView({
     }
   };
 
-  const handleEscalationChange = (
-    patch:
-      | Partial<api.EscalationSettings>
-      | ((prev: api.EscalationSettings) => api.EscalationSettings),
-  ) => {
-    setEscalationSettings((prev) => {
-      if (!prev) return prev;
-      return typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
-    });
-  };
-
-  const handleEscalationSave = async () => {
-    if (!escalationSettings) return;
-    setEscalationSaving(true);
-    try {
-      const data = await api.saveEscalationSettings(escalationSettings);
-      setEscalationSettings(data.current);
-      setEscalationBaseline(data.current);
-      setEscalationDefaults(data.defaults);
-    } finally {
-      setEscalationSaving(false);
-    }
-  };
-
   return (
     <div
-      className="mx-auto h-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto px-4 py-5 pb-40 sm:px-6"
+      className="mx-auto w-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden px-4 py-5 pb-40 sm:h-full sm:overflow-y-auto sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold tracking-tight" style={{ color: "var(--th-text)" }}>
-          {tr("설정", "Settings")}
-        </h2>
-        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-          {tr(`회사 ${4} · 런타임 ${runtimeFieldCount} · 정책 ${configEntries.length}`, `Company ${4} · Runtime ${runtimeFieldCount} · Policy ${configEntries.length}`)}
-        </span>
-      </div>
-
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
-          eyebrow={tr("에스컬레이션", "Escalation")}
-          title={tr("PM / owner 라우팅 전환", "Switch between PM and owner routing")}
-          description={tr(
-            "pending_decision 에스컬레이션을 PM 채널로 보낼지, owner 스레드로 보낼지, 시간대 기반으로 전환할지를 관리합니다.",
-            "Controls whether pending-decision escalations go to the PM channel, an owner thread, or switch automatically by time window.",
-          )}
-          badge={tr("api/settings/escalation", "api/settings/escalation")}
-        />
-
-        {escalationSettings ? (
-          <div className="mt-5 space-y-4">
-            <div className="grid gap-4 lg:grid-cols-2">
-              <InputCard
-                label={tr("라우팅 모드", "Routing mode")}
-                description={tr(
-                  "PM 고정, owner 고정, 또는 scheduled 자동 전환 중 하나를 고릅니다.",
-                  "Choose fixed PM, fixed owner, or scheduled automatic switching.",
-                )}
-              >
-                <select
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                  style={inputStyle}
-                  value={escalationSettings.mode}
-                  onChange={(event) =>
-                    handleEscalationChange({ mode: event.target.value as api.EscalationMode })
-                  }
-                >
-                  <option value="pm">{tr("PM 모드", "PM mode")}</option>
-                  <option value="user">{tr("Owner 모드", "Owner mode")}</option>
-                  <option value="scheduled">{tr("시간대 기반", "Scheduled")}</option>
-                </select>
-              </InputCard>
-
-              <InputCard
-                label={tr("fallback owner user ID", "Fallback owner user ID")}
-                description={tr(
-                  "live owner 추적이 비어 있을 때 owner 멘션에 사용할 Discord user ID입니다.",
-                  "Discord user ID used for owner mentions when live owner tracking is unavailable.",
-                )}
-              >
-                <input
-                  type="text"
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                  style={inputStyle}
-                  value={escalationSettings.owner_user_id ?? ""}
-                  onChange={(event) =>
-                    handleEscalationChange((prev) => ({
-                      ...prev,
-                      owner_user_id: event.target.value.trim()
-                        ? Number(event.target.value.trim())
-                        : null,
-                    }))
-                  }
-                />
-              </InputCard>
-
-              <InputCard
-                label={tr("PM channel ID", "PM channel ID")}
-                description={tr(
-                  "PM fallback 및 PM mode에서 사용할 Discord channel ID 또는 alias입니다.",
-                  "Discord channel ID or alias used for PM fallback and PM mode.",
-                )}
-              >
-                <input
-                  type="text"
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                  style={inputStyle}
-                  value={escalationSettings.pm_channel_id ?? ""}
-                  onChange={(event) =>
-                    handleEscalationChange({
-                      pm_channel_id: event.target.value.trim() || null,
-                    })
-                  }
-                />
-              </InputCard>
-
-              <InputCard
-                label={tr("PM hours", "PM hours")}
-                description={tr(
-                  "scheduled 모드에서 이 시간대에는 PM 라우팅으로 전환합니다. 형식: `HH:MM-HH:MM`.",
-                  "When scheduled mode is active, this window routes to PM. Format: `HH:MM-HH:MM`.",
-                )}
-              >
-                <input
-                  type="text"
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                  style={inputStyle}
-                  value={escalationSettings.schedule.pm_hours}
-                  onChange={(event) =>
-                    handleEscalationChange((prev) => ({
-                      ...prev,
-                      schedule: {
-                        ...prev.schedule,
-                        pm_hours: event.target.value,
-                      },
-                    }))
-                  }
-                />
-              </InputCard>
-
-              <InputCard
-                label={tr("Timezone", "Timezone")}
-                description={tr(
-                  "scheduled 모드 판단에 사용할 IANA timezone입니다. 예: `Asia/Seoul`.",
-                  "IANA timezone used for scheduled-mode evaluation. Example: `Asia/Seoul`.",
-                )}
-              >
-                <input
-                  type="text"
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                  style={inputStyle}
-                  value={escalationSettings.schedule.timezone}
-                  onChange={(event) =>
-                    handleEscalationChange((prev) => ({
-                      ...prev,
-                      schedule: {
-                        ...prev.schedule,
-                        timezone: event.target.value,
-                      },
-                    }))
-                  }
-                />
-              </InputCard>
+      <section
+        className="rounded-[28px] border p-5 sm:p-6"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-accent-primary) 22%, var(--th-border) 78%)",
+          background: "radial-gradient(circle at top left, color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent), color-mix(in srgb, var(--th-card-bg) 92%, transparent) 48%, color-mix(in srgb, var(--th-bg-surface) 94%, transparent) 100%)",
+        }}
+      >
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--th-text-secondary)" }}>
+              {tr("설정 제어실", "Settings Control Room")}
             </div>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: "var(--th-text)" }}>
+              {tr("AgentDesk 설정창 재정렬", "Reframing AgentDesk settings")}
+            </h2>
+            <p className="mt-3 max-w-3xl text-sm leading-6" style={{ color: "var(--th-text-secondary)" }}>
+              {tr(
+                "설정은 단순 입력 폼이 아니라 저장 위치와 적용 범위를 이해해야 안전하게 다룰 수 있습니다. 이 화면은 회사 설정, 즉시 반영 런타임 설정, 파이프라인 정책, 별도 관리 설정을 분리해서 보여줍니다.",
+                "Settings are safe only when their storage surface and effect scope are visible. This view separates company settings, live runtime tuning, pipeline policy keys, and settings managed elsewhere.",
+              )}
+            </p>
+          </div>
+          <div
+            className="rounded-2xl border px-4 py-3 text-sm"
+            style={{ borderColor: "rgba(148,163,184,0.2)", background: "rgba(15,23,42,0.38)", color: "var(--th-text-secondary)" }}
+          >
+            {tr("현재 일반 설정 저장은 merged object로 수행되어 hidden JSON key를 보존합니다.", "General settings now save as a merged object so hidden JSON keys stay intact.")}
+          </div>
+        </div>
 
-            <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
-              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {tr(
-                  "Discord `!escalation` 명령과 같은 endpoint를 공유합니다. 기본값은 `agentdesk.yaml`, runtime override는 DB `kv_meta`에 저장됩니다.",
-                  "Shares the same endpoint as the Discord `!escalation` command. Defaults come from `agentdesk.yaml`, while runtime overrides are stored in DB `kv_meta`.",
-                )}
-                {escalationDefaults && (
-                  <>
-                    {" "}
-                    {tr(
-                      `기본 schedule은 ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone} 입니다.`,
-                      `Default schedule is ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone}.`,
-                    )}
-                  </>
-                )}
-              </p>
-              <button
-                onClick={handleEscalationSave}
-                disabled={escalationSaving || !escalationDirty}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-amber-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-amber-500 disabled:opacity-50"
-              >
-                {escalationSaving ? tr("저장 중...", "Saving...") : tr("에스컬레이션 저장", "Save escalation")}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)", color: "var(--th-text-muted)" }}>
-            {tr("에스컬레이션 설정을 불러오는 중입니다.", "Loading escalation settings.")}
-          </div>
-        )}
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <SummaryCard
+            label={tr("회사 설정", "Company Settings")}
+            value="4"
+            description={tr("이 화면에서 직접 편집하는 브랜드/언어/테마 설정", "Brand, language, and theme controls edited directly here")}
+          />
+          <SummaryCard
+            label={tr("런타임 튜닝", "Live Runtime")}
+            value={String(runtimeFieldCount)}
+            description={tr("재시작 없이 즉시 반영되는 운영 숫자 설정", "Operational tuning values that apply without restart")}
+            accent="#22c55e"
+          />
+          <SummaryCard
+            label={tr("정책 키", "Policy Keys")}
+            value={String(configEntries.length)}
+            description={tr("개별 `kv_meta` 키로 저장되는 파이프라인 정책", "Pipeline policy keys stored as individual `kv_meta` entries")}
+            accent="#f59e0b"
+          />
+          <SummaryCard
+            label={tr("정리 대상", "Audit Findings")}
+            value={String(AUDIT_NOTES.length)}
+            description={tr("별도 관리/읽기 전용/정리 필요로 분류한 설정 이슈", "Settings that are managed elsewhere, read-only, or need core cleanup")}
+            accent="#fb7185"
+          />
+        </div>
       </section>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("저장 경로", "Storage Surfaces")}
           title={tr("어디에 저장되는지 먼저 보이게", "Make storage surfaces explicit")}
           description={tr(
             "설정이 한 곳에만 있지 않아서, 저장 경로를 이해하지 못하면 UI가 쉽게 거짓말을 하게 됩니다. 아래 카드는 현재 AgentDesk 설정의 실제 저장면을 요약합니다.",
             "Settings do not live in one place, so the UI becomes misleading unless the storage path is explicit. These cards summarize the current storage surfaces.",
           )}
-        />
+        >
 
-        <div className="mt-5 grid gap-3 lg:grid-cols-2 2xl:grid-cols-5">
+        <div className="mt-5 grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
           <SurfaceCard
             title={tr("회사 설정 JSON", "Company settings JSON")}
             body={tr(
-              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서, 저장할 때 기존 값을 합친 merged object가 필요하고 legacy key는 서버에서 제거됩니다.",
-              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace rather than a patch merge, so callers must send a merged object and the server strips retired legacy keys.",
+              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서, 저장할 때 기존 값을 합친 merged object가 필요합니다.",
+              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace rather than a patch merge, so callers must send a merged object.",
             )}
             footer={tr("source: kv_meta['settings']", "source: kv_meta['settings']")}
           />
           <SurfaceCard
             title={tr("런타임 설정", "Runtime config")}
             body={tr(
-              "`agentdesk.yaml`의 `runtime:` 섹션이 재시작 시 baseline이 되고, 대시보드 변경은 `kv_meta['runtime-config']` override로 즉시 반영됩니다.",
-              "The `runtime:` section in `agentdesk.yaml` becomes the restart baseline, while dashboard edits apply immediately as `kv_meta['runtime-config']` overrides.",
+              "폴링 주기와 cache TTL 같은 숫자 설정은 `kv_meta['runtime-config']`에 저장되고 재시작 없이 반영됩니다.",
+              "Polling intervals and cache TTL values live in `kv_meta['runtime-config']` and apply without restart.",
             )}
-            footer={tr("source: agentdesk.yaml runtime + kv_meta['runtime-config']", "source: agentdesk.yaml runtime + kv_meta['runtime-config']")}
+            footer={tr("source: kv_meta['runtime-config']", "source: kv_meta['runtime-config']")}
           />
           <SurfaceCard
             title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
             body={tr(
-              "리뷰, 타임아웃, context compact, merge automation 값은 YAML baseline 위에 개별 `kv_meta` override로 쌓입니다. `/api/settings/config` 응답이 baseline과 restart behavior를 함께 내려줍니다.",
-              "Review, timeout, context-compaction, and merge automation values layer individual `kv_meta` overrides on top of YAML baselines, and `/api/settings/config` returns baseline plus restart metadata per key.",
+              "리뷰, 타임아웃, context compact 같은 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해서만 노출됩니다.",
+              "Review, timeout, and context-compaction values are stored as individual `kv_meta` keys and only exposed through the `/api/settings/config` whitelist.",
             )}
-            footer={tr("source: agentdesk.yaml + individual kv_meta overrides", "source: agentdesk.yaml + individual kv_meta overrides")}
-          />
-          <SurfaceCard
-            title={tr("에스컬레이션 라우팅", "Escalation routing")}
-            body={tr(
-              "PM/owner 라우팅은 `escalation:` baseline과 `kv_meta['escalation-settings-override']` 전용 override를 함께 사용합니다.",
-              "PM/owner routing uses an `escalation:` baseline plus a dedicated `kv_meta['escalation-settings-override']` layer.",
-            )}
-            footer={tr("source: escalation config + dedicated kv_meta override", "source: escalation config + dedicated kv_meta override")}
+            footer={tr("source: individual kv_meta keys", "source: individual kv_meta keys")}
           />
           <SurfaceCard
             title={tr("온보딩/시크릿", "Onboarding and secrets")}
@@ -1058,21 +970,20 @@ export default function SettingsView({
             footer={tr("source: onboarding API + kv_meta", "source: onboarding API + kv_meta")}
           />
         </div>
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("회사 설정", "Workspace Identity")}
           title={tr("브랜드/언어/테마", "Brand, language, and theme")}
-            description={tr(
-              "이 섹션은 대시보드가 사람에게 어떻게 보일지 결정합니다. 저장 시 현재 `settings` JSON 전체와 합쳐 보내고, 서버 canonical state를 다시 불러와 숨겨진 키와 legacy key 정리를 동시에 맞춥니다.",
-              "This section controls how the dashboard presents itself to people. Saves are merged with the current `settings` JSON and then re-fetched so hidden keys stay intact while retired keys are stripped server-side.",
-            )}
-            badge={tr("full replace API → merged save", "full replace API → merged save")}
-        />
+          description={tr(
+            "이 섹션은 대시보드가 사람에게 어떻게 보일지 결정합니다. 저장 시 현재 `settings` JSON 전체와 합쳐 저장하여 숨겨진 키를 지킵니다.",
+            "This section controls how the dashboard presents itself to people. Saves are merged with the current `settings` JSON so hidden keys are preserved.",
+          )}
+          badge={tr("full replace API → merged save", "full replace API → merged save")}
+        >
 
         <div className="mt-5 grid gap-3 lg:grid-cols-2">
-          <InputCard
+          <SettingsFieldCard
             label={tr("회사 이름", "Company name")}
             description={tr("대시보드 hero와 주요 타이틀에 노출됩니다.", "Shown in the dashboard hero and primary titles.")}
           >
@@ -1083,9 +994,9 @@ export default function SettingsView({
               className="w-full rounded-2xl px-3 py-2.5 text-sm"
               style={inputStyle}
             />
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("CEO 이름", "CEO name")}
             description={tr("오피스와 일부 운영 UI에서 대표 인물 이름으로 사용됩니다.", "Used as the representative persona name in office and ops surfaces.")}
           >
@@ -1096,9 +1007,9 @@ export default function SettingsView({
               className="w-full rounded-2xl px-3 py-2.5 text-sm"
               style={inputStyle}
             />
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("언어", "Language")}
             description={tr("대시보드 전반의 로캘과 기본 텍스트 방향을 정합니다.", "Controls dashboard locale and default text language.")}
           >
@@ -1113,9 +1024,9 @@ export default function SettingsView({
               <option value="ja">日本語</option>
               <option value="zh">中文</option>
             </select>
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("테마", "Theme")}
             description={tr("대시보드 전체 테마와 오피스 화면의 기본 분위기를 정합니다.", "Sets the overall dashboard theme and base office mood.")}
           >
@@ -1129,53 +1040,50 @@ export default function SettingsView({
               <option value="light">{tr("라이트", "Light")}</option>
               <option value="auto">{tr("자동 (시스템)", "Auto (System)")}</option>
             </select>
-          </InputCard>
+          </SettingsFieldCard>
         </div>
 
-        <div className="mt-5 flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+        <SettingsCallout className="mt-5" action={
+            <button
+              onClick={handleSave}
+              disabled={saving || !companyDirty}
+              className={primaryActionClass}
+              style={primaryActionStyle}
+            >
+              {saving ? tr("저장 중...", "Saving...") : tr("회사 설정 저장", "Save company settings")}
+            </button>
+        }>
           <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
             {tr(
-              "이 저장 버튼은 현재 회사 설정 patch를 기존 `settings` JSON과 합쳐 보내고, 저장 후 서버 값을 다시 불러옵니다. `roomThemes` 같은 숨겨진 키는 보존하고 retired key는 서버 정본에 맞춰 제거합니다.",
-              "This save action merges the edited patch with the existing `settings` JSON and re-fetches the server value afterward. Hidden keys such as `roomThemes` are preserved while retired keys are removed to match the server canonical state.",
+              "이 저장 버튼은 현재 회사 설정 patch를 기존 `settings` JSON과 합쳐 보냅니다. `roomThemes`처럼 화면에 안 보이는 키가 저장 중 사라지지 않도록 하기 위한 방어선입니다.",
+              "This save action merges the edited patch with the existing `settings` JSON. It prevents hidden keys such as `roomThemes` from being wiped during save.",
             )}
           </p>
-          <button
-            onClick={handleSave}
-            disabled={saving || !companyDirty}
-            className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-          >
-            {saving ? tr("저장 중...", "Saving...") : tr("회사 설정 저장", "Save company settings")}
-          </button>
-        </div>
-      </section>
+        </SettingsCallout>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("즉시 반영", "Live Runtime")}
           title={tr("운영 리듬과 캐시 튜닝", "Tune runtime cadence and caching")}
           description={tr(
-            "이 값들은 `agentdesk.yaml` `runtime:` baseline 위에 저장되는 live override입니다. 저장 즉시 반영되지만, 재시작하면 YAML baseline이 다시 기준이 됩니다.",
-            "These values are live overrides layered on top of the `agentdesk.yaml` `runtime:` baseline. They apply immediately, but the YAML baseline becomes authoritative again on restart.",
+            "이 값들은 `runtime-config`에 저장되고 재시작 없이 반영됩니다. 장애 복구 속도, GitHub 동기화 리듬, 사용량 경고 민감도 같은 운영 감각을 조절하는 영역입니다.",
+            "These values are saved to `runtime-config` and apply without restart. They tune recovery cadence, GitHub sync rhythm, and usage-alert sensitivity.",
           )}
-          badge={tr("live override on YAML baseline", "live override on YAML baseline")}
-        />
+          badge={tr("no restart needed", "no restart needed")}
+        >
 
         {!rcLoaded ? (
-          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", color: "var(--th-text-muted)" }}>
+          <SettingsEmptyState className="mt-5 text-sm">
             {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
-          </div>
+          </SettingsEmptyState>
         ) : (
           <div className="mt-5 space-y-5">
             {CATEGORIES.map((category) => (
-              <div key={category.titleEn} className="rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.26)" }}>
-                <div className="mb-4">
-                  <h4 className="text-base font-medium" style={{ color: "var(--th-text)" }}>
-                    {tr(category.titleKo, category.titleEn)}
-                  </h4>
-                  <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                    {tr(category.descriptionKo, category.descriptionEn)}
-                  </p>
-                </div>
+              <SettingsSubsection
+                key={category.titleEn}
+                title={tr(category.titleKo, category.titleEn)}
+                description={tr(category.descriptionKo, category.descriptionEn)}
+              >
                 <div className="grid gap-3 xl:grid-cols-2">
                   {category.fields.map((field) => {
                     const value = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
@@ -1183,9 +1091,9 @@ export default function SettingsView({
                     const isDefault = value === defaultValue;
 
                     return (
-                      <div
+                      <SettingsCard
                         key={field.key}
-                        className="rounded-2xl border p-4"
+                        className="rounded-2xl p-4"
                         style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.32)" }}
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -1216,7 +1124,7 @@ export default function SettingsView({
                             value={value}
                             onChange={(event) => handleRcChange(field.key, Number(event.target.value))}
                             className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-                            style={{ accentColor: "#6366f1" }}
+                            style={{ accentColor: "var(--th-accent-primary)" }}
                           />
                           <input
                             type="number"
@@ -1239,51 +1147,52 @@ export default function SettingsView({
                           <div className="mt-3 flex justify-end">
                             <button
                               onClick={() => handleRcReset(field.key)}
-                              className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium transition-colors hover:border-indigo-400/50 hover:text-indigo-200"
-                              style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
+                              className={compactSecondaryActionClass}
+                              style={compactSecondaryActionStyle}
                             >
                               {tr("기본값으로 되돌리기", "Reset to default")}
                             </button>
                           </div>
                         )}
-                      </div>
+                      </SettingsCard>
                     );
                   })}
                 </div>
-              </div>
+              </SettingsSubsection>
             ))}
 
-            <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
-              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 대시보드/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify dashboard, receipts, and logs before making larger moves.")}
-              </p>
+            <SettingsCallout className="mt-0" action={
               <button
                 onClick={handleRcSave}
                 disabled={rcSaving || !rcDirty}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                className={primaryActionClass}
+                style={primaryActionStyle}
               >
                 {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 설정 저장", "Save runtime config")}
               </button>
-            </div>
+            }>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 Pulse/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify Pulse, receipts, and logs before making larger moves.")}
+              </p>
+            </SettingsCallout>
           </div>
         )}
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("파이프라인 정책", "Pipeline Policy")}
           title={tr("개별 `kv_meta` 키 관리", "Manage individual `kv_meta` keys")}
           description={tr(
-            "리뷰, 자동 머지, 타임아웃, context compact, Discord 채널 연결 값은 `agentdesk.yaml` baseline과 개별 `kv_meta` override의 조합입니다. 여기서는 live override만 수정하고, restart baseline은 YAML이 담당합니다.",
-            "Review, merge automation, timeout, context-compaction, and Discord channel IDs now combine an `agentdesk.yaml` baseline with individual `kv_meta` overrides. This section edits only the live override layer while YAML owns the restart baseline.",
+            "리뷰, 타임아웃, context compact, Discord 채널 연결 값은 일반 설정 JSON이 아니라 개별 `kv_meta` 키입니다. 여기서는 토글/숫자/문자열 타입을 분리해서 보여주고, read-only 항목은 편집 대신 현재 상태만 노출합니다.",
+            "Review, timeout, context-compaction, and Discord channel IDs are stored as individual `kv_meta` keys rather than the general settings JSON. This section separates toggles, numeric values, and read-only keys.",
           )}
-          badge={tr("YAML baseline + live override", "YAML baseline + live override")}
-        />
+          badge={tr("whitelisted API only", "whitelisted API only")}
+        >
 
         {configEntries.length === 0 ? (
-          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", color: "var(--th-text-muted)" }}>
+          <SettingsEmptyState className="mt-5 text-sm">
             {tr("시스템 설정을 불러오는 중...", "Loading system config...")}
-          </div>
+          </SettingsEmptyState>
         ) : (
           <div className="mt-5 space-y-4">
             {(Object.keys(SYSTEM_CATEGORY_META) as Array<keyof typeof SYSTEM_CATEGORY_META>).map((categoryKey) => {
@@ -1292,35 +1201,24 @@ export default function SettingsView({
               const meta = SYSTEM_CATEGORY_META[categoryKey];
 
               return (
-                <div key={categoryKey} className="rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.26)" }}>
-                  <div className="mb-4">
-                    <div className="text-base font-medium" style={{ color: "var(--th-text)" }}>
-                      {tr(meta.titleKo, meta.titleEn)}
-                    </div>
-                    <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                      {tr(meta.descriptionKo, meta.descriptionEn)}
-                    </p>
-                  </div>
-
+                <SettingsSubsection
+                  key={categoryKey}
+                  title={tr(meta.titleKo, meta.titleEn)}
+                  description={tr(meta.descriptionKo, meta.descriptionEn)}
+                >
                   <div className="grid gap-3 xl:grid-cols-2">
                     {entries.map((entry) => {
                       const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
                       const hasLocalEdit = Object.prototype.hasOwnProperty.call(configEdits, entry.key);
                       const currentValue = hasLocalEdit ? configEdits[entry.key] : (entry.value ?? entry.default ?? "");
-                      const baselineValue = entry.baseline ?? entry.default ?? null;
-                      const defaultLabel = baselineValue ?? tr("없음", "None");
-                      const readOnly = entry.editable === false || isReadOnlyConfigKey(entry.key);
-                      const overrideActive = hasLocalEdit
-                        ? (baselineValue !== null ? String(currentValue) !== baselineValue : hasConfigValue(currentValue))
-                        : (entry.override_active ?? (baselineValue !== null ? String(currentValue) !== baselineValue : hasConfigValue(currentValue)));
+                      const defaultLabel = entry.default ?? tr("없음", "None");
+                      const readOnly = isReadOnlyConfigKey(entry.key);
                       const isEnabled = parseBooleanConfigValue(currentValue);
-                      const baselineSource = baselineSourceNote(entry.baseline_source, isKo);
-                      const restartNote = restartBehaviorNote(entry.restart_behavior, isKo);
 
                       return (
-                        <div
+                        <SettingsCard
                           key={entry.key}
-                          className="rounded-2xl border p-4"
+                          className="rounded-2xl p-4"
                           style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.32)" }}
                         >
                           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1335,11 +1233,6 @@ export default function SettingsView({
                                 >
                                   kv_meta
                                 </span>
-                                {!readOnly && (
-                                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${configLayerClass(overrideActive)}`}>
-                                    {configLayerLabel(overrideActive, isKo)}
-                                  </span>
-                                )}
                                 {readOnly && (
                                   <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${auditStatusClass("read-only")}`}>
                                     {auditStatusLabel("read-only", isKo)}
@@ -1375,14 +1268,10 @@ export default function SettingsView({
                                   <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
                                     {isEnabled ? tr("활성화됨", "Enabled") : tr("비활성화됨", "Disabled")}
                                   </div>
-                                  <div className="mt-1 flex flex-wrap gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                                    <span>
-                                      {readOnly
-                                        ? tr("서버 부팅 시 다시 동기화되는 항목입니다.", "This value is resynced on server boot.")
-                                        : tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
-                                    </span>
-                                    {baselineSource && <span>{baselineSource}</span>}
-                                    {restartNote && <span>{restartNote}</span>}
+                                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                                    {readOnly
+                                      ? tr("서버 부팅 시 다시 동기화되는 항목입니다.", "This value is resynced on server boot.")
+                                      : tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
                                   </div>
                                 </div>
                                 <span
@@ -1395,45 +1284,6 @@ export default function SettingsView({
                                   />
                                 </span>
                               </button>
-                            ) : entry.key === "merge_strategy" ? (
-                              <>
-                                <select
-                                  disabled={readOnly}
-                                  className="w-full rounded-2xl px-3 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-80"
-                                  style={inputStyle}
-                                  value={String(currentValue || "squash")}
-                                  onChange={(event) => handleConfigEdit(entry.key, event.target.value)}
-                                >
-                                  <option value="squash">squash</option>
-                                  <option value="merge">merge</option>
-                                  <option value="rebase">rebase</option>
-                                </select>
-                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                                  <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
-                                  {baselineSource && <span>{baselineSource}</span>}
-                                  {restartNote && <span>{restartNote}</span>}
-                                  <span>{tr("GitHub auto-merge 전략과 1:1로 대응합니다.", "Maps directly to the GitHub auto-merge strategy.")}</span>
-                                </div>
-                              </>
-                            ) : entry.key === "merge_strategy_mode" ? (
-                              <>
-                                <select
-                                  disabled={readOnly}
-                                  className="w-full rounded-2xl px-3 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-80"
-                                  style={inputStyle}
-                                  value={String(currentValue || "direct-first")}
-                                  onChange={(event) => handleConfigEdit(entry.key, event.target.value)}
-                                >
-                                  <option value="direct-first">direct-first</option>
-                                  <option value="pr-always">pr-always</option>
-                                </select>
-                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                                  <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
-                                  {baselineSource && <span>{baselineSource}</span>}
-                                  {restartNote && <span>{restartNote}</span>}
-                                  <span>{tr("direct-first는 기존 동작을 유지하고, pr-always는 항상 PR과 Codex 리뷰 승인을 기다립니다.", "direct-first preserves the current flow, while pr-always always opens a PR and waits for Codex approval.")}</span>
-                                </div>
-                              </>
                             ) : (
                               <>
                                 <input
@@ -1447,8 +1297,9 @@ export default function SettingsView({
                                 />
                                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                                   <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
-                                  {baselineSource && <span>{baselineSource}</span>}
-                                  {restartNote && <span>{restartNote}</span>}
+                                  {readOnly && (
+                                    <span>{tr("이 값은 서버 설정에서 덮어써집니다.", "This value is overwritten from server config.")}</span>
+                                  )}
                                   {entry.key.endsWith("_channel_id") && (
                                     <span>{tr("Discord ID는 정밀도 손실을 피하려고 문자열로 유지합니다.", "Discord IDs stay as strings to avoid precision loss.")}</span>
                                   )}
@@ -1456,21 +1307,15 @@ export default function SettingsView({
                               </>
                             )}
                           </div>
-                        </div>
+                        </SettingsCard>
                       );
                     })}
                   </div>
-                </div>
+                </SettingsSubsection>
               );
             })}
 
-            <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
-              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {tr(
-                  "이 섹션은 whitelist된 개별 `kv_meta` override만 편집합니다. dead config였던 `max_chain_depth`와 `context_clear_*`는 surface에서 제거했고, 재시작 baseline은 `agentdesk.yaml`이 다시 적용됩니다.",
-                  "This section edits only whitelisted `kv_meta` override keys. Retired keys such as `max_chain_depth` and `context_clear_*` have been removed from the surface, and the `agentdesk.yaml` baseline is re-applied on restart.",
-                )}
-              </p>
+            <SettingsCallout className="mt-0" action={
               <button
                 onClick={handleConfigSave}
                 disabled={configSaving || !configDirty}
@@ -1478,30 +1323,35 @@ export default function SettingsView({
               >
                 {configSaving ? tr("저장 중...", "Saving...") : tr("정책 설정 저장", "Save policy settings")}
               </button>
-            </div>
+            }>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr(
+                  "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. `context_clear_*`처럼 설명은 있지만 API에 없는 항목은 아래 audit 섹션에서 별도 정리 대상으로 표시합니다.",
+                  "This section edits only whitelisted individual `kv_meta` keys. Items such as `context_clear_*` that are described but not exposed by the API are surfaced in the audit section below.",
+                )}
+              </p>
+            </SettingsCallout>
           </div>
         )}
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("감사 결과", "Audit Findings")}
           title={tr("별도 관리 / 정리 필요 항목", "Managed elsewhere / cleanup-needed items")}
           description={tr(
-            "이 항목들은 일반 설정창에서 바로 편집하지 않는 편이 맞거나, read-only/계약 메모로 남겨두는 편이 더 정확한 surface입니다.",
-            "These items are either better managed outside the general settings form or are more truthful when kept as read-only or contract notes.",
+            "이 항목들은 일반 설정창에서 바로 편집하지 않는 편이 맞거나, frontend만으로는 정본을 보장할 수 없는 후보들입니다. ADK 본체 쪽 정리 요청의 근거 목록으로도 사용합니다.",
+            "These items are either better managed outside the general settings form or cannot be made truthful from the frontend alone. This list also serves as the basis for ADK core cleanup requests.",
           )}
-        />
+        >
 
         <div className="mt-5 grid gap-3 xl:grid-cols-2">
           {AUDIT_NOTES.map((note) => (
             <AuditNoteCard key={note.id} note={note} isKo={isKo} />
           ))}
         </div>
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("온보딩", "Onboarding")}
           title={tr("토큰과 첫 설정은 별도 흐름으로", "Keep secrets and first-run setup in a dedicated flow")}
           description={tr(
@@ -1509,9 +1359,12 @@ export default function SettingsView({
             "Onboarding tokens, channel IDs, and provider values are safer and easier to understand inside a dedicated wizard than in the general settings form, so this screen links back to that flow instead of embedding raw text inputs.",
           )}
           badge={tr("dashboard > discord onboarding bridge", "dashboard > Discord onboarding bridge")}
-        />
+        >
 
-        <div className="mt-5 rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+        <SettingsCard
+          className="mt-5 rounded-3xl p-4 sm:p-5"
+          style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+        >
           <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
             <div>
               <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
@@ -1526,14 +1379,14 @@ export default function SettingsView({
             </div>
             <button
               onClick={() => setShowOnboarding(true)}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-colors hover:border-indigo-400/50 hover:text-indigo-200"
-              style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}
+              className={secondaryActionClass}
+              style={secondaryActionStyle}
             >
               {tr("온보딩 다시 열기", "Open onboarding again")}
             </button>
           </div>
-        </div>
-      </section>
+        </SettingsCard>
+      </SettingsSection>
 
       {showOnboarding && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0a0e1a]" role="dialog" aria-modal="true" aria-label="Onboarding wizard">

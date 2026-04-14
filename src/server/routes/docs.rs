@@ -651,7 +651,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "force",
-                body_param("boolean", false, "Bypass guards for blocked/pending_decision states")
+                body_param("boolean", false, "Bypass guards for manual-intervention review/in-progress states")
                     .with_default(false),
             ),
             (
@@ -1585,6 +1585,54 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"run": {"id": "run-1", "status": "active"}, "entries": [{"id": "entry-1", "status": "pending", "github_issue_number": 423}], "agents": {"agent-1": {"pending": 1, "dispatched": 0, "done": 0, "skipped": 0}}, "thread_groups": {"0": {"status": "pending", "pending": 1, "dispatched": 0, "done": 0, "skipped": 0, "entries": [{"id": "entry-1", "card_id": "card-423", "status": "pending", "github_issue_number": 423, "batch_phase": 0}]}}}),
         ),
         ep(
+            "GET",
+            "/api/auto-queue/history",
+            "auto-queue",
+            "List recent auto-queue runs with outcome metrics",
+        )
+        .with_params([
+            (
+                "repo",
+                query_param("string", false, "Restrict history view to a repo"),
+            ),
+            (
+                "agent_id",
+                query_param("string", false, "Restrict history view to an agent"),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Maximum number of recent runs to return")
+                    .with_default(8),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"repo": "test-repo", "limit": 5}}),
+            json!({
+                "summary": {
+                    "total_runs": 2,
+                    "completed_runs": 1,
+                    "success_rate": 0.375,
+                    "failure_rate": 0.625
+                },
+                "runs": [{
+                    "id": "run-2",
+                    "repo": "test-repo",
+                    "agent_id": "agent-1",
+                    "status": "completed",
+                    "created_at": 1712600000000_i64,
+                    "completed_at": 1712600300000_i64,
+                    "duration_ms": 300000_i64,
+                    "entry_count": 4,
+                    "done_count": 3,
+                    "skipped_count": 1,
+                    "pending_count": 0,
+                    "dispatched_count": 0,
+                    "success_rate": 0.75,
+                    "failure_rate": 0.25
+                }]
+            }),
+        ),
+        ep(
             "PATCH",
             "/api/auto-queue/entries/{id}",
             "auto-queue",
@@ -1843,7 +1891,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 14}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
+            json!({"categories": [{"name": "auto-queue", "count": 15}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
         ),
         ep(
             "GET",
@@ -1857,7 +1905,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 14, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
+            json!({"categories": [{"name": "auto-queue", "count": 15, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
         ),
         ep(
             "GET",

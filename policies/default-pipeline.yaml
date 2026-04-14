@@ -18,10 +18,6 @@ states:
     label: 진행 중
   - id: review
     label: 리뷰
-  - id: pending_decision
-    label: 판단 대기
-  - id: blocked
-    label: 막힘
   - id: done
     label: 완료
     terminal: true
@@ -74,45 +70,25 @@ transitions:
     gates: [review_rework]
 
   # Force-only transitions (timeouts, PMD overrides)
-  - from: requested
-    to: pending_decision
-    type: force_only
-
   # Revert to backlog (force-only, for cancellation/requeue)
   - from: requested
     to: backlog
     type: force_only
 
-  - from: in_progress
-    to: blocked
-    type: force_only
-
-  - from: review
-    to: pending_decision
-    type: force_only
-
-  - from: pending_decision
+  - from: requested
     to: done
     type: force_only
 
-  - from: pending_decision
+  - from: in_progress
     to: requested
     type: force_only
 
-  - from: pending_decision
-    to: in_progress
+  - from: in_progress
+    to: done
     type: force_only
 
-  - from: blocked
+  - from: review
     to: requested
-    type: force_only
-
-  - from: blocked
-    to: in_progress
-    type: force_only
-
-  - from: blocked
-    to: pending_decision
     type: force_only
 
 # ── Gates ─────────────────────────────────────────────────────────
@@ -149,10 +125,6 @@ hooks:
     on_enter: [OnCardTransition]
   review:
     on_enter: [OnCardTransition, OnReviewEnter]
-  pending_decision:
-    on_enter: [OnCardTransition]
-  blocked:
-    on_enter: [OnCardTransition]
   done:
     on_enter: [OnCardTransition, OnCardTerminal]
 
@@ -204,20 +176,20 @@ timeouts:
     duration: 45m
     clock: requested_at
     max_retries: 10
-    on_exhaust: pending_decision
+    on_exhaust: requested
 
   in_progress:
     duration: 2h
     clock: started_at
-    on_exhaust: blocked
+    on_exhaust: in_progress
 
   review:
     duration: 30m
     clock: review_entered_at
-    on_exhaust: pending_decision
+    on_exhaust: review
 
   awaiting_dod:
     duration: 15m
     clock: awaiting_dod_at
     condition: review_status = 'awaiting_dod'
-    on_exhaust: pending_decision
+    on_exhaust: review

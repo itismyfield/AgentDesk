@@ -23,6 +23,7 @@ pub(super) struct DiscordSession {
     /// Restart generation at which this session was created/restored.
     #[allow(dead_code)]
     pub(super) born_generation: u64,
+    pub(super) assistant_turns: usize,
 }
 
 pub(super) fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
@@ -66,6 +67,72 @@ impl DiscordSession {
         self.memento_reflected = false;
     }
 
+    pub(super) fn assistant_turn_count(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|item| item.item_type == HistoryType::Assistant)
+            .count()
+    }
+
+    pub(super) fn recent_history_context(&self, max_messages: usize) -> Option<String> {
+        if max_messages == 0 {
+            return None;
+        }
+
+        let mut lines = self
+            .history
+            .iter()
+            .rev()
+            .filter_map(|item| {
+                let speaker = match item.item_type {
+                    HistoryType::User => "User",
+                    HistoryType::Assistant => "Assistant",
+                    _ => return None,
+                };
+                let content = item.content.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                Some(format!(
+                    "{speaker}: {}",
+                    content.chars().take(300).collect::<String>()
+                ))
+            })
+            .take(max_messages)
+            .collect::<Vec<_>>();
+
+        if lines.is_empty() {
+            return None;
+        }
+
+        lines.reverse();
+        Some(lines.join("\n"))
+    }
+    pub(super) fn clear_transcript_history(&mut self) {
+        self.history.clear();
+        self.assistant_turns = 0;
+    }
+
+    pub(super) fn will_reach_turn_cap(&self) -> bool {
+        self.assistant_turns.saturating_add(1) >= SESSION_MAX_ASSISTANT_TURNS
+    }
+
+    pub(super) fn record_completed_turn(
+        &mut self,
+        user_text: String,
+        assistant_text: String,
+    ) -> bool {
+        self.history.push(HistoryItem {
+            item_type: HistoryType::User,
+            content: user_text,
+        });
+        self.history.push(HistoryItem {
+            item_type: HistoryType::Assistant,
+            content: assistant_text,
+        });
+        self.assistant_turns = self.assistant_turns.saturating_add(1);
+        self.assistant_turns >= SESSION_MAX_ASSISTANT_TURNS
+    }
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
@@ -341,12 +408,24 @@ pub(super) async fn auto_restore_session(
         resolve_thread_parent(&serenity_ctx.http, channel_id).await,
         channel_id,
     );
+    let is_dm = matches!(
+        channel_id.to_channel(&serenity_ctx.http).await.ok(),
+        Some(serenity::Channel::Private(_))
+    );
 
     // Read settings first to get provider and runtime restore metadata.
     let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let provider = settings.provider.clone();
-        let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref());
+        let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
+            .or_else(|| {
+                if is_dm {
+                    super::agentdesk_config::resolve_dm_default_agent(&provider)
+                        .map(|resolved| resolved.workspace)
+                } else {
+                    None
+                }
+            });
         let saved_remote =
             load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
 
@@ -435,6 +514,7 @@ pub(super) async fn auto_restore_session(
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
                 born_generation: runtime_store::load_generation(),
+                assistant_turns: 0,
             });
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();
@@ -501,6 +581,7 @@ pub(super) async fn bootstrap_thread_session(
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: runtime_store::load_generation(),
+            assistant_turns: 0,
         });
     // Always create a worktree for thread sessions to isolate concurrent work.
     let effective_path = {
@@ -796,6 +877,89 @@ mod tests {
         );
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn assistant_turn_count_only_counts_assistant_messages() {
+        let session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "user".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "assistant-1".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::ToolUse,
+                    content: "tool".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "assistant-2".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        };
+
+        assert_eq!(session.assistant_turn_count(), 2);
+    }
+
+    #[test]
+    fn recent_history_context_returns_latest_user_and_assistant_messages() {
+        let session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "첫 질문".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "첫 답변".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "둘째 질문".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "둘째 답변".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        };
+
+        assert_eq!(
+            session.recent_history_context(3).as_deref(),
+            Some("Assistant: 첫 답변\nUser: 둘째 질문\nAssistant: 둘째 답변")
+        );
     }
 
     #[test]

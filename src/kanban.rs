@@ -80,6 +80,7 @@ where
         card_repo_id,
         card_agent_id,
         review_entered_at,
+        blocked_reason,
     ): (
         String,
         Option<String>,
@@ -87,9 +88,10 @@ where
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     ) = conn
         .query_row(
-            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id, review_entered_at \
+            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id, review_entered_at, blocked_reason \
              FROM kanban_cards WHERE id = ?1",
             [card_id],
             |row| {
@@ -100,6 +102,7 @@ where
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -154,8 +157,8 @@ where
         card: CardState {
             id: card_id.to_string(),
             status: old_status.clone(),
-            review_status,
-            latest_dispatch_id,
+            review_status: review_status.clone(),
+            latest_dispatch_id: latest_dispatch_id.clone(),
         },
         pipeline: effective.clone(),
         gates: GateSnapshot {
@@ -204,14 +207,27 @@ where
     }
 
     // ── 4. Execute intents atomically (DB writes, still holding lock) ──
+    let old_manual_intervention = crate::manual_intervention::requires_manual_intervention(
+        review_status.as_deref(),
+        blocked_reason.as_deref(),
+    );
     conn.execute_batch("BEGIN")?;
     let exec_result = (|| -> anyhow::Result<()> {
         for intent in &decision.intents {
             transition::execute_intent_on_conn(&conn, intent)?;
         }
         on_conn_after_intents(&conn)?;
-        if effective.is_force_only_state(&old_status) && !effective.is_force_only_state(new_status)
-        {
+        let (new_review_status, new_blocked_reason): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT review_status, blocked_reason FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+        let new_manual_intervention = crate::manual_intervention::requires_manual_intervention(
+            new_review_status.as_deref(),
+            new_blocked_reason.as_deref(),
+        );
+        if old_manual_intervention && !new_manual_intervention {
             clear_escalation_alert_state_on_conn(&conn, card_id)?;
         }
         Ok(())
@@ -1877,10 +1893,9 @@ mod tests {
         );
     }
 
-    /// #110: review → done → auto-queue should not conflict with pending_decision.
-    /// When card goes to pending_decision, auto-queue entry should NOT be marked done.
+    /// #110: non-terminal manual recovery transitions must not complete auto-queue entries.
     #[test]
-    fn pending_decision_does_not_complete_auto_queue_entry() {
+    fn requested_force_transition_does_not_complete_auto_queue_entry() {
         let db = test_db();
         ensure_auto_queue_tables(&db);
         let engine = test_engine(&db);
@@ -1902,15 +1917,9 @@ mod tests {
             ).unwrap();
         }
 
-        // Transition to pending_decision (NOT done)
-        let result = transition_status_with_opts(
-            &db,
-            &engine,
-            "card-pd",
-            "pending_decision",
-            "pm-gate",
-            true,
-        );
+        // Transition to requested (NOT done)
+        let result =
+            transition_status_with_opts(&db, &engine, "card-pd", "requested", "pm-gate", true);
         assert!(result.is_ok());
 
         // Verify: entry should still be 'dispatched' (not done)
@@ -1925,7 +1934,7 @@ mod tests {
         };
         assert_eq!(
             entry_status, "dispatched",
-            "pending_decision must NOT mark auto_queue_entry as done"
+            "requested must NOT mark auto_queue_entry as done"
         );
     }
 

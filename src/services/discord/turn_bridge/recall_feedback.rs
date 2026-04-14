@@ -332,7 +332,9 @@ fn recall_is_relevant(events: &[SessionTranscriptEvent], recall: &RecallObservat
 fn canonical_memento_tool_kind(name: &str) -> Option<MementoToolKind> {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "recall" => return Some(MementoToolKind::Recall),
+        // Memento MCP exposes recall via the `context` tool, while older
+        // transcript fixtures still use `recall`.
+        "context" | "recall" => return Some(MementoToolKind::Recall),
         "tool_feedback" => return Some(MementoToolKind::ToolFeedback),
         _ => {}
     }
@@ -343,7 +345,7 @@ fn canonical_memento_tool_kind(name: &str) -> Option<MementoToolKind> {
     }
 
     match segments.last().copied() {
-        Some("recall") => Some(MementoToolKind::Recall),
+        Some("context") | Some("recall") => Some(MementoToolKind::Recall),
         Some("tool_feedback") => Some(MementoToolKind::ToolFeedback),
         _ => None,
     }
@@ -501,6 +503,37 @@ mod tests {
         );
         assert_eq!(analysis.covered_recall_count_after(1), 1);
         assert_eq!(analysis.covered_recall_count_after(2), 2);
+    }
+
+    #[test]
+    fn analyze_turn_treats_memento_context_as_recall() {
+        let events = vec![
+            tool_use("mcp__memento__context", json!({"query":"foo"})),
+            tool_result(
+                "mcp__memento__context",
+                json!({
+                    "success": true,
+                    "_searchEventId": "search-1",
+                    "fragments": [{"id": "frag-1"}]
+                }),
+            ),
+            assistant("frag-1 정보를 바탕으로 정리합니다."),
+        ];
+
+        let analysis = analyze_recall_feedback_turn(&events);
+
+        assert_eq!(analysis.recall_count, 1);
+        assert_eq!(analysis.manual_feedback_count, 0);
+        assert_eq!(analysis.manual_covered_recall_count, 0);
+        assert_eq!(
+            analysis.pending_feedbacks,
+            vec![PendingRecallFeedback {
+                search_event_id: Some("search-1".to_string()),
+                fragment_ids: vec!["frag-1".to_string()],
+                relevant: true,
+                sufficient: true,
+            }]
+        );
     }
 
     #[test]

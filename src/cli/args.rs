@@ -277,7 +277,7 @@ pub(crate) enum Commands {
     Resume {
         /// Card ID or GitHub issue number
         card_id: String,
-        /// Force resume (bypass gates for pending_decision/blocked)
+        /// Force resume (bypass guards for manual-intervention states)
         #[arg(long)]
         force: bool,
         /// Reason for audit log

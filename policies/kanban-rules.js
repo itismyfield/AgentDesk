@@ -182,8 +182,6 @@ var rules = {
     // causing double processing (JS verdict extraction + Rust OnDispatchCompleted).
     // Now only Rust handles auto-complete; JS policy reacts via onDispatchCompleted hook.
     var reviewState = agentdesk.pipeline.nextGatedTarget(nextFromInitial, cfg);
-    var forceTargets = agentdesk.pipeline.forceOnlyTargets(nextFromInitial, cfg);
-    var pendingState = forceTargets[0];
 
     if (false && payload.status === "idle" && card.status === reviewState) {
       var dispatch = agentdesk.db.query(
@@ -192,7 +190,7 @@ var rules = {
       );
       if (dispatch.length > 0 && dispatch[0].dispatch_type === "review" && dispatch[0].status === "pending") {
         // ── Verdict extraction (structured, dispatch-correlated) ──
-        // Priority: 1) dispatch result JSON  2) GitHub comment with round marker  3) pending_decision
+        // Priority: 1) dispatch result JSON  2) GitHub comment with round marker  3) current review/manual-intervention state
         var verdict = null;
         var resultJson = dispatch[0].result;
 
@@ -254,14 +252,10 @@ var rules = {
           }
         }
 
-        // 3. No verdict found → pendingState (never default to pass)
+        // 3. No verdict found → manual intervention (never default to pass)
         if (!verdict) {
-          agentdesk.kanban.setStatus(card.id, pendingState);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET blocked_reason = 'Review completed but verdict unclear — manual decision needed' WHERE id = ?",
-            [card.id]
-          );
-          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → " + pendingState);
+          escalateToManualIntervention(card.id, "Review completed but verdict unclear — manual decision needed", { review: true });
+          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → dilemma_pending");
           return;
         }
 
@@ -298,8 +292,6 @@ var rules = {
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var inProgressState = agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg);
     var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
-    var forceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
-    var pendingState = forceTargets[0];
 
     // Skip terminal cards
     if (agentdesk.pipeline.isTerminal(card.status, cfg)) return;
@@ -319,7 +311,7 @@ var rules = {
       meta.consultation_result = consultResult;
       // If consultation clarified the issue, update preflight_status to "clear"
       // and immediately resume the linked auto-queue entry with a fresh
-      // implementation dispatch. Otherwise escalate to pending_decision.
+      // implementation dispatch. Otherwise escalate to manual intervention.
       if (consultResult.verdict === "clear" || consultResult.verdict === "proceed") {
         meta.preflight_status = "clear";
         meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
@@ -363,8 +355,8 @@ var rules = {
           "UPDATE kanban_cards SET metadata = ?, blocked_reason = ? WHERE id = ?",
           [JSON.stringify(meta), "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
         );
-        agentdesk.kanban.setStatus(dispatch.kanban_card_id, pendingState);
-        agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → " + pendingState);
+        escalateToManualIntervention(dispatch.kanban_card_id, "Consultation did not resolve ambiguity");
+        agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → manual intervention");
       }
       return;
     }
@@ -453,7 +445,7 @@ var rules = {
         // Check if the only failure is DoD — give agent 15 min to complete it
         var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
         if (dodOnly) {
-          // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 pendingState)
+          // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 dilemma_pending)
           agentdesk.kanban.setStatus(card.id, reviewState);
           agentdesk.kanban.setReviewStatus(card.id, "awaiting_dod", {awaiting_dod_at: "now"});
           // #117: sync canonical review state
@@ -461,13 +453,10 @@ var rules = {
           agentdesk.log.warn("[pm-gate] Card " + card.id + " → review(awaiting_dod): " + reasons[0]);
           return;
         }
-        // Other gate failures → pendingState
-        agentdesk.kanban.setStatus(card.id, pendingState);
-        agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
-        // #117: sync canonical review state
-        agentdesk.reviewState.sync(card.id, "idle");
-        agentdesk.log.warn("[pm-gate] Card " + card.id + " → " + pendingState + ": " + reasons.join("; "));
-        notifyPMD(card.id, reasons.join("; "));
+        // Other gate failures → dilemma_pending
+        var gateReason = reasons.join("; ");
+        escalateToManualIntervention(card.id, gateReason, { review: true });
+        agentdesk.log.warn("[pm-gate] Card " + card.id + " → dilemma_pending: " + gateReason);
         return;
       }
     }
@@ -482,9 +471,6 @@ var rules = {
     agentdesk.log.info("[kanban] card " + payload.card_id + ": " + payload.from + " → " + payload.to);
     var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
     var initialState = agentdesk.pipeline.kickoffState(cfg);
-    var inProgressForForce = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
-    var blockedTargets = agentdesk.pipeline.forceOnlyTargets(inProgressForForce, cfg);
-    var pendingState = blockedTargets[0];
 
     // → initialState (requested): run preflight validation (#256)
     // #255: requested is a dispatch-free preflight state. Dispatch is created separately
@@ -533,21 +519,6 @@ var rules = {
         agentdesk.log.info("[preflight] Card " + payload.card_id + " needs consultation: " + preflight.summary);
       }
       // "clear" and "assumption_ok" → do nothing, auto-queue will create implementation dispatch
-    }
-
-    // → blocked (force-only target): PMD 알림 (Agent in the Loop)
-    // "blocked" is a force-only target from in_progress — check all force targets
-    var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
-    var allForceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
-    // blocked is typically the second force target (index 1)
-    var blockedState = allForceTargets.length > 1 ? allForceTargets[1] : allForceTargets[0];
-    if (payload.to === blockedState) {
-      agentdesk.log.info("[kanban] card " + payload.card_id + " entered blocked state");
-    }
-
-    // → pendingState: log only (pm-decision dispatch removed — not effective in practice)
-    if (payload.to === pendingState) {
-      agentdesk.log.info("[kanban] card " + payload.card_id + " entered pendingState via force-transition");
     }
   },
 

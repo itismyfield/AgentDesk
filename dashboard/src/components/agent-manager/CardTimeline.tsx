@@ -15,7 +15,7 @@ import {
 
 export const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
   review: { bg: "rgba(20,184,166,0.16)", text: "#5eead4" },
-  pm: { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" },
+  pm: { bg: "rgba(249,115,22,0.16)", text: "#fdba74" },
   work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
   general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
 };
@@ -65,7 +65,7 @@ function getTimelineStatusStyle(status: GitHubTimelineStatus) {
     case "passed":
       return { bg: "rgba(34,197,94,0.18)", text: "#86efac" };
     case "decision":
-      return { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" };
+      return { bg: "rgba(249,115,22,0.16)", text: "#fdba74" };
     case "completed":
       return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
     case "comment":

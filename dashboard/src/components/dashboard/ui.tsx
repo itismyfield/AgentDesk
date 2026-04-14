@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 export function cx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -11,6 +13,7 @@ export const dashboardCard = {
   accentCompact: "dash-card dash-card-accent dash-card-pad-compact",
   nested: "dash-card dash-card-nested dash-card-pad-standard",
   nestedCompact: "dash-card dash-card-nested dash-card-pad-compact",
+  interactiveNestedCompact: "dash-card dash-card-nested dash-card-surface-muted dash-card-hover-emphasis dash-card-pad-compact",
   smallCompact: "dash-card dash-card-small dash-card-pad-compact",
   accentNestedCompact: "dash-card dash-card-accent dash-card-nested dash-card-pad-compact",
 } as const;
@@ -24,3 +27,31 @@ export const dashboardButton = {
   sm: "dash-btn dash-btn-sm",
   md: "dash-btn dash-btn-md",
 } as const;
+
+export const dashboardText = {
+  label: "text-xs font-bold uppercase tracking-widest",
+  labelMuted: "text-xs font-semibold uppercase tracking-widest",
+  bodyDense: "text-xs sm:text-[10px]",
+} as const;
+
+interface DashboardEmptyStateProps {
+  icon: ReactNode;
+  title: string;
+  description?: string;
+  className?: string;
+}
+
+export function DashboardEmptyState({
+  icon,
+  title,
+  description,
+  className,
+}: DashboardEmptyStateProps) {
+  return (
+    <div className={cx("dash-empty-state", dashboardCard.nestedCompact, className)}>
+      <div className="dash-empty-icon" aria-hidden="true">{icon}</div>
+      <div className="dash-empty-title">{title}</div>
+      {description ? <div className="dash-empty-description">{description}</div> : null}
+    </div>
+  );
+}

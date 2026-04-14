@@ -12,6 +12,15 @@ import type {
 } from "../../types";
 import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+  SurfaceSubsection,
+} from "../common/SurfacePrimitives";
 import { STATUS_DOT } from "./constants";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import type { Translator } from "./types";
@@ -22,6 +31,13 @@ import type {
   DiscordBinding,
   AgentOfficeMembership,
 } from "../../api/client";
+import {
+  describeDiscordBinding,
+  describeDiscordTarget,
+  describeDispatchedSession,
+  formatDiscordSummary,
+  isDiscordSnowflake,
+} from "./discord-routing";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -127,7 +143,7 @@ export function getAgentTitle(xp: number, isKo: boolean) {
 }
 
 const ACTIVITY_SOURCE_COLORS: Record<string, string> = {
-  agentdesk: "#a78bfa",
+  agentdesk: "#10b981",
   idle: "#64748b",
 };
 
@@ -157,6 +173,63 @@ function bindingSourceLabel(source: string): string {
 function compactToken(value: string, head = 8, tail = 4): string {
   if (value.length <= head + tail + 3) return value;
   return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
+
+function DiscordSummaryLabel({
+  summary,
+}: {
+  summary: {
+    title: string;
+    subtitle: string | null;
+    webUrl: string | null;
+    deepLink: string | null;
+  };
+}) {
+  const href = summary.deepLink ?? summary.webUrl;
+  const label = formatDiscordSummary(summary);
+
+  if (!href) {
+    return (
+      <span
+        className="block min-w-0 flex-1 truncate text-xs font-medium"
+        style={{ color: "var(--th-text-primary)" }}
+        title={label}
+      >
+        {label}
+      </span>
+    );
+  }
+
+  return (
+    <a
+      href={href}
+      className="block min-w-0 flex-1 truncate text-xs font-medium hover:underline"
+      style={{ color: "var(--th-text-primary)" }}
+      title={summary.deepLink ?? summary.webUrl ?? label}
+    >
+      {label}
+    </a>
+  );
+}
+
+function DiscordDeepLinkChip({
+  deepLink,
+  label,
+}: {
+  deepLink: string | null;
+  label: string;
+}) {
+  if (!deepLink) return null;
+  return (
+    <a
+      href={deepLink}
+      className="shrink-0 rounded px-1.5 py-0.5 text-xs"
+      style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}
+      title={deepLink}
+    >
+      {label}
+    </a>
+  );
 }
 
 interface DetailAccordionProps {
@@ -251,7 +324,12 @@ export default function AgentInfoCard({
   const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
+  const [discordChannelInfoById, setDiscordChannelInfoById] = useState<
+    Record<string, api.DiscordChannelInfo>
+  >({});
   const [loadingBindings, setLoadingBindings] = useState(true);
+  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
+  const [loadingAudit, setLoadingAudit] = useState(true);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
@@ -450,6 +528,70 @@ export default function AgentInfoCard({
       });
   }, [agent.id]);
 
+  useEffect(() => {
+    const seedIds = Array.from(
+      new Set(
+        [
+          ...discordBindings.flatMap((binding) => [
+            binding.channelId,
+            binding.counterModelChannelId ?? null,
+          ]),
+          ...claudeSessions.map((session) => session.thread_channel_id ?? null),
+        ].filter((value): value is string => isDiscordSnowflake(value)),
+      ),
+    );
+
+    if (seedIds.length === 0) {
+      setDiscordChannelInfoById({});
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadChannelInfo = async (ids: string[]) => {
+      const entries = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const info = await api.getDiscordChannelInfo(id);
+            return info?.id ? ([id, info] as const) : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return Object.fromEntries(
+        entries.filter(
+          (entry): entry is readonly [string, api.DiscordChannelInfo] =>
+            entry !== null,
+        ),
+      );
+    };
+
+    void (async () => {
+      const initialInfo = await loadChannelInfo(seedIds);
+      const parentIds = Array.from(
+        new Set(
+          Object.values(initialInfo)
+            .map((info) => info.parent_id ?? null)
+            .filter(
+              (value): value is string =>
+                isDiscordSnowflake(value) && !(value in initialInfo),
+            ),
+        ),
+      );
+      const parentInfo =
+        parentIds.length > 0 ? await loadChannelInfo(parentIds) : {};
+
+      if (!cancelled) {
+        setDiscordChannelInfoById({ ...initialInfo, ...parentInfo });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [claudeSessions, discordBindings]);
+
   const statusLabel: Record<string, { ko: string; en: string }> = {
     working: { ko: "근무 중", en: "Working" },
     idle: { ko: "대기", en: "Idle" },
@@ -495,6 +637,23 @@ export default function AgentInfoCard({
   const roleMapBindings = discordBindings.filter(
     (binding) => inferBindingSource(binding) === "role-map",
   );
+  const dbBindings = discordBindings.filter((binding) => inferBindingSource(binding) !== "role-map");
+  const resolveDiscordChannelInfo = (
+    channelId: string | null | undefined,
+  ): api.DiscordChannelInfo | null =>
+    channelId && isDiscordSnowflake(channelId)
+      ? discordChannelInfoById[channelId] ?? null
+      : null;
+  const resolveDiscordParentInfo = (
+    channelInfo: api.DiscordChannelInfo | null | undefined,
+  ): api.DiscordChannelInfo | null =>
+    channelInfo?.parent_id && isDiscordSnowflake(channelInfo.parent_id)
+      ? discordChannelInfoById[channelInfo.parent_id] ?? null
+      : null;
+  const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
+    { label: tr("Agent ID", "Agent ID"), value: agent.id },
+    { label: tr("이름", "Name"), value: agent.name },
+  ];
   const routingChips = [
     {
       label: "DB",
@@ -536,9 +695,7 @@ export default function AgentInfoCard({
     {
       label: "Discord",
       value: `${discordBindings.length}`,
-      fullValue: `${discordBindings.length}`,
-      fullLabel: tr("Discord 경로", "Discord Routes"),
-      tone: discordBindings.length > 0 ? "#a78bfa" : "#94a3b8",
+      tone: discordBindings.length > 0 ? "#10b981" : "#94a3b8",
     },
     {
       label: "ADK",
@@ -548,79 +705,19 @@ export default function AgentInfoCard({
       tone: workingLinkedSessions.length > 0 ? "#38bdf8" : "#94a3b8",
     },
   ];
-  const renderLinkedSessionCard = (
-    session: DispatchedSession,
-    emphasized: boolean,
-  ) => {
-    const providerTone =
-      session.provider === "codex"
-        ? { bg: "rgba(56,189,248,0.18)", text: "#38bdf8", label: "Codex" }
-        : session.provider === "gemini"
-          ? { bg: "rgba(250,204,21,0.18)", text: "#facc15", label: "Gemini" }
-          : session.provider === "qwen"
-            ? { bg: "rgba(34,197,94,0.18)", text: "#86efac", label: "Qwen" }
-            : { bg: "rgba(167,139,250,0.18)", text: "#c4b5fd", label: "Claude" };
-
-    return (
-      <div
-        key={session.id}
-        className="flex items-start justify-between gap-2 rounded-xl border px-3 py-2"
-        style={{
-          borderColor: emphasized
-            ? "rgba(16,185,129,0.26)"
-            : "rgba(148,163,184,0.12)",
-          background: emphasized
-            ? "rgba(16,185,129,0.08)"
-            : "var(--th-bg-surface)",
-        }}
-      >
-        <div className="min-w-0">
-          <div
-            className="text-xs font-medium truncate"
-            style={{ color: "var(--th-text-primary)" }}
-          >
-            {session.name || session.session_key}
-          </div>
-          <div
-            className="mt-0.5 text-xs truncate"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {session.session_info || session.model || "AgentDesk session"}
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-          <span
-            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-            style={{
-              background: providerTone.bg,
-              color: providerTone.text,
-            }}
-          >
-            {providerTone.label}
-          </span>
-          <span
-            className="whitespace-nowrap rounded px-1.5 py-0.5 text-xs"
-            style={{
-              background: emphasized
-                ? "rgba(16,185,129,0.15)"
-                : "rgba(100,116,139,0.15)",
-              color: emphasized ? "#34d399" : "#94a3b8",
-            }}
-          >
-            {emphasized ? tr("작업중", "Working") : tr("대기", "Idle")}
-          </span>
-        </div>
-      </div>
-    );
-  };
+  const primaryName = localeName(locale, agent);
+  const secondaryName = locale === "en" ? agent.name_ko || "" : agent.name;
+  const levelInfo = getAgentLevel(agent.stats_xp);
+  const levelTitle = getAgentTitle(agent.stats_xp, isKo);
 
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       style={{
         background: "var(--th-modal-overlay)",
-        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+        paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
+        paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
@@ -629,1021 +726,646 @@ export default function AgentInfoCard({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`${localeName(locale, agent)} — ${tr("직원 상세", "Agent Details")}`}
-        className="w-full max-w-lg max-h-full overflow-y-auto overscroll-contain rounded-t-3xl shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-2xl"
+        aria-label={`${primaryName} — ${tr("직원 상세", "Agent Details")}`}
+        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[32px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
         style={{
-          background: "var(--th-card-bg)",
-          border: "1px solid var(--th-card-border)",
-          backdropFilter: "blur(20px)",
-          paddingBottom: "max(env(safe-area-inset-bottom), 0px)",
+          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+          WebkitOverflowScrolling: "touch",
+          touchAction: "pan-y",
         }}
       >
-        {/* Header */}
-        <div
-          className="flex items-center gap-4 p-5"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div className="relative shrink-0">
-            <AgentAvatar
-              agent={agent}
-              spriteMap={spriteMap}
-              size={56}
-              rounded="xl"
-            />
-            <div
-              className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
-              style={{ borderColor: "var(--th-card-bg)" }}
-            />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div
-              className="font-bold text-base"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              {localeName(locale, agent)}
-            </div>
-            {(() => {
-              const primary = localeName(locale, agent);
-              const sub = locale === "en" ? agent.name_ko || "" : agent.name;
-              return primary !== sub && sub ? (
+        <div className="space-y-4">
+          <SurfaceSection
+            eyebrow={tr("직원 상세", "Agent Details")}
+            title={primaryName}
+            description={primaryName !== secondaryName && secondaryName ? secondaryName : undefined}
+            actions={(
+              <SurfaceActionButton onClick={onClose} tone="neutral" aria-label="Close">
+                {tr("닫기", "Close")}
+              </SurfaceActionButton>
+            )}
+          >
+            <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
+              <div className="relative shrink-0">
+                <AgentAvatar agent={agent} spriteMap={spriteMap} size={64} rounded="xl" />
                 <div
-                  className="text-xs mt-0.5"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {sub}
-                </div>
-              ) : null;
-            })()}
-            <div className="flex items-center gap-1 mt-1">
-              {editingAlias ? (
-                <input
-                  autoFocus
-                  value={aliasValue}
-                  onChange={(e) => setAliasValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") saveAlias();
-                    if (e.key === "Escape") {
-                      setEditingAlias(false);
-                      setAliasValue(agent.alias ?? "");
-                    }
-                  }}
-                  onBlur={saveAlias}
-                  disabled={savingAlias}
-                  placeholder={tr("별명 입력", "Enter alias")}
-                  className="text-xs px-1.5 py-0.5 rounded border outline-none"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    borderColor: "var(--th-input-border)",
-                    color: "var(--th-text-primary)",
-                    width: "120px",
-                  }}
+                  className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
+                  style={{ borderColor: "var(--th-card-bg)" }}
                 />
-              ) : (
-                <button
-                  onClick={() => {
-                    setAliasValue(agent.alias ?? "");
-                    setEditingAlias(true);
-                  }}
-                  className="text-xs px-1.5 py-0.5 rounded hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-                  style={{
-                    color: agent.alias
-                      ? "var(--th-text-secondary)"
-                      : "var(--th-text-muted)",
-                  }}
-                  title={tr("별명 편집", "Edit alias")}
-                >
-                  {agent.alias
-                    ? `aka ${agent.alias}`
-                    : `+ ${tr("별명", "alias")}`}
-                </button>
-              )}
-            </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <span
-                className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium"
-                style={{
-                  background:
-                    agent.status === "working"
-                      ? "rgba(16,185,129,0.15)"
-                      : agent.status === "break"
-                        ? "rgba(245,158,11,0.15)"
-                        : agent.status === "offline"
-                          ? "rgba(239,68,68,0.15)"
-                          : "rgba(100,116,139,0.15)",
-                  color:
-                    agent.status === "working"
-                      ? "#34d399"
-                      : agent.status === "break"
-                        ? "#fbbf24"
-                        : agent.status === "offline"
-                          ? "#f87171"
-                          : "#94a3b8",
-                }}
-              >
-                {isKo
-                  ? statusLabel[agent.status]?.ko
-                  : statusLabel[agent.status]?.en}
-              </span>
-              {agent.status === "working" && sourceLabel && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "rgba(99,102,241,0.18)",
-                    color: "#a5b4fc",
-                  }}
-                >
-                  {sourceLabel}
-                </span>
-              )}
-              {dept && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {dept.icon} {localeName(locale, dept)}
-                </span>
-              )}
-              {!dept && (
-                <span
-                  className="whitespace-nowrap rounded-full px-2 py-0.5 text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {tr("미배정", "Unassigned")}
-                </span>
-              )}
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
-            style={{ color: "var(--th-text-muted)" }}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-
-        <DetailAccordion
-          title={tr("트랜스크립트", "Transcript")}
-          subtitle={tr(
-            "완료된 턴을 다시 살펴보고 필요한 로그만 펼쳐 봅니다.",
-            "Replay completed turns and expand only the logs you need.",
-          )}
-          badge={tr("최근 8개", "Recent 8")}
-          open={transcriptOpen}
-          onToggle={() => setTranscriptOpen((prev) => !prev)}
-        >
-          <TurnTranscriptPanel
-            source={{
-              type: "agent",
-              id: agent.id,
-              refreshSeed: `${agent.status}:${agent.session_info ?? ""}:${agent.current_task_id ?? ""}`,
-            }}
-            isKo={isKo}
-            tr={tr}
-            embedded
-          />
-        </DetailAccordion>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("소속 부서", "Department")}
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedDeptId}
-              onChange={(e) => void saveDepartment(e.target.value)}
-              disabled={savingDept}
-              className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="">{tr("— 미배정 —", "— Unassigned —")}</option>
-              {departments.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.icon} {localeName(locale, d)}
-                </option>
-              ))}
-            </select>
-            <span
-              className="text-xs shrink-0"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {savingDept ? tr("저장 중...", "Saving...") : null}
-            </span>
-          </div>
-        </div>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("메인 Provider", "Main Provider")}
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedProvider}
-              onChange={(e) => void saveProvider(e.target.value)}
-              disabled={savingProvider}
-              className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="claude">Claude</option>
-              <option value="codex">Codex</option>
-              <option value="gemini">Gemini</option>
-              <option value="qwen">Qwen</option>
-            </select>
-            <span
-              className="text-xs shrink-0"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {savingProvider ? tr("저장 중...", "Saving...") : null}
-            </span>
-          </div>
-        </div>
-
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("소속 오피스", "Offices")}
-          </div>
-          {loadingOffices ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : officeMemberships.length === 0 ? (
-            <div
-              className="text-xs py-1"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 오피스가 없습니다", "No offices")}
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {officeMemberships.map((office) => {
-                const assigned = office.assigned;
-                const savingOffice = !!savingOfficeIds[office.id];
-
-                return (
-                  <button
-                    key={office.id}
-                    onClick={() => void toggleOfficeMembership(office)}
-                    disabled={savingOffice}
-                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
-                    style={
-                      assigned
-                        ? { background: office.color, color: "#ffffff" }
-                        : {
-                            background: "var(--th-bg-surface)",
-                            color: "var(--th-text-secondary)",
-                            border: "1px solid var(--th-card-border)",
-                          }
-                    }
-                  >
-                    <span>
-                      {office.icon} {localeName(locale, office)}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <DetailAccordion
-          title={tr("세션", "Sessions")}
-          subtitle={tr(
-            "working 세션은 바로 보이고 idle 세션은 접어 둡니다.",
-            "Working sessions stay visible while idle sessions are tucked away.",
-          )}
-          badge={
-            loadingClaudeSessions
-              ? tr("불러오는 중", "Loading")
-              : `${workingLinkedSessions.length}/${claudeSessions.length}`
-          }
-          open={sessionsOpen}
-          onToggle={() => setSessionsOpen((prev) => !prev)}
-        >
-          <div className="space-y-3">
-            <div
-              className="rounded-xl border px-3 py-3"
-              style={{
-                borderColor: "rgba(148,163,184,0.12)",
-                background: "var(--th-bg-surface)",
-              }}
-            >
-              <div
-                className="text-xs font-semibold uppercase tracking-widest"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("현재 작업", "Current Work")}
               </div>
-              <div
-                className="mt-2 text-xs leading-relaxed"
-                style={{ color: "var(--th-text-primary)" }}
-              >
-                {currentWorkSummary ||
-                  tr("현재 작업 설명이 없습니다", "No current work detail")}
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {currentWorkElapsedMs != null && (
+              <div className="min-w-0 flex-1 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {editingAlias ? (
+                    <input
+                      autoFocus
+                      value={aliasValue}
+                      onChange={(e) => setAliasValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveAlias(); if (e.key === "Escape") { setEditingAlias(false); setAliasValue(agent.alias ?? ""); } }}
+                      onBlur={saveAlias}
+                      disabled={savingAlias}
+                      placeholder={tr("별명 입력", "Enter alias")}
+                      className="rounded-xl border px-2 py-1 text-xs outline-none"
+                      style={{
+                        background: "var(--th-bg-surface)",
+                        borderColor: "var(--th-input-border)",
+                        color: "var(--th-text-primary)",
+                        width: "140px",
+                      }}
+                    />
+                  ) : (
+                    <SurfaceActionButton
+                      onClick={() => { setAliasValue(agent.alias ?? ""); setEditingAlias(true); }}
+                      tone="neutral"
+                      compact
+                      title={tr("별명 편집", "Edit alias")}
+                    >
+                      {agent.alias ? `aka ${agent.alias}` : `+ ${tr("별명", "alias")}`}
+                    </SurfaceActionButton>
+                  )}
                   <span
-                    className="rounded-lg px-2 py-1 text-xs"
+                    className="rounded-full px-2 py-0.5 text-xs font-medium"
                     style={{
-                      background: "rgba(59,130,246,0.14)",
-                      color: "#93c5fd",
+                      background: agent.status === "working" ? "rgba(16,185,129,0.15)" :
+                        agent.status === "break" ? "rgba(245,158,11,0.15)" :
+                        agent.status === "offline" ? "rgba(239,68,68,0.15)" :
+                        "rgba(100,116,139,0.15)",
+                      color: agent.status === "working" ? "#34d399" :
+                        agent.status === "break" ? "#fbbf24" :
+                        agent.status === "offline" ? "#f87171" :
+                        "#94a3b8",
                     }}
                   >
-                    {tr("경과", "Elapsed")}:{" "}
-                    {formatElapsedCompact(currentWorkElapsedMs, isKo)}
+                    {isKo ? statusLabel[agent.status]?.ko : statusLabel[agent.status]?.en}
                   </span>
-                )}
-                <span
-                  className="rounded-lg px-2 py-1 text-xs"
+                  {agent.status === "working" && sourceLabel && (
+                    <span
+                      className="rounded-full px-2 py-0.5 text-xs"
+                      style={{
+                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                        color: "var(--th-accent-primary)",
+                      }}
+                    >
+                      {sourceLabel}
+                    </span>
+                  )}
+                  <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
+                    {dept ? `${dept.icon} ${localeName(locale, dept)}` : tr("미배정", "Unassigned")}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <SurfaceMetricPill
+                    label={tr("레벨", "Level")}
+                    tone="accent"
+                    value={`Lv.${levelInfo.level} ${levelTitle}`}
+                  />
+                  <SurfaceMetricPill
+                    label={tr("완료", "Done")}
+                    tone="success"
+                    value={`${agent.stats_tasks_done} ${tr("건", "tasks")}`}
+                  />
+                  <SurfaceMetricPill
+                    label="AgentDesk"
+                    tone="info"
+                    value={`${workingLinkedSessions.length}/${claudeSessions.length}`}
+                  />
+                </div>
+              </div>
+            </div>
+          </SurfaceSection>
+
+          <div className="grid min-w-0 gap-4 md:grid-cols-2">
+            <SurfaceSubsection title={tr("소속 부서", "Department")} className="min-w-0">
+              <div className="min-w-0 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+                <select
+                  value={selectedDeptId}
+                  onChange={(e) => void saveDepartment(e.target.value)}
+                  disabled={savingDept}
+                  className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
                   style={{
-                    background: "rgba(56,189,248,0.14)",
-                    color: "#67e8f9",
+                    background: "var(--th-input-bg)",
+                    borderColor: "var(--th-input-border)",
+                    color: "var(--th-text-primary)",
                   }}
                 >
-                  AgentDesk {workingLinkedSessions.length}/{claudeSessions.length}
+                  <option value="">{tr("— 미배정 —", "— Unassigned —")}</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.icon} {localeName(locale, d)}
+                    </option>
+                  ))}
+                </select>
+                <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                  {savingDept ? tr("저장 중...", "Saving...") : null}
                 </span>
               </div>
-              {currentWorkDetails.length > 0 && (
-                <div className="mt-3 space-y-1">
-                  {currentWorkDetails.map((line, idx) => (
-                    <div
-                      key={`${line}:${idx}`}
-                      className="text-xs"
-                      style={{ color: "var(--th-text-secondary)" }}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("메인 Provider", "Main Provider")} className="min-w-0">
+              <div className="min-w-0 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+                <select
+                  value={selectedProvider}
+                  onChange={(e) => void saveProvider(e.target.value)}
+                  disabled={savingProvider}
+                  className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
+                  style={{
+                    background: "var(--th-input-bg)",
+                    borderColor: "var(--th-input-border)",
+                    color: "var(--th-text-primary)",
+                  }}
+                >
+                  <option value="claude">Claude</option>
+                  <option value="codex">Codex</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="qwen">Qwen</option>
+                </select>
+                <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                  {savingProvider ? tr("저장 중...", "Saving...") : null}
+                </span>
+              </div>
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("소속 오피스", "Offices")} className="min-w-0 md:col-span-2">
+              {loadingOffices ? (
+                <SurfaceNotice tone="neutral" compact>
+                  {tr("불러오는 중...", "Loading...")}
+                </SurfaceNotice>
+              ) : officeMemberships.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 오피스가 없습니다", "No offices")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {officeMemberships.map((office) => {
+                    const assigned = office.assigned;
+                    const savingOffice = !!savingOfficeIds[office.id];
+
+                    return (
+                      <button
+                        key={office.id}
+                        onClick={() => void toggleOfficeMembership(office)}
+                        disabled={savingOffice}
+                        className="rounded-xl px-2.5 py-1.5 text-xs font-medium transition-all disabled:opacity-50"
+                        style={assigned
+                          ? { background: office.color, color: "#ffffff" }
+                          : {
+                            background: "var(--th-bg-surface)",
+                            color: "var(--th-text-secondary)",
+                            border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
+                          }}
+                      >
+                        {office.icon} {localeName(locale, office)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("상태 요약", "Status Summary")} className="min-w-0 md:col-span-2">
+              <div className="space-y-3">
+                <SurfaceCard className="p-3">
+                  <div className="mb-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("현재 작업", "Current Work")}
+                  </div>
+                  <div className="text-xs leading-relaxed" style={{ color: "var(--th-text-primary)" }}>
+                    {currentWorkSummary || tr("현재 작업 설명이 없습니다", "No current work detail")}
+                  </div>
+                </SurfaceCard>
+                <div className="flex flex-wrap gap-2">
+                  {currentWorkElapsedMs != null && (
+                    <SurfaceMetricPill
+                      label={tr("경과", "Elapsed")}
+                      tone="info"
+                      value={formatElapsedCompact(currentWorkElapsedMs, isKo)}
+                    />
+                  )}
+                  <SurfaceMetricPill
+                    label={tr("DB 경로", "DB routes")}
+                    tone="accent"
+                    value={`${dbBindings.length}`}
+                  />
+                </div>
+                {currentWorkDetails.length > 0 && (
+                  <div className="space-y-1">
+                    {currentWorkDetails.map((line, idx) => (
+                      <div key={`${line}:${idx}`} className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                        • {line}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </SurfaceSubsection>
+
+            {warnings.length > 0 && (
+              <SurfaceSubsection title={tr("이상 징후", "Warnings")} className="min-w-0 md:col-span-2">
+                <div className="flex flex-wrap gap-2">
+                  {warnings.map((warning) => (
+                    <span
+                      key={warning.code}
+                      className="rounded-lg px-2 py-1 text-xs"
+                      style={{
+                        background:
+                          warning.severity === "error"
+                            ? "rgba(239,68,68,0.14)"
+                            : warning.severity === "warning"
+                              ? "rgba(245,158,11,0.14)"
+                              : "rgba(96,165,250,0.14)",
+                        color:
+                          warning.severity === "error"
+                            ? "#fca5a5"
+                            : warning.severity === "warning"
+                              ? "#fcd34d"
+                              : "#93c5fd",
+                      }}
                     >
-                      • {line}
+                      {isKo ? warning.ko : warning.en}
+                    </span>
+                  ))}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            <SurfaceSubsection title={tr("정본 연결", "Source of Truth")} className="md:col-span-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {sourceOfTruthRows.map((row) => (
+                  <SurfaceCard key={row.label} className="p-3" style={{ background: "var(--th-bg-surface)" }}>
+                    <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      {row.label}
                     </div>
+                    <div className="mt-1 break-all text-xs font-medium" style={{ color: row.tone }}>
+                      {row.value}
+                    </div>
+                  </SurfaceCard>
+                ))}
+              </div>
+              {roleMapBindings.length > 0 && (
+                <SurfaceNotice tone="warn" compact className="mt-3">
+                  {tr("RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.", "When RoleMap exists, role_map is treated as the Discord source-of-truth.")}
+                </SurfaceNotice>
+              )}
+            </SurfaceSubsection>
+
+            {agent.personality && (
+              <SurfaceSubsection title={tr("성격", "Personality")} className="md:col-span-2">
+                <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--th-text-secondary)" }}>
+                  {agent.personality}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            {agent.session_info && (
+              <SurfaceSubsection title={tr("현재 작업", "Current Session")} className="md:col-span-2">
+                <div className="text-xs leading-relaxed" style={{ color: "var(--th-text-secondary)" }}>
+                  {agent.session_info}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            {discordBindings.length > 0 && (
+              <SurfaceSubsection
+                title={`${tr("Discord 라우팅", "Discord Routing")} (${discordBindings.length})`}
+                description={tr("RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.", "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.")}
+                className="md:col-span-2"
+              >
+                <div className="space-y-1">
+                  {discordBindings.map((b) => {
+                    const source = inferBindingSource(b);
+                    const sourceLabel = bindingSourceLabel(source);
+                    const channelInfo = resolveDiscordChannelInfo(b.channelId);
+                    const channelSummary = describeDiscordBinding(
+                      b,
+                      channelInfo,
+                      resolveDiscordParentInfo(channelInfo),
+                    );
+                    const counterChannelInfo = resolveDiscordChannelInfo(
+                      b.counterModelChannelId ?? null,
+                    );
+                    const counterSummary =
+                      b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                        ? describeDiscordTarget(
+                            b.counterModelChannelId,
+                            counterChannelInfo,
+                            resolveDiscordParentInfo(counterChannelInfo),
+                          )
+                        : null;
+
+                    return (
+                      <SurfaceCard key={`${b.channelId}:${source}`} className="flex items-center gap-2 px-2.5 py-1.5" style={{ background: "var(--th-bg-surface)" }}>
+                        <span className="text-sm">💬</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <DiscordSummaryLabel summary={channelSummary} />
+                            <DiscordDeepLinkChip
+                              deepLink={channelSummary.deepLink}
+                              label={tr("앱", "App")}
+                            />
+                          </div>
+                          {counterSummary && (
+                            <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                              {`counter: ${formatDiscordSummary(counterSummary)}`}
+                            </div>
+                          )}
+                        </div>
+                        <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}>
+                          {sourceLabel}
+                        </span>
+                      </SurfaceCard>
+                    );
+                  })}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            <SurfaceSubsection title={`${tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}${!loadingClaudeSessions ? ` (${claudeSessions.length})` : ""}`} className="md:col-span-2">
+              {loadingClaudeSessions ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : claudeSessions.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {claudeSessions.map((s) => {
+                    const sessionChannelInfo = resolveDiscordChannelInfo(
+                      s.thread_channel_id ?? null,
+                    );
+                    const sessionSummary = describeDispatchedSession(
+                      s,
+                      sessionChannelInfo,
+                      resolveDiscordParentInfo(sessionChannelInfo),
+                    );
+
+                    return (
+                      <SurfaceCard key={s.id} className="flex items-start justify-between gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <DiscordSummaryLabel summary={sessionSummary} />
+                            <DiscordDeepLinkChip
+                              deepLink={sessionSummary.deepLink}
+                              label={tr("앱", "App")}
+                            />
+                          </div>
+                          <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                            {s.session_info || s.model || "AgentDesk session"}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <span
+                            className="rounded px-1.5 py-0.5 text-xs"
+                            style={{
+                              background:
+                                s.provider === "codex"
+                                  ? "rgba(56,189,248,0.18)"
+                                  : s.provider === "gemini"
+                                    ? "rgba(250,204,21,0.18)"
+                                    : s.provider === "qwen"
+                                      ? "rgba(34,197,94,0.18)"
+                                      : "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                              color:
+                                s.provider === "codex"
+                                  ? "#38bdf8"
+                                  : s.provider === "gemini"
+                                    ? "#facc15"
+                                    : s.provider === "qwen"
+                                      ? "#86efac"
+                                      : "var(--th-accent-primary)",
+                            }}
+                          >
+                            {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
+                          </span>
+                          <span
+                            className="rounded px-1.5 py-0.5 text-xs"
+                            style={{
+                              background: s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(100,116,139,0.15)",
+                              color: s.status === "working" ? "#34d399" : "#94a3b8",
+                            }}
+                          >
+                            {s.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
+                          </span>
+                        </div>
+                      </SurfaceCard>
+                    );
+                  })}
+                </div>
+              )}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={`${tr("크론 작업", "Cron Jobs")} ${!loadingCron ? `(${cronJobs.length})` : ""}`} className="md:col-span-2">
+              {loadingCron ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : cronJobs.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 크론 작업이 없습니다", "No cron jobs")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {cronJobs.map((job) => (
+                    <SurfaceCard key={job.id} className="flex items-start gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                      <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${
+                        job.enabled
+                          ? job.state?.lastStatus === "ok" ? "bg-emerald-400" : "bg-amber-400"
+                          : "bg-slate-500"
+                      }`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }} title={job.name}>
+                          {job.name}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
+                            {formatSchedule(job.schedule, isKo)}
+                          </span>
+                          {job.state?.lastRunAtMs && (
+                            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                              {tr("최근:", "Last:")} {timeAgo(job.state.lastRunAtMs, isKo)}
+                              {job.state.lastDurationMs != null && ` (${formatDuration(job.state.lastDurationMs)})`}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {!job.enabled && (
+                        <span className="shrink-0 rounded px-1.5 py-0.5 text-xs" style={{ background: "rgba(100,116,139,0.2)", color: "#94a3b8" }}>
+                          {tr("비활성", "Off")}
+                        </span>
+                      )}
+                    </SurfaceCard>
                   ))}
                 </div>
               )}
-            </div>
+            </SurfaceSubsection>
 
-            {agent.session_info && (
-              <div
-                className="rounded-xl border px-3 py-3"
-                style={{
-                  borderColor: "rgba(148,163,184,0.12)",
-                  background: "rgba(255,255,255,0.03)",
-                }}
-              >
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("세션 메모", "Session Note")}
+            <SurfaceSubsection title={tr("최근 변경", "Recent Changes")} className="md:col-span-2">
+              {loadingAudit ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : auditLogs.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("관련 변경 로그가 없습니다", "No related audit logs")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {auditLogs.map((log) => (
+                    <SurfaceCard key={log.id} className="px-3 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                      <div className="text-xs" style={{ color: "var(--th-text-primary)" }}>
+                        {log.summary}
+                      </div>
+                      <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        {log.action} • {timeAgo(log.created_at ?? log.ts, isKo)}
+                      </div>
+                    </SurfaceCard>
+                  ))}
                 </div>
-                <div
-                  className="mt-2 text-xs leading-relaxed"
-                  style={{ color: "var(--th-text-secondary)" }}
-                >
-                  {agent.session_info}
-                </div>
-              </div>
-            )}
+              )}
+            </SurfaceSubsection>
 
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}
-                  {!loadingClaudeSessions && ` (${claudeSessions.length})`}
-                </div>
-                {!loadingClaudeSessions && idleLinkedSessions.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setIdleSessionsOpen((prev) => !prev)}
-                    className="rounded-full px-2 py-1 text-xs"
-                    style={{
-                      background: "rgba(148,163,184,0.12)",
-                      color: "var(--th-text-muted)",
-                    }}
-                  >
-                    {idleSessionsOpen
-                      ? tr("idle 접기", "Hide idle")
-                      : tr(
-                          `idle ${idleLinkedSessions.length}개`,
-                          `Idle ${idleLinkedSessions.length}`,
-                        )}
-                  </button>
-                )}
-              </div>
-
-              {loadingClaudeSessions ? (
-                <div
-                  className="text-xs py-1"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("불러오는 중...", "Loading...")}
-                </div>
-              ) : claudeSessions.length === 0 ? (
-                <div
-                  className="text-xs py-1"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr(
-                    "연결된 AgentDesk 세션 없음",
-                    "No linked AgentDesk sessions",
-                  )}
-                </div>
+            <SurfaceSubsection title={tr("스킬", "Skills")} className="md:col-span-2">
+              {loadingSkills ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : agentSkills.length === 0 && sharedSkills.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 스킬이 없습니다", "No skills")}
+                </SurfaceEmptyState>
               ) : (
                 <div className="space-y-2">
-                  {workingLinkedSessions.length > 0 ? (
-                    <div className="space-y-1.5">
-                      {workingLinkedSessions.map((session) =>
-                        renderLinkedSessionCard(session, true),
-                      )}
-                    </div>
-                  ) : (
-                    <div
-                      className="rounded-xl px-3 py-2 text-xs"
-                      style={{
-                        background: "rgba(148,163,184,0.08)",
-                        color: "var(--th-text-muted)",
-                      }}
-                    >
-                      {tr(
-                        "현재 working 세션은 없습니다.",
-                        "There are no working sessions right now.",
-                      )}
-                    </div>
-                  )}
-
-                  {idleLinkedSessions.length > 0 && !idleSessionsOpen && (
-                    <div
-                      className="rounded-xl px-3 py-2 text-xs"
-                      style={{
-                        background: "rgba(148,163,184,0.08)",
-                        color: "var(--th-text-muted)",
-                      }}
-                    >
-                      {tr(
-                        `idle 세션 ${idleLinkedSessions.length}개는 접혀 있습니다.`,
-                        `${idleLinkedSessions.length} idle sessions are tucked away.`,
-                      )}
-                    </div>
-                  )}
-
-                  {idleLinkedSessions.length > 0 && idleSessionsOpen && (
-                    <div className="space-y-1.5">
-                      {idleLinkedSessions.map((session) =>
-                        renderLinkedSessionCard(session, false),
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </DetailAccordion>
-
-        {warnings.length > 0 && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("이상 징후", "Warnings")}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {warnings.map((warning) => (
-                <span
-                  key={warning.code}
-                  className="text-xs px-2 py-1 rounded-lg"
-                  style={{
-                    background:
-                      warning.severity === "error"
-                        ? "rgba(239,68,68,0.14)"
-                        : warning.severity === "warning"
-                          ? "rgba(245,158,11,0.14)"
-                          : "rgba(96,165,250,0.14)",
-                    color:
-                      warning.severity === "error"
-                        ? "#fca5a5"
-                        : warning.severity === "warning"
-                          ? "#fcd34d"
-                          : "#93c5fd",
-                  }}
-                >
-                  {isKo ? warning.ko : warning.en}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <DetailAccordion
-          title={tr("라우팅", "Routing")}
-          subtitle={tr(
-            "RoleMap/Primary/Alt/Codex가 이 agent의 Discord 연결 경로를 설명합니다.",
-            "RoleMap/Primary/Alt/Codex explain how this agent is wired to Discord.",
-          )}
-          badge={`${discordBindings.length}`}
-          open={routingOpen}
-          onToggle={() => setRoutingOpen((prev) => !prev)}
-        >
-          <div className="space-y-3">
-            <div className="overflow-x-auto pb-1">
-              <div className="flex min-w-max items-center gap-2">
-                {routingChips.map((chip) => (
-                  <div
-                    key={chip.label}
-                    className="flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1 text-xs"
-                    style={{
-                      borderColor: `${chip.tone}44`,
-                      background: `${chip.tone}14`,
-                    }}
-                    title={`${chip.fullLabel}: ${chip.fullValue}`}
-                  >
-                    <span style={{ color: "var(--th-text-muted)" }}>
-                      {chip.label}
-                    </span>
-                    <span className="font-medium" style={{ color: chip.tone }}>
-                      {chip.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {roleMapBindings.length > 0 && (
-              <div
-                className="text-xs"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr(
-                  "RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.",
-                  "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
-                )}
-              </div>
-            )}
-
-            {discordBindings.length === 0 ? (
-              <div
-                className="text-xs py-1"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("연결된 Discord 경로 없음", "No Discord routes")}
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {discordBindings.map((binding) => {
-                  const source = inferBindingSource(binding);
-                  const sourcePill = bindingSourceLabel(source);
-                  const subtitle =
-                    binding.counterModelChannelId &&
-                    binding.counterModelChannelId !== binding.channelId
-                      ? `counter: ${binding.counterModelChannelId}`
-                      : null;
-
-                  return (
-                    <div
-                      key={`${binding.channelId}:${source}`}
-                      className="flex items-center gap-2 rounded-lg px-2.5 py-1.5"
-                      style={{ background: "var(--th-bg-surface)" }}
-                    >
-                      <span className="text-sm">💬</span>
-                      <div className="min-w-0 flex-1">
-                        <div
-                          className="text-xs font-medium truncate"
-                          style={{ color: "var(--th-text-primary)" }}
-                        >
-                          {binding.channelId}
-                        </div>
-                        {subtitle && (
-                          <div
-                            className="mt-0.5 text-xs truncate"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            {subtitle}
-                          </div>
-                        )}
+                  {agentSkills.length > 0 && (
+                    <div>
+                      <div className="mb-1 text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                        {tr("전용 스킬", "Agent-specific")}
                       </div>
-                      <span
-                        className="rounded px-1.5 py-0.5 text-xs"
-                        style={{
-                          background: "rgba(88,101,242,0.15)",
-                          color: "#7289da",
-                        }}
-                      >
-                        {sourcePill}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </DetailAccordion>
-
-        {/* Personality */}
-        {agent.personality && (
-          <div
-            className="px-5 py-3"
-            style={{ borderBottom: "1px solid var(--th-card-border)" }}
-          >
-            <div
-              className="text-xs font-semibold uppercase tracking-widest mb-1.5"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("성격", "Personality")}
-            </div>
-            <div
-              className="text-xs leading-relaxed whitespace-pre-wrap"
-              style={{ color: "var(--th-text-secondary)" }}
-            >
-              {agent.personality}
-            </div>
-          </div>
-        )}
-
-        {/* Cron Jobs */}
-        <div
-          className="px-5 py-3"
-          style={{ borderBottom: "1px solid var(--th-card-border)" }}
-        >
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("크론 작업", "Cron Jobs")}{" "}
-            {!loadingCron && `(${cronJobs.length})`}
-          </div>
-          {loadingCron ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : cronJobs.length === 0 ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 크론 작업이 없습니다", "No cron jobs")}
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {cronJobs.map((job) => (
-                <div
-                  key={job.id}
-                  className="flex items-start gap-2 px-2.5 py-2 rounded-lg"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <span
-                    className={`mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${
-                      job.enabled
-                        ? job.state?.lastStatus === "ok"
-                          ? "bg-emerald-400"
-                          : "bg-amber-400"
-                        : "bg-slate-500"
-                    }`}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div
-                      className="text-xs font-medium truncate"
-                      style={{ color: "var(--th-text-primary)" }}
-                      title={job.name}
-                    >
-                      {job.name}
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                      <span
-                        className="text-xs font-mono"
-                        style={{ color: "var(--th-text-muted)" }}
-                      >
-                        {formatSchedule(job.schedule, isKo)}
-                      </span>
-                      {job.state?.lastRunAtMs && (
-                        <span
-                          className="text-xs"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {tr("최근:", "Last:")}{" "}
-                          {timeAgo(job.state.lastRunAtMs, isKo)}
-                          {job.state.lastDurationMs != null &&
-                            ` (${formatDuration(job.state.lastDurationMs)})`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {!job.enabled && (
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded shrink-0"
-                      style={{
-                        background: "rgba(100,116,139,0.2)",
-                        color: "#94a3b8",
-                      }}
-                    >
-                      {tr("비활성", "Off")}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Skills */}
-        <div className="px-5 py-3">
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("스킬", "Skills")}
-          </div>
-          {loadingSkills ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : agentSkills.length === 0 && sharedSkills.length === 0 ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 스킬이 없습니다", "No skills")}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {agentSkills.length > 0 && (
-                <div>
-                  <div
-                    className="text-xs mb-1 font-medium"
-                    style={{ color: "var(--th-text-secondary)" }}
-                  >
-                    {tr("전용 스킬", "Agent-specific")}
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {agentSkills.map((skill) => (
-                      <span
-                        key={skill.name}
-                        className="text-xs px-2 py-0.5 rounded-full"
-                        style={{
-                          background: "rgba(99,102,241,0.15)",
-                          color: "#a5b4fc",
-                        }}
-                        title={skill.description}
-                      >
-                        {skill.name}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {sharedSkills.length > 0 && (
-                <div>
-                  <button
-                    onClick={() => setShowSharedSkills(!showSharedSkills)}
-                    className="text-xs font-medium flex items-center gap-1 hover:underline"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {tr("공유 스킬", "Shared")} ({sharedSkills.length})
-                    <span className="text-xs">
-                      {showSharedSkills ? "▲" : "▼"}
-                    </span>
-                  </button>
-                  {showSharedSkills && (
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {sharedSkills.map((skill) => (
-                        <span
-                          key={skill.name}
-                          className="text-xs px-2 py-0.5 rounded-full"
-                          style={{
-                            background: "var(--th-bg-surface)",
-                            color: "var(--th-text-muted)",
-                          }}
-                          title={skill.description}
-                        >
-                          {skill.name}
-                        </span>
-                      ))}
+                      <div className="flex flex-wrap gap-1">
+                        {agentSkills.map((skill) => (
+                          <span
+                            key={skill.name}
+                            className="rounded-full px-2 py-0.5 text-xs"
+                            style={{
+                              background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                              color: "var(--th-accent-primary)",
+                            }}
+                            title={skill.description}
+                          >
+                            {skill.name}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer with Level */}
-        <div
-          className="px-5 py-3 space-y-2"
-          style={{ borderTop: "1px solid var(--th-card-border)" }}
-        >
-          {/* Level progress bar */}
-          {(() => {
-            const lv = getAgentLevel(agent.stats_xp);
-            const title = getAgentTitle(agent.stats_xp, isKo);
-            return (
-              <div className="flex items-center gap-2">
-                <span
-                  className="text-xs font-bold px-2 py-0.5 rounded-full shrink-0"
-                  style={{
-                    background: "rgba(99,102,241,0.18)",
-                    color: "#a5b4fc",
-                  }}
-                >
-                  Lv.{lv.level} {title}
-                </span>
-                <div
-                  className="flex-1 h-1.5 rounded-full overflow-hidden"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${Math.round(lv.progress * 100)}%`,
-                      background: "linear-gradient(90deg, #6366f1, #a78bfa)",
-                    }}
-                  />
-                </div>
-                <span
-                  className="text-xs shrink-0"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {agent.stats_xp} /{" "}
-                  {lv.nextThreshold === Infinity ? "MAX" : lv.nextThreshold} XP
-                </span>
-              </div>
-            );
-          })()}
-          {/* Activity Timeline */}
-          <div
-            className="rounded-2xl border overflow-hidden"
-            style={{
-              borderColor: "var(--th-border-subtle)",
-              background: "var(--th-bg-card)",
-            }}
-          >
-            <button
-              onClick={() => setTimelineOpen((v) => !v)}
-              className="w-full flex items-center justify-between px-4 py-3 text-xs font-semibold"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              <span>{tr("활동 타임라인", "Activity Timeline")}</span>
-              <span style={{ color: "var(--th-text-muted)" }}>
-                {timelineOpen ? "▲" : "▼"}
-              </span>
-            </button>
-            {timelineOpen && (
-              <div className="px-4 pb-3 space-y-1.5 max-h-64 overflow-y-auto">
-                {loadingTimeline ? (
-                  <div
-                    className="text-xs py-2"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    …
-                  </div>
-                ) : timeline.length === 0 ? (
-                  <div
-                    className="text-xs py-2"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {tr("활동 없음", "No activity")}
-                  </div>
-                ) : (
-                  timeline.map((evt) => {
-                    const sourceColor =
-                      evt.source === "dispatch"
-                        ? "#a78bfa"
-                        : evt.source === "session"
-                          ? "#38bdf8"
-                          : "#4ade80";
-                    const sourceLabel =
-                      evt.source === "dispatch"
-                        ? "D"
-                        : evt.source === "session"
-                          ? "S"
-                          : "K";
-                    const durationStr =
-                      evt.duration_ms != null
-                        ? evt.duration_ms < 60_000
-                          ? `${Math.round(evt.duration_ms / 1000)}s`
-                          : `${Math.round(evt.duration_ms / 60_000)}m`
-                        : null;
-                    return (
-                      <div
-                        key={`${evt.source}-${evt.id}`}
-                        className="flex items-start gap-2 text-xs"
-                      >
-                        <span
-                          className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
-                          style={{
-                            backgroundColor: `${sourceColor}22`,
-                            color: sourceColor,
-                          }}
-                        >
-                          {sourceLabel}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="truncate"
-                            style={{ color: "var(--th-text-primary)" }}
-                          >
-                            {evt.title}
-                          </div>
-                          <div
-                            className="flex gap-2"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            <span>{timeAgo(evt.timestamp, isKo)}</span>
+                  {sharedSkills.length > 0 && (
+                    <div>
+                      <SurfaceActionButton onClick={() => setShowSharedSkills(!showSharedSkills)} tone="neutral" compact>
+                        {tr("공유 스킬", "Shared")} ({sharedSkills.length}) {showSharedSkills ? "▲" : "▼"}
+                      </SurfaceActionButton>
+                      {showSharedSkills && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {sharedSkills.map((skill) => (
                             <span
-                              className="px-1 rounded"
-                              style={{
-                                backgroundColor: `${sourceColor}15`,
-                                color: sourceColor,
-                              }}
+                              key={skill.name}
+                              className="rounded-full px-2 py-0.5 text-xs"
+                              style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
+                              title={skill.description}
                             >
-                              {evt.status}
+                              {skill.name}
                             </span>
-                            {durationStr && <span>{durationStr}</span>}
-                            {evt.detail && "issue" in evt.detail && (
-                              <span>#{String(evt.detail.issue)}</span>
-                            )}
-                          </div>
+                          ))}
                         </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {agent.role_id && (
-                <span
-                  className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {agent.role_id}
-                </span>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
-              <span
-                className="whitespace-nowrap text-xs"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("완료", "Done")} {agent.stats_tasks_done}
-              </span>
-            </div>
-            <button
-              onClick={onClose}
-              className="shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
-              style={{
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-secondary)",
-              }}
-            >
-              {tr("닫기", "Close")}
-            </button>
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("활동 레벨", "Activity Level")} className="md:col-span-2">
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="shrink-0 rounded-full px-2 py-0.5 text-xs font-bold"
+                    style={{
+                      background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                      color: "var(--th-accent-primary)",
+                    }}
+                  >
+                    Lv.{levelInfo.level} {levelTitle}
+                  </span>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full" style={{ background: "var(--th-bg-surface)" }}>
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.round(levelInfo.progress * 100)}%`,
+                        background: "linear-gradient(90deg, var(--th-accent-primary), var(--th-accent-info))",
+                      }}
+                    />
+                  </div>
+                  <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {agent.stats_xp} / {levelInfo.nextThreshold === Infinity ? "MAX" : levelInfo.nextThreshold} XP
+                  </span>
+                </div>
+
+                <SurfaceCard className="overflow-hidden px-0 py-0" style={{ background: "var(--th-bg-card)" }}>
+                  <button
+                    onClick={() => setTimelineOpen((v) => !v)}
+                    className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold"
+                    style={{ color: "var(--th-text-heading)" }}
+                  >
+                    <span>{tr("활동 타임라인", "Activity Timeline")}</span>
+                    <span style={{ color: "var(--th-text-muted)" }}>{timelineOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {timelineOpen && (
+                    <div className="space-y-1.5 px-4 pb-3">
+                      {loadingTimeline ? (
+                        <SurfaceNotice tone="neutral" compact>…</SurfaceNotice>
+                      ) : timeline.length === 0 ? (
+                        <SurfaceEmptyState className="py-2 text-xs">{tr("활동 없음", "No activity")}</SurfaceEmptyState>
+                      ) : (
+                        <div className="max-h-64 space-y-1.5 overflow-y-auto">
+                          {timeline.map((evt) => {
+                            const sourceColor = evt.source === "dispatch" ? "#10b981" : evt.source === "session" ? "#38bdf8" : "#84cc16";
+                            const sourceLabel = evt.source === "dispatch" ? "D" : evt.source === "session" ? "S" : "K";
+                            const durationStr = evt.duration_ms != null
+                              ? evt.duration_ms < 60_000
+                                ? `${Math.round(evt.duration_ms / 1000)}s`
+                                : `${Math.round(evt.duration_ms / 60_000)}m`
+                              : null;
+                            return (
+                              <div key={`${evt.source}-${evt.id}`} className="flex items-start gap-2 text-xs">
+                                <span
+                                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-xs font-bold"
+                                  style={{ backgroundColor: `${sourceColor}22`, color: sourceColor }}
+                                >
+                                  {sourceLabel}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate" style={{ color: "var(--th-text-primary)" }}>{evt.title}</div>
+                                  <div className="flex flex-wrap gap-2" style={{ color: "var(--th-text-muted)" }}>
+                                    <span>{timeAgo(evt.timestamp, isKo)}</span>
+                                    <span className="rounded px-1" style={{ backgroundColor: `${sourceColor}15`, color: sourceColor }}>
+                                      {evt.status}
+                                    </span>
+                                    {durationStr && <span>{durationStr}</span>}
+                                    {evt.detail && "issue" in evt.detail && <span>#{String(evt.detail.issue)}</span>}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </SurfaceCard>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {agent.role_id && (
+                    <span className="rounded px-1.5 py-0.5 font-mono text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
+                      {agent.role_id}
+                    </span>
+                  )}
+                  <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("완료", "Done")} {agent.stats_tasks_done}
+                  </span>
+                </div>
+              </div>
+            </SurfaceSubsection>
           </div>
         </div>
       </div>

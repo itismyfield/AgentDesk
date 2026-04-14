@@ -455,7 +455,7 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
           />
         )}
 
-        <main className="mb-14 flex min-h-0 flex-1 flex-col overflow-hidden sm:mb-0">
+        <main className="mb-14 flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto sm:mb-0 sm:overflow-hidden">
           <Suspense fallback={<ViewSkeleton label={viewFallbackLabel[view]} />}>
             {view === "office" && (
               <OfficeView
@@ -482,13 +482,14 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
               <DashboardPageView
                 stats={stats}
                 agents={agents}
+                sessions={visibleDispatchedSessions}
                 meetings={roundTableMeetings}
                 settings={settings}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                 onOpenKanbanSignal={openKanbanSignalFocus}
                 onOpenDispatchSessions={openDispatchSessions}
                 onOpenSettings={openSettingsView}
-                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
+                onOpenMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
               />
             )}
 
@@ -601,7 +602,7 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
             key={item.id}
             onClick={() => handleNavigate(item.id)}
             className={`relative flex h-full flex-1 flex-col items-center justify-center text-[10px] ${
-              view === item.id ? "text-indigo-400" : "text-gray-500"
+              view === item.id ? "text-emerald-300" : "text-gray-500"
             }`}
           >
             {item.icon}
@@ -721,7 +722,7 @@ function NavBtn({
       onClick={onClick}
       title={label}
       className={`relative flex w-14 flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 transition-colors ${
-        active ? "bg-indigo-600 text-white" : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+        active ? "bg-emerald-600 text-white" : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
       }`}
     >
       {icon}

@@ -233,6 +233,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 worktree: None,
 
                 born_generation: runtime_store::load_generation(),
+                assistant_turns: 0,
             });
         session.channel_id = Some(channel_id.get());
         session.channel_name = ch_name;

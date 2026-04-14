@@ -6,9 +6,11 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use std::process::Command;
+use std::{collections::BTreeMap, process::Command};
 
-use super::AppState;
+use super::{
+    AppState, skill_usage_analytics::collect_skill_usage, skills_api::sync_skills_from_disk,
+};
 
 fn sqlite_datetime_to_millis(value: &str) -> Option<i64> {
     if let Ok(ts) = DateTime::parse_from_rfc3339(value) {
@@ -660,35 +662,26 @@ pub async fn skills_trend(
         }
     };
 
-    let mut stmt = match conn.prepare(
-        "SELECT DATE(used_at) as day, COUNT(*) as count
-         FROM skill_usage
-         WHERE used_at >= datetime('now', '-' || ?1 || ' days')
-         GROUP BY DATE(used_at)
-         ORDER BY day",
-    ) {
-        Ok(s) => s,
+    sync_skills_from_disk(&conn);
+    let usage = match collect_skill_usage(&conn, Some(days)) {
+        Ok(data) => data,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query prepare failed: {e}")})),
+                Json(json!({"error": format!("usage query failed: {e}")})),
             );
         }
     };
 
-    let rows = stmt
-        .query_map([days], |row| {
-            Ok(json!({
-                "day": row.get::<_, String>(0)?,
-                "count": row.get::<_, i64>(1)?,
-            }))
-        })
-        .ok();
+    let mut by_day = BTreeMap::<String, i64>::new();
+    for record in usage {
+        *by_day.entry(record.day).or_default() += 1;
+    }
 
-    let trend = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-        None => Vec::new(),
-    };
+    let trend = by_day
+        .into_iter()
+        .map(|(day, count)| json!({ "day": day, "count": count }))
+        .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(json!({"trend": trend})))
 }

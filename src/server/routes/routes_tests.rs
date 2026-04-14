@@ -2982,12 +2982,12 @@ async fn kanban_terminal_status_fires_hook() {
     {
         let conn = db.lock().unwrap();
         conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'pending_decision', 'medium', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'requested', 'medium', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
     }
 
-    // Use force transition: pending_decision → done (force_only in YAML pipeline)
+    // Use force transition: requested → done (force_only in YAML pipeline)
     let result =
         crate::kanban::transition_status_with_opts(&db, &engine, "c1", "done", "pmd", true);
     assert!(
@@ -3004,7 +3004,7 @@ async fn kanban_terminal_status_fires_hook() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(transition, "pending_decision->done");
+    assert_eq!(transition, "requested->done");
 
     let terminal: String = conn
         .query_row(
@@ -3994,6 +3994,67 @@ fn on_tick1min_orphan_review_treats_e2e_dispatch_as_active() {
 }
 
 #[test]
+fn on_tick1min_orphan_review_skips_recently_completed_review_gap() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-review-gap");
+    seed_repo(&db, "test-repo");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                review_entered_at, created_at, updated_at
+            ) VALUES (
+                'card-review-gap', 'Review Gap', 'review', 'medium', 'agent-review-gap', 'test-repo',
+                datetime('now', '-10 minutes'), datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at, completed_at
+            ) VALUES (
+                'dispatch-review-gap', 'card-review-gap', 'agent-review-gap', 'review', 'completed', 'Review Gap R1',
+                datetime('now', '-10 minutes'), datetime('now', '-30 seconds'), datetime('now', '-30 seconds')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET latest_dispatch_id = 'dispatch-review-gap' WHERE id = 'card-review-gap'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let _ = engine.try_fire_hook_by_name("OnTick1min", serde_json::json!({}));
+    drain_pending_transitions(&db, &engine);
+
+    let conn = db.lock().unwrap();
+    let (status, blocked_reason): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-review-gap'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        status, "review",
+        "recently completed review dispatch must protect the review-decision creation gap"
+    );
+    assert!(
+        blocked_reason.is_none(),
+        "recent review completion gap must not leave an orphan-review blocked_reason"
+    );
+}
+
+#[test]
 fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -4358,6 +4419,236 @@ async fn force_transition_succeeds_with_correct_channel() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["forced"], true);
+}
+
+#[tokio::test]
+async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_up() {
+    crate::pipeline::ensure_loaded();
+    let (repo, _repo_override) = setup_test_repo();
+    let policy_dir = tempfile::tempdir().unwrap();
+    let source_policies = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    for entry in std::fs::read_dir(&source_policies).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+            continue;
+        }
+        std::fs::copy(&path, policy_dir.path().join(entry.file_name())).unwrap();
+    }
+    std::fs::write(
+        policy_dir.path().join("zz-ft-terminal-marker.js"),
+        r#"
+        agentdesk.registerPolicy({
+          name: "ft-terminal-marker",
+          priority: 9999,
+          onCardTerminal: function(payload) {
+            agentdesk.db.execute(
+              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('test_force_terminal_marker', ?1)",
+              [payload.card_id + ":" + payload.status]
+            );
+          }
+        });
+        "#,
+    )
+    .unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    run_git(origin.path(), &["init", "--bare"]);
+    run_git(
+        repo.path(),
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+    );
+    run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+    let worktrees_dir = repo.path().join("worktrees");
+    std::fs::create_dir_all(&worktrees_dir).unwrap();
+    run_git(repo.path(), &["branch", "wt/card-575-force"]);
+
+    let worktree_path = worktrees_dir.join("card-575-force");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            worktree_path.to_str().unwrap(),
+            "wt/card-575-force",
+        ],
+    );
+    std::fs::write(
+        worktree_path.join("feature.txt"),
+        "force transition merge\n",
+    )
+    .unwrap();
+    run_git(worktree_path.as_path(), &["add", "feature.txt"]);
+    run_git(
+        worktree_path.as_path(),
+        &["commit", "-m", "fix: force-transition merge target (#575)"],
+    );
+    std::fs::write(
+        worktree_path.join("merge-proof.txt"),
+        "second force transition merge\n",
+    )
+    .unwrap();
+    run_git(worktree_path.as_path(), &["add", "merge-proof.txt"]);
+    run_git(
+        worktree_path.as_path(),
+        &[
+            "commit",
+            "-m",
+            "fix: second force-transition merge target (#575)",
+        ],
+    );
+
+    let db = test_db();
+    let mut config = crate::config::Config::default();
+    config.policies.dir = policy_dir.path().to_path_buf();
+    let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+    seed_agent(&db, "agent-ft-terminal");
+    seed_repo(&db, "test-repo");
+    set_pmd_channel(&db, "pmd-chan-123");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, created_at, updated_at, started_at
+            ) VALUES (
+                'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test-repo',
+                575, 'dispatch-ft-terminal', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+            ) VALUES (
+                'dispatch-ft-terminal', 'card-ft-terminal', 'agent-ft-terminal', 'implementation', 'dispatched',
+                'live impl', ?1, datetime('now', '-4 minutes'), datetime('now', '-4 minutes')
+            )",
+            [serde_json::json!({
+                "worktree_path": worktree_path.to_string_lossy().to_string(),
+                "worktree_branch": "wt/card-575-force"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router_with_config(db.clone(), engine, config, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-ft-terminal/force-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"done"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["forced"], true);
+    assert_eq!(
+        json["cancelled_dispatches"],
+        serde_json::json!(1),
+        "force-transition to done must cancel the live work dispatch before terminal hooks"
+    );
+
+    let hook_marker: Option<String> = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = 'test_force_terminal_marker'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    };
+    assert_eq!(
+        hook_marker.as_deref(),
+        Some("card-ft-terminal:done"),
+        "force-transition to done must still fire OnCardTerminal hooks"
+    );
+
+    let merge_debug: (Option<String>, Option<String>) = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT state, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None))
+    };
+
+    run_git(repo.path(), &["fetch", "origin", "main"]);
+    let merged_feature = Command::new("git")
+        .args(["show", "origin/main:feature.txt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let merged_proof = Command::new("git")
+        .args(["show", "origin/main:merge-proof.txt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        merged_feature.status.success()
+            && merged_proof.status.success()
+            && String::from_utf8_lossy(&merged_feature.stdout) == "force transition merge\n"
+            && String::from_utf8_lossy(&merged_proof.stdout) == "second force transition merge\n",
+        "force-transition terminal path must still hand merge-automation a usable worktree target; pr_tracking={:?}",
+        merge_debug
+    );
+
+    let conn = db.lock().unwrap();
+    let (card_status, latest_dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ft-terminal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let pr_tracking_state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    assert_eq!(card_status, "done");
+    assert!(
+        latest_dispatch_id.is_none(),
+        "force-transition terminal cleanup must clear stale latest_dispatch_id"
+    );
+    assert_eq!(
+        dispatch_status, "cancelled",
+        "live implementation dispatch must not survive a force-transition to done"
+    );
+    assert_eq!(
+        pr_tracking_state.as_deref(),
+        Some("closed"),
+        "direct merge success should close PR tracking even when the source dispatch never completed"
+    );
 }
 
 #[tokio::test]
@@ -7155,8 +7446,8 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .unwrap();
     let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(
-        first_json["count"], 1,
-        "first activation must dispatch only one group for the same agent"
+        first_json["count"], 2,
+        "first activation must dispatch two groups in parallel when two slots are available"
     );
 
     {
@@ -7194,21 +7485,20 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
             "claude_session_id must be cleared on slot release"
         );
         assert_eq!(
-            second_slot_session.0, "working",
-            "unused sibling slot must stay untouched until it is actually reused"
+            second_slot_session.0, "idle",
+            "a reused sibling slot must also be reset before dispatch"
         );
         assert_eq!(
-            second_slot_session.1.as_deref(),
-            Some("dispatch-slot-old-1"),
-            "unused sibling slot must keep its original dispatch context"
+            second_slot_session.1, None,
+            "a reused sibling slot must clear its prior dispatch context"
         );
         assert_eq!(
-            second_slot_session.2, 73,
-            "unused sibling slot must preserve existing token state"
+            second_slot_session.2, 0,
+            "a reused sibling slot must clear prior token state"
         );
         assert!(
-            second_slot_session.3.as_deref() == Some("claude-slot-1"),
-            "unused sibling slot must preserve claude_session_id"
+            second_slot_session.3.is_none(),
+            "a reused sibling slot must clear claude_session_id"
         );
         let first_slot: Option<i64> = conn
             .query_row(
@@ -7225,7 +7515,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
             )
             .unwrap();
         assert_eq!(first_slot, Some(0));
-        assert_eq!(second_slot, None);
+        assert_eq!(second_slot, Some(1));
         conn.execute(
             "UPDATE sessions
              SET status = 'working',
@@ -7313,7 +7603,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         )
         .unwrap();
     assert_eq!(slot_zero_group, Some(2));
-    assert_eq!(slot_one_group, None);
+    assert_eq!(slot_one_group, Some(1));
 
     let recycled_slot_session: (String, Option<String>, i64, Option<String>) = conn
         .query_row(
@@ -7622,8 +7912,8 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         .unwrap();
     let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(
-        first_json["count"], 1,
-        "first activate must dispatch only one group for the same agent"
+        first_json["count"], 2,
+        "first activate must dispatch both groups in parallel when slots are available"
     );
 
     let second_response = app
@@ -7674,8 +7964,8 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         )
         .unwrap();
     assert_eq!(
-        sibling_group_status, "pending",
-        "different thread_group for the same agent must also stay pending until the next activate"
+        sibling_group_status, "dispatched",
+        "different thread_group for the same agent must dispatch in parallel when slots are available"
     );
 
     let guard_dispatch_count: i64 = conn
@@ -7690,6 +7980,19 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
     assert_eq!(
         guard_dispatch_count, 0,
         "no dispatch row should be created for the blocked same-group follow-up"
+    );
+    let sibling_group_dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE kanban_card_id = 'card-same-group-guard-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        sibling_group_dispatch_count, 1,
+        "a sibling group should create its own dispatch while the same-group follow-up stays blocked"
     );
 }
 
@@ -7773,10 +8076,10 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        json["count"], 1,
-        "activate must still dispatch only one group when all pending work targets the same agent"
+        json["count"], 4,
+        "activate must dispatch all groups in parallel when slots are available"
     );
-    assert_eq!(json["active_groups"], 1);
+    assert_eq!(json["active_groups"], 4);
 
     let conn = db.lock().unwrap();
     let slot_count: i64 = conn
@@ -7805,7 +8108,7 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         .filter_map(|row| row.ok().flatten())
         .collect::<Vec<_>>();
     assigned_slots.sort_unstable();
-    assert_eq!(assigned_slots, vec![0]);
+    assert_eq!(assigned_slots, vec![0, 1, 2, 3]);
 
     let fourth_slot_group: Option<i64> = conn
         .query_row(
@@ -7817,9 +8120,122 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         )
         .unwrap();
     assert_eq!(
-        fourth_slot_group, None,
-        "newly created slot must stay unassigned until a later activate consumes it"
+        fourth_slot_group,
+        Some(3),
+        "newly expanded slot must be assigned when parallel dispatch fills all slots"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_keeps_single_slot_agent_single_dispatched_group() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-single-slot");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-single-slot-0",
+        1960,
+        "ready",
+        "agent-single-slot",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-single-slot-1",
+        1961,
+        "ready",
+        "agent-single-slot",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, unified_thread,
+                max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-single-slot', 'test-repo', 'agent-single-slot', 'active', 1, 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-single-slot-0', 'run-single-slot', 'card-single-slot-0', 'agent-single-slot', 'pending', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-single-slot-1', 'run-single-slot', 'card-single-slot-1', 'agent-single-slot', 'pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-single-slot",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 1,
+        "a single-slot run must still dispatch only one same-agent group"
+    );
+    assert_eq!(json["active_groups"], 1);
+
+    let conn = db.lock().unwrap();
+    let dispatched_entries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries
+             WHERE run_id = 'run-single-slot' AND status = 'dispatched'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatched_entries, 1);
+
+    let pending_slot: Option<i64> = conn
+        .query_row(
+            "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-single-slot-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending_slot, None,
+        "the second group must stay unassigned until the lone slot becomes free"
+    );
+
+    let slot_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_slots WHERE agent_id = 'agent-single-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(slot_count, 1);
 }
 
 // NOTE: auto_queue_activate_requested_card_not_blocked_by_own_status and
@@ -8283,6 +8699,134 @@ async fn auto_queue_status_exposes_explicit_thread_links_from_configured_channel
         thread_links[1]["url"],
         "https://discord.com/channels/guild-123/222000000000000002"
     );
+}
+
+#[tokio::test]
+async fn auto_queue_history_returns_recent_runs_with_summary_metrics() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-history");
+    seed_auto_queue_card(&db, "card-history-done", 5131, "done", "agent-history");
+    seed_auto_queue_card(&db, "card-history-skipped", 5132, "done", "agent-history");
+    seed_auto_queue_card(&db, "card-history-pending", 5133, "review", "agent-history");
+    seed_auto_queue_card(
+        &db,
+        "card-history-dispatched",
+        5134,
+        "review",
+        "agent-history",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at, completed_at
+            ) VALUES (
+                'run-history-completed', 'test-repo', 'agent-history', 'completed',
+                datetime('now', '-20 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-history-active', 'test-repo', 'agent-history', 'active',
+                datetime('now', '-5 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-history-done', 'run-history-completed', 'card-history-done',
+                'agent-history', 'done', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-history-skipped', 'run-history-completed', 'card-history-skipped',
+                'agent-history', 'skipped', 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-history-pending', 'run-history-active', 'card-history-pending',
+                'agent-history', 'pending', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-history-dispatched', 'run-history-active', 'card-history-dispatched',
+                'agent-history', 'dispatched', 1
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auto-queue/history?repo=test-repo&limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let runs = json["runs"].as_array().expect("runs must be an array");
+
+    assert_eq!(json["summary"]["total_runs"], 2);
+    assert_eq!(json["summary"]["completed_runs"], 1);
+    assert_eq!(json["summary"]["success_rate"], 0.25);
+    assert_eq!(json["summary"]["failure_rate"], 0.75);
+    assert_eq!(runs.len(), 2);
+
+    assert_eq!(runs[0]["id"], "run-history-active");
+    assert_eq!(runs[0]["status"], "active");
+    assert_eq!(runs[0]["entry_count"], 2);
+    assert_eq!(runs[0]["done_count"], 0);
+    assert_eq!(runs[0]["pending_count"], 1);
+    assert_eq!(runs[0]["dispatched_count"], 1);
+    assert_eq!(runs[0]["success_rate"], 0.0);
+    assert_eq!(runs[0]["failure_rate"], 1.0);
+    assert!(runs[0]["duration_ms"].as_i64().unwrap() >= 0);
+    assert!(runs[0]["completed_at"].is_null());
+
+    assert_eq!(runs[1]["id"], "run-history-completed");
+    assert_eq!(runs[1]["status"], "completed");
+    assert_eq!(runs[1]["entry_count"], 2);
+    assert_eq!(runs[1]["done_count"], 1);
+    assert_eq!(runs[1]["skipped_count"], 1);
+    assert_eq!(runs[1]["success_rate"], 0.5);
+    assert_eq!(runs[1]["failure_rate"], 0.5);
+    assert!(runs[1]["duration_ms"].as_i64().unwrap() > 0);
+    assert!(runs[1]["completed_at"].as_i64().unwrap() > runs[1]["created_at"].as_i64().unwrap());
 }
 
 #[tokio::test]
@@ -9686,6 +10230,8 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(json["cancelled_runs"], 1);
     assert_eq!(json["cancelled_entries"], 2);
     assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["deleted_phase_gates"], 0);
+    assert_eq!(json["remaining_live_dispatches"], 0);
     assert_eq!(json["released_slots"], 1);
 
     let conn = db.lock().unwrap();
@@ -9755,6 +10301,192 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_rows() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-phase-gate");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-live",
+        4606,
+        "in_progress",
+        "agent-cancel-phase-gate",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-pending",
+        4607,
+        "ready",
+        "agent-cancel-phase-gate",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-anchor",
+        4608,
+        "reviewing",
+        "agent-cancel-phase-gate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-cancel-phase-gate', 'test-repo', 'agent-cancel-phase-gate', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-cancel-phase-gate', 0, 'run-cancel-phase-gate', 0, ?1
+            )",
+            [json!({"111": "222000000000004608"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-phase-live', 'card-cancel-phase-gate-live', 'agent-cancel-phase-gate',
+                'implementation', 'dispatched', 'Cancel run dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-phase-gate', 'card-cancel-phase-gate-anchor', 'agent-cancel-phase-gate',
+                'review', 'dispatched', 'Cancel phase gate', ?1, datetime('now'), datetime('now')
+            )",
+            [json!({
+                "slot_index": 0,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-cancel-phase-gate",
+                    "batch_phase": 1,
+                    "next_phase": 2,
+                    "anchor_card_id": "card-cancel-phase-gate-anchor"
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-cancel-phase-live', 'run-cancel-phase-gate', 'card-cancel-phase-gate-live',
+                'agent-cancel-phase-gate', 'dispatched', 'dispatch-cancel-phase-live', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-phase-pending', 'run-cancel-phase-gate', 'card-cancel-phase-gate-pending',
+                'agent-cancel-phase-gate', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict, next_phase, final_phase, anchor_card_id, created_at, updated_at
+            ) VALUES (
+                'run-cancel-phase-gate', 1, 'pending', 'dispatch-cancel-phase-gate',
+                'phase_gate_passed', 2, 0, 'card-cancel-phase-gate-anchor', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_dispatches"], 2);
+    assert_eq!(json["deleted_phase_gates"], 1);
+    assert_eq!(json["remaining_live_dispatches"], 0);
+    assert_eq!(json["released_slots"], 1);
+
+    let conn = db.lock().unwrap();
+    let statuses: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT id, status
+             FROM task_dispatches
+             WHERE id IN ('dispatch-cancel-phase-live', 'dispatch-cancel-phase-gate')
+             ORDER BY id ASC",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                "dispatch-cancel-phase-gate".to_string(),
+                "cancelled".to_string(),
+            ),
+            (
+                "dispatch-cancel-phase-live".to_string(),
+                "cancelled".to_string(),
+            ),
+        ]
+    );
+
+    let phase_gate_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = 'run-cancel-phase-gate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phase_gate_rows, 0);
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-cancel-phase-gate' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot, (None, None));
+    assert!(
+        !crate::db::auto_queue::slot_has_active_dispatch(&conn, "agent-cancel-phase-gate", 0,),
+        "cancelled phase-gate dispatches must not keep the slot blocked"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10028,8 +10760,8 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
         .await
         .unwrap();
     let activate_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(activate_json["count"], 1);
-    assert_eq!(activate_json["active_groups"], 1);
+    assert_eq!(activate_json["count"], 2);
+    assert_eq!(activate_json["active_groups"], 2);
 }
 
 #[test]

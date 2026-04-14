@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -58,6 +58,13 @@ pub struct StatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub repo: Option<String>,
+    pub agent_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReorderBody {
     #[serde(rename = "orderedIds")]
     pub ordered_ids: Vec<String>,
@@ -69,6 +76,7 @@ pub struct ReorderBody {
 pub struct UpdateRunBody {
     pub status: Option<String>,
     pub unified_thread: Option<bool>,
+    pub deploy_phases: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +96,7 @@ pub struct DispatchBody {
     pub activate: Option<bool>,
     pub auto_assign_agent: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
+    pub deploy_phases: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,20 +189,72 @@ fn load_live_dispatch_ids_for_runs(
         return Ok(Vec::new());
     }
 
+    let sql = live_dispatches_for_runs_sql("td.id", run_ids.len());
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn delete_phase_gate_rows_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> usize {
+    if run_ids.is_empty() {
+        return 0;
+    }
+
     let placeholders = std::iter::repeat("?")
         .take(run_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT DISTINCT td.id
-         FROM task_dispatches td
-         JOIN auto_queue_entries e ON e.dispatch_id = td.id
-         WHERE e.run_id IN ({placeholders})
-           AND td.status IN ('pending', 'dispatched')"
+        "DELETE FROM auto_queue_phase_gates
+         WHERE run_id IN ({placeholders})"
     );
-    let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()
+    conn.execute(&sql, rusqlite::params_from_iter(run_ids.iter()))
+        .unwrap_or(0)
+}
+
+fn count_live_dispatches_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> i64 {
+    if run_ids.is_empty() {
+        return 0;
+    }
+
+    let sql = live_dispatches_for_runs_sql("COUNT(*)", run_ids.len());
+    conn.query_row(&sql, rusqlite::params_from_iter(run_ids.iter()), |row| {
+        row.get(0)
+    })
+    .unwrap_or(0)
+}
+
+fn live_dispatches_for_runs_sql(select_expr: &str, run_count: usize) -> String {
+    let values = std::iter::repeat("(?)")
+        .take(run_count)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH target_runs(id) AS (VALUES {values})
+         SELECT {select_expr}
+         FROM task_dispatches td
+         WHERE td.status IN ('pending', 'dispatched')
+           AND (
+               EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   JOIN target_runs tr ON tr.id = e.run_id
+                   WHERE e.dispatch_id = td.id
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   JOIN target_runs tr ON tr.id = pg.run_id
+                   WHERE pg.dispatch_id = td.id
+               )
+               OR (
+                   json_valid(td.context)
+                   AND json_extract(td.context, '$.phase_gate.run_id') IN (
+                       SELECT id FROM target_runs
+                   )
+               )
+           )"
+    )
 }
 
 fn cancel_live_dispatches_for_runs(
@@ -248,6 +309,7 @@ pub(crate) fn cancel_with_conn(
     let target_run_ids = load_run_ids_with_status(conn, &["active", "paused"]).unwrap_or_default();
     let cancelled_dispatches =
         cancel_live_dispatches_for_runs(conn, &target_run_ids, "auto_queue_cancel");
+    let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, &target_run_ids);
     let (released_slots, cleared_slot_sessions) =
         clear_and_release_slots_for_runs(health_registry, conn, &target_run_ids);
     let cancelled_runs = conn
@@ -297,15 +359,51 @@ pub(crate) fn cancel_with_conn(
             ),
         }
     }
+    let remaining_live_dispatches = count_live_dispatches_for_runs(conn, &target_run_ids);
+    if remaining_live_dispatches > 0 {
+        tracing::warn!(
+            "[auto-queue] cancel left {} non-terminal dispatches for runs {:?}",
+            remaining_live_dispatches,
+            target_run_ids
+        );
+    }
 
     json!({
         "ok": true,
         "cancelled_entries": cancelled_entries,
         "cancelled_runs": cancelled_runs,
         "cancelled_dispatches": cancelled_dispatches,
+        "deleted_phase_gates": deleted_phase_gates,
+        "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": released_slots,
         "cleared_slot_sessions": cleared_slot_sessions,
     })
+}
+
+#[derive(Debug, Serialize)]
+struct AutoQueueHistoryRun {
+    id: String,
+    repo: Option<String>,
+    agent_id: Option<String>,
+    status: String,
+    created_at: i64,
+    completed_at: Option<i64>,
+    duration_ms: i64,
+    entry_count: i64,
+    done_count: i64,
+    skipped_count: i64,
+    pending_count: i64,
+    dispatched_count: i64,
+    success_rate: f64,
+    failure_rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AutoQueueHistorySummary {
+    total_runs: usize,
+    completed_runs: usize,
+    success_rate: f64,
+    failure_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -2355,19 +2453,6 @@ pub(crate) fn activate_with_deps(
     };
 
     let active_group_count = active_groups.len() as i64;
-    let mut occupied_agents: HashSet<String> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT DISTINCT agent_id
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1 AND status = 'dispatched'",
-            )
-            .unwrap();
-        stmt.query_map([&run_id], |row| row.get::<_, String>(0))
-            .ok()
-            .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            .unwrap_or_default()
-    };
 
     // Find pending groups not currently active, ordered by group number
     let pending_groups: Vec<i64> = {
@@ -2503,16 +2588,6 @@ pub(crate) fn activate_with_deps(
             .thread_group(*group)
             .batch_phase(batch_phase);
 
-        if occupied_agents.contains(&agent_id) {
-            crate::auto_queue_log!(
-                info,
-                "activate_same_agent_guard_blocked",
-                entry_log_ctx.clone(),
-                "[auto-queue] Skipping group {group} for {agent_id}: agent already dispatched in this activate cycle or run"
-            );
-            continue;
-        }
-
         let initial_state = {
             let conn = deps.db.separate_conn().unwrap();
             let card_state = load_activate_card_state(&conn, &card_id, &entry_id);
@@ -2603,7 +2678,6 @@ pub(crate) fn activate_with_deps(
             ) {
                 ActivatePreflightOutcome::Continue => {}
                 ActivatePreflightOutcome::Dispatched(entry_json) => {
-                    occupied_agents.insert(agent_id.clone());
                     dispatched_groups_this_activate += 1;
                     dispatched.push(entry_json);
                     continue;
@@ -2796,7 +2870,6 @@ pub(crate) fn activate_with_deps(
                                     error
                                 );
                             }
-                            occupied_agents.insert(agent_id.clone());
                             dispatched_groups_this_activate += 1;
                             dispatched.push(deps.entry_json(&entry_id));
                             crate::auto_queue_log!(
@@ -2909,7 +2982,6 @@ pub(crate) fn activate_with_deps(
                 // call was walking the card. Treat the slot as occupied for
                 // scheduling, but do not count it as a dispatch created by this
                 // request.
-                occupied_agents.insert(agent_id.clone());
                 dispatched_groups_this_activate += 1;
             }
             continue;
@@ -2961,7 +3033,6 @@ pub(crate) fn activate_with_deps(
             drop(conn);
             // Repair the entry linkage to the dispatch that already exists, but
             // do not report it as a new dispatch created by this activate call.
-            occupied_agents.insert(agent_id.clone());
             dispatched_groups_this_activate += 1;
             continue;
         }
@@ -2977,7 +3048,6 @@ pub(crate) fn activate_with_deps(
         ) {
             ActivatePreflightOutcome::Continue => {}
             ActivatePreflightOutcome::Dispatched(entry_json) => {
-                occupied_agents.insert(agent_id.clone());
                 dispatched_groups_this_activate += 1;
                 dispatched.push(entry_json);
                 continue;
@@ -3187,7 +3257,6 @@ pub(crate) fn activate_with_deps(
         }
         drop(conn);
 
-        occupied_agents.insert(agent_id.clone());
         dispatched_groups_this_activate += 1;
         dispatched.push(deps.entry_json(&entry_id));
     }
@@ -3463,6 +3532,18 @@ pub async fn dispatch(
             );
         }
     };
+
+    if let Some(ref deploy_phases) = body.deploy_phases {
+        if !deploy_phases.is_empty() {
+            if let Ok(json_str) = serde_json::to_string(deploy_phases) {
+                let _ = conn.execute(
+                    "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
+                    rusqlite::params![json_str, run_id],
+                );
+            }
+        }
+    }
+
     let mut rank_per_group = HashMap::<i64, i64>::new();
     for entry in &requested_entries {
         let thread_group = entry.thread_group.unwrap_or(0);
@@ -3560,6 +3641,106 @@ pub async fn status(
         Ok(response) => (StatusCode::OK, Json(json!(response))),
         Err(error) => error.into_json_response(),
     }
+}
+
+/// GET /api/auto-queue/history
+pub async fn history(
+    State(state): State<AppState>,
+    Query(query): Query<HistoryQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let limit = query.limit.unwrap_or(8).clamp(1, 20);
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let records = match crate::db::auto_queue::list_run_history(
+        &conn,
+        &crate::db::auto_queue::StatusFilter {
+            repo: query.repo,
+            agent_id: query.agent_id,
+        },
+        limit,
+    ) {
+        Ok(records) => records,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("list run history: {error}")})),
+            );
+        }
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let runs: Vec<AutoQueueHistoryRun> = records
+        .into_iter()
+        .map(|record| {
+            let entry_count = record.entry_count.max(0);
+            let completed_count = record.done_count.max(0);
+            let unresolved_count = (entry_count - completed_count).max(0) as f64;
+            let total_entries = entry_count.max(1) as f64;
+            let success_rate = if entry_count > 0 {
+                completed_count as f64 / total_entries
+            } else {
+                0.0
+            };
+            let failure_rate = if entry_count > 0 {
+                unresolved_count / total_entries
+            } else {
+                0.0
+            };
+            AutoQueueHistoryRun {
+                id: record.id,
+                repo: record.repo,
+                agent_id: record.agent_id,
+                status: record.status,
+                created_at: record.created_at,
+                completed_at: record.completed_at,
+                duration_ms: record
+                    .completed_at
+                    .unwrap_or(now_ms)
+                    .saturating_sub(record.created_at),
+                entry_count,
+                done_count: record.done_count,
+                skipped_count: record.skipped_count,
+                pending_count: record.pending_count,
+                dispatched_count: record.dispatched_count,
+                success_rate,
+                failure_rate,
+            }
+        })
+        .collect();
+
+    let total_runs = runs.len();
+    let completed_runs = runs.iter().filter(|run| run.status == "completed").count();
+    let success_rate = if total_runs > 0 {
+        runs.iter().map(|run| run.success_rate).sum::<f64>() / total_runs as f64
+    } else {
+        0.0
+    };
+    let failure_rate = if total_runs > 0 {
+        runs.iter().map(|run| run.failure_rate).sum::<f64>() / total_runs as f64
+    } else {
+        0.0
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "summary": AutoQueueHistorySummary {
+                total_runs,
+                completed_runs,
+                success_rate,
+                failure_rate,
+            },
+            "runs": runs,
+        })),
+    )
 }
 
 /// PATCH /api/auto-queue/entries/{id}
@@ -3743,6 +3924,17 @@ pub async fn update_run(
                 rusqlite::params![status, id],
             )
             .unwrap_or(0);
+    }
+
+    if let Some(ref deploy_phases) = body.deploy_phases {
+        if let Ok(json_str) = serde_json::to_string(deploy_phases) {
+            changed += conn
+                .execute(
+                    "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
+                    rusqlite::params![json_str, id],
+                )
+                .unwrap_or(0);
+        }
     }
 
     let ignored_unified_thread = body.unified_thread.is_some();

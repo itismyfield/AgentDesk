@@ -111,6 +111,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/auto-queue/dispatch", post(auto_queue::dispatch))
             .route("/auto-queue/activate", post(auto_queue::activate))
             .route("/auto-queue/status", get(auto_queue::status))
+            .route("/auto-queue/history", get(auto_queue::history))
             .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
             .route(
                 "/auto-queue/entries/{id}/skip",

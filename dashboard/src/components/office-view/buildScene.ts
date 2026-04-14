@@ -369,7 +369,7 @@ export function buildOfficeScene(context: BuildOfficeSceneContext): void {
       tintColor = 0xff8c30;
       tintAlpha = isDark ? 0.05 : 0.04;
     } else if (hour >= 20 && hour < 22) {
-      // Evening: indigo
+      // Evening: deep dusk blue
       tintColor = 0x1a1a40;
       tintAlpha = isDark ? 0.08 : 0.05;
     }

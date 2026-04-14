@@ -10,7 +10,7 @@ function makeDepartment(overrides: Partial<Department> = {}): Department {
     name_ja: "企画チーム",
     name_zh: "企划组",
     icon: "📋",
-    color: "#6366f1",
+    color: "#14b8a6",
     description: null,
     prompt: null,
     sort_order: 1,

@@ -34,6 +34,15 @@ fn context_compression_guidance() -> String {
     )
 }
 
+fn tool_output_efficiency_guidance() -> &'static str {
+    "[Tool Output Efficiency]\n\
+     Large tool results persist in context and increase cost for every subsequent turn.\n\
+     - Bash: Use LIMIT clauses for SQL, pipe to head/grep for filtering, avoid tail with large line counts\n\
+     - Read: Use offset/limit to read specific sections, not entire large files\n\
+     - Grep: Set head_limit, use narrow glob/type filters, avoid broad patterns that match hundreds of lines\n\
+     - Prefer targeted queries over exhaustive dumps"
+}
+
 fn strip_dod_section(issue_body: &str) -> Option<String> {
     let mut lines = Vec::new();
     let mut in_dod_section = false;
@@ -273,13 +282,18 @@ pub(super) fn build_system_prompt(
         discord_token_hash(token),
         narration_guidance,
         disabled_notice,
-        // ReviewLite: omit skills to save tokens — reviewer only submits verdict
+        // Skill inventory is caller-supplied. Production currently passes an
+        // empty string to avoid duplicating providers' native skill injection.
+        // ReviewLite also omits it defensively even if a caller provides one.
         if profile == DispatchProfile::ReviewLite {
             ""
         } else {
             skills_notice
         }
     );
+    system_prompt_owned.push_str("\n\n");
+    system_prompt_owned.push_str(tool_output_efficiency_guidance());
+
     if profile == DispatchProfile::Full {
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&context_compression_guidance());
@@ -509,6 +523,16 @@ mod tests {
     }
 
     #[test]
+    fn test_build_system_prompt_includes_tool_output_efficiency_guidance() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("[Tool Output Efficiency]"));
+        assert!(output.contains("Large tool results persist in context"));
+        assert!(output.contains("Use LIMIT clauses for SQL"));
+        assert!(output.contains("Use offset/limit to read specific sections"));
+        assert!(output.contains("Set head_limit"));
+    }
+
+    #[test]
     fn test_build_system_prompt_includes_api_friction_guidance() {
         let output = call_build("ctx", "/tmp", 1, "tok", "", "");
         assert!(output.contains("[ADK API Usage]"));
@@ -582,19 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn test_review_lite_omits_skills() {
-        let skills_notice = "\n\nAvailable skills:\n\
-            The entries below are descriptions only, not the full skill body.\n\
-            If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
-            Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
-              - /commit: Commit changes";
-        let with_skills = build_system_prompt(
+    fn test_empty_skills_notice_omits_skills_for_full_profile() {
+        let prompt = build_system_prompt(
             "ctx",
             "/tmp",
             ChannelId::new(1),
             "tok",
             "",
-            skills_notice,
+            "",
             true,
             None,
             false,
@@ -605,30 +624,10 @@ mod tests {
             None,
             None,
         );
-        let without_skills = build_system_prompt(
-            "ctx",
-            "/tmp",
-            ChannelId::new(1),
-            "tok",
-            "",
-            skills_notice,
-            true,
-            None,
-            false,
-            DispatchProfile::ReviewLite,
-            Some("review"),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(with_skills.contains("Available skills"));
-        assert!(with_skills.contains("descriptions only"));
-        assert!(with_skills.contains("`SKILL.md`"));
-        assert!(!without_skills.contains("Available skills"));
-        assert!(!without_skills.contains("[Context Compression]"));
-        // ReviewLite prompt should be shorter
-        assert!(without_skills.len() < with_skills.len());
+
+        assert!(!prompt.contains("Available skills"));
+        assert!(!prompt.contains("descriptions only"));
+        assert!(!prompt.contains("`SKILL.md`"));
     }
 
     #[test]
@@ -654,6 +653,30 @@ mod tests {
         assert!(!prompt.contains("[Context Compression]"));
         assert!(!prompt.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
         assert!(!prompt.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
+    fn test_review_lite_includes_tool_output_efficiency_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(prompt.contains("[Tool Output Efficiency]"));
+        assert!(prompt.contains("Prefer targeted queries over exhaustive dumps"));
     }
 
     #[test]

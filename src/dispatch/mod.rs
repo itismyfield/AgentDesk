@@ -25,7 +25,14 @@ fn execution_target_from_dir(dir: &str) -> Option<DispatchExecutionTarget> {
         return None;
     }
     let reviewed_commit = crate::services::platform::git_head_commit(dir)?;
-    let branch = crate::services::platform::shell::git_branch_name(dir);
+    let checked_out_branch = crate::services::platform::shell::git_branch_name(dir);
+    let branch = crate::services::platform::shell::git_branch_containing_commit(
+        dir,
+        &reviewed_commit,
+        checked_out_branch.as_deref(),
+        None,
+    )
+    .or(checked_out_branch);
     Some(DispatchExecutionTarget {
         reviewed_commit,
         branch,
@@ -308,11 +315,24 @@ fn latest_completed_work_dispatch_target(
                 .ok()
                 .flatten();
         let worktree_path = path.map(str::to_string).or(fallback_repo_dir);
-        let branch = branch.or_else(|| {
-            worktree_path
-                .as_deref()
-                .and_then(crate::services::platform::shell::git_branch_name)
-        });
+        let issue_branch_hint = load_card_issue_repo(db, kanban_card_id)
+            .and_then(|(issue_number, _)| issue_number.map(|value| value.to_string()));
+        let branch = branch
+            .or_else(|| {
+                worktree_path.as_deref().and_then(|path| {
+                    crate::services::platform::shell::git_branch_containing_commit(
+                        path,
+                        &reviewed_commit,
+                        None,
+                        issue_branch_hint.as_deref(),
+                    )
+                })
+            })
+            .or_else(|| {
+                worktree_path
+                    .as_deref()
+                    .and_then(crate::services::platform::shell::git_branch_name)
+            });
         return Some(DispatchExecutionTarget {
             reviewed_commit,
             branch,
@@ -417,6 +437,38 @@ fn apply_review_target_context(
     }
 }
 
+fn latest_completed_work_dispatch_is_noop(db: &Db, kanban_card_id: &str) -> bool {
+    let Ok(conn) = db.separate_conn() else {
+        return false;
+    };
+    let result_raw: Option<String> = conn
+        .query_row(
+            "SELECT result
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('implementation', 'rework')
+               AND status = 'completed'
+             ORDER BY updated_at DESC, rowid DESC
+             LIMIT 1",
+            [kanban_card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let Some(result_json) = result_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    else {
+        return false;
+    };
+
+    json_string_field(&result_json, "work_outcome") == Some("noop")
+        || result_json
+            .get("completed_without_changes")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
 pub(crate) const REVIEW_QUALITY_SCOPE_REMINDER: &str =
     "기존 DoD/기능 검증과 함께 아래 품질 항목도 반드시 확인하세요.";
 pub(crate) const REVIEW_VERDICT_IMPROVE_GUIDANCE: &str = "기능이 맞더라도 아래 품질 항목에서 실제 문제가 하나라도 보이면 `VERDICT: improve`로 판정하세요.";
@@ -453,15 +505,43 @@ fn inject_review_merge_base_context(obj: &mut serde_json::Map<String, serde_json
         .or_else(|| obj.get("worktree_branch").and_then(|value| value.as_str()))
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let (Some(path), Some(branch)) = (path, branch) else {
+    let reviewed_commit = obj
+        .get("reviewed_commit")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let (Some(path), Some(branch), Some(reviewed_commit)) = (path, branch, reviewed_commit) else {
         return;
     };
 
-    if let Some(merge_base) =
-        crate::services::platform::shell::git_merge_base(&path, "main", &branch)
-    {
-        obj.insert("merge_base".to_string(), json!(merge_base));
+    if crate::services::platform::shell::is_mainlike_branch(&branch) {
+        tracing::warn!(
+            "[dispatch] skipping review merge-base injection for branch '{}' at commit {}: main-like branch would produce an empty diff range",
+            branch,
+            &reviewed_commit[..8.min(reviewed_commit.len())]
+        );
+        return;
     }
+
+    let Some(merge_base) = crate::services::platform::shell::git_merge_base(&path, "main", &branch)
+    else {
+        tracing::warn!(
+            "[dispatch] skipping review merge-base injection for branch '{}' at commit {}: git merge-base returned no result",
+            branch,
+            &reviewed_commit[..8.min(reviewed_commit.len())]
+        );
+        return;
+    };
+
+    if merge_base == reviewed_commit {
+        tracing::warn!(
+            "[dispatch] skipping review merge-base injection for branch '{}' at commit {}: merge-base resolved to the reviewed commit",
+            branch,
+            &reviewed_commit[..8.min(reviewed_commit.len())]
+        );
+        return;
+    }
+    obj.insert("merge_base".to_string(), json!(merge_base));
 }
 
 /// Resolve the canonical worktree for a card's GitHub issue.
@@ -511,10 +591,18 @@ fn resolve_card_issue_commit_target(
     else {
         return Ok(None);
     };
+    let issue_branch_hint = issue_number.to_string();
+    let branch = crate::services::platform::shell::git_branch_containing_commit(
+        &repo_dir,
+        &reviewed_commit,
+        None,
+        Some(&issue_branch_hint),
+    )
+    .or_else(|| crate::services::platform::shell::git_branch_name(&repo_dir))
+    .or(Some("main".to_string()));
     Ok(Some(DispatchExecutionTarget {
         reviewed_commit,
-        branch: crate::services::platform::shell::git_branch_name(&repo_dir)
-            .or(Some("main".to_string())),
+        branch,
         worktree_path: Some(repo_dir),
     }))
 }
@@ -567,6 +655,17 @@ fn build_review_context(
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
+            if latest_completed_work_dispatch_is_noop(db, kanban_card_id) {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: skipping review context because latest completed work dispatch is explicit noop",
+                    kanban_card_id
+                );
+                anyhow::bail!(
+                    "Cannot create review dispatch for card {}: latest completed work dispatch is noop",
+                    kanban_card_id
+                );
+            }
+
             // Prefer the actual target used by the latest completed work dispatch
             // for this card. This keeps review aligned even when the card had no
             // dedicated worktree and the agent worked directly in the repo root.
@@ -3662,6 +3761,24 @@ mod tests {
     }
 
     #[test]
+    fn review_context_skips_missing_merge_base_for_unknown_branch() {
+        let mut obj = serde_json::Map::new();
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let reviewed_commit = crate::services::platform::git_head_commit(repo_dir).unwrap();
+        obj.insert("worktree_path".to_string(), json!(repo_dir));
+        obj.insert("branch".to_string(), json!("missing-branch"));
+        obj.insert("reviewed_commit".to_string(), json!(reviewed_commit));
+
+        inject_review_merge_base_context(&mut obj);
+
+        assert!(
+            !obj.contains_key("merge_base"),
+            "missing git merge-base must leave merge_base absent"
+        );
+    }
+
+    #[test]
     fn review_context_accepts_latest_work_dispatch_commit_for_same_issue() {
         let db = test_db();
         seed_card(&db, "card-review-match", "review");
@@ -3699,6 +3816,10 @@ mod tests {
         assert_eq!(parsed["reviewed_commit"], matching_commit);
         assert_eq!(parsed["worktree_path"], repo_dir);
         assert_eq!(parsed["branch"], "main");
+        assert!(
+            parsed.get("merge_base").is_none(),
+            "main branch reviews must not inject an empty merge-base diff"
+        );
     }
 
     #[test]
@@ -3855,6 +3976,68 @@ mod tests {
                 .contains("repo-root HEAD fallback is unsafe while tracked changes exist"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn review_context_rejects_explicit_noop_latest_work_dispatch() {
+        let db = test_db();
+        seed_card(&db, "card-review-noop", "review");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-noop', 'card-review-noop', 'agent-1', 'implementation', 'completed',
+                'No changes needed', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "work_outcome": "noop",
+                    "completed_without_changes": true,
+                    "notes": "spec already satisfied",
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = build_review_context(&db, "card-review-noop", "agent-1", &json!({}))
+            .expect_err("explicit noop work must not create a review dispatch");
+        assert!(
+            err.to_string()
+                .contains("latest completed work dispatch is noop"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn review_context_recovers_issue_branch_from_reviewed_commit_membership() {
+        let db = test_db();
+        seed_card(&db, "card-review-contains-branch", "review");
+        set_card_issue_number(&db, "card-review-contains-branch", 610);
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        run_git(repo_dir, &["checkout", "-b", "feat/610-review"]);
+        let reviewed_commit = git_commit(repo_dir, "fix: recover branch from commit (#610)");
+        let fork_point = run_git(repo_dir, &["rev-parse", "HEAD^"]);
+        let fork_point = String::from_utf8_lossy(&fork_point.stdout)
+            .trim()
+            .to_string();
+        run_git(repo_dir, &["checkout", "main"]);
+
+        let context =
+            build_review_context(&db, "card-review-contains-branch", "agent-1", &json!({}))
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(parsed["worktree_path"], repo_dir);
+        assert_eq!(parsed["branch"], "feat/610-review");
+        assert_eq!(parsed["merge_base"], fork_point);
     }
 
     #[test]

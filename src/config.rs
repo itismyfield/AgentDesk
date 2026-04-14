@@ -51,6 +51,8 @@ pub struct DiscordConfig {
     pub bots: std::collections::HashMap<String, BotConfig>,
     #[serde(default)]
     pub guild_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dm_default_agent: Option<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_u64",

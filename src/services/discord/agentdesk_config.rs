@@ -66,6 +66,12 @@ pub(super) struct ResolvedDiscordBotConfig {
     pub owner_id: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct ResolvedDmDefaultAgent {
+    pub role_binding: RoleBinding,
+    pub workspace: String,
+}
+
 fn resolve_bot_token(bot_name: &str, bot: &crate::config::BotConfig) -> Option<String> {
     bot.token
         .as_deref()
@@ -194,6 +200,99 @@ fn role_binding_from_channel(
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
         memory: resolve_memory_settings(None, None),
     }
+}
+
+fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKind) -> RoleBinding {
+    RoleBinding {
+        role_id: agent.id.clone(),
+        prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
+        provider: Some(provider),
+        model: None,
+        reasoning_effort: None,
+        peer_agents_enabled: true,
+        memory: resolve_memory_settings(None, None),
+    }
+}
+
+fn find_agent_channel_for_provider<'a>(
+    agent: &'a crate::config::AgentDef,
+    provider: &ProviderKind,
+) -> Option<(&'static str, &'a AgentChannel)> {
+    agent
+        .channels
+        .iter()
+        .into_iter()
+        .find_map(|(provider_key, maybe_channel)| {
+            let channel = maybe_channel?;
+            (binding_provider(agent, provider_key, channel).as_ref() == Some(provider))
+                .then_some((provider_key, channel))
+        })
+}
+
+pub(super) fn resolve_dm_default_agent(provider: &ProviderKind) -> Option<ResolvedDmDefaultAgent> {
+    let config = load_agentdesk_config()?;
+    let agent_id = config
+        .discord
+        .dm_default_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let agent = match config.agents.iter().find(|agent| agent.id == agent_id) {
+        Some(agent) => agent,
+        None => {
+            tracing::warn!("  [dm-default] configured agent '{}' not found", agent_id);
+            return None;
+        }
+    };
+
+    if let Some((provider_key, channel)) = find_agent_channel_for_provider(agent, provider) {
+        let role_binding = role_binding_from_channel(agent, provider_key, channel);
+        let workspace = channel
+            .workspace()
+            .map(|value| expand_tilde(&value))
+            .or_else(|| default_workspace(&agent.id))?;
+        return Some(ResolvedDmDefaultAgent {
+            role_binding,
+            workspace,
+        });
+    }
+
+    let agent_provider = match ProviderKind::from_str(&agent.provider) {
+        Some(agent_provider) => agent_provider,
+        None => {
+            tracing::warn!(
+                "  [dm-default] agent '{}' has unsupported provider '{}'",
+                agent.id,
+                agent.provider
+            );
+            return None;
+        }
+    };
+    if &agent_provider != provider {
+        tracing::info!(
+            "  [dm-default] skipping agent '{}' for provider {} (configured provider {})",
+            agent.id,
+            provider.as_str(),
+            agent_provider.as_str()
+        );
+        return None;
+    }
+
+    let workspace = match default_workspace(&agent.id) {
+        Some(workspace) => workspace,
+        None => {
+            tracing::warn!(
+                "  [dm-default] agent '{}' has no default workspace",
+                agent.id
+            );
+            return None;
+        }
+    };
+
+    Some(ResolvedDmDefaultAgent {
+        role_binding: role_binding_from_agent(agent, agent_provider),
+        workspace,
+    })
 }
 
 fn meeting_agent_from_entry(
@@ -725,6 +824,71 @@ agents:
                 resolve_channel_alias("adk-dash-main"),
                 Some(1490141479707086938)
             );
+        });
+    }
+
+    #[test]
+    fn resolve_dm_default_agent_reads_matching_provider_channel() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+discord:
+  dm_default_agent: family-counsel
+agents:
+  - id: family-counsel
+    name: "상담봇"
+    provider: claude
+    channels:
+      claude:
+        id: "1473922824350601297"
+        name: "윤호네비서"
+        prompt_file: "~/.adk/release/config/agents/family-counsel.prompt.md"
+        workspace: "~/.adk/release/workspaces/family-counsel"
+        provider: claude
+"#,
+            );
+
+            let resolved =
+                resolve_dm_default_agent(&ProviderKind::Claude).expect("dm default agent");
+            assert_eq!(resolved.role_binding.role_id, "family-counsel");
+            assert_eq!(resolved.role_binding.provider, Some(ProviderKind::Claude));
+            assert!(
+                resolved
+                    .role_binding
+                    .prompt_file
+                    .ends_with("/config/agents/family-counsel.prompt.md")
+            );
+            assert!(resolved.workspace.ends_with("/workspaces/family-counsel"));
+        });
+    }
+
+    #[test]
+    fn resolve_dm_default_agent_skips_mismatched_provider() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+discord:
+  dm_default_agent: family-counsel
+agents:
+  - id: family-counsel
+    name: "상담봇"
+    provider: claude
+    channels:
+      claude:
+        id: "1473922824350601297"
+        name: "윤호네비서"
+        workspace: "~/.adk/release/workspaces/family-counsel"
+        provider: claude
+"#,
+            );
+
+            assert!(resolve_dm_default_agent(&ProviderKind::Codex).is_none());
         });
     }
 

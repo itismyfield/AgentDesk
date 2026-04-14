@@ -90,7 +90,7 @@ pub async fn resume_card(
         .ok()
     };
 
-    let (status, review_status, latest_dispatch_id, agent_id, card_title, _blocked_reason) =
+    let (status, review_status, latest_dispatch_id, agent_id, card_title, blocked_reason) =
         match card_info {
             Some(info) => info,
             None => {
@@ -178,6 +178,7 @@ pub async fn resume_card(
         &id,
         &status,
         review_status.as_deref(),
+        blocked_reason.as_deref(),
         &latest_dispatch_id,
         &agent_id,
         &card_title,
@@ -231,6 +232,7 @@ async fn determine_and_execute_resume(
     card_id: &str,
     status: &str,
     review_status: Option<&str>,
+    blocked_reason: Option<&str>,
     latest_dispatch_id: &Option<String>,
     agent_id: &str,
     card_title: &str,
@@ -242,9 +244,29 @@ async fn determine_and_execute_resume(
 
     match status {
         "requested" => {
-            resume_from_requested(state, card_id, agent_id, card_title, latest_dispatch_id)
+            if crate::manual_intervention::requires_manual_intervention(
+                review_status,
+                blocked_reason,
+            ) {
+                resume_from_requested_manual_intervention(
+                    state, card_id, agent_id, card_title, force,
+                )
+            } else {
+                resume_from_requested(state, card_id, agent_id, card_title, latest_dispatch_id)
+            }
         }
-        "in_progress" => resume_from_in_progress(state, card_id, latest_dispatch_id),
+        "in_progress" => {
+            if crate::manual_intervention::requires_manual_intervention(
+                review_status,
+                blocked_reason,
+            ) {
+                resume_from_in_progress_manual_intervention(
+                    state, card_id, agent_id, card_title, force,
+                )
+            } else {
+                resume_from_in_progress(state, card_id, latest_dispatch_id)
+            }
+        }
         "review" => resume_from_review(
             state,
             card_id,
@@ -255,9 +277,9 @@ async fn determine_and_execute_resume(
             force,
         ),
         "pending_decision" => {
-            resume_from_pending_decision(state, card_id, agent_id, card_title, force)
+            resume_from_pending_decision_legacy(state, card_id, agent_id, card_title, force)
         }
-        "blocked" => resume_from_blocked(
+        "blocked" => resume_from_blocked_legacy(
             state,
             card_id,
             agent_id,
@@ -298,6 +320,39 @@ fn resume_from_requested(
     }))
 }
 
+/// requested + manual intervention → clear markers, create new implementation dispatch
+fn resume_from_requested_manual_intervention(
+    state: &AppState,
+    card_id: &str,
+    agent_id: &str,
+    card_title: &str,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    if !force {
+        return Err("requested manual intervention requires force=true to resume".to_string());
+    }
+
+    cancel_and_clear(state, card_id)?;
+    let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+    clear_manual_intervention_markers(&conn, card_id)?;
+    drop(conn);
+
+    let dispatch = create_and_notify(
+        state,
+        card_id,
+        agent_id,
+        "implementation",
+        card_title,
+        &json!({"resume": true, "resumed_from": "requested_manual_intervention"}),
+    )?;
+
+    Ok(json!({
+        "type": "resume_requested_manual_intervention",
+        "dispatch_id": dispatch["id"],
+        "from_status": "requested",
+    }))
+}
+
 /// in_progress (orphan completed): transition to review → OnReviewEnter creates review dispatch
 fn resume_from_in_progress(
     state: &AppState,
@@ -329,6 +384,50 @@ fn resume_from_in_progress(
             "in_progress card has dispatch in '{s}' status — not stuck"
         )),
     }
+}
+
+/// in_progress + manual intervention → clear markers, re-request implementation
+fn resume_from_in_progress_manual_intervention(
+    state: &AppState,
+    card_id: &str,
+    agent_id: &str,
+    card_title: &str,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    if !force {
+        return Err("in_progress manual intervention requires force=true to resume".to_string());
+    }
+
+    cancel_and_clear(state, card_id)?;
+    {
+        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+        clear_manual_intervention_markers(&conn, card_id)?;
+    }
+
+    crate::kanban::transition_status_with_opts(
+        &state.db,
+        &state.engine,
+        card_id,
+        "requested",
+        "resume_from_in_progress_manual_intervention",
+        true,
+    )
+    .map_err(|e| format!("transition from in_progress manual intervention failed: {e}"))?;
+
+    let dispatch = create_and_notify(
+        state,
+        card_id,
+        agent_id,
+        "implementation",
+        card_title,
+        &json!({"resume": true, "resumed_from": "in_progress_manual_intervention"}),
+    )?;
+
+    Ok(json!({
+        "type": "resume_in_progress_manual_intervention",
+        "dispatch_id": dispatch["id"],
+        "from_status": "in_progress",
+    }))
 }
 
 /// review: depends on review_status sub-state
@@ -507,14 +606,133 @@ fn resume_from_review(
         }
 
         // dilemma_pending / awaiting_dod → escalate
+        Some("dilemma_pending") => {
+            resume_from_review_dilemma_pending(state, card_id, agent_id, card_title, force)
+        }
+
         Some(rs) => Err(format!(
-            "review sub-state '{rs}' requires manual intervention (use force=true with pending_decision path)"
+            "review sub-state '{rs}' is not resumable via /resume"
         )),
     }
 }
 
-/// pending_decision → re-evaluate from dispatch history, create appropriate dispatch
-fn resume_from_pending_decision(
+/// review + dilemma_pending → clear manual intervention and restart the appropriate flow
+fn resume_from_review_dilemma_pending(
+    state: &AppState,
+    card_id: &str,
+    agent_id: &str,
+    card_title: &str,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    if !force {
+        return Err("review dilemma_pending requires force=true to resume".to_string());
+    }
+
+    let last_dispatch_type = get_last_terminal_dispatch_type(&state.db, card_id);
+
+    cancel_and_clear(state, card_id)?;
+    {
+        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+        clear_manual_intervention_markers(&conn, card_id)?;
+    }
+
+    match last_dispatch_type.as_deref() {
+        Some("rework") => {
+            let rework_target = resolve_rework_resume_target(
+                &state.db,
+                card_id,
+                "review",
+                Some("pending_decision"),
+            )?;
+            crate::kanban::transition_status_with_opts(
+                &state.db,
+                &state.engine,
+                card_id,
+                &rework_target,
+                "resume_from_review_dilemma_pending",
+                true,
+            )
+            .map_err(|e| format!("transition failed: {e}"))?;
+
+            let dispatch = create_and_notify(
+                state,
+                card_id,
+                agent_id,
+                "rework",
+                &format!("[Rework] {card_title}"),
+                &json!({
+                    "resume": true,
+                    "resumed_from": "review_dilemma_pending",
+                    "previous_dispatch_type": "rework",
+                }),
+            )?;
+
+            Ok(json!({
+                "type": "resume_rework_from_review_dilemma_pending",
+                "dispatch_id": dispatch["id"],
+                "previous_dispatch_type": "rework",
+                "rework_target": rework_target,
+            }))
+        }
+        Some("review") | Some("review-decision") => {
+            let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+            sync_review_state(&conn, card_id, Some("reviewing"), "reviewing")?;
+            drop(conn);
+
+            let dispatch = create_and_notify(
+                state,
+                card_id,
+                agent_id,
+                "review",
+                &format!("[Review] {card_title}"),
+                &json!({
+                    "resume": true,
+                    "resumed_from": "review_dilemma_pending",
+                    "previous_dispatch_type": last_dispatch_type,
+                }),
+            )?;
+
+            Ok(json!({
+                "type": "resume_review_from_dilemma_pending",
+                "dispatch_id": dispatch["id"],
+                "previous_dispatch_type": last_dispatch_type,
+            }))
+        }
+        _ => {
+            crate::kanban::transition_status_with_opts(
+                &state.db,
+                &state.engine,
+                card_id,
+                "requested",
+                "resume_from_review_dilemma_pending",
+                true,
+            )
+            .map_err(|e| format!("transition to requested failed: {e}"))?;
+
+            let dispatch = create_and_notify(
+                state,
+                card_id,
+                agent_id,
+                "implementation",
+                card_title,
+                &json!({
+                    "resume": true,
+                    "resumed_from": "review_dilemma_pending",
+                    "previous_dispatch_type": last_dispatch_type,
+                }),
+            )?;
+
+            Ok(json!({
+                "type": "resume_from_review_dilemma_pending",
+                "dispatch_id": dispatch["id"],
+                "previous_dispatch_type": last_dispatch_type,
+            }))
+        }
+    }
+}
+
+/// Legacy pending_decision → re-evaluate from dispatch history, create appropriate dispatch
+fn resume_from_pending_decision_legacy(
     state: &AppState,
     card_id: &str,
     agent_id: &str,
@@ -525,18 +743,7 @@ fn resume_from_pending_decision(
         return Err("pending_decision requires force=true to resume".to_string());
     }
 
-    // Look at the most recent completed dispatch to determine what to resume with
-    let (last_dispatch_type, _last_dispatch_id): (Option<String>, Option<String>) = {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        conn.query_row(
-            "SELECT dispatch_type, id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND status IN ('completed', 'failed', 'cancelled') \
-             ORDER BY updated_at DESC LIMIT 1",
-            [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or((None, None))
-    };
+    let last_dispatch_type = get_last_terminal_dispatch_type(&state.db, card_id);
 
     // Cancel all active dispatches for this card
     cancel_and_clear(state, card_id)?;
@@ -544,76 +751,19 @@ fn resume_from_pending_decision(
     // Clear pending_decision state
     {
         let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-        execute_intent_on_conn(
-            &conn,
-            &TransitionIntent::SetReviewStatus {
-                card_id: card_id.to_string(),
-                review_status: None,
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
-        execute_intent_on_conn(
-            &conn,
-            &TransitionIntent::SyncReviewState {
-                card_id: card_id.to_string(),
-                state: "idle".to_string(),
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
+        clear_manual_intervention_markers(&conn, card_id)?;
     }
 
     // Route based on last dispatch type
     match last_dispatch_type.as_deref() {
         // Rework was stuck → compute rework target from pipeline, create rework dispatch
         Some("rework") => {
-            let rework_target = {
-                let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-                let (repo_id, card_agent): (Option<String>, Option<String>) = conn
-                    .query_row(
-                        "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                        [card_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .unwrap_or((None, None));
-
-                // Find what status the card was in before pending_decision
-                let prior_status: String = conn
-                    .query_row(
-                        "SELECT from_status FROM kanban_audit_logs \
-                         WHERE card_id = ?1 AND to_status = 'pending_decision' \
-                         ORDER BY created_at DESC LIMIT 1",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or_else(|_| "review".to_string());
-
-                crate::pipeline::ensure_loaded();
-                let effective = crate::pipeline::resolve_for_card(
-                    &conn,
-                    repo_id.as_deref(),
-                    card_agent.as_deref(),
-                );
-                // Find rework target via review_rework gate, constrained by
-                // the status the card was in before pending_decision (matching
-                // review_verdict.rs:687-703 t.from == card_status_now pattern)
-                effective
-                    .transitions
-                    .iter()
-                    .find(|t| {
-                        t.from == prior_status
-                            && t.transition_type == crate::pipeline::TransitionType::Gated
-                            && t.gates.iter().any(|g| g == "review_rework")
-                    })
-                    .map(|t| t.to.clone())
-                    .unwrap_or_else(|| {
-                        effective
-                            .dispatchable_states()
-                            .first()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "in_progress".to_string())
-                    })
-            };
+            let rework_target = resolve_rework_resume_target(
+                &state.db,
+                card_id,
+                "review",
+                Some("pending_decision"),
+            )?;
 
             crate::kanban::transition_status_with_opts(
                 &state.db,
@@ -700,8 +850,8 @@ fn resume_from_pending_decision(
     }
 }
 
-/// blocked → transition to requested, create new implementation dispatch
-fn resume_from_blocked(
+/// Legacy blocked → transition to requested, create new implementation dispatch
+fn resume_from_blocked_legacy(
     state: &AppState,
     card_id: &str,
     agent_id: &str,
@@ -719,29 +869,7 @@ fn resume_from_blocked(
     // Clear blocked state
     {
         let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        conn.execute(
-            "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
-            [card_id],
-        )
-        .map_err(|e| format!("{e}"))?;
-
-        use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-        execute_intent_on_conn(
-            &conn,
-            &TransitionIntent::SetReviewStatus {
-                card_id: card_id.to_string(),
-                review_status: None,
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
-        execute_intent_on_conn(
-            &conn,
-            &TransitionIntent::SyncReviewState {
-                card_id: card_id.to_string(),
-                state: "idle".to_string(),
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
+        clear_manual_intervention_markers(&conn, card_id)?;
     }
 
     crate::kanban::transition_status_with_opts(
@@ -868,6 +996,18 @@ fn create_and_notify(
     Ok(dispatch)
 }
 
+fn get_last_terminal_dispatch_type(db: &crate::db::Db, card_id: &str) -> Option<String> {
+    let conn = db.lock().ok()?;
+    conn.query_row(
+        "SELECT dispatch_type FROM task_dispatches \
+         WHERE kanban_card_id = ?1 AND status IN ('completed', 'failed', 'cancelled') \
+         ORDER BY updated_at DESC LIMIT 1",
+        [card_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Get dispatch status by ID
 fn get_dispatch_status(db: &crate::db::Db, dispatch_id: &Option<String>) -> Option<String> {
     let did = dispatch_id.as_ref()?;
@@ -878,6 +1018,95 @@ fn get_dispatch_status(db: &crate::db::Db, dispatch_id: &Option<String>) -> Opti
         |row| row.get(0),
     )
     .ok()
+}
+
+fn resolve_rework_resume_target(
+    db: &crate::db::Db,
+    card_id: &str,
+    fallback_status: &str,
+    legacy_to_status: Option<&str>,
+) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| format!("{e}"))?;
+    let (repo_id, card_agent): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None));
+
+    let prior_status = legacy_to_status
+        .and_then(|to_status| {
+            conn.query_row(
+                "SELECT from_status FROM kanban_audit_logs \
+                 WHERE card_id = ?1 AND to_status = ?2 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                rusqlite::params![card_id, to_status],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .filter(|status| !status.trim().is_empty())
+        .unwrap_or_else(|| fallback_status.to_string());
+
+    crate::pipeline::ensure_loaded();
+    let effective =
+        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), card_agent.as_deref());
+    Ok(effective
+        .transitions
+        .iter()
+        .find(|t| {
+            t.from == prior_status
+                && t.transition_type == crate::pipeline::TransitionType::Gated
+                && t.gates.iter().any(|g| g == "review_rework")
+        })
+        .map(|t| t.to.clone())
+        .unwrap_or_else(|| {
+            effective
+                .dispatchable_states()
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "in_progress".to_string())
+        }))
+}
+
+fn clear_manual_intervention_markers(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
+        [card_id],
+    )
+    .map_err(|e| format!("{e}"))?;
+    sync_review_state(conn, card_id, None, "idle")
+}
+
+fn sync_review_state(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    review_status: Option<&str>,
+    state: &str,
+) -> Result<(), String> {
+    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+
+    execute_intent_on_conn(
+        conn,
+        &TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: review_status.map(ToString::to_string),
+        },
+    )
+    .map_err(|e| format!("{e}"))?;
+    execute_intent_on_conn(
+        conn,
+        &TransitionIntent::SyncReviewState {
+            card_id: card_id.to_string(),
+            state: state.to_string(),
+        },
+    )
+    .map_err(|e| format!("{e}"))?;
+    Ok(())
 }
 
 /// Write audit log entry for resume action

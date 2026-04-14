@@ -175,6 +175,7 @@ pub struct AutoQueueStatusResponse {
     pub entries: Vec<AutoQueueStatusEntryView>,
     pub agents: BTreeMap<String, AutoQueueStatusCounts>,
     pub thread_groups: BTreeMap<String, AutoQueueThreadGroupView>,
+    pub phase_gates: Vec<PhaseGateView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +193,18 @@ pub struct AutoQueueRunView {
     pub unified_thread_id: Option<String>,
     pub max_concurrent_threads: i64,
     pub thread_group_count: i64,
+    pub deploy_phases: Vec<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PhaseGateView {
+    pub id: i64,
+    pub phase: i64,
+    pub status: String,
+    pub dispatch_id: Option<String>,
+    pub failure_reason: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -532,6 +545,11 @@ impl From<GenerateCandidateRecord> for GenerateCandidate {
 
 impl From<AutoQueueRunRecord> for AutoQueueRunView {
     fn from(record: AutoQueueRunRecord) -> Self {
+        let deploy_phases = record
+            .deploy_phases
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
+            .unwrap_or_default();
         Self {
             id: record.id,
             repo: record.repo,
@@ -546,6 +564,7 @@ impl From<AutoQueueRunRecord> for AutoQueueRunView {
             unified_thread_id: None,
             max_concurrent_threads: record.max_concurrent_threads,
             thread_group_count: record.thread_group_count,
+            deploy_phases,
         }
     }
 }
@@ -637,12 +656,40 @@ fn build_status_response(
         };
     }
 
+    let phase_gates = query_phase_gates(conn, &run.id);
+
     Ok(AutoQueueStatusResponse {
         run: Some(AutoQueueRunView::from(run)),
         entries,
         agents,
         thread_groups,
+        phase_gates,
     })
+}
+
+fn query_phase_gates(conn: &rusqlite::Connection, run_id: &str) -> Vec<PhaseGateView> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, phase, status, dispatch_id, failure_reason, created_at, updated_at
+         FROM auto_queue_phase_gates
+         WHERE run_id = ?1
+         ORDER BY phase ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([run_id], |row| {
+        Ok(PhaseGateView {
+            id: row.get(0)?,
+            phase: row.get(1)?,
+            status: row.get(2)?,
+            dispatch_id: row.get(3)?,
+            failure_reason: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 fn build_entry_view(

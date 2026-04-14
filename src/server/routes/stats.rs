@@ -286,11 +286,27 @@ pub async fn get_stats(
             .unwrap_or(0);
 
         let blocked: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'blocked'",
-                [],
-                |r| r.get(0),
-            )
+            .prepare("SELECT review_status, blocked_reason FROM kanban_cards")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .ok()
+                .map(|rows| {
+                    rows.filter_map(|row| row.ok())
+                        .filter(|(review_status, blocked_reason)| {
+                            crate::manual_intervention::requires_manual_intervention(
+                                review_status.as_deref(),
+                                blocked_reason.as_deref(),
+                            )
+                        })
+                        .count() as i64
+                })
+            })
             .unwrap_or(0);
 
         let failed: i64 = conn
@@ -309,7 +325,6 @@ pub async fn get_stats(
             "requested",
             "in_progress",
             "review",
-            "blocked",
             "failed",
             "done",
             "cancelled",

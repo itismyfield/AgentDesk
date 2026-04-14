@@ -2,7 +2,96 @@ use std::sync::Arc;
 
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
+use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use serenity::all::{ChannelId, MessageId};
+
+const SESSION_RETRY_CONTEXT_LIMIT: usize = 10;
+const SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT: usize = 300;
+
+fn session_retry_context_key(channel_id: u64) -> String {
+    format!("session_retry_context:{channel_id}")
+}
+
+pub(in crate::services::discord) fn build_session_retry_context_from_history(
+    history: &[HistoryItem],
+) -> Option<String> {
+    let lines = history
+        .iter()
+        .filter_map(|item| {
+            let label = match item.item_type {
+                HistoryType::User => "User",
+                HistoryType::Assistant | HistoryType::Error => "Assistant",
+                HistoryType::System | HistoryType::ToolUse | HistoryType::ToolResult => {
+                    return None;
+                }
+            };
+            let content = item.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+            let excerpt = content
+                .chars()
+                .take(SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT)
+                .collect::<String>();
+            Some(format!("{label}: {excerpt}"))
+        })
+        .rev()
+        .take(SESSION_RETRY_CONTEXT_LIMIT)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+pub(in crate::services::discord) fn store_session_retry_context(
+    db: Option<&crate::db::Db>,
+    channel_id: u64,
+    history: &str,
+) -> Result<(), String> {
+    let history = history.trim();
+    if history.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(db) = db {
+        let conn = db.lock().map_err(|err| format!("db lock failed: {err}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![session_retry_context_key(channel_id), history],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    } else {
+        super::super::internal_api::set_kv_value(&session_retry_context_key(channel_id), history)
+    }
+}
+
+pub(in crate::services::discord) fn take_session_retry_context(
+    db: Option<&crate::db::Db>,
+    channel_id: u64,
+) -> Option<String> {
+    let db = db?;
+    let key = session_retry_context_key(channel_id);
+    let conn = db.lock().ok()?;
+    let history = conn
+        .query_row("SELECT value FROM kv_meta WHERE key = ?1", [&key], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()?;
+    let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&key]);
+    let history = history.trim().to_string();
+    if history.is_empty() {
+        None
+    } else {
+        Some(history)
+    }
+}
 
 /// Auto-retry a failed resume by fetching recent Discord history,
 /// storing it in kv_meta for the router to inject into the LLM prompt,
@@ -65,10 +154,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some(ref hist) = history {
-        let _ = super::super::internal_api::set_kv_value(
-            &format!("session_retry_context:{}", channel_id),
-            hist,
-        );
+        let _ = store_session_retry_context(shared.db.as_ref(), channel_id.get(), hist);
     }
 
     // Discord message: short notice only — history stays LLM-side

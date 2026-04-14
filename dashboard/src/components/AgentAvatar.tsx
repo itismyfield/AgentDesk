@@ -82,7 +82,9 @@ export default function AgentAvatar({
           src={`/sprites/${spriteNum}-D-1.png`}
           alt={agent?.name ?? ""}
           className={`w-full h-full ${imageFit === "contain" ? "object-contain" : "object-cover"}`}
-          style={{ imageRendering: "pixelated", objectPosition: imagePosition }}
+          draggable={false}
+          onDragStart={(e) => e.preventDefault()}
+          style={{ imageRendering: "pixelated", objectPosition: imagePosition, userSelect: "none" }}
         />
       </div>
     );

@@ -11,6 +11,7 @@ mod github;
 pub(crate) mod kanban;
 mod launch;
 mod logging;
+pub(crate) mod manual_intervention;
 pub(crate) mod pipeline;
 pub(crate) mod receipt;
 pub(crate) mod reconcile;

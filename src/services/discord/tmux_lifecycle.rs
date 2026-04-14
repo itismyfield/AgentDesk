@@ -78,6 +78,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
          JOIN task_dispatches td
            ON td.id = s.active_dispatch_id
          WHERE s.active_dispatch_id IS NOT NULL
+           AND s.status != 'disconnected'
            AND (
              s.session_key = ?1
              OR s.session_key = ?2
@@ -92,8 +93,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
            CASE s.status
              WHEN 'working' THEN 0
              WHEN 'idle' THEN 1
-             WHEN 'disconnected' THEN 2
-             ELSE 3
+             ELSE 2
            END,
            datetime(COALESCE(s.last_heartbeat, s.created_at)) DESC,
            s.rowid DESC
