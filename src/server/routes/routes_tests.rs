@@ -7255,6 +7255,54 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
 
     {
         let conn = db.lock().unwrap();
+        let first_slot_session: (String, Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, COALESCE(tokens, 0), claude_session_id
+                 FROM sessions WHERE thread_channel_id = '222000000000000001'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let second_slot_session: (String, Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, COALESCE(tokens, 0), claude_session_id
+                 FROM sessions WHERE thread_channel_id = '222000000000000002'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            first_slot_session.0, "idle",
+            "slot session status must be idle after release"
+        );
+        assert_eq!(
+            first_slot_session.1, None,
+            "active_dispatch_id must be cleared on slot release"
+        );
+        assert_eq!(
+            first_slot_session.2, 0,
+            "tokens must be cleared so the slot starts from a fresh session"
+        );
+        assert!(
+            first_slot_session.3.is_none(),
+            "claude_session_id must be cleared on slot release"
+        );
+        assert_eq!(
+            second_slot_session.0, "idle",
+            "a reused sibling slot must also be reset before dispatch"
+        );
+        assert_eq!(
+            second_slot_session.1, None,
+            "a reused sibling slot must clear its prior dispatch context"
+        );
+        assert_eq!(
+            second_slot_session.2, 0,
+            "a reused sibling slot must clear prior token state"
+        );
+        assert!(
+            second_slot_session.3.is_none(),
+            "a reused sibling slot must clear claude_session_id"
+        );
         let first_slot: Option<i64> = conn
             .query_row(
                 "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-slot-0'",
@@ -7736,6 +7784,19 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         guard_dispatch_count, 0,
         "no dispatch row should be created for the blocked same-group follow-up"
     );
+    let sibling_group_dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE kanban_card_id = 'card-same-group-guard-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        sibling_group_dispatch_count, 1,
+        "a sibling group should create its own dispatch while the same-group follow-up stays blocked"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7866,6 +7927,118 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         Some(3),
         "newly expanded slot must be assigned when parallel dispatch fills all slots"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_keeps_single_slot_agent_single_dispatched_group() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-single-slot");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-single-slot-0",
+        1960,
+        "ready",
+        "agent-single-slot",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-single-slot-1",
+        1961,
+        "ready",
+        "agent-single-slot",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, unified_thread,
+                max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-single-slot', 'test-repo', 'agent-single-slot', 'active', 1, 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-single-slot-0', 'run-single-slot', 'card-single-slot-0', 'agent-single-slot', 'pending', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-single-slot-1', 'run-single-slot', 'card-single-slot-1', 'agent-single-slot', 'pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-single-slot",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 1,
+        "a single-slot run must still dispatch only one same-agent group"
+    );
+    assert_eq!(json["active_groups"], 1);
+
+    let conn = db.lock().unwrap();
+    let dispatched_entries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries
+             WHERE run_id = 'run-single-slot' AND status = 'dispatched'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatched_entries, 1);
+
+    let pending_slot: Option<i64> = conn
+        .query_row(
+            "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-single-slot-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending_slot, None,
+        "the second group must stay unassigned until the lone slot becomes free"
+    );
+
+    let slot_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_slots WHERE agent_id = 'agent-single-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(slot_count, 1);
 }
 
 // NOTE: auto_queue_activate_requested_card_not_blocked_by_own_status and
