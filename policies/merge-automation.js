@@ -32,7 +32,6 @@ var CODEX_REVIEWERS = {
 };
 var CODEX_REVIEW_TTL_SECONDS = 14 * 24 * 60 * 60;
 var CODEX_NOTIFICATION_TTL_SECONDS = 6 * 60 * 60;
-var CODEX_MAX_CONTEXT_COMMENTS = 5;
 
 var mergeAutomation = {
   name: "merge-automation",
@@ -993,15 +992,6 @@ function mergeGuardDedupKey(repo, prNumber, reviewId) {
     sanitizeKvKeyPart(reviewId);
 }
 
-function hasActiveReworkDispatch(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(*) AS count FROM task_dispatches " +
-    "WHERE kanban_card_id = ? AND dispatch_type = 'rework' AND status IN ('pending', 'dispatched')",
-    [cardId]
-  );
-  return rows.length > 0 && Number(rows[0].count || 0) > 0;
-}
-
 function findCardForPr(repo, pr) {
   var tracking = loadTrackedPrForRepoPr(repo, pr.number);
   return tracking ? loadCardContext(tracking.card_id) : null;
@@ -1042,7 +1032,7 @@ function resolveCodexNotificationTarget(card) {
   return null;
 }
 
-function buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded) {
+function buildCodexReviewMessage(pr, snapshot, followUpIssue, mergeGuarded) {
   var lines = [];
   if (snapshot.hasBlocking) {
     lines.push("⚠️ PR #" + pr.number + " Codex 리뷰: unresolved P1/P2 " + snapshot.blockingComments.length + "건");
@@ -1056,8 +1046,12 @@ function buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded) {
     if (snapshot.blockingComments.length > 3) {
       lines.push("- 외 " + (snapshot.blockingComments.length - 3) + "건");
     }
-    if (reworkCreated) {
-      lines.push("rework dispatch를 생성했습니다.");
+    if (followUpIssue) {
+      var ref = followUpIssue.number ? "#" + followUpIssue.number : "생성 완료";
+      lines.push("follow-up 이슈를 생성했습니다: " + ref);
+      if (followUpIssue.url) {
+        lines.push(followUpIssue.url);
+      }
     } else if (mergeGuarded) {
       lines.push("merge를 차단했습니다.");
     }
@@ -1068,7 +1062,7 @@ function buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded) {
   return lines.join("\n");
 }
 
-function notifyCodexReview(card, pr, snapshot, kind, reworkCreated, mergeGuarded) {
+function notifyCodexReview(card, pr, snapshot, kind, followUpIssue, mergeGuarded) {
   var target = resolveCodexNotificationTarget(card);
   if (!target) return;
 
@@ -1077,79 +1071,131 @@ function notifyCodexReview(card, pr, snapshot, kind, reworkCreated, mergeGuarded
 
   agentdesk.message.queue(
     target,
-    buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded),
+    buildCodexReviewMessage(pr, snapshot, followUpIssue, mergeGuarded),
     "announce",
     "merge-automation"
   );
   agentdesk.kv.set(dedupKey, "true", CODEX_NOTIFICATION_TTL_SECONDS);
 }
 
-function buildCodexReworkTitle(card, pr, snapshot) {
+function ensureGitHubLabel(repo, name, color, description) {
+  if (!repo || !name) return false;
+  var output = agentdesk.exec("gh", [
+    "label", "create", name,
+    "--repo", repo,
+    "--force",
+    "--color", color || "B60205",
+    "--description", description || name
+  ]);
+  if (output && output.indexOf("ERROR") === 0) {
+    agentdesk.log.warn("[merge] Failed to ensure label '" + name + "' in " + repo + ": " + output);
+    return false;
+  }
+  return true;
+}
+
+function normalizeGitHubUrlOutput(text) {
+  var lines = String(text || "").split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var trimmed = lines[i].trim();
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  }
+  var compact = compactWhitespace(text);
+  return /^https?:\/\//i.test(compact) ? compact : "";
+}
+
+function extractIssueNumberFromUrl(url) {
+  var match = String(url || "").match(/\/issues\/(\d+)(?:[/?#]|$)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+function buildCodexFollowUpTitle(card, pr) {
+  var issueNum = card.github_issue_number || "?";
+  return "[Codex Follow-up] PR #" + pr.number + " #" + issueNum + " " + card.title;
+}
+
+function buildCodexFollowUpBody(card, pr, snapshot) {
   var issueNum = card.github_issue_number || "?";
   var lines = [
-    "[Codex Rework] PR #" + pr.number + " #" + issueNum + " " + card.title,
+    "Codex review found unresolved P1/P2 inline comments on PR #" + pr.number + ".",
     "",
-    "Codex review found unresolved P1/P2 inline comments."
+    "- Source card: " + card.id,
+    "- Original issue: " + (card.github_issue_url || ("#" + issueNum)),
+    "- Original PR: https://github.com/" + pr.repo + "/pull/" + pr.number
   ];
 
+  if (card.assigned_agent_id) {
+    lines.push("- Original agent: " + card.assigned_agent_id);
+  }
+
   if (snapshot.blockingFiles.length > 0) {
-    lines.push("Files: " + snapshot.blockingFiles.join(", "));
+    lines.push("- Affected files: " + snapshot.blockingFiles.join(", "));
   }
 
-  lines.push("Comments:");
-  for (var i = 0; i < snapshot.blockingComments.length && i < CODEX_MAX_CONTEXT_COMMENTS; i++) {
+  lines.push("");
+  lines.push("Unresolved comments:");
+  for (var i = 0; i < snapshot.blockingComments.length; i++) {
     var comment = snapshot.blockingComments[i];
-    lines.push("- " + comment.path + ":" + comment.line + " — " + comment.body);
-  }
-  if (snapshot.blockingComments.length > CODEX_MAX_CONTEXT_COMMENTS) {
-    lines.push("- 외 " + (snapshot.blockingComments.length - CODEX_MAX_CONTEXT_COMMENTS) + "건");
+    lines.push((i + 1) + ". " + comment.path + ":" + comment.line);
+    lines.push("   - Comment: " + comment.body);
+    if (comment.url) {
+      lines.push("   - URL: " + comment.url);
+    }
   }
 
+  if (snapshot.latestBody) {
+    lines.push("");
+    lines.push("Latest Codex review summary:");
+    lines.push(snapshot.latestBody);
+  }
+
+  lines.push("");
+  lines.push("Handle this as a follow-up backlog issue. Do not interrupt the agent's current session.");
   return lines.join("\n");
 }
 
 function processCodexBlockingReview(card, pr, snapshot) {
-  if (!card || !card.assigned_agent_id || !snapshot.hasBlocking) return;
+  if (!card || !snapshot.hasBlocking) return;
 
   var dedupKey = codexReviewDedupKey(pr.repo, pr.number, snapshot.triggerReviewId);
   if (agentdesk.kv.get(dedupKey)) return;
 
-  var targets = getReviewTargets(card.id);
   var latestCard = loadCardContext(card.id);
   if (!latestCard) return;
 
-  if (agentdesk.pipeline.isTerminal(latestCard.status, targets.cfg)) {
-    agentdesk.kanban.reopen(card.id, targets.reviewReworkTarget);
-    latestCard = loadCardContext(card.id) || latestCard;
+  var agentLabel = latestCard.assigned_agent_id ? "agent:" + latestCard.assigned_agent_id : null;
+  if (agentLabel) {
+    ensureGitHubLabel(pr.repo, agentLabel, "1D76DB", "Auto-assign follow-up work to " + latestCard.assigned_agent_id);
   }
 
-  var created = false;
-  if (!hasActiveReworkDispatch(card.id)) {
-    try {
-      agentdesk.dispatch.create(
-        card.id,
-        latestCard.assigned_agent_id,
-        "rework",
-        buildCodexReworkTitle(latestCard, pr, snapshot)
-      );
-      created = true;
-    } catch (e) {
-      agentdesk.log.warn("[merge] Failed to create Codex rework dispatch for PR #" + pr.number + ": " + e);
-    }
+  var args = [
+    "issue", "create",
+    "--repo", pr.repo,
+    "--title", buildCodexFollowUpTitle(latestCard, pr),
+    "--body", buildCodexFollowUpBody(latestCard, pr, snapshot)
+  ];
+  if (agentLabel) {
+    args.push("--label", agentLabel);
   }
 
-  if (created || hasActiveReworkDispatch(card.id)) {
-    agentdesk.reviewState.sync(card.id, "rework_pending", { last_verdict: "rework" });
-    agentdesk.kanban.setReviewStatus(card.id, "rework_pending", { exclude_status: targets.terminalState });
-
-    var currentCard = loadCardContext(card.id);
-    if (currentCard && currentCard.status !== targets.reviewReworkTarget) {
-      agentdesk.kanban.setStatus(card.id, targets.reviewReworkTarget);
-    }
-
-    agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
-    notifyCodexReview(latestCard, pr, snapshot, "blocking", created, false);
+  var created = agentdesk.exec("gh", args);
+  if (created && created.indexOf("ERROR") === 0) {
+    agentdesk.log.warn("[merge] Failed to create Codex follow-up issue for PR #" + pr.number + ": " + created);
+    return;
   }
+
+  var followUpUrl = normalizeGitHubUrlOutput(created);
+  var followUpIssue = {
+    url: followUpUrl,
+    number: extractIssueNumberFromUrl(followUpUrl) || extractIssueNumberFromText(created)
+  };
+
+  agentdesk.log.info(
+    "[merge] Created Codex follow-up issue for PR #" + pr.number +
+    (followUpIssue.url ? ": " + followUpIssue.url : "")
+  );
+  agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
+  notifyCodexReview(latestCard, pr, snapshot, "blocking", followUpIssue, false);
 }
 
 function processCodexPassReview(card, pr, snapshot) {

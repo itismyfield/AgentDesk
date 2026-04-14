@@ -27,10 +27,14 @@ var reviewAutomation = {
   onReviewEnter: function(payload) {
     var card = agentdesk.cards.get(payload.card_id);
     if (!card) return;
-    var entry = agentdesk.review.entryContext(card.id);
-    if (!entry) return;
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var terminalState = agentdesk.pipeline.terminalState(cfg);
+    if (agentdesk.pipeline.isTerminal(card.status, cfg)) {
+      agentdesk.log.info("[review] Card " + card.id + " already terminal — skipping OnReviewEnter");
+      return;
+    }
+    var entry = agentdesk.review.entryContext(card.id);
+    if (!entry) return;
 
     // #128: If card entered review with awaiting_dod (DoD incomplete),
     // skip review dispatch — timeouts.js [D] will escalate to dilemma_pending after 15 min

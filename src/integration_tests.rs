@@ -3427,6 +3427,33 @@ mod tests {
     }
 
     #[test]
+    fn scenario_615_on_review_enter_skips_terminal_card() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-615-terminal", "done");
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-615-terminal",
+            "card-615-terminal",
+            "implementation",
+        );
+
+        kanban::fire_enter_hooks(&db, &engine, "card-615-terminal", "review");
+
+        assert_eq!(get_card_status(&db, "card-615-terminal"), "done");
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-615-terminal", "review"),
+            0,
+            "#615: terminal card must not create a stale review dispatch"
+        );
+        assert!(
+            get_review_state(&db, "card-615-terminal").is_none(),
+            "#615: terminal card must not recreate canonical review state"
+        );
+    }
+
+    #[test]
     fn scenario_335_on_review_enter_reuses_round_without_new_completed_work() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -5581,8 +5608,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
-        let (repo, _env) = setup_test_repo_with_mock_gh(&[
+    fn scenario_208_on_tick_creates_codex_follow_up_issue_and_dedups_review() {
+        let (repo, gh) = setup_test_repo_with_mock_gh(&[
             MockGhReply {
                 key: "pr:list",
                 contains: Some("--state merged"),
@@ -5602,6 +5629,16 @@ mod tests {
                 key: "api:graphql",
                 contains: None,
                 stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-1\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-1\",\"body\":\"P1 force-transition leaves dispatch alive\",\"path\":\"src/server/routes/github.rs\",\"line\":77,\"url\":\"https://example.com/comment-1\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9001\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
+            },
+            MockGhReply {
+                key: "label:create",
+                contains: Some("agent:agent-1"),
+                stdout: "label ok",
+            },
+            MockGhReply {
+                key: "issue:create",
+                contains: Some("--label agent:agent-1"),
+                stdout: "https://github.com/test/repo/issues/400",
             },
         ]);
         run_git(
@@ -5627,12 +5664,9 @@ mod tests {
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(get_card_status(&db, "card-208"), "in_progress");
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
-        let title = latest_dispatch_title(&db, "card-208", "rework").unwrap();
-        assert!(title.contains("src/server/routes/github.rs:77"));
-        assert!(title.contains("P1 force-transition leaves dispatch alive"));
-        assert_eq!(
+        assert_eq!(get_card_status(&db, "card-208"), "done");
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
+        assert_ne!(
             review_state_value(&db, "card-208").as_deref(),
             Some("rework_pending")
         );
@@ -5641,15 +5675,28 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "thread-208");
         assert!(messages[0].1.contains("PR #323"));
-        assert!(messages[0].1.contains("rework dispatch"));
+        assert!(messages[0].1.contains("follow-up 이슈를 생성했습니다"));
+        assert!(messages[0].1.contains("#400"));
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
         assert_eq!(message_outbox_rows(&db).len(), 1);
+
+        let log = gh_log(&gh._gh);
+        assert_eq!(
+            log.matches("label create agent:agent-1").count(),
+            1,
+            "Codex follow-up flow must ensure the agent label only once"
+        );
+        assert_eq!(
+            log.matches("issue create --repo test/repo").count(),
+            1,
+            "Codex follow-up flow must create exactly one follow-up issue per review"
+        );
     }
 
     #[cfg(unix)]
