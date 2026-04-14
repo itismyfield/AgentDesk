@@ -110,13 +110,15 @@ body {
 }
 
 @media (max-width: 639px) {
-  body { overflow: auto; }
+  body { overflow-x: hidden; overflow-y: auto; }
 }
 
 #root {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+  max-width: 100vw;
+  overflow-x: hidden;
 }
 
 /* Scrollbar */
@@ -135,6 +137,9 @@ body {
   border: 1px solid var(--th-border);
   border-radius: 1rem;
   background: var(--th-surface);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .dash-card-accent {

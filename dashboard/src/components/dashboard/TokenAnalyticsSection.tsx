@@ -247,7 +247,7 @@ export default function TokenAnalyticsSection({
   );
 
   return (
-    <section className="space-y-4">
+    <section className="min-w-0 max-w-full space-y-4 overflow-hidden">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
@@ -379,9 +379,9 @@ export default function TokenAnalyticsSection({
               {t({ ko: "토큰 분석을 불러오는 중입니다", en: "Loading token analytics", ja: "トークン分析を読み込み中", zh: "正在加载 Token 分析" })}
             </div>
           ) : (
-            <div className="mt-4 overflow-x-hidden">
-              <div className="min-w-0">
-                <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="mt-4 overflow-hidden">
+              <div className="min-w-0 overflow-x-auto">
+                <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)", minWidth: "min-content" }}>
                   {weekLabels.map((item) => (
                     <span key={item.week} className="truncate">
                       {item.label}
@@ -389,9 +389,9 @@ export default function TokenAnalyticsSection({
                   ))}
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex gap-3" style={{ minWidth: "min-content" }}>
                   <div
-                    className="grid grid-rows-7 gap-1 pt-1 text-[10px]"
+                    className="grid shrink-0 grid-rows-7 gap-1 pt-1 text-[10px]"
                     style={{ color: "var(--th-text-muted)" }}
                   >
                     {["M", "", "W", "", "F", "", "S"].map((label, index) => (
@@ -401,7 +401,7 @@ export default function TokenAnalyticsSection({
                     ))}
                   </div>
 
-                  <div className="grid grid-flow-col grid-rows-7 gap-1">
+                  <div className="grid min-w-0 grid-flow-col grid-rows-7 gap-1">
                     {data.heatmap.map((cell) => (
                       <div
                         key={cell.date}
@@ -547,9 +547,9 @@ function DailyTrendCard({
           {t({ ko: "표시할 토큰 추이가 없습니다", en: "No token trend to show", ja: "表示する推移がありません", zh: "暂无可显示的趋势" })}
         </div>
       ) : (
-        <div className="mt-4 overflow-x-hidden">
-          <div className="min-w-0">
-            <div className="flex h-44 items-end gap-px sm:gap-1.5">
+        <div className="mt-4 overflow-hidden">
+          <div className="min-w-0 overflow-x-auto">
+            <div className="flex h-44 items-end gap-px sm:gap-1.5" style={{ minWidth: "min-content" }}>
               {daily.map((day, index) => {
                 const segments = legend
                   .map((item) => ({
@@ -569,7 +569,7 @@ function DailyTrendCard({
                 return (
                   <div
                     key={day.date}
-                    className="group relative flex w-2 shrink-0 flex-col items-center gap-1 outline-none sm:min-w-0 sm:flex-1 sm:gap-2"
+                    className="group relative flex w-2 shrink-0 flex-col items-center gap-1 outline-none sm:min-w-0 sm:flex-1 sm:shrink sm:gap-2"
                     tabIndex={0}
                     role="img"
                     aria-label={[

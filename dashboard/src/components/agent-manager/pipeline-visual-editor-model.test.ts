@@ -20,8 +20,6 @@ function makePipeline(): PipelineConfigFull {
       { id: "requested", label: "Requested" },
       { id: "in_progress", label: "In Progress" },
       { id: "review", label: "Review" },
-      { id: "pending_decision", label: "Pending Decision" },
-      { id: "blocked", label: "Blocked" },
       { id: "done", label: "Done", terminal: true },
     ],
     transitions: [
@@ -50,7 +48,7 @@ function makePipeline(): PipelineConfigFull {
       review: {
         duration: "30m",
         clock: "review_entered_at",
-        on_exhaust: "pending_decision",
+        on_exhaust: "review",
       },
     },
     phase_gate: {
