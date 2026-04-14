@@ -16,7 +16,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
-use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned};
+use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned_on_separate_conn};
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -168,9 +168,18 @@ pub(super) fn persist_turn_analytics_row(
         duration_ms: Some(duration_ms),
         token_usage,
     };
-    if let Err(error) = upsert_turn_owned(db, &entry) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
+    let db = db.clone();
+    let persist = move || {
+        if let Err(error) = upsert_turn_owned_on_separate_conn(&db, &entry) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
+        }
+    };
+
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let _ = runtime.spawn_blocking(persist);
+    } else {
+        persist();
     }
 }
 
