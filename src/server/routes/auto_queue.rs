@@ -188,20 +188,91 @@ fn load_live_dispatch_ids_for_runs(
         return Ok(Vec::new());
     }
 
+    let values = std::iter::repeat("(?)")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "WITH target_runs(id) AS (VALUES {values})
+         SELECT td.id
+         FROM task_dispatches td
+         WHERE td.status IN ('pending', 'dispatched')
+           AND (
+               EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   JOIN target_runs tr ON tr.id = e.run_id
+                   WHERE e.dispatch_id = td.id
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   JOIN target_runs tr ON tr.id = pg.run_id
+                   WHERE pg.dispatch_id = td.id
+               )
+               OR json_extract(COALESCE(td.context, '{{}}'), '$.phase_gate.run_id') IN (
+                   SELECT id FROM target_runs
+               )
+           )"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn delete_phase_gate_rows_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> usize {
+    if run_ids.is_empty() {
+        return 0;
+    }
+
     let placeholders = std::iter::repeat("?")
         .take(run_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT DISTINCT td.id
-         FROM task_dispatches td
-         JOIN auto_queue_entries e ON e.dispatch_id = td.id
-         WHERE e.run_id IN ({placeholders})
-           AND td.status IN ('pending', 'dispatched')"
+        "DELETE FROM auto_queue_phase_gates
+         WHERE run_id IN ({placeholders})"
     );
-    let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()
+    conn.execute(&sql, rusqlite::params_from_iter(run_ids.iter()))
+        .unwrap_or(0)
+}
+
+fn count_live_dispatches_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> i64 {
+    if run_ids.is_empty() {
+        return 0;
+    }
+
+    let values = std::iter::repeat("(?)")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "WITH target_runs(id) AS (VALUES {values})
+         SELECT COUNT(*)
+         FROM task_dispatches td
+         WHERE td.status IN ('pending', 'dispatched')
+           AND (
+               EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   JOIN target_runs tr ON tr.id = e.run_id
+                   WHERE e.dispatch_id = td.id
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   JOIN target_runs tr ON tr.id = pg.run_id
+                   WHERE pg.dispatch_id = td.id
+               )
+               OR json_extract(COALESCE(td.context, '{{}}'), '$.phase_gate.run_id') IN (
+                   SELECT id FROM target_runs
+               )
+           )"
+    );
+    conn.query_row(&sql, rusqlite::params_from_iter(run_ids.iter()), |row| {
+        row.get(0)
+    })
+    .unwrap_or(0)
 }
 
 fn cancel_live_dispatches_for_runs(
@@ -256,6 +327,7 @@ pub(crate) fn cancel_with_conn(
     let target_run_ids = load_run_ids_with_status(conn, &["active", "paused"]).unwrap_or_default();
     let cancelled_dispatches =
         cancel_live_dispatches_for_runs(conn, &target_run_ids, "auto_queue_cancel");
+    let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, &target_run_ids);
     let (released_slots, cleared_slot_sessions) =
         clear_and_release_slots_for_runs(health_registry, conn, &target_run_ids);
     let cancelled_runs = conn
@@ -305,12 +377,22 @@ pub(crate) fn cancel_with_conn(
             ),
         }
     }
+    let remaining_live_dispatches = count_live_dispatches_for_runs(conn, &target_run_ids);
+    if remaining_live_dispatches > 0 {
+        tracing::warn!(
+            "[auto-queue] cancel left {} non-terminal dispatches for runs {:?}",
+            remaining_live_dispatches,
+            target_run_ids
+        );
+    }
 
     json!({
         "ok": true,
         "cancelled_entries": cancelled_entries,
         "cancelled_runs": cancelled_runs,
         "cancelled_dispatches": cancelled_dispatches,
+        "deleted_phase_gates": deleted_phase_gates,
+        "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": released_slots,
         "cleared_slot_sessions": cleared_slot_sessions,
     })

@@ -9860,6 +9860,8 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(json["cancelled_runs"], 1);
     assert_eq!(json["cancelled_entries"], 2);
     assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["deleted_phase_gates"], 0);
+    assert_eq!(json["remaining_live_dispatches"], 0);
     assert_eq!(json["released_slots"], 1);
 
     let conn = db.lock().unwrap();
@@ -9929,6 +9931,192 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_rows() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-phase-gate");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-live",
+        4606,
+        "in_progress",
+        "agent-cancel-phase-gate",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-pending",
+        4607,
+        "ready",
+        "agent-cancel-phase-gate",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-phase-gate-anchor",
+        4608,
+        "reviewing",
+        "agent-cancel-phase-gate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-cancel-phase-gate', 'test-repo', 'agent-cancel-phase-gate', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-cancel-phase-gate', 0, 'run-cancel-phase-gate', 0, ?1
+            )",
+            [json!({"111": "222000000000004608"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-phase-live', 'card-cancel-phase-gate-live', 'agent-cancel-phase-gate',
+                'implementation', 'dispatched', 'Cancel run dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-phase-gate', 'card-cancel-phase-gate-anchor', 'agent-cancel-phase-gate',
+                'review', 'dispatched', 'Cancel phase gate', ?1, datetime('now'), datetime('now')
+            )",
+            [json!({
+                "slot_index": 0,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-cancel-phase-gate",
+                    "batch_phase": 1,
+                    "next_phase": 2,
+                    "anchor_card_id": "card-cancel-phase-gate-anchor"
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-cancel-phase-live', 'run-cancel-phase-gate', 'card-cancel-phase-gate-live',
+                'agent-cancel-phase-gate', 'dispatched', 'dispatch-cancel-phase-live', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-phase-pending', 'run-cancel-phase-gate', 'card-cancel-phase-gate-pending',
+                'agent-cancel-phase-gate', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict, next_phase, final_phase, anchor_card_id, created_at, updated_at
+            ) VALUES (
+                'run-cancel-phase-gate', 1, 'pending', 'dispatch-cancel-phase-gate',
+                'phase_gate_passed', 2, 0, 'card-cancel-phase-gate-anchor', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_dispatches"], 2);
+    assert_eq!(json["deleted_phase_gates"], 1);
+    assert_eq!(json["remaining_live_dispatches"], 0);
+    assert_eq!(json["released_slots"], 1);
+
+    let conn = db.lock().unwrap();
+    let statuses: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT id, status
+             FROM task_dispatches
+             WHERE id IN ('dispatch-cancel-phase-live', 'dispatch-cancel-phase-gate')
+             ORDER BY id ASC",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                "dispatch-cancel-phase-gate".to_string(),
+                "cancelled".to_string(),
+            ),
+            (
+                "dispatch-cancel-phase-live".to_string(),
+                "cancelled".to_string(),
+            ),
+        ]
+    );
+
+    let phase_gate_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = 'run-cancel-phase-gate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phase_gate_rows, 0);
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-cancel-phase-gate' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot, (None, None));
+    assert!(
+        !crate::db::auto_queue::slot_has_active_dispatch(&conn, "agent-cancel-phase-gate", 0,),
+        "cancelled phase-gate dispatches must not keep the slot blocked"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
