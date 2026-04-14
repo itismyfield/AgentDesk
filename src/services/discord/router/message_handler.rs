@@ -115,7 +115,6 @@ fn take_session_retry_context(channel_id: ChannelId) -> Option<String> {
         .flatten()
         .and_then(|raw| format_session_retry_context(&raw))
 }
-
 async fn send_restore_notification(
     shared: &Arc<SharedData>,
     fallback_http: &Arc<serenity::Http>,

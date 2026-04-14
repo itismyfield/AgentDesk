@@ -6,8 +6,12 @@ use super::context_window::{
     persisted_context_tokens, resolve_done_response, total_context_tokens,
 };
 use super::memory_lifecycle::{
-    TurnEndMemoryPlan, optional_metric_token_fields, plan_turn_end_memory,
-    spawn_memory_capture_task, take_memento_reflect_request,
+    PROVIDER_SESSION_ASSISTANT_TURN_CAP, TurnEndMemoryPlan, optional_metric_token_fields,
+    plan_turn_end_memory, spawn_memory_capture_task, take_memento_reflect_request,
+};
+use super::recovery_text::{
+    build_session_retry_context_from_history, store_session_retry_context,
+    take_session_retry_context,
 };
 use super::retry_state::{
     clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
@@ -198,7 +202,7 @@ fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
     assert_eq!(
         plan_turn_end_memory(&session, MemoryBackendKind::File, false, false, false, true),
         Some(TurnEndMemoryPlan {
-            reflect_reason: None,
+            session_end_reason: None,
             clear_provider_session: false,
             persist_transcript: true,
             spawn_capture: true,
@@ -219,7 +223,7 @@ fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
             true
         ),
         Some(TurnEndMemoryPlan {
-            reflect_reason: Some(SessionEndReason::LocalSessionReset),
+            session_end_reason: Some(SessionEndReason::LocalSessionReset),
             clear_provider_session: true,
             persist_transcript: true,
             spawn_capture: false,
@@ -233,7 +237,7 @@ fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_captur
     assert_eq!(
         plan_turn_end_memory(&session, MemoryBackendKind::Mem0, false, true, false, false),
         Some(TurnEndMemoryPlan {
-            reflect_reason: None,
+            session_end_reason: None,
             clear_provider_session: true,
             persist_transcript: false,
             spawn_capture: false,
@@ -254,12 +258,79 @@ fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
             true
         ),
         Some(TurnEndMemoryPlan {
-            reflect_reason: None,
+            session_end_reason: None,
             clear_provider_session: false,
             persist_transcript: true,
             spawn_capture: false,
         })
     );
+}
+
+#[test]
+fn turn_end_memory_plan_clears_provider_session_at_turn_cap() {
+    let mut session = sample_session();
+    session.history = (0..PROVIDER_SESSION_ASSISTANT_TURN_CAP.saturating_sub(1))
+        .flat_map(|idx| {
+            [
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: format!("user-{idx}"),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: format!("assistant-{idx}"),
+                },
+            ]
+        })
+        .collect();
+
+    assert_eq!(
+        plan_turn_end_memory(&session, MemoryBackendKind::File, false, false, false, true),
+        Some(TurnEndMemoryPlan {
+            session_end_reason: Some(SessionEndReason::TurnCapReached),
+            clear_provider_session: true,
+            persist_transcript: true,
+            spawn_capture: true,
+        })
+    );
+}
+
+#[test]
+fn retry_context_history_keeps_last_ten_visible_messages() {
+    let history = (0..12)
+        .flat_map(|idx| {
+            [
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: format!("user-{idx}"),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: format!("assistant-{idx}"),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let context = build_session_retry_context_from_history(&history).expect("retry context");
+    let lines = context.lines().collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 10);
+    assert_eq!(lines.first().copied(), Some("User: user-7"));
+    assert_eq!(lines.last().copied(), Some("Assistant: assistant-11"));
+}
+
+#[test]
+fn stored_retry_context_is_consumed_once() {
+    let db = crate::db::test_db();
+    store_session_retry_context(Some(&db), 42, "User: hi\nAssistant: hello")
+        .expect("store retry context");
+
+    assert_eq!(
+        take_session_retry_context(Some(&db), 42),
+        Some("User: hi\nAssistant: hello".to_string())
+    );
+    assert_eq!(take_session_retry_context(Some(&db), 42), None);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -350,11 +421,11 @@ fn memento_reflect_request_handles_local_session_reset_once() {
         &ProviderKind::Codex,
         None,
         42,
-        SessionEndReason::LocalSessionReset,
+        SessionEndReason::TurnCapReached,
     )
-    .expect("local session reset should trigger one reflect");
+    .expect("turn cap should trigger one reflect");
 
-    assert_eq!(request.reason, SessionEndReason::LocalSessionReset);
+    assert_eq!(request.reason, SessionEndReason::TurnCapReached);
     assert!(session.memento_reflected);
 
     let duplicate = take_memento_reflect_request(
@@ -363,11 +434,11 @@ fn memento_reflect_request_handles_local_session_reset_once() {
         &ProviderKind::Codex,
         None,
         42,
-        SessionEndReason::LocalSessionReset,
+        SessionEndReason::TurnCapReached,
     );
     assert!(
         duplicate.is_none(),
-        "reflect must stay one-shot after reset"
+        "reflect must stay one-shot after turn-cap reset"
     );
 }
 

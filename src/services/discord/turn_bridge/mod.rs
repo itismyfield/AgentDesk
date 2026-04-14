@@ -18,7 +18,7 @@ use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned};
 use crate::services::memory::{
-    CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 use crate::utils::format::tail_with_ellipsis;
@@ -28,7 +28,10 @@ pub(super) use completion_guard::{
     build_work_dispatch_completion_result, fail_dispatch_with_retry,
     guard_review_dispatch_completion, runtime_db_fallback_complete_with_result,
 };
-pub(super) use recovery_text::auto_retry_with_history;
+pub(super) use recovery_text::{
+    auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
+    take_session_retry_context,
+};
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::stale_inflight_message;
@@ -1453,6 +1456,9 @@ pub(super) fn spawn_turn_bridge(
         let mut should_persist_transcript = false;
         let mut should_spawn_memory_capture = false;
         let mut reflect_request = None;
+        let mut session_end_reason = None;
+        let mut clear_provider_session = false;
+        let mut retry_context_to_store = None;
         let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
@@ -1465,7 +1471,9 @@ pub(super) fn spawn_turn_bridge(
                     terminal_session_reset_required,
                     should_record_final_turn,
                 ) {
-                    if let Some(reason) = memory_plan.reflect_reason {
+                    session_end_reason = memory_plan.session_end_reason;
+                    clear_provider_session = memory_plan.clear_provider_session;
+                    if let Some(reason) = memory_plan.session_end_reason {
                         reflect_request = take_memento_reflect_request(
                             session,
                             &capture_memory_settings,
@@ -1490,6 +1498,11 @@ pub(super) fn spawn_turn_bridge(
                             content: full_response.clone(),
                         });
                         should_persist_transcript = true;
+                        if memory_plan.session_end_reason == Some(SessionEndReason::TurnCapReached)
+                        {
+                            retry_context_to_store =
+                                build_session_retry_context_from_history(&session.history);
+                        }
                     }
                     should_spawn_memory_capture = memory_plan.spawn_capture;
                     session.session_id.clone()
@@ -1501,21 +1514,50 @@ pub(super) fn spawn_turn_bridge(
             }
         };
 
-        // Persist provider session_id to DB so it survives dcserver restarts.
-        if !resume_failure_detected && !terminal_session_reset_required {
-            if let (Some(session_key), Some(persisted_sid)) =
-                (adk_session_key.as_deref(), session_id_to_persist.as_deref())
-            {
-                super::adk_session::save_provider_session_id(
-                    session_key,
-                    persisted_sid,
-                    &provider,
-                    shared_owned.api_port,
-                )
-                .await;
+        if let Some(retry_context) = retry_context_to_store.as_deref()
+            && let Err(err) = store_session_retry_context(
+                shared_owned.db.as_ref(),
+                channel_id.get(),
+                retry_context,
+            )
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ failed to store retry context for channel {}: {}",
+                channel_id.get(),
+                err
+            );
+        }
+
+        // Persist or clear provider session_id in DB so fresh-session transitions
+        // survive dcserver restarts and idle cleanup.
+        if clear_provider_session {
+            if let Some(session_key) = adk_session_key.as_deref() {
+                super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
+                    .await;
+                if session_end_reason == Some(SessionEndReason::TurnCapReached) {
+                    crate::services::termination_audit::record_termination(
+                        session_key,
+                        dispatch_id.as_deref(),
+                        "turn_bridge",
+                        "turn_cap_reached",
+                        Some("provider session cleared after assistant turn cap"),
+                        None,
+                        None,
+                        None,
+                    );
+                }
             }
-        } else if terminal_session_reset_required && let Some(ref session_key) = adk_session_key {
-            super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port).await;
+        } else if let (Some(session_key), Some(persisted_sid)) =
+            (adk_session_key.as_deref(), session_id_to_persist.as_deref())
+        {
+            super::adk_session::save_provider_session_id(
+                session_key,
+                persisted_sid,
+                &provider,
+                shared_owned.api_port,
+            )
+            .await;
         }
 
         let turn_id = should_persist_transcript
