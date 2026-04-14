@@ -1163,14 +1163,22 @@ function createCodexFollowupIssue(card, pr, snapshot) {
   if (typeof output === "string" && output.indexOf("ERROR") === 0) {
     throw new Error(output.replace(/^ERROR:\s*/, ""));
   }
+  if (typeof output !== "string") {
+    throw new Error("gh issue create returned non-string output");
+  }
 
   var issueUrl = compactWhitespace(output);
   if (!issueUrl) {
     throw new Error("gh issue create returned empty output");
   }
+  var issueNumber = parseIssueNumberFromUrl(issueUrl);
+  if (!issueNumber) {
+    throw new Error("gh issue create returned invalid issue URL: " + issueUrl);
+  }
 
   return {
     url: issueUrl,
+    issueNumber: issueNumber,
     title: title,
     body: body,
     repo: repo,
@@ -1182,7 +1190,7 @@ function createCodexFollowupIssue(card, pr, snapshot) {
 function createCodexFollowupBacklogCard(card, pr, snapshot, issueInfo) {
   if (!issueInfo || !issueInfo.url || !issueInfo.repo) return null;
 
-  var issueNumber = parseIssueNumberFromUrl(issueInfo.url);
+  var issueNumber = Number(issueInfo.issueNumber || 0) || parseIssueNumberFromUrl(issueInfo.url);
   if (!issueNumber) {
     agentdesk.log.warn("[merge] Codex follow-up issue URL missing issue number for PR #" + pr.number + ": " + issueInfo.url);
     return null;
@@ -1224,8 +1232,8 @@ function processCodexBlockingReview(card, pr, snapshot) {
 
   try {
     var issueInfo = createCodexFollowupIssue(latestCard, pr, snapshot);
+    agentdesk.kv.set(dedupKey, issueInfo.url, CODEX_REVIEW_TTL_SECONDS);
     createCodexFollowupBacklogCard(latestCard, pr, snapshot, issueInfo);
-    agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
     notifyCodexReview(latestCard, pr, snapshot, "blocking", issueInfo.url, false);
   } catch (e) {
     agentdesk.log.warn("[merge] Failed to create Codex follow-up issue for PR #" + pr.number + ": " + e);

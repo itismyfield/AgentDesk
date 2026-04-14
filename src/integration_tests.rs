@@ -5672,6 +5672,181 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scenario_615_codex_followup_dedups_even_if_backlog_insert_fails() {
+        let (repo, env) = setup_test_repo_with_mock_gh(&[
+            MockGhReply {
+                key: "pr:list",
+                contains: Some("--state merged"),
+                stdout: "[]",
+            },
+            MockGhReply {
+                key: "pr:list",
+                contains: None,
+                stdout: "[{\"number\":325,\"headRefName\":\"wt/card-615-dedup\",\"title\":\"fix: follow-up dedup (#615)\",\"mergeable\":\"MERGEABLE\"}]",
+            },
+            MockGhReply {
+                key: "api:repos/test/repo/pulls/325/reviews",
+                contains: None,
+                stdout: "[{\"id\":9003,\"state\":\"COMMENTED\",\"body\":\"P1 blocking finding\",\"submitted_at\":\"2026-04-06T00:00:00Z\",\"user\":{\"login\":\"chatgpt-codex-connector\"}}]",
+            },
+            MockGhReply {
+                key: "api:graphql",
+                contains: None,
+                stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-615\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-615\",\"body\":\"P1 keep dedup even if backlog insert fails\",\"path\":\"policies/merge-automation.js\",\"line\":1209,\"url\":\"https://example.com/comment-615\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9003\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
+            },
+            MockGhReply {
+                key: "issue:create",
+                contains: Some("--label agent:agent-1"),
+                stdout: "https://github.com/test/repo/issues/901",
+            },
+        ]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", "git@github.com:test/repo.git"],
+        );
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-615-dedup", "done", "test/repo", 615, None);
+        seed_thread_session(&db, "s-615-dedup", "thread-615-dedup");
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(
+            &db,
+            "pr:card-615-dedup",
+            r#"{"number":325,"repo":"test/repo","branch":"wt/card-615-dedup"}"#,
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_followup_backlog_insert
+                 BEFORE INSERT ON kanban_cards
+                 WHEN NEW.id LIKE 'codex-followup-%'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'boom');
+                 END;",
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let followup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kanban_cards \
+                 WHERE repo_id = 'test/repo' AND github_issue_number = 901",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            followup_count, 0,
+            "failed backlog insert must not leave partial local card"
+        );
+        assert_eq!(
+            gh_log(&env._gh).matches("issue create").count(),
+            1,
+            "issue creation must still dedup even when backlog insert fails"
+        );
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "failed backlog insert should not emit success notification"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_615_codex_followup_rejects_invalid_issue_url() {
+        let (repo, env) = setup_test_repo_with_mock_gh(&[
+            MockGhReply {
+                key: "pr:list",
+                contains: Some("--state merged"),
+                stdout: "[]",
+            },
+            MockGhReply {
+                key: "pr:list",
+                contains: None,
+                stdout: "[{\"number\":326,\"headRefName\":\"wt/card-615-url\",\"title\":\"fix: validate follow-up url (#615)\",\"mergeable\":\"MERGEABLE\"}]",
+            },
+            MockGhReply {
+                key: "api:repos/test/repo/pulls/326/reviews",
+                contains: None,
+                stdout: "[{\"id\":9004,\"state\":\"COMMENTED\",\"body\":\"P2 malformed follow-up url risk\",\"submitted_at\":\"2026-04-06T00:00:00Z\",\"user\":{\"login\":\"chatgpt-codex-connector\"}}]",
+            },
+            MockGhReply {
+                key: "api:graphql",
+                contains: None,
+                stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-615-url\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-615-url\",\"body\":\"P2 validate issue URL\",\"path\":\"policies/merge-automation.js\",\"line\":1167,\"url\":\"https://example.com/comment-615-url\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9004\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
+            },
+            MockGhReply {
+                key: "issue:create",
+                contains: Some("--label agent:agent-1"),
+                stdout: "https://github.com/test/repo/pull/901",
+            },
+        ]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", "git@github.com:test/repo.git"],
+        );
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-615-url", "done", "test/repo", 615, None);
+        seed_thread_session(&db, "s-615-url", "thread-615-url");
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(
+            &db,
+            "pr:card-615-url",
+            r#"{"number":326,"repo":"test/repo","branch":"wt/card-615-url"}"#,
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let followup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kanban_cards \
+                 WHERE repo_id = 'test/repo' AND title LIKE '%PR #326%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            followup_count, 0,
+            "invalid issue URL must not create a backlog card"
+        );
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "invalid issue URL must not emit a follow-up success notification"
+        );
+        assert_eq!(
+            gh_log(&env._gh).matches("issue create").count(),
+            1,
+            "invalid issue URL should fail fast without fallback loops inside one tick"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scenario_208_on_tick_notifies_clean_codex_pass() {
         let _gh = install_mock_gh(&[
             MockGhReply {
