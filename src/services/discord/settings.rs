@@ -1878,7 +1878,6 @@ memory:
                         ChannelId::new(1),
                         "tok",
                         "",
-                        "",
                         true,
                         None,
                         false,

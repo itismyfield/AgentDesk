@@ -1005,11 +1005,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         )
     };
 
-    // Claude Code/Codex inject their own skills inventory natively.
-    // Avoid duplicating it in AgentDesk's appended system prompt because it
-    // bloats the cache prefix and inflates per-turn cache_read tokens.
-    let skills_notice = String::new();
-
     // Build Discord context info
     let discord_context = {
         let data = shared.core.lock().await;
@@ -1058,7 +1053,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id,
         token,
         &disabled_notice,
-        &skills_notice,
         narrate_progress,
         role_binding.as_ref(),
         reply_to_user_message,
