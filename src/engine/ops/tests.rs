@@ -1004,6 +1004,114 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
 }
 
 #[test]
+fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-run-agent', 'AQ Run Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'aq-run-card', 'AQ Run Card', 'ready', 'medium', 'aq-run-agent',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('aq-run-status', 'repo-1', 'aq-run-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'aq-run-entry', 'aq-run-status', 'aq-run-card',
+                'aq-run-agent', 'done', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group
+            ) VALUES (
+                'aq-run-agent', 0, 'aq-run-status', 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let raw: String = ctx
+            .eval(
+                r#"
+                JSON.stringify((function() {
+                    var paused = agentdesk.autoQueue.pauseRun("aq-run-status", "test_pause");
+                    var resumed = agentdesk.autoQueue.resumeRun("aq-run-status", "test_resume");
+                    var completed = agentdesk.autoQueue.completeRun(
+                        "aq-run-status",
+                        "test_complete",
+                        { releaseSlots: true }
+                    );
+                    return {
+                        paused: paused.changed,
+                        resumed: resumed.changed,
+                        completed: completed.changed
+                    };
+                })())
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["paused"], true);
+        assert_eq!(parsed["resumed"], true);
+        assert_eq!(parsed["completed"], true);
+    });
+
+    let conn = db.separate_conn().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'aq-run-status'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let slot_run: Option<String> = conn
+        .query_row(
+            "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'aq-run-agent' AND slot_index = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let message_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(run_status, "completed");
+    assert!(slot_run.is_none());
+    assert_eq!(message_count, 1);
+}
+
+#[test]
 fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
     crate::pipeline::ensure_loaded();
 

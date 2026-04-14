@@ -1212,6 +1212,28 @@ fn maybe_finalize_run_after_terminal_entry(
     complete_run_on_conn(conn, run_id)
 }
 
+pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+    let updated = conn.execute(
+        "UPDATE auto_queue_runs
+         SET status = 'paused',
+             completed_at = NULL
+         WHERE id = ?1 AND status = 'active'",
+        [run_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+    let updated = conn.execute(
+        "UPDATE auto_queue_runs
+         SET status = 'active',
+             completed_at = NULL
+         WHERE id = ?1 AND status = 'paused'",
+        [run_id],
+    )?;
+    Ok(updated > 0)
+}
+
 pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
     let updated = conn.execute(
         "UPDATE auto_queue_runs
