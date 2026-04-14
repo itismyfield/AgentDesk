@@ -35,6 +35,7 @@ pub struct GenerateBody {
     #[allow(dead_code)]
     pub parallel: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
+    pub force: Option<bool>,
     // Legacy compatibility only. Accepted from callers, but ignored.
     #[allow(dead_code)]
     pub max_concurrent_per_agent: Option<i64>,
@@ -97,6 +98,7 @@ pub struct DispatchBody {
     pub auto_assign_agent: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
     pub deploy_phases: Option<Vec<i64>>,
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +110,11 @@ pub struct UpdateEntryBody {
 #[derive(Debug, Default, Deserialize)]
 pub struct ResetBody {
     pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CancelQuery {
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -307,17 +314,34 @@ pub(crate) fn cancel_with_conn(
     conn: &rusqlite::Connection,
 ) -> serde_json::Value {
     let target_run_ids = load_run_ids_with_status(conn, &["active", "paused"]).unwrap_or_default();
-    let cancelled_dispatches =
-        cancel_live_dispatches_for_runs(conn, &target_run_ids, "auto_queue_cancel");
-    let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, &target_run_ids);
+    cancel_selected_runs_with_conn(health_registry, conn, &target_run_ids, "auto_queue_cancel")
+}
+
+fn cancel_selected_runs_with_conn(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    conn: &rusqlite::Connection,
+    target_run_ids: &[String],
+    reason: &str,
+) -> serde_json::Value {
+    let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, target_run_ids, reason);
+    let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, target_run_ids);
     let (released_slots, cleared_slot_sessions) =
-        clear_and_release_slots_for_runs(health_registry, conn, &target_run_ids);
-    let cancelled_runs = conn
-        .execute(
-            "UPDATE auto_queue_runs SET status = 'cancelled', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
-            [],
-        )
-        .unwrap_or(0);
+        clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
+    let cancelled_runs = if target_run_ids.is_empty() {
+        0
+    } else {
+        let placeholders = std::iter::repeat("?")
+            .take(target_run_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE auto_queue_runs
+             SET status = 'cancelled', completed_at = datetime('now')
+             WHERE id IN ({placeholders}) AND status IN ('active', 'paused')"
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(target_run_ids.iter()))
+            .unwrap_or(0)
+    };
     let entry_ids: Vec<String> = if target_run_ids.is_empty() {
         Vec::new()
     } else {
@@ -985,8 +1009,9 @@ fn find_matching_active_run_id(
     conn: &rusqlite::Connection,
     repo: Option<&str>,
     agent_id: Option<&str>,
-) -> Result<Option<String>, String> {
-    let mut sql = String::from("SELECT id FROM auto_queue_runs WHERE status = 'active'");
+) -> Result<Vec<(String, String)>, String> {
+    let mut sql =
+        String::from("SELECT id, status FROM auto_queue_runs WHERE status IN ('active', 'paused')");
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
@@ -1003,100 +1028,32 @@ fn find_matching_active_run_id(
             params.len()
         ));
     }
-    sql.push_str(" ORDER BY created_at DESC LIMIT 1");
+    sql.push_str(" ORDER BY created_at DESC, id DESC");
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    match conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, String>(0)) {
-        Ok(run_id) => Ok(Some(run_id)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(format!("lookup active run: {err}")),
-    }
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| format!("prepare live run lookup: {err}"))?;
+    stmt.query_map(param_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|err| format!("query live runs: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("collect live runs: {err}"))
 }
 
-fn enqueue_dispatch_entries_into_run(
-    conn: &mut rusqlite::Connection,
+fn existing_live_run_conflict_response(
     run_id: &str,
-    requested_entries: &[GenerateEntryBody],
-    cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
-) -> Result<usize, String> {
-    let existing_live_cards: HashSet<String> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT kanban_card_id
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND status IN ('pending', 'dispatched')",
-            )
-            .map_err(|err| format!("prepare existing queued cards: {err}"))?;
-        stmt.query_map([run_id], |row| row.get::<_, String>(0))
-            .map_err(|err| format!("query existing queued cards: {err}"))?
-            .filter_map(|row| row.ok())
-            .collect()
-    };
-
-    let mut next_rank_by_group: HashMap<i64, i64> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT COALESCE(thread_group, 0), COALESCE(MAX(priority_rank), -1) + 1
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                 GROUP BY COALESCE(thread_group, 0)",
-            )
-            .map_err(|err| format!("prepare group ranks: {err}"))?;
-        stmt.query_map([run_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })
-        .map_err(|err| format!("query group ranks: {err}"))?
-        .filter_map(|row| row.ok())
-        .collect()
-    };
-    let mut existing_live_cards = existing_live_cards;
-    let tx = conn
-        .transaction()
-        .map_err(|err| format!("begin enqueue transaction: {err}"))?;
-    let mut inserted = 0usize;
-
-    for entry in requested_entries {
-        let Some(card) = cards_by_issue.get(&entry.issue_number) else {
-            continue;
-        };
-        if existing_live_cards.contains(&card.card_id) {
-            continue;
-        }
-
-        let thread_group = entry.thread_group.unwrap_or(0);
-        let priority_rank = *next_rank_by_group.entry(thread_group).or_insert(0);
-        next_rank_by_group.insert(thread_group, priority_rank + 1);
-
-        tx.execute(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase
-             ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7
-             )",
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                run_id,
-                card.card_id,
-                card.assigned_agent_id.as_deref().unwrap_or(""),
-                priority_rank,
-                thread_group,
-                entry.batch_phase.unwrap_or(0)
-            ],
-        )
-        .map_err(|err| format!("insert auto-queue entry: {err}"))?;
-        existing_live_cards.insert(card.card_id.clone());
-        inserted += 1;
-    }
-
-    if inserted > 0 {
-        crate::db::auto_queue::sync_run_group_metadata(&tx, run_id)
-            .map_err(|err| format!("sync run group metadata: {err}"))?;
-    }
-
-    tx.commit()
-        .map_err(|err| format!("commit enqueue transaction: {err}"))?;
-    Ok(inserted)
+    status: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": format!(
+                "live auto-queue run already exists: run_id={run_id}, status={status}; pass force=true to cancel it before creating a new run"
+            ),
+            "existing_run_id": run_id,
+            "existing_run_status": status,
+        })),
+    )
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
@@ -1839,6 +1796,7 @@ pub async fn generate(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let guild_id = state.config.discord.guild_id.as_deref();
     let _ignored_unified_thread = body.unified_thread.is_some();
+    let force = body.force.unwrap_or(false);
     let requested_entries = match normalize_generate_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
@@ -1870,6 +1828,41 @@ pub async fn generate(
                 .collect()
         })
         .unwrap_or_default();
+    let conn = match state.db.separate_conn() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    };
+    let conflicting_live_runs =
+        match find_matching_active_run_id(&conn, body.repo.as_deref(), body.agent_id.as_deref()) {
+            Ok(runs) => runs,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+    if let Some((run_id, status)) = conflicting_live_runs.first() {
+        if !force {
+            return existing_live_run_conflict_response(run_id, status);
+        }
+        let target_run_ids: Vec<String> = conflicting_live_runs
+            .iter()
+            .map(|(run_id, _)| run_id.clone())
+            .collect();
+        cancel_selected_runs_with_conn(
+            state.health_registry.clone(),
+            &conn,
+            &target_run_ids,
+            "auto_queue_force_new_run",
+        );
+    }
+    drop(conn);
     let mut cards: Vec<GenerateCandidate> = match state.auto_queue_service().prepare_generate_cards(
         &crate::services::auto_queue::PrepareGenerateInput {
             repo: body.repo.clone(),
@@ -3286,6 +3279,7 @@ pub async fn dispatch(
     State(state): State<AppState>,
     Json(body): Json<DispatchBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let force = body.force.unwrap_or(false);
     let requested_entries = match normalize_dispatch_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
@@ -3329,9 +3323,9 @@ pub async fn dispatch(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
     }
 
-    let existing_active_run_id =
+    let conflicting_live_runs =
         match find_matching_active_run_id(&conn, body.repo.as_deref(), body.agent_id.as_deref()) {
-            Ok(run_id) => run_id,
+            Ok(runs) => runs,
             Err(err) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3339,99 +3333,22 @@ pub async fn dispatch(
                 );
             }
         };
-    drop(conn);
-
-    if let Some(run_id) = existing_active_run_id {
-        let prepare_result = state.auto_queue_service().prepare_generate_cards(
-            &crate::services::auto_queue::PrepareGenerateInput {
-                repo: body.repo.clone(),
-                agent_id: body.agent_id.clone(),
-                issue_numbers: Some(issue_numbers.clone()),
-            },
+    if let Some((run_id, status)) = conflicting_live_runs.first() {
+        if !force {
+            return existing_live_run_conflict_response(run_id, status);
+        }
+        let target_run_ids: Vec<String> = conflicting_live_runs
+            .iter()
+            .map(|(run_id, _)| run_id.clone())
+            .collect();
+        cancel_selected_runs_with_conn(
+            state.health_registry.clone(),
+            &conn,
+            &target_run_ids,
+            "auto_queue_force_new_run",
         );
-        if let Err(error) = prepare_result {
-            return error.into_json_response();
-        }
-
-        let mut conn = match state.db.separate_conn() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        if let Err(err) = enqueue_dispatch_entries_into_run(
-            &mut conn,
-            &run_id,
-            &requested_entries,
-            &cards_by_issue,
-        ) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": err})),
-            );
-        }
-        drop(conn);
-
-        let activate_now = body.activate.unwrap_or(true);
-        let activation = if activate_now {
-            let (activate_status, activate_body) = activate(
-                State(state.clone()),
-                Json(ActivateBody {
-                    run_id: Some(run_id.clone()),
-                    repo: body.repo.clone(),
-                    agent_id: body.agent_id.clone(),
-                    thread_group: None,
-                    unified_thread: body.unified_thread,
-                    active_only: Some(true),
-                }),
-            )
-            .await;
-            if activate_status != StatusCode::OK {
-                return (activate_status, activate_body);
-            }
-            Some(activate_body.0)
-        } else {
-            None
-        };
-
-        let mut snapshot = state
-            .auto_queue_service()
-            .status_json_for_run(
-                &run_id,
-                crate::services::auto_queue::StatusInput {
-                    repo: body.repo.clone(),
-                    agent_id: body.agent_id.clone(),
-                    guild_id: None,
-                },
-            )
-            .unwrap_or_else(|_| {
-                json!({
-                    "run": null,
-                    "entries": [],
-                    "agents": {},
-                    "thread_groups": {},
-                })
-            });
-        if let Some(obj) = snapshot.as_object_mut() {
-            obj.insert("activated".to_string(), json!(activate_now));
-            obj.insert(
-                "requested".to_string(),
-                json!({
-                    "groups": body.groups.len(),
-                    "issues": issue_numbers,
-                    "auto_assign_agent": auto_assign_agent,
-                }),
-            );
-            if let Some(activation) = activation {
-                obj.insert("dispatch".to_string(), activation);
-            }
-        }
-
-        return (StatusCode::OK, Json(snapshot));
     }
+    drop(conn);
 
     let distinct_groups = requested_entries
         .iter()
@@ -3452,6 +3369,7 @@ pub async fn dispatch(
                 .unwrap_or(distinct_groups)
                 .clamp(1, 10),
         ),
+        force: Some(false),
         max_concurrent_per_agent: None,
     };
 
@@ -4177,7 +4095,10 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
 }
 
 /// POST /api/auto-queue/cancel — cancel all active/paused runs and pending entries
-pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn cancel(
+    State(state): State<AppState>,
+    Query(query): Query<CancelQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -4187,6 +4108,50 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             );
         }
     };
+    if let Some(run_id) = query
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let run_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match run_status.as_deref() {
+            Some("active") | Some("paused") => {
+                let payload = cancel_selected_runs_with_conn(
+                    state.health_registry.clone(),
+                    &conn,
+                    &[run_id.to_string()],
+                    "auto_queue_cancel",
+                );
+                return (StatusCode::OK, Json(payload));
+            }
+            Some(status) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("auto-queue run '{run_id}' is not cancelable (status={status})"),
+                        "run_id": run_id,
+                        "status": status,
+                    })),
+                );
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": format!("auto-queue run '{run_id}' not found"),
+                        "run_id": run_id,
+                    })),
+                );
+            }
+        }
+    }
     (
         StatusCode::OK,
         Json(cancel_with_conn(state.health_registry.clone(), &conn)),
