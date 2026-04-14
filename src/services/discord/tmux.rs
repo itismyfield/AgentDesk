@@ -2957,6 +2957,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             let cleanup_plan = dead_session_cleanup_plan(dispatch_protection.is_some());
 
             if let Some(protection) = dispatch_protection {
+            ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ♻ tmux startup: preserving dispatch session {} — {}",
@@ -2964,6 +2965,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     protection.log_reason()
                 );
             }
+            let cleanup_plan = dead_session_cleanup_plan(dispatch_protection.is_some());
 
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
             let thread_channel_id =
