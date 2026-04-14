@@ -30,7 +30,6 @@ pub(super) use completion_guard::{
 };
 pub(super) use recovery_text::{
     auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
-    take_session_retry_context,
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
