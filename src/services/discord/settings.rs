@@ -158,6 +158,41 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
     }
 }
 
+fn warn_legacy_bot_setting_fallback(field_name: &str) {
+    tracing::warn!(
+        field = %field_name,
+        "bot setting missing from YAML, falling back to legacy bot_settings.json"
+    );
+}
+
+fn fallback_legacy_option<T>(
+    configured: Option<T>,
+    legacy: Option<T>,
+    field_name: &'static str,
+) -> Option<T> {
+    configured.or_else(|| {
+        legacy.map(|value| {
+            warn_legacy_bot_setting_fallback(field_name);
+            value
+        })
+    })
+}
+
+fn fallback_legacy_vec<T>(
+    configured: Option<Vec<T>>,
+    legacy: Vec<T>,
+    field_name: &'static str,
+) -> Vec<T> {
+    match configured {
+        Some(values) => values,
+        None if !legacy.is_empty() => {
+            warn_legacy_bot_setting_fallback(field_name);
+            legacy
+        }
+        None => Vec::new(),
+    }
+}
+
 fn config_path_for_write() -> Option<PathBuf> {
     let root = crate::config::runtime_root()?;
     let canonical = crate::runtime_layout::config_file_path(&root);
@@ -1328,47 +1363,69 @@ pub(super) fn cleanup_channel_uploads(channel_id: ChannelId) {
 pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let configured = agentdesk_config::find_discord_bot_by_token(token);
     let legacy = load_legacy_bot_settings_entry(token);
-    let provider = configured
-        .as_ref()
-        .and_then(|bot| bot.provider.clone())
-        .or(legacy.provider.clone())
-        .unwrap_or(ProviderKind::Claude);
-    let allowed_tools = configured
-        .as_ref()
-        .and_then(|bot| bot.auth.allowed_tools.as_ref().cloned())
-        .map(|tools| normalize_allowed_tools(&tools))
-        .or(legacy.allowed_tools.clone())
-        .unwrap_or_else(|| default_allowed_tools_for_provider(&provider));
+    let agent = fallback_legacy_option(
+        configured.as_ref().and_then(|bot| bot.agent.clone()),
+        legacy.agent.clone(),
+        "agent",
+    );
+    let provider = fallback_legacy_option(
+        configured.as_ref().and_then(|bot| bot.provider.clone()),
+        legacy.provider.clone(),
+        "provider",
+    )
+    .unwrap_or(ProviderKind::Claude);
+    let allowed_tools = fallback_legacy_option(
+        configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_tools.as_ref().cloned())
+            .map(|tools| normalize_allowed_tools(&tools)),
+        legacy.allowed_tools.clone(),
+        "allowed_tools",
+    )
+    .unwrap_or_else(|| default_allowed_tools_for_provider(&provider));
+    let allowed_channel_ids = fallback_legacy_vec(
+        configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_channel_ids.clone()),
+        legacy.allowed_channel_ids.clone(),
+        "allowed_channel_ids",
+    );
+    let owner_user_id = fallback_legacy_option(
+        configured.as_ref().and_then(|bot| bot.owner_id),
+        legacy.owner_user_id,
+        "owner_user_id",
+    );
+    let allowed_user_ids = fallback_legacy_vec(
+        configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_user_ids.clone()),
+        legacy.allowed_user_ids.clone(),
+        "allowed_user_ids",
+    );
+    let allow_all_users = fallback_legacy_option(
+        configured.as_ref().and_then(|bot| bot.auth.allow_all_users),
+        legacy.allow_all_users,
+        "allow_all_users",
+    )
+    .unwrap_or(false);
+    let allowed_bot_ids = fallback_legacy_vec(
+        configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_bot_ids.clone()),
+        legacy.allowed_bot_ids.clone(),
+        "allowed_bot_ids",
+    );
 
     DiscordBotSettings {
-        agent: configured
-            .as_ref()
-            .and_then(|bot| bot.agent.clone())
-            .or(legacy.agent),
+        agent,
         provider,
         allowed_tools,
-        allowed_channel_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_channel_ids.clone())
-            .unwrap_or(legacy.allowed_channel_ids),
+        allowed_channel_ids,
         channel_model_overrides: legacy.channel_model_overrides,
-        owner_user_id: configured
-            .as_ref()
-            .and_then(|bot| bot.owner_id)
-            .or(legacy.owner_user_id),
-        allowed_user_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_user_ids.clone())
-            .unwrap_or(legacy.allowed_user_ids),
-        allow_all_users: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allow_all_users)
-            .or(legacy.allow_all_users)
-            .unwrap_or(false),
-        allowed_bot_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_bot_ids.clone())
-            .unwrap_or(legacy.allowed_bot_ids),
+        owner_user_id,
+        allowed_user_ids,
+        allow_all_users,
+        allowed_bot_ids,
     }
 }
 
@@ -1472,6 +1529,8 @@ pub fn resolve_discord_bot_provider(token: &str) -> ProviderKind {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
 
     use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
@@ -1503,6 +1562,38 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", v) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
         }
+    }
+
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
     }
 
     fn write_memory_backend_config(temp_home: &TempDir, value: serde_json::Value) {
@@ -2281,10 +2372,59 @@ agents:
             )
             .unwrap();
 
-            let settings = load_bot_settings(token);
+            let (settings, logs) = capture_logs(|| load_bot_settings(token));
             assert_eq!(settings.owner_user_id, Some(42));
             assert_eq!(settings.allowed_user_ids, vec![7]);
             assert!(settings.allow_all_users);
+            assert!(logs.contains("field=owner_user_id"));
+            assert!(logs.contains("field=allowed_user_ids"));
+            assert!(logs.contains("field=allow_all_users"));
+            assert!(logs.contains("falling back to legacy bot_settings.json"));
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_does_not_warn_when_yaml_has_fields() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  owner_id: 42\n  bots:\n    command:\n      token: \"{token}\"\n      provider: codex\n      agent: spark\n      auth:\n        allowed_tools:\n          - Bash\n        allowed_channel_ids:\n          - 123\n        allowed_user_ids:\n          - 7\n        allow_all_users: true\n        allowed_bot_ids:\n          - 9\n"
+                ),
+            );
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "provider": "claude",
+                    "agent": "legacy",
+                    "allowed_tools": ["Read"],
+                    "allowed_channel_ids": [456],
+                    "owner_user_id": 42,
+                    "allowed_user_ids": [8],
+                    "allow_all_users": false,
+                    "allowed_bot_ids": [10]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let (settings, logs) = capture_logs(|| load_bot_settings(token));
+
+            assert_eq!(settings.provider, ProviderKind::Codex);
+            assert_eq!(settings.agent.as_deref(), Some("spark"));
+            assert_eq!(settings.owner_user_id, Some(42));
+            assert_eq!(settings.allowed_channel_ids, vec![123]);
+            assert_eq!(settings.allowed_user_ids, vec![7]);
+            assert!(settings.allow_all_users);
+            assert_eq!(settings.allowed_bot_ids, vec![9]);
+            assert!(logs.trim().is_empty());
         });
     }
 
