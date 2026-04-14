@@ -1178,8 +1178,13 @@ function processCodexBlockingReview(card, pr, snapshot) {
     args.push("--label", agentLabel);
   }
 
+  // Set dedup key optimistically BEFORE the gh call so concurrent ticks skip
+  agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
+
+  // WARNING: agentdesk.exec is synchronous with no timeout — gh CLI hang will block all tick hooks
   var created = agentdesk.exec("gh", args);
   if (created && created.indexOf("ERROR") === 0) {
+    agentdesk.kv.delete(dedupKey);
     agentdesk.log.warn("[merge] Failed to create Codex follow-up issue for PR #" + pr.number + ": " + created);
     return;
   }
@@ -1194,7 +1199,6 @@ function processCodexBlockingReview(card, pr, snapshot) {
     "[merge] Created Codex follow-up issue for PR #" + pr.number +
     (followUpIssue.url ? ": " + followUpIssue.url : "")
   );
-  agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
   notifyCodexReview(latestCard, pr, snapshot, "blocking", followUpIssue, false);
 }
 

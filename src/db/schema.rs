@@ -974,6 +974,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;");
     }
 
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_auto_queue_entry_card
+            ON auto_queue_entries(run_id, kanban_card_id)
+            WHERE status NOT IN ('skipped', 'cancelled');",
+    )?;
+
     Ok(())
 }
 

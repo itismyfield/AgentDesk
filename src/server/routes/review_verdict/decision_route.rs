@@ -34,6 +34,7 @@ fn current_issue_worktree_commit(
     db: &crate::db::Db,
     card_id: &str,
     issue_num: i64,
+    context: Option<&serde_json::Value>,
 ) -> Option<String> {
     #[cfg(test)]
     {
@@ -44,7 +45,7 @@ fn current_issue_worktree_commit(
         }
     }
 
-    match crate::dispatch::resolve_card_worktree(db, card_id, None) {
+    match crate::dispatch::resolve_card_worktree(db, card_id, context) {
         Ok(Some((_worktree_path, _branch, commit))) => Some(commit),
         Ok(None) => None,
         Err(err) => {
@@ -412,7 +413,7 @@ pub async fn submit_review_decision(
             // reviewed_commit of the last review, skip rework and go straight
             // to review (the agent already addressed the feedback).
             let skip_rework = {
-                let last_reviewed_commit: Option<String> = state
+                let last_review_context: Option<serde_json::Value> = state
                     .db
                     .lock()
                     .ok()
@@ -428,8 +429,10 @@ pub async fn submit_review_decision(
                         .ok()
                         .flatten()
                     })
-                    .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(&ctx_str).ok())
-                    .and_then(|v| {
+                    .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(&ctx_str).ok());
+
+                let last_reviewed_commit: Option<String> =
+                    last_review_context.as_ref().and_then(|v| {
                         v.get("reviewed_commit")
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string())
@@ -446,8 +449,12 @@ pub async fn submit_review_decision(
 
                 if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
                 {
-                    let current_commit =
-                        current_issue_worktree_commit(&state.db, &body.card_id, issue_num);
+                    let current_commit = current_issue_worktree_commit(
+                        &state.db,
+                        &body.card_id,
+                        issue_num,
+                        last_review_context.as_ref(),
+                    );
                     if let Some(ref cur) = current_commit {
                         let differs = cur != prev_commit;
                         if differs {
