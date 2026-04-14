@@ -1067,41 +1067,8 @@ function _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCa
     created_at: new Date().toISOString()
   };
 
-  autoQueueLog("info", "Deploy gate: starting build + deploy for phase " + phase, {
-    run_id: runId,
-    card_id: anchorCardId,
-    batch_phase: phase
-  });
-
-  var deployResult;
-  try {
-    deployResult = agentdesk.deploy();
-    if (typeof deployResult === "string") {
-      try { deployResult = JSON.parse(deployResult); } catch (e) { deployResult = { ok: false, error: deployResult }; }
-    }
-  } catch (e) {
-    deployResult = { ok: false, error: String(e) };
-  }
-
-  if (deployResult && deployResult.ok) {
-    autoQueueLog("info", "Deploy gate passed for phase " + phase + ": " + (deployResult.summary || "deploy succeeded"), {
-      run_id: runId,
-      card_id: anchorCardId,
-      batch_phase: phase
-    });
-    if (finalPhase) {
-      completeRunAndNotify(runId);
-    } else {
-      resumeRunAndActivate(runId, nextPhase);
-    }
-    return state;
-  }
-
-  state.status = "failed";
-  state.failed_reason = (deployResult && deployResult.error) || "deploy failed";
   savePhaseGateState(runId, phase, state);
-  notifyPMD(anchorCardId, "[deploy-gate] phase " + phase + " deploy failed: " + state.failed_reason);
-  autoQueueLog("warn", "Deploy gate failed for phase " + phase + ": " + state.failed_reason, {
+  autoQueueLog("info", "Deploy gate created for phase " + phase + " — Rust will execute asynchronously", {
     run_id: runId,
     card_id: anchorCardId,
     batch_phase: phase
