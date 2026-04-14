@@ -1238,6 +1238,15 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     };
 
+    let (logical_channel_id, thread_id, thread_title) = if let Some((parent_id, _parent_name)) =
+        super::super::resolve_thread_parent(&ctx.http, channel_id).await
+    {
+        let (live_thread_title, _) = super::super::resolve_channel_category(ctx, channel_id).await;
+        (parent_id.get(), Some(channel_id.get()), live_thread_title)
+    } else {
+        (channel_id.get(), None, None)
+    };
+
     let mut inflight_state = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
@@ -1252,6 +1261,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.logical_channel_id = Some(logical_channel_id);
+    inflight_state.thread_id = thread_id;
+    inflight_state.thread_title = thread_title;
     // Persist identifiers for long-turn diagnostics (#130)
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();

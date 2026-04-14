@@ -141,6 +141,8 @@ struct QwenStatusSnapshot {
     duration_ms: Option<u64>,
     num_turns: Option<u32>,
     input_tokens: Option<u64>,
+    cache_create_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
     output_tokens: Option<u64>,
 }
 
@@ -810,6 +812,8 @@ fn process_qwen_result_message(json: &Value, state: &mut QwenAttemptState) {
         duration_ms: state.status.duration_ms,
         num_turns: state.status.num_turns,
         input_tokens: state.status.input_tokens,
+        cache_create_tokens: state.status.cache_create_tokens,
+        cache_read_tokens: state.status.cache_read_tokens,
         output_tokens: state.status.output_tokens,
     });
 
@@ -1730,6 +1734,18 @@ fn update_status_from_usage(
     };
     if let Some(input_tokens) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
         state.status.input_tokens = Some(input_tokens);
+    }
+    if let Some(cache_create_tokens) = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+    {
+        state.status.cache_create_tokens = Some(cache_create_tokens);
+    }
+    if let Some(cache_read_tokens) = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+    {
+        state.status.cache_read_tokens = Some(cache_read_tokens);
     }
     if let Some(output_tokens) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
         state.status.output_tokens = Some(output_tokens);

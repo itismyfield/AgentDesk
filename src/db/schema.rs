@@ -87,6 +87,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
+    ensure_turns_schema(conn)?;
     run_migration_once(
         conn,
         SESSION_AGENT_ID_BACKFILL_META_KEY,
@@ -1640,6 +1641,43 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute_batch("ALTER TABLE session_transcripts ADD COLUMN duration_ms INTEGER;");
     migrate_legacy_session_transcripts_agent_fk(conn)?;
+    Ok(())
+}
+
+fn ensure_turns_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS turns (
+            turn_id              TEXT PRIMARY KEY,
+            session_key          TEXT,
+            thread_id            TEXT,
+            thread_title         TEXT,
+            channel_id           TEXT NOT NULL,
+            agent_id             TEXT,
+            provider             TEXT,
+            session_id           TEXT,
+            dispatch_id          TEXT,
+            started_at           TEXT NOT NULL,
+            finished_at          TEXT NOT NULL,
+            duration_ms          INTEGER,
+            input_tokens         INTEGER NOT NULL DEFAULT 0,
+            cache_create_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens        INTEGER NOT NULL DEFAULT 0,
+            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_turns_channel_id
+            ON turns (channel_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_thread_id
+            ON turns (thread_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_agent_id
+            ON turns (agent_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_session_id
+            ON turns (session_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_dispatch_id
+            ON turns (dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_finished_at
+            ON turns (finished_at DESC);",
+    )?;
     Ok(())
 }
 

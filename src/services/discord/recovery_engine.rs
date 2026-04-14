@@ -6,6 +6,9 @@ use super::settings::{
 };
 use super::turn_bridge::stale_inflight_message;
 use super::*;
+use crate::db::turns::TurnTokenUsage;
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::session_backend::{StreamLineState, process_stream_line};
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 use crate::utils::format::tail_with_ellipsis;
@@ -130,6 +133,48 @@ fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool 
 /// Extract accumulated assistant text from output JSONL after the given offset.
 fn extract_response_from_output(output_path: &str, start_offset: u64) -> String {
     extract_response_from_output_pub(output_path, start_offset)
+}
+
+fn extract_turn_analytics_from_output(
+    output_path: &str,
+    start_offset: u64,
+) -> (Option<String>, Option<TurnTokenUsage>) {
+    let Ok(bytes) = std::fs::read(output_path) else {
+        return (None, None);
+    };
+    let start = usize::try_from(start_offset)
+        .ok()
+        .map(|offset| offset.min(bytes.len()))
+        .unwrap_or(bytes.len());
+
+    let (sender, _receiver) = std::sync::mpsc::channel::<StreamMessage>();
+    let mut state = StreamLineState::new();
+    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
+        let _ = process_stream_line(line, &sender, &mut state);
+    }
+
+    let usage = TurnTokenUsage {
+        input_tokens: state.accum_input_tokens,
+        cache_create_tokens: state.accum_cache_create_tokens,
+        cache_read_tokens: state.accum_cache_read_tokens,
+        output_tokens: state.accum_output_tokens,
+    };
+    let has_usage = usage.input_tokens > 0
+        || usage.cache_create_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.output_tokens > 0;
+
+    (state.last_session_id, has_usage.then_some(usage))
+}
+
+fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
+    let started_at = started_at?.trim();
+    if started_at.is_empty() {
+        return None;
+    }
+    let parsed = chrono::NaiveDateTime::parse_from_str(started_at, "%Y-%m-%d %H:%M:%S").ok()?;
+    let elapsed = chrono::Local::now().naive_local() - parsed;
+    Some(elapsed.num_milliseconds().max(0))
 }
 
 fn persist_recovered_transcript(
@@ -321,6 +366,10 @@ pub(super) async fn restore_inflight_turns(
                     "  [{ts}] ✓ recovering completed turn for channel {} (restart report exists but output has result)",
                     state.channel_id
                 );
+                let (recovered_session_id, recovered_usage) = output_path_for_check
+                    .as_deref()
+                    .map(|path| extract_turn_analytics_from_output(path, state.last_offset))
+                    .unwrap_or((None, None));
                 let extracted = output_path_for_check
                     .as_deref()
                     .map(|p| extract_response_from_output(p, state.last_offset))
@@ -361,7 +410,27 @@ pub(super) async fn restore_inflight_turns(
                     lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id)
                         .await
                         .or_else(|| parse_dispatch_id(&state.user_text));
+                let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+                let duration_ms =
+                    recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
                 let has_completion_evidence = if let Some(db) = shared.db.as_ref() {
+                    super::turn_bridge::persist_turn_analytics_row(
+                        db,
+                        provider,
+                        channel_id,
+                        user_msg_id,
+                        role_binding.as_ref(),
+                        recovered_dispatch_id
+                            .as_deref()
+                            .or(state.dispatch_id.as_deref()),
+                        state.session_key.as_deref(),
+                        recovered_session_id
+                            .as_deref()
+                            .or(state.session_id.as_deref()),
+                        &state,
+                        recovered_usage.unwrap_or_default(),
+                        duration_ms,
+                    );
                     persist_recovered_transcript(
                         db,
                         provider,
@@ -812,6 +881,10 @@ pub(super) async fn restore_inflight_turns(
                 state.channel_id,
                 state.last_offset
             );
+            let (recovered_session_id, recovered_usage) = output_path
+                .as_deref()
+                .map(|path| extract_turn_analytics_from_output(path, state.last_offset))
+                .unwrap_or((None, None));
             // Deliver the result to Discord before clearing the inflight state
             let extracted = output_path
                 .as_deref()
@@ -849,7 +922,27 @@ pub(super) async fn restore_inflight_turns(
             // #225 P1-3: Use DB lookup for dispatch ID (text parsing fails in unified threads)
             let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
+            let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
+            let duration_ms =
+                recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
             let has_completion_evidence = if let Some(db) = shared.db.as_ref() {
+                super::turn_bridge::persist_turn_analytics_row(
+                    db,
+                    provider,
+                    channel_id,
+                    user_msg_id,
+                    role_binding.as_ref(),
+                    recovered_dispatch_id
+                        .as_deref()
+                        .or(state.dispatch_id.as_deref()),
+                    state.session_key.as_deref(),
+                    recovered_session_id
+                        .as_deref()
+                        .or(state.session_id.as_deref()),
+                    &state,
+                    recovered_usage.unwrap_or_default(),
+                    duration_ms,
+                );
                 persist_recovered_transcript(
                     db,
                     provider,
@@ -1517,6 +1610,29 @@ mod tests {
     }
 
     #[test]
+    fn extract_turn_analytics_from_output_reads_session_and_cache_tokens() {
+        let file = write_jsonl(&[
+            r#"{"type":"system","subtype":"init","session_id":"session-init"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"content":[{"type":"text","text":"partial"}]}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"session-final","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"result":"done"}"#,
+        ]);
+
+        let (session_id, usage) =
+            extract_turn_analytics_from_output(file.path().to_str().unwrap(), 0);
+
+        assert_eq!(session_id.as_deref(), Some("session-final"));
+        assert_eq!(
+            usage,
+            Some(crate::db::turns::TurnTokenUsage {
+                input_tokens: 100,
+                cache_create_tokens: 20,
+                cache_read_tokens: 30,
+                output_tokens: 40,
+            })
+        );
+    }
+
+    #[test]
     fn recovery_text_then_tool_then_result_prefers_result() {
         // Text -> ToolUse -> Done(result): pre-tool narration should be replaced
         let file = write_jsonl(&[
@@ -1641,6 +1757,9 @@ mod tests {
             provider: "codex".to_string(),
             channel_id: 1486333430516945008,
             channel_name: Some("adk-cdx-t1486333430516945008".to_string()),
+            logical_channel_id: Some(1479671301387059200),
+            thread_id: Some(1486333430516945008),
+            thread_title: Some("[AgentDesk] #558 token audit".to_string()),
             request_owner_user_id: 343742347365974026,
             user_msg_id: 1487795113240559788,
             current_msg_id: 1487799916758827138,
@@ -1740,6 +1859,9 @@ mod tests {
             provider: "codex".to_string(),
             channel_id: 1486333430516945008,
             channel_name: Some("adk-cdx-t1486333430516945008".to_string()),
+            logical_channel_id: Some(1479671301387059200),
+            thread_id: Some(1486333430516945008),
+            thread_title: Some("[AgentDesk] #558 token audit".to_string()),
             request_owner_user_id: 343742347365974026,
             user_msg_id: 1487795113240559788,
             current_msg_id: 1487799916758827138,

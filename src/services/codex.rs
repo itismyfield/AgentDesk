@@ -997,6 +997,8 @@ fn handle_codex_json_line(
                 duration_ms: Some(started_at.elapsed().as_millis() as u64),
                 num_turns: None,
                 input_tokens,
+                cache_create_tokens: None,
+                cache_read_tokens: None,
                 output_tokens,
             });
             let _ = sender.send(StreamMessage::Done {

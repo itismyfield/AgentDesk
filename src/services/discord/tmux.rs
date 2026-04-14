@@ -5,6 +5,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
+use crate::db::turns::TurnTokenUsage;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_backend::StreamLineState;
 use crate::services::tmux_diagnostics::{
@@ -52,9 +53,22 @@ pub(super) struct WatcherLineOutcome {
     pub auth_error_message: Option<String>,
     pub is_provider_overloaded: bool,
     pub provider_overload_message: Option<String>,
-    pub result_tokens: Option<u64>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
+}
+
+fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsage> {
+    let usage = TurnTokenUsage {
+        input_tokens: state.accum_input_tokens,
+        cache_create_tokens: state.accum_cache_create_tokens,
+        cache_read_tokens: state.accum_cache_read_tokens,
+        output_tokens: state.accum_output_tokens,
+    };
+    (usage.input_tokens > 0
+        || usage.cache_create_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.output_tokens > 0)
+        .then_some(usage)
 }
 
 fn watcher_ready_for_input_turn_completed(
@@ -916,7 +930,6 @@ pub(super) async fn tmux_output_watcher(
         let mut auth_error_message = initial_outcome.auth_error_message;
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
-        let mut result_tokens = initial_outcome.result_tokens;
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
 
         // Keep reading until result or timeout
@@ -986,9 +999,6 @@ pub(super) async fn tmux_output_watcher(
                             stale_resume_detected || outcome.stale_resume_detected;
                         if provider_overload_message.is_none() {
                             provider_overload_message = outcome.provider_overload_message;
-                        }
-                        if outcome.result_tokens.is_some() {
-                            result_tokens = outcome.result_tokens;
                         }
                         // Notify when auto-compaction is detected in output
                         if outcome.auto_compacted {
@@ -1640,6 +1650,8 @@ pub(super) async fn tmux_output_watcher(
 
         let provider_kind = watcher_provider.clone();
         let inflight_state = super::inflight::load_inflight_state(&provider_kind, channel_id.get());
+        let watcher_session_id = state.last_session_id.clone();
+        let result_usage = stream_line_state_token_usage(&state);
         if inflight_state.is_none() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
@@ -1692,6 +1704,22 @@ pub(super) async fn tmux_output_watcher(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
                 }
+
+                super::turn_bridge::persist_turn_analytics_row(
+                    db,
+                    &provider_kind,
+                    channel_id,
+                    user_msg_id,
+                    resolve_role_binding(channel_id, state.channel_name.as_deref()).as_ref(),
+                    resolved_did.as_deref().or(state.dispatch_id.as_deref()),
+                    state.session_key.as_deref(),
+                    watcher_session_id
+                        .as_deref()
+                        .or(state.session_id.as_deref()),
+                    state,
+                    result_usage.unwrap_or_default(),
+                    inflight_duration_ms(Some(state.started_at.as_str())).unwrap_or(0),
+                );
             }
         }
 
@@ -1892,7 +1920,7 @@ pub(super) async fn tmux_output_watcher(
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
-        if let Some(tokens) = result_tokens {
+        if let Some(tokens) = result_usage.map(|usage| usage.total_input_tokens()) {
             let provider = shared.settings.read().await.provider.clone();
             let session_key =
                 super::adk_session::build_adk_session_key(&shared, channel_id, &provider).await;
@@ -2140,8 +2168,39 @@ pub(super) fn process_watcher_lines(
             let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "assistant" => {
-                    // Text content from assistant message
                     if let Some(message) = val.get("message") {
+                        if let Some(model) = message.get("model").and_then(|value| value.as_str()) {
+                            state.last_model = Some(model.to_string());
+                        }
+                        if let Some(usage) = message.get("usage") {
+                            state.accum_input_tokens = state.accum_input_tokens.saturating_add(
+                                usage
+                                    .get("input_tokens")
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0),
+                            );
+                            state.accum_cache_read_tokens =
+                                state.accum_cache_read_tokens.saturating_add(
+                                    usage
+                                        .get("cache_read_input_tokens")
+                                        .and_then(|value| value.as_u64())
+                                        .unwrap_or(0),
+                                );
+                            state.accum_cache_create_tokens =
+                                state.accum_cache_create_tokens.saturating_add(
+                                    usage
+                                        .get("cache_creation_input_tokens")
+                                        .and_then(|value| value.as_u64())
+                                        .unwrap_or(0),
+                                );
+                            state.accum_output_tokens = state.accum_output_tokens.saturating_add(
+                                usage
+                                    .get("output_tokens")
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0),
+                            );
+                        }
+                        // Text content from assistant message
                         if let Some(content) = message.get("content") {
                             if let Some(arr) = content.as_array() {
                                 for block in arr {
@@ -2266,6 +2325,10 @@ pub(super) fn process_watcher_lines(
                 "result" => {
                     outcome.stale_resume_detected = outcome.stale_resume_detected
                         || super::turn_bridge::result_event_has_stale_resume_error(&val);
+                    if let Some(session_id) = val.get("session_id").and_then(|value| value.as_str())
+                    {
+                        state.last_session_id = Some(session_id.to_string());
+                    }
                     let is_error = val
                         .get("is_error")
                         .and_then(|v| v.as_bool())
@@ -2325,29 +2388,35 @@ pub(super) fn process_watcher_lines(
                             full_response.push_str(&result_str);
                         }
                     }
-                    // Extract token usage from result event for context tracking.
-                    // #227: Use input tokens only — output tokens are NOT part of the
-                    // context window and inflated the percentage (197% on 1M window).
                     if let Some(usage) = val.get("usage") {
-                        let input = usage
+                        state.accum_input_tokens = usage
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        let cache_read = usage
+                        state.accum_cache_read_tokens = usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        let cache_creation = usage
+                        state.accum_cache_create_tokens = usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        outcome.result_tokens = Some(input + cache_read + cache_creation);
+                        state.accum_output_tokens = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                     }
 
                     state.final_result = Some(String::new());
                     outcome.found_result = true;
                 }
                 "system" => {
+                    if val.get("subtype").and_then(|s| s.as_str()) == Some("init")
+                        && let Some(session_id) =
+                            val.get("session_id").and_then(|value| value.as_str())
+                    {
+                        state.last_session_id = Some(session_id.to_string());
+                    }
                     // Detect auto-compaction events from Claude Code
                     if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
                         let lower = msg.to_ascii_lowercase();

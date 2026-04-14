@@ -5,6 +5,7 @@ pub mod memento_feedback_stats;
 pub(crate) mod schema;
 pub(crate) mod session_agent_resolution;
 pub mod session_transcripts;
+pub mod turns;
 
 use anyhow::Result;
 use rusqlite::Connection;
