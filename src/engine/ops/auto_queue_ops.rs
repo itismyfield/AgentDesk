@@ -77,6 +77,28 @@ pub(super) fn register_auto_queue_ops<'js>(
             clear_phase_gate_state_raw(&db_clear_phase_gate, &run_id, phase)
         })?,
     )?;
+    let db_record_consultation = db.clone();
+    auto_queue_obj.set(
+        "__recordConsultationDispatchRaw",
+        Function::new(
+            ctx.clone(),
+            move |entry_id: String,
+                  card_id: String,
+                  dispatch_id: String,
+                  source: String,
+                  metadata_json: String|
+                  -> String {
+                record_consultation_dispatch_raw(
+                    &db_record_consultation,
+                    &entry_id,
+                    &card_id,
+                    &dispatch_id,
+                    &source,
+                    &metadata_json,
+                )
+            },
+        )?,
+    )?;
     let bridge_should_defer = bridge.clone();
     auto_queue_obj.set(
         "__shouldDeferActivateRaw",
@@ -174,6 +196,19 @@ pub(super) fn register_auto_queue_ops<'js>(
             aq.clearPhaseGateState = function(runId, phase) {
                 var result = JSON.parse(
                     aq.__clearPhaseGateStateRaw(runId, phase)
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            aq.recordConsultationDispatch = function(entryId, cardId, dispatchId, source, metadata) {
+                var result = JSON.parse(
+                    aq.__recordConsultationDispatchRaw(
+                        entryId,
+                        cardId,
+                        dispatchId,
+                        source || "",
+                        JSON.stringify(metadata || {})
+                    )
                 );
                 if (result.error) throw new Error(result.error);
                 return result;
@@ -364,6 +399,46 @@ fn clear_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64) -> String {
         Ok(changed) => serde_json::json!({
             "ok": true,
             "changed": changed,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
+}
+
+fn record_consultation_dispatch_raw(
+    db: &Db,
+    entry_id: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    source: &str,
+    metadata_json: &str,
+) -> String {
+    let mut conn = match db.separate_conn() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("DB: {error}")
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::auto_queue::record_consultation_dispatch_on_conn(
+        &mut conn,
+        entry_id,
+        card_id,
+        dispatch_id,
+        source,
+        metadata_json,
+    ) {
+        Ok(result) => serde_json::json!({
+            "ok": true,
+            "changed": result.entry_status_changed,
+            "metadata": serde_json::from_str::<serde_json::Value>(&result.metadata_json)
+                .unwrap_or_else(|_| serde_json::json!({})),
         })
         .to_string(),
         Err(error) => serde_json::json!({

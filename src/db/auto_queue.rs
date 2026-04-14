@@ -36,6 +36,26 @@ pub enum EntryStatusUpdateError {
     Sql(#[from] rusqlite::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsultationDispatchRecordResult {
+    pub metadata_json: String,
+    pub entry_status_changed: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum ConsultationDispatchRecordError {
+    #[error("consultation dispatch id is required")]
+    MissingDispatchId,
+    #[error("consultation trigger source is required")]
+    MissingSource,
+    #[error("consultation card not found: {card_id}")]
+    CardNotFound { card_id: String },
+    #[error(transparent)]
+    EntryStatus(#[from] EntryStatusUpdateError),
+    #[error(transparent)]
+    Sql(#[from] rusqlite::Error),
+}
+
 #[derive(Debug, Clone)]
 struct EntryStatusRow {
     run_id: String,
@@ -833,6 +853,80 @@ pub fn run_has_blocking_phase_gate(conn: &Connection, run_id: &str) -> bool {
         |row| row.get(0),
     )
     .unwrap_or(false)
+}
+
+fn consultation_metadata_object(
+    base_metadata_json: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let trimmed = base_metadata_json.trim();
+    if trimmed.is_empty() {
+        return serde_json::Map::new();
+    }
+
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+pub fn record_consultation_dispatch_on_conn(
+    conn: &mut Connection,
+    entry_id: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+    base_metadata_json: &str,
+) -> Result<ConsultationDispatchRecordResult, ConsultationDispatchRecordError> {
+    let dispatch_id = dispatch_id.trim();
+    if dispatch_id.is_empty() {
+        return Err(ConsultationDispatchRecordError::MissingDispatchId);
+    }
+    let trigger_source = trigger_source.trim();
+    if trigger_source.is_empty() {
+        return Err(ConsultationDispatchRecordError::MissingSource);
+    }
+
+    let tx = conn.transaction()?;
+    let mut metadata = consultation_metadata_object(base_metadata_json);
+    metadata.insert(
+        "consultation_status".to_string(),
+        serde_json::json!("pending"),
+    );
+    metadata.insert(
+        "consultation_dispatch_id".to_string(),
+        serde_json::json!(dispatch_id),
+    );
+    let metadata_json = serde_json::Value::Object(metadata).to_string();
+
+    let updated = tx.execute(
+        "UPDATE kanban_cards
+         SET metadata = ?1,
+             updated_at = datetime('now')
+         WHERE id = ?2",
+        rusqlite::params![&metadata_json, card_id],
+    )?;
+    if updated == 0 {
+        return Err(ConsultationDispatchRecordError::CardNotFound {
+            card_id: card_id.to_string(),
+        });
+    }
+
+    let entry_result = update_entry_status_on_conn(
+        &tx,
+        entry_id,
+        ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+        &EntryStatusUpdateOptions {
+            dispatch_id: Some(dispatch_id.to_string()),
+            slot_index: None,
+        },
+    )?;
+
+    tx.commit()?;
+    Ok(ConsultationDispatchRecordResult {
+        metadata_json,
+        entry_status_changed: entry_result.changed,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1679,10 +1773,11 @@ fn append_card_filters(
 #[cfg(test)]
 mod tests {
     use super::{
-        ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED,
-        EntryStatusUpdateError, EntryStatusUpdateOptions, PhaseGateStateWrite,
-        clear_phase_gate_state_on_conn, list_entry_dispatch_history, save_phase_gate_state_on_conn,
-        update_entry_status_on_conn,
+        ConsultationDispatchRecordError, ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE,
+        ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
+        EntryStatusUpdateOptions, PhaseGateStateWrite, clear_phase_gate_state_on_conn,
+        list_entry_dispatch_history, record_consultation_dispatch_on_conn,
+        save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
     use rusqlite::Connection;
 
@@ -1754,6 +1849,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 title TEXT,
                 status TEXT,
+                metadata TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -2130,6 +2226,80 @@ mod tests {
             super::slot_has_active_dispatch(&conn, "agent-1", 0),
             "primary dispatches must still block slot reuse"
         );
+    }
+
+    #[test]
+    fn record_consultation_dispatch_preserves_metadata_and_marks_entry_dispatched() {
+        let mut conn = setup_conn();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, metadata)
+             VALUES ('card-consult', 'Card Consult', 'requested', ?1)",
+            [serde_json::json!({
+                "keep": "yes",
+                "preflight_status": "consult_required"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-consult', 'run-1', 'card-consult', 'agent-1', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+
+        let result = record_consultation_dispatch_on_conn(
+            &mut conn,
+            "entry-consult",
+            "card-consult",
+            "dispatch-consult",
+            "test_consultation_dispatch",
+            r#"{"keep":"yes","preflight_status":"consult_required"}"#,
+        )
+        .unwrap();
+        assert!(result.entry_status_changed);
+
+        let metadata_raw: String = conn
+            .query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-consult'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_raw).unwrap();
+        assert_eq!(metadata["keep"], "yes");
+        assert_eq!(metadata["preflight_status"], "consult_required");
+        assert_eq!(metadata["consultation_status"], "pending");
+        assert_eq!(metadata["consultation_dispatch_id"], "dispatch-consult");
+
+        let (status, dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-consult'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-consult"));
+    }
+
+    #[test]
+    fn record_consultation_dispatch_requires_dispatch_id() {
+        let mut conn = setup_conn();
+        let error = record_consultation_dispatch_on_conn(
+            &mut conn,
+            "entry-missing",
+            "card-missing",
+            "   ",
+            "test_consultation_dispatch",
+            "{}",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConsultationDispatchRecordError::MissingDispatchId
+        ));
     }
 
     #[test]

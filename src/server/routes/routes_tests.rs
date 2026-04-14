@@ -7681,6 +7681,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         conn.execute(
             "UPDATE kanban_cards SET metadata = ?1 WHERE id = 'card-consult'",
             [serde_json::json!({
+                "keep": "yes",
                 "preflight_status": "consult_required",
                 "preflight_summary": "need counter review"
             })
@@ -7759,6 +7760,8 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         )
         .unwrap();
     let metadata: serde_json::Value = serde_json::from_str(&metadata_raw).unwrap();
+    assert_eq!(metadata["keep"], "yes");
+    assert_eq!(metadata["preflight_status"], "consult_required");
     assert_eq!(metadata["consultation_status"], "pending");
     assert_eq!(metadata["consultation_dispatch_id"], dispatch_id);
 }

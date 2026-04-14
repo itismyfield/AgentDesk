@@ -1091,19 +1091,12 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
       "[Consultation] " + entry.title
     );
     if (dispatchId) {
-      // Update metadata with consultation info
-      var newMeta = JSON.parse(JSON.stringify(preflightMeta));
-      newMeta.consultation_status = "pending";
-      newMeta.consultation_dispatch_id = dispatchId;
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-        [JSON.stringify(newMeta), entry.kanban_card_id]
-      );
-      agentdesk.autoQueue.updateEntryStatus(
+      agentdesk.autoQueue.recordConsultationDispatch(
         entry.id,
-        "dispatched",
+        entry.kanban_card_id,
+        dispatchId,
         "consultation_dispatch_created",
-        { dispatchId: dispatchId }
+        preflightMeta
       );
       autoQueueLog("info", "Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id, {
         entry_id: entry.id,

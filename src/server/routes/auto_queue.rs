@@ -797,7 +797,7 @@ fn handle_activate_preflight_metadata(
     let Some(metadata) = metadata else {
         return ActivatePreflightOutcome::Continue;
     };
-    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(metadata) else {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(metadata) else {
         return ActivatePreflightOutcome::Continue;
     };
     let log_ctx = AutoQueueLogContext::new()
@@ -884,32 +884,22 @@ fn handle_activate_preflight_metadata(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            if let Some(obj) = parsed.as_object_mut() {
-                obj.insert(
-                    "consultation_status".to_string(),
-                    serde_json::json!("pending"),
-                );
-                obj.insert(
-                    "consultation_dispatch_id".to_string(),
-                    serde_json::json!(dispatch_id),
+            let mut conn = deps.db.separate_conn().unwrap();
+            if let Err(error) = crate::db::auto_queue::record_consultation_dispatch_on_conn(
+                &mut conn,
+                entry_id,
+                card_id,
+                &dispatch_id,
+                "activate_preflight_consultation_dispatch",
+                metadata,
+            ) {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_preflight_consultation_record_failed",
+                    log_ctx.clone().dispatch(&dispatch_id),
+                    "[auto-queue] failed to persist consultation dispatch state for entry {entry_id}: {error}"
                 );
             }
-
-            let conn = deps.db.separate_conn().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-                rusqlite::params![parsed.to_string(), card_id],
-            )
-            .ok();
-            conn.execute(
-                "UPDATE auto_queue_entries
-                 SET status = 'dispatched',
-                     dispatch_id = ?1,
-                     dispatched_at = datetime('now')
-                 WHERE id = ?2",
-                rusqlite::params![dispatch_id, entry_id],
-            )
-            .ok();
             crate::auto_queue_log!(
                 info,
                 "activate_preflight_consultation_dispatch_created",
@@ -2995,7 +2985,7 @@ pub(crate) fn activate_with_deps(
             drop(conn);
 
             if let Some(metadata) = metadata {
-                if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&metadata) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&metadata) {
                     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
                         Some("consult_required") => {
                             let conn = deps.db.separate_conn().unwrap();
@@ -3117,38 +3107,22 @@ pub(crate) fn activate_with_deps(
                                 .as_str()
                                 .unwrap_or("")
                                 .to_string();
-                            if let Some(obj) = parsed.as_object_mut() {
-                                obj.insert(
-                                    "consultation_status".to_string(),
-                                    serde_json::json!("pending"),
-                                );
-                                obj.insert(
-                                    "consultation_dispatch_id".to_string(),
-                                    serde_json::json!(dispatch_id),
-                                );
-                            }
-
-                            let conn = deps.db.separate_conn().unwrap();
-                            conn.execute(
-                                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-                                rusqlite::params![parsed.to_string(), card_id],
-                            )
-                            .ok();
-                            if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
-                                &conn,
-                                &entry_id,
-                                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                                "activate_consultation_dispatch",
-                                &crate::db::auto_queue::EntryStatusUpdateOptions {
-                                    dispatch_id: Some(dispatch_id.clone()),
-                                    slot_index: None,
-                                },
-                            ) {
+                            let mut conn = deps.db.separate_conn().unwrap();
+                            if let Err(error) =
+                                crate::db::auto_queue::record_consultation_dispatch_on_conn(
+                                    &mut conn,
+                                    &entry_id,
+                                    &card_id,
+                                    &dispatch_id,
+                                    "activate_consultation_dispatch",
+                                    &metadata,
+                                )
+                            {
                                 crate::auto_queue_log!(
                                     warn,
-                                    "activate_consultation_mark_dispatched_failed",
+                                    "activate_consultation_record_failed",
                                     entry_log_ctx.clone().dispatch(&dispatch_id),
-                                    "[auto-queue] failed to mark consultation entry {} dispatched: {}",
+                                    "[auto-queue] failed to persist consultation dispatch state for entry {}: {}",
                                     entry_id,
                                     error
                                 );
