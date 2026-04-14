@@ -38,6 +38,7 @@ src/
 ├── db/
 │   ├── agents.rs
 │   ├── auto_queue.rs
+│   ├── cron_history.rs
 │   ├── kanban.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
@@ -143,6 +144,7 @@ src/
 │   │   └── termination_events.rs
 │   ├── background.rs
 │   ├── boot.rs
+│   ├── cron_catalog.rs
 │   ├── mod.rs
 │   ├── tick.rs
 │   ├── worker_registry.rs

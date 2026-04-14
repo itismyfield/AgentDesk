@@ -739,7 +739,7 @@ export default function KanbanTab({
     : boardColumns;
 
   const canRetryCard = (card: KanbanCard | null) =>
-    Boolean(card && (isManualInterventionCard(card) || ["requested", "in_progress"].includes(card.status)));
+    Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
 
   const canRedispatchCard = (card: KanbanCard | null) =>
     Boolean(card && ["requested", "in_progress"].includes(card.status));
