@@ -2073,6 +2073,107 @@ mod tests {
     }
 
     #[test]
+    fn auto_queue_activate_agent_scope_uses_free_slot_for_additional_group() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+                 VALUES ('card-aq-live', 'AQ Live', 'in_progress', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+                 VALUES ('card-aq-next', 'AQ Next', 'ready', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at) \
+                 VALUES ('run-aq-slot-scale', 'repo-1', 'agent-1', 'active', 2, 2, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-aq-live', 'run-aq-slot-scale', 'card-aq-live', 'agent-1', 'dispatched', 'dispatch-aq-live', 0, 0, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, priority_rank, created_at) \
+                 VALUES ('entry-aq-next', 'run-aq-slot-scale', 'card-aq-next', 'agent-1', 'pending', 1, 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+                 VALUES ('agent-1', 0, 'run-aq-slot-scale', 0, '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+                 VALUES ('agent-1', 1, NULL, NULL, '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        seed_dispatch(
+            &db,
+            "dispatch-aq-live",
+            "card-aq-live",
+            "implementation",
+            "dispatched",
+        );
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            db.clone(),
+            engine.clone(),
+        );
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-slot-scale".to_string()),
+                repo: Some("repo-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        );
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(
+            body.0["count"].as_u64(),
+            Some(1),
+            "agent-scoped activate should dispatch another group when a free slot exists"
+        );
+
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (entry_status, slot_index, dispatch_id): (String, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT status, slot_index, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-next'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(entry_status, "dispatched");
+        assert_eq!(slot_index, Some(1));
+        assert!(
+            dispatch_id.is_some(),
+            "newly dispatched group must persist dispatch_id"
+        );
+    }
+
+    #[test]
     fn auto_queue_on_tick_recovers_orphan_dispatched_entry_to_pending() {
         let db = test_db();
         let engine = test_engine(&db);

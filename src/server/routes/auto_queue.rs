@@ -2354,53 +2354,6 @@ pub(crate) fn activate_with_deps(
         );
     }
 
-    // #179: When agent_id is known, apply cross-run in-flight guard to prevent
-    // double-dispatch. Respects repo filter to avoid cross-repo dispatch.
-    let effective_agent: Option<String> = body.agent_id.clone();
-
-    // Build card-level repo condition for agent-scoped queries (#179).
-    // Uses kanban_cards.repo_id instead of auto_queue_runs.repo to handle
-    // mixed global runs (repo=NULL) that contain cards from multiple repos.
-    let card_repo_condition = if body.repo.is_some() {
-        " AND kc.repo_id = ?2"
-    } else {
-        ""
-    };
-
-    if let Some(ref agt) = effective_agent {
-        // In-flight guard: any dispatched entry for this agent across active runs,
-        // filtered by card's actual repo_id (not run-level repo).
-        let inflight_query = format!(
-            "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-             WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'{}",
-            card_repo_condition
-        );
-        let has_inflight: bool = if let Some(ref repo) = body.repo {
-            conn.query_row(&inflight_query, rusqlite::params![agt, repo], |row| {
-                row.get(0)
-            })
-        } else {
-            conn.query_row(&inflight_query, rusqlite::params![agt], |row| row.get(0))
-        }
-        .unwrap_or(false);
-        if has_inflight {
-            crate::auto_queue_log!(
-                info,
-                "activate_inflight_guard_blocked",
-                run_log_ctx.clone().agent(agt),
-                "[auto-queue] Skipping activate: agent {agt} already has a dispatched entry in-flight"
-            );
-            return (
-                StatusCode::OK,
-                Json(
-                    json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" }),
-                ),
-            );
-        }
-    }
-
     // Slot pooling is always enabled. The legacy `unified_thread` field is
     // accepted at the API boundary for compatibility, but no longer affects runtime.
     let (max_concurrent, _thread_group_count): (i64, i64) = conn
