@@ -36,7 +36,27 @@ interface ModelSegment {
   color: string;
 }
 
-type TrendSeriesKey = "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_creation_tokens";
+interface AgentCacheRow {
+  id: string;
+  label: string;
+  promptTokens: number;
+  cacheReadTokens: number;
+  savings: number;
+  hitRate: number;
+}
+
+interface DailyCacheHitPoint {
+  date: string;
+  promptTokens: number;
+  cacheReadTokens: number;
+  hitRate: number;
+}
+
+type TrendSeriesKey =
+  | "input_tokens"
+  | "output_tokens"
+  | "cache_read_tokens"
+  | "cache_creation_tokens";
 type TrendPattern = "diagonal" | "dots" | "horizontal" | "cross";
 
 interface TrendLegendItem {
@@ -64,6 +84,7 @@ const HEATMAP_COLORS = [
   "rgba(249,115,22,0.72)",
 ];
 const DAILY_TREND_CHART_HEIGHT_PX = 160;
+const DAILY_CACHE_HIT_CHART_HEIGHT_PX = 152;
 
 function formatTokens(value: number): string {
   if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
@@ -79,13 +100,86 @@ function formatCost(value: number): string {
   return `$${value.toFixed(4)}`;
 }
 
+function formatPercentage(value: number): string {
+  return `${value.toFixed(1)}%`;
+}
+
+export function cacheHitRatePct(
+  inputTokens: number,
+  cacheReadTokens: number,
+  cacheCreationTokens = 0,
+): number {
+  const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
+  if (promptTokens <= 0) return 0;
+  return (cacheReadTokens / promptTokens) * 100;
+}
+
+export function cacheSavingsRatePct(
+  costWithoutCache: number,
+  actualCost: number,
+): number {
+  if (costWithoutCache <= 0) return 0;
+  return (Math.max(costWithoutCache - actualCost, 0) / costWithoutCache) * 100;
+}
+
+export function buildAgentCacheRows(
+  agents: ReceiptSnapshotAgentShare[],
+): AgentCacheRow[] {
+  return [...agents]
+    .map((agent) => {
+      const inputTokens = agent.input_tokens ?? 0;
+      const cacheReadTokens = agent.cache_read_tokens ?? 0;
+      const cacheCreationTokens = agent.cache_creation_tokens ?? 0;
+      const costWithoutCache = agent.cost_without_cache ?? agent.cost;
+      return {
+        id: agent.agent,
+        label: agent.agent,
+        promptTokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+        cacheReadTokens,
+        savings: Math.max(costWithoutCache - agent.cost, 0),
+        hitRate: cacheHitRatePct(
+          inputTokens,
+          cacheReadTokens,
+          cacheCreationTokens,
+        ),
+      };
+    })
+    .filter((row) => row.promptTokens > 0)
+    .sort(
+      (left, right) =>
+        right.promptTokens - left.promptTokens || right.savings - left.savings,
+    )
+    .slice(0, 8);
+}
+
+export function buildDailyCacheHitPoints(
+  daily: TokenAnalyticsDailyPoint[],
+): DailyCacheHitPoint[] {
+  return daily.map((day) => ({
+    date: day.date,
+    promptTokens:
+      day.input_tokens + day.cache_read_tokens + day.cache_creation_tokens,
+    cacheReadTokens: day.cache_read_tokens,
+    hitRate: cacheHitRatePct(
+      day.input_tokens,
+      day.cache_read_tokens,
+      day.cache_creation_tokens,
+    ),
+  }));
+}
+
 function modelColor(provider: string, index: number): string {
   const palette = MODEL_PALETTES[provider] ?? MODEL_PALETTES.default;
   return palette[index % palette.length];
 }
 
-function buildModelSegments(models: ReceiptSnapshotModelLine[]): ModelSegment[] {
-  const totalTokens = models.reduce((sum, model) => sum + model.total_tokens, 0);
+function buildModelSegments(
+  models: ReceiptSnapshotModelLine[],
+): ModelSegment[] {
+  const totalTokens = models.reduce(
+    (sum, model) => sum + model.total_tokens,
+    0,
+  );
   if (totalTokens === 0) return [];
 
   const sorted = [...models].sort((a, b) => b.total_tokens - a.total_tokens);
@@ -101,7 +195,10 @@ function buildModelSegments(models: ReceiptSnapshotModelLine[]): ModelSegment[] 
   }));
 
   if (remainder.length > 0) {
-    const remainderTokens = remainder.reduce((sum, model) => sum + model.total_tokens, 0);
+    const remainderTokens = remainder.reduce(
+      (sum, model) => sum + model.total_tokens,
+      0,
+    );
     segments.push({
       id: "other",
       label: "Other",
@@ -129,7 +226,9 @@ function buildDonutBackground(segments: ModelSegment[]): string {
   return `conic-gradient(${stops.join(", ")})`;
 }
 
-function buildWeekLabels(cells: TokenAnalyticsHeatmapCell[]): Array<{ week: number; label: string }> {
+function buildWeekLabels(
+  cells: TokenAnalyticsHeatmapCell[],
+): Array<{ week: number; label: string }> {
   const formatter = new Intl.DateTimeFormat("en-US", { month: "short" });
   const byWeek = new Map<number, TokenAnalyticsHeatmapCell[]>();
   for (const cell of cells) {
@@ -166,13 +265,15 @@ function patternFillStyle(color: string, pattern: TrendPattern): CSSProperties {
     case "dots":
       return {
         backgroundColor: color,
-        backgroundImage: "radial-gradient(circle at 2px 2px, rgba(255,255,255,0.38) 0 1.25px, transparent 1.35px)",
+        backgroundImage:
+          "radial-gradient(circle at 2px 2px, rgba(255,255,255,0.38) 0 1.25px, transparent 1.35px)",
         backgroundSize: "7px 7px",
       };
     case "horizontal":
       return {
         backgroundColor: color,
-        backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 6px)",
+        backgroundImage:
+          "repeating-linear-gradient(0deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 6px)",
       };
     case "cross":
       return {
@@ -186,7 +287,8 @@ function patternFillStyle(color: string, pattern: TrendPattern): CSSProperties {
     default:
       return {
         backgroundColor: color,
-        backgroundImage: "repeating-linear-gradient(135deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 7px)",
+        backgroundImage:
+          "repeating-linear-gradient(135deg, rgba(255,255,255,0.34) 0 2px, transparent 2px 7px)",
       };
   }
 }
@@ -207,9 +309,15 @@ export function hasDailyTrendData(daily: TokenAnalyticsDailyPoint[]): boolean {
   return daily.some((day) => day.total_tokens > 0);
 }
 
-export function dailyTrendBarHeightPx(totalTokens: number, trendMax: number): number {
+export function dailyTrendBarHeightPx(
+  totalTokens: number,
+  trendMax: number,
+): number {
   if (totalTokens <= 0 || trendMax <= 0) return 0;
-  return Math.max(8, Math.round((totalTokens / trendMax) * DAILY_TREND_CHART_HEIGHT_PX));
+  return Math.max(
+    8,
+    Math.round((totalTokens / trendMax) * DAILY_TREND_CHART_HEIGHT_PX),
+  );
 }
 
 export default function TokenAnalyticsSection({
@@ -228,7 +336,9 @@ export default function TokenAnalyticsSection({
 
     const load = async () => {
       const cached = analyticsCache.get(period);
-      const fresh = cached ? Date.now() - cached.fetchedAt < ANALYTICS_CACHE_TTL : false;
+      const fresh = cached
+        ? Date.now() - cached.fetchedAt < ANALYTICS_CACHE_TTL
+        : false;
       if (cached && mounted) setData(cached.data);
       if (fresh) return;
 
@@ -275,15 +385,65 @@ export default function TokenAnalyticsSection({
     };
   }, []);
 
-  const segments = useMemo(() => buildModelSegments(data?.receipt.models ?? []), [data]);
-  const donutBackground = useMemo(() => buildDonutBackground(segments), [segments]);
-  const weekLabels = useMemo(() => buildWeekLabels(data?.heatmap ?? []), [data]);
+  const segments = useMemo(
+    () => buildModelSegments(data?.receipt.models ?? []),
+    [data],
+  );
+  const donutBackground = useMemo(
+    () => buildDonutBackground(segments),
+    [segments],
+  );
+  const weekLabels = useMemo(
+    () => buildWeekLabels(data?.heatmap ?? []),
+    [data],
+  );
   const trendMax = useMemo(
     () => Math.max(1, ...(data?.daily.map((day) => day.total_tokens) ?? [1])),
     [data],
   );
   const topAgents = useMemo(
-    () => [...(data?.receipt.agents ?? [])].sort((a, b) => b.cost - a.cost).slice(0, 8),
+    () =>
+      [...(data?.receipt.agents ?? [])]
+        .sort((a, b) => b.cost - a.cost)
+        .slice(0, 8),
+    [data],
+  );
+  const cacheSummary = useMemo(() => {
+    const models = data?.receipt.models ?? [];
+    const inputTokens = models.reduce(
+      (sum, model) => sum + model.input_tokens,
+      0,
+    );
+    const cacheReadTokens = models.reduce(
+      (sum, model) => sum + model.cache_read_tokens,
+      0,
+    );
+    const cacheCreationTokens = models.reduce(
+      (sum, model) => sum + model.cache_creation_tokens,
+      0,
+    );
+    const costWithoutCache = data?.receipt.subtotal ?? 0;
+    const actualCost = data?.receipt.total ?? 0;
+    return {
+      promptTokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+      cacheReadTokens,
+      actualCost,
+      costWithoutCache,
+      savings: Math.max(costWithoutCache - actualCost, 0),
+      savingsRate: cacheSavingsRatePct(costWithoutCache, actualCost),
+      hitRate: cacheHitRatePct(
+        inputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+      ),
+    };
+  }, [data]);
+  const agentCacheRows = useMemo(
+    () => buildAgentCacheRows(data?.receipt.agents ?? []),
+    [data],
+  );
+  const dailyCacheHitPoints = useMemo(
+    () => buildDailyCacheHitPoints(data?.daily ?? []),
     [data],
   );
   const roiRows = useMemo(
@@ -302,7 +462,10 @@ export default function TokenAnalyticsSection({
     <section className="min-w-0 max-w-full space-y-4 overflow-hidden">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+          <h2
+            className="text-lg font-semibold"
+            style={{ color: "var(--th-text-heading)" }}
+          >
             {t({
               ko: "토큰 컨트롤 센터",
               en: "Token Control Center",
@@ -344,10 +507,18 @@ export default function TokenAnalyticsSection({
           ))}
           {loading && (
             <span
-              className={cx(dashboardBadge.default, "font-semibold uppercase tracking-[0.18em]")}
+              className={cx(
+                dashboardBadge.default,
+                "font-semibold uppercase tracking-[0.18em]",
+              )}
               style={{ color: "#fbbf24", background: "rgba(245,158,11,0.12)" }}
             >
-              {t({ ko: "토큰 분석 동기화 중", en: "Syncing token analytics", ja: "トークン分析を同期中", zh: "同步 Token 分析中" })}
+              {t({
+                ko: "토큰 분석 동기화 중",
+                en: "Syncing token analytics",
+                ja: "トークン分析を同期中",
+                zh: "同步 Token 分析中",
+              })}
             </span>
           )}
         </div>
@@ -358,44 +529,102 @@ export default function TokenAnalyticsSection({
           className={dashboardCard.accentHero}
           style={{
             borderColor: "rgba(245,158,11,0.22)",
-            background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
+            background:
+              "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #f97316 10%), var(--th-surface))",
           }}
         >
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
-              label={t({ ko: "총 토큰", en: "Total Tokens", ja: "総トークン", zh: "总代币" })}
+              label={t({
+                ko: "총 토큰",
+                en: "Total Tokens",
+                ja: "総トークン",
+                zh: "总代币",
+              })}
               value={data ? formatTokens(data.summary.total_tokens) : "…"}
-              sub={data ? data.period_label : t({ ko: "로딩 중", en: "Loading", ja: "読み込み中", zh: "加载中" })}
+              sub={
+                data
+                  ? data.period_label
+                  : t({
+                      ko: "로딩 중",
+                      en: "Loading",
+                      ja: "読み込み中",
+                      zh: "加载中",
+                    })
+              }
               accent="#f59e0b"
             />
             <MetricCard
-              label={t({ ko: "API 비용", en: "API Spend", ja: "API コスト", zh: "API 成本" })}
+              label={t({
+                ko: "API 비용",
+                en: "API Spend",
+                ja: "API コスト",
+                zh: "API 成本",
+              })}
               value={data ? formatCost(data.summary.total_cost) : "…"}
               sub={data ? `-${formatCost(data.summary.cache_discount)}` : ""}
               accent="#22c55e"
             />
             <MetricCard
-              label={t({ ko: "활성 일수", en: "Active Days", ja: "稼働日数", zh: "活跃天数" })}
-              value={data ? numberFormatter.format(data.summary.active_days) : "…"}
-              sub={data ? `${formatTokens(data.summary.average_daily_tokens)} / day` : ""}
+              label={t({
+                ko: "활성 일수",
+                en: "Active Days",
+                ja: "稼働日数",
+                zh: "活跃天数",
+              })}
+              value={
+                data ? numberFormatter.format(data.summary.active_days) : "…"
+              }
+              sub={
+                data
+                  ? `${formatTokens(data.summary.average_daily_tokens)} / day`
+                  : ""
+              }
               accent="#38bdf8"
             />
             <MetricCard
-              label={t({ ko: "피크 데이", en: "Peak Day", ja: "ピーク日", zh: "峰值日" })}
+              label={t({
+                ko: "피크 데이",
+                en: "Peak Day",
+                ja: "ピーク日",
+                zh: "峰值日",
+              })}
               value={data?.summary.peak_day?.date.slice(5) ?? "—"}
-              sub={data?.summary.peak_day ? formatTokens(data.summary.peak_day.total_tokens) : ""}
+              sub={
+                data?.summary.peak_day
+                  ? formatTokens(data.summary.peak_day.total_tokens)
+                  : ""
+              }
               accent="#fb7185"
             />
           </div>
         </div>
 
+        <CacheEfficiencyCard
+          t={t}
+          loading={loading}
+          actualCost={cacheSummary.actualCost}
+          cacheReadTokens={cacheSummary.cacheReadTokens}
+          hitRate={cacheSummary.hitRate}
+          promptTokens={cacheSummary.promptTokens}
+          savings={cacheSummary.savings}
+          savingsRate={cacheSummary.savingsRate}
+          uncachedCost={cacheSummary.costWithoutCache}
+        />
+
         <div
           className={dashboardCard.standard}
-          style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+          style={{
+            borderColor: "var(--th-border)",
+            background: "var(--th-surface)",
+          }}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+              <h3
+                className="text-sm font-semibold"
+                style={{ color: "var(--th-text)" }}
+              >
                 {t({
                   ko: "토큰 활동 히트맵",
                   en: "Token Activity Heatmap",
@@ -419,7 +648,8 @@ export default function TokenAnalyticsSection({
                   className="h-2.5 w-2.5 rounded-[4px] border"
                   style={{
                     background: color,
-                    borderColor: index === 0 ? "rgba(148,163,184,0.12)" : "transparent",
+                    borderColor:
+                      index === 0 ? "rgba(148,163,184,0.12)" : "transparent",
                   }}
                 />
               ))}
@@ -427,13 +657,27 @@ export default function TokenAnalyticsSection({
           </div>
 
           {!data ? (
-            <div className="py-12 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "토큰 분석을 불러오는 중입니다", en: "Loading token analytics", ja: "トークン分析を読み込み中", zh: "正在加载 Token 分析" })}
+            <div
+              className="py-12 text-center text-sm"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {t({
+                ko: "토큰 분석을 불러오는 중입니다",
+                en: "Loading token analytics",
+                ja: "トークン分析を読み込み中",
+                zh: "正在加载 Token 分析",
+              })}
             </div>
           ) : (
             <div className="mt-4 overflow-hidden">
               <div className="min-w-0 overflow-x-auto">
-                <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)", minWidth: "min-content" }}>
+                <div
+                  className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]"
+                  style={{
+                    color: "var(--th-text-muted)",
+                    minWidth: "min-content",
+                  }}
+                >
                   {weekLabels.map((item) => (
                     <span key={item.week} className="truncate">
                       {item.label}
@@ -472,8 +716,13 @@ export default function TokenAnalyticsSection({
                         <span
                           className="block h-3 w-3 rounded-[4px] border transition-transform group-hover:scale-110 group-focus-within:scale-110"
                           style={{
-                            background: cell.future ? "rgba(148,163,184,0.04)" : HEATMAP_COLORS[cell.level] ?? HEATMAP_COLORS[0],
-                            borderColor: cell.future ? "rgba(148,163,184,0.05)" : "rgba(255,255,255,0.04)",
+                            background: cell.future
+                              ? "rgba(148,163,184,0.04)"
+                              : (HEATMAP_COLORS[cell.level] ??
+                                HEATMAP_COLORS[0]),
+                            borderColor: cell.future
+                              ? "rgba(148,163,184,0.05)"
+                              : "rgba(255,255,255,0.04)",
                             opacity: cell.future ? 0.35 : 1,
                           }}
                         />
@@ -486,7 +735,17 @@ export default function TokenAnalyticsSection({
           )}
         </div>
 
-        <DailyTrendCard daily={data?.daily ?? []} trendMax={trendMax} t={t} loading={loading} />
+        <DailyTrendCard
+          daily={data?.daily ?? []}
+          trendMax={trendMax}
+          t={t}
+          loading={loading}
+        />
+        <DailyCacheHitTrendCard
+          daily={dailyCacheHitPoints}
+          t={t}
+          loading={loading}
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -505,6 +764,8 @@ export default function TokenAnalyticsSection({
         />
       </div>
 
+      <AgentCacheHitCard t={t} rows={agentCacheRows} loading={loading} />
+
       <AgentRoiCard
         t={t}
         rows={roiRows}
@@ -512,6 +773,125 @@ export default function TokenAnalyticsSection({
         numberFormatter={numberFormatter}
       />
     </section>
+  );
+}
+
+function CacheEfficiencyCard({
+  t,
+  loading,
+  actualCost,
+  uncachedCost,
+  savings,
+  savingsRate,
+  hitRate,
+  cacheReadTokens,
+  promptTokens,
+}: {
+  t: TFunction;
+  loading: boolean;
+  actualCost: number;
+  uncachedCost: number;
+  savings: number;
+  savingsRate: number;
+  hitRate: number;
+  cacheReadTokens: number;
+  promptTokens: number;
+}) {
+  return (
+    <div
+      className={dashboardCard.standard}
+      style={{
+        borderColor: "color-mix(in srgb, #22c55e 24%, var(--th-border) 76%)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, var(--th-surface) 93%, #22c55e 7%) 0%, var(--th-surface) 100%)",
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
+            {t({
+              ko: "캐시 절감 요약",
+              en: "Cache Savings Summary",
+              ja: "キャッシュ節約サマリー",
+              zh: "缓存节省摘要",
+            })}
+          </h3>
+          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+            {t({
+              ko: "uncached 기준 비용과 실제 결제 비용 차이를 한눈에 봅니다",
+              en: "See the gap between uncached baseline and actual billed spend",
+              ja: "キャッシュなし基準コストと実課金コストの差をひと目で確認します",
+              zh: "一眼查看未缓存基线成本与实际计费成本的差值",
+            })}
+          </p>
+        </div>
+        {loading ? (
+          <LoadingIndicator
+            compact
+            label={t({
+              ko: "캐시 절감 요약 갱신 중",
+              en: "Refreshing cache savings summary",
+              ja: "キャッシュ節約サマリーを更新中",
+              zh: "刷新缓存节省摘要中",
+            })}
+          />
+        ) : null}
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <MetricCard
+          label={t({
+            ko: "절감액",
+            en: "Savings",
+            ja: "節約額",
+            zh: "节省金额",
+          })}
+          value={formatCost(savings)}
+          sub={t({
+            ko: `${formatCost(actualCost)} actual spend`,
+            en: `${formatCost(actualCost)} actual spend`,
+            ja: `${formatCost(actualCost)} actual spend`,
+            zh: `${formatCost(actualCost)} actual spend`,
+          })}
+          accent="#22c55e"
+        />
+        <MetricCard
+          label={t({
+            ko: "절감율",
+            en: "Savings Rate",
+            ja: "節約率",
+            zh: "节省率",
+          })}
+          value={formatPercentage(savingsRate)}
+          sub={t({
+            ko: `${formatCost(uncachedCost)} uncached baseline`,
+            en: `${formatCost(uncachedCost)} uncached baseline`,
+            ja: `${formatCost(uncachedCost)} uncached baseline`,
+            zh: `${formatCost(uncachedCost)} uncached baseline`,
+          })}
+          accent="#14b8a6"
+        />
+        <MetricCard
+          label={t({
+            ko: "캐시 히트율",
+            en: "Cache Hit Rate",
+            ja: "キャッシュヒット率",
+            zh: "缓存命中率",
+          })}
+          value={formatPercentage(hitRate)}
+          sub={t({
+            ko: `${formatTokens(cacheReadTokens)} cache reads / ${formatTokens(promptTokens)} prompt`,
+            en: `${formatTokens(cacheReadTokens)} cache reads / ${formatTokens(promptTokens)} prompt`,
+            ja: `${formatTokens(cacheReadTokens)} cache reads / ${formatTokens(promptTokens)} prompt`,
+            zh: `${formatTokens(cacheReadTokens)} cache reads / ${formatTokens(promptTokens)} prompt`,
+          })}
+          accent="#f59e0b"
+        />
+      </div>
+    </div>
   );
 }
 
@@ -560,10 +940,16 @@ function MetricCard({
         background: "rgba(15,23,42,0.16)",
       }}
     >
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+      <div
+        className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+        style={{ color: "var(--th-text-muted)" }}
+      >
         {label}
       </div>
-      <div className="mt-2 text-2xl font-black tracking-tight" style={{ color: accent }}>
+      <div
+        className="mt-2 text-2xl font-black tracking-tight"
+        style={{ color: accent }}
+      >
         {value}
       </div>
       <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -585,10 +971,40 @@ function DailyTrendCard({
   loading: boolean;
 }) {
   const legend: TrendLegendItem[] = [
-    { key: "input_tokens", color: "#38bdf8", pattern: "diagonal", label: t({ ko: "입력", en: "Input", ja: "入力", zh: "输入" }) },
-    { key: "output_tokens", color: "#f97316", pattern: "dots", label: t({ ko: "출력", en: "Output", ja: "出力", zh: "输出" }) },
-    { key: "cache_read_tokens", color: "#22c55e", pattern: "horizontal", label: t({ ko: "캐시 읽기", en: "Cache Read", ja: "キャッシュ読取", zh: "缓存读取" }) },
-    { key: "cache_creation_tokens", color: "#a855f7", pattern: "cross", label: t({ ko: "캐시 쓰기", en: "Cache Write", ja: "キャッシュ書込", zh: "缓存写入" }) },
+    {
+      key: "input_tokens",
+      color: "#38bdf8",
+      pattern: "diagonal",
+      label: t({ ko: "입력", en: "Input", ja: "入力", zh: "输入" }),
+    },
+    {
+      key: "output_tokens",
+      color: "#f97316",
+      pattern: "dots",
+      label: t({ ko: "출력", en: "Output", ja: "出力", zh: "输出" }),
+    },
+    {
+      key: "cache_read_tokens",
+      color: "#22c55e",
+      pattern: "horizontal",
+      label: t({
+        ko: "캐시 읽기",
+        en: "Cache Read",
+        ja: "キャッシュ読取",
+        zh: "缓存读取",
+      }),
+    },
+    {
+      key: "cache_creation_tokens",
+      color: "#a855f7",
+      pattern: "cross",
+      label: t({
+        ko: "캐시 쓰기",
+        en: "Cache Write",
+        ja: "キャッシュ書込",
+        zh: "缓存写入",
+      }),
+    },
   ];
   const hasData = hasDailyTrendData(daily);
   const labelStride = Math.max(1, Math.ceil(daily.length / 6));
@@ -596,11 +1012,17 @@ function DailyTrendCard({
   return (
     <div
       className={dashboardCard.standard}
-      style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
             {t({
               ko: "일별 토큰 추이",
               en: "Daily Token Trend",
@@ -619,7 +1041,11 @@ function DailyTrendCard({
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
           {legend.map((item) => (
-            <span key={item.key} className="inline-flex items-center gap-1.5" style={{ color: "var(--th-text-muted)" }}>
+            <span
+              key={item.key}
+              className="inline-flex items-center gap-1.5"
+              style={{ color: "var(--th-text-muted)" }}
+            >
               <span
                 className="h-3.5 w-3.5 rounded-lg border"
                 style={{
@@ -630,20 +1056,49 @@ function DailyTrendCard({
               {item.label}
             </span>
           ))}
-          {loading ? <LoadingIndicator compact label={t({ ko: "일별 토큰 추이 갱신 중", en: "Refreshing daily token trend", ja: "日次トークン推移を更新中", zh: "刷新每日 Token 趋势" })} /> : null}
+          {loading ? (
+            <LoadingIndicator
+              compact
+              label={t({
+                ko: "일별 토큰 추이 갱신 중",
+                en: "Refreshing daily token trend",
+                ja: "日次トークン推移を更新中",
+                zh: "刷新每日 Token 趋势",
+              })}
+            />
+          ) : null}
         </div>
       </div>
 
       {!hasData ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
           {loading
-            ? t({ ko: "토큰 추이를 동기화하는 중입니다", en: "Syncing token trend", ja: "トークン推移を同期中", zh: "正在同步 Token 趋势" })
-            : t({ ko: "표시할 토큰 추이가 없습니다", en: "No token trend to show", ja: "表示する推移がありません", zh: "暂无可显示的趋势" })}
+            ? t({
+                ko: "토큰 추이를 동기화하는 중입니다",
+                en: "Syncing token trend",
+                ja: "トークン推移を同期中",
+                zh: "正在同步 Token 趋势",
+              })
+            : t({
+                ko: "표시할 토큰 추이가 없습니다",
+                en: "No token trend to show",
+                ja: "表示する推移がありません",
+                zh: "暂无可显示的趋势",
+              })}
         </div>
       ) : (
-        <div className="mt-4 overflow-hidden" style={{ opacity: loading ? 0.58 : 1 }}>
+        <div
+          className="mt-4 overflow-hidden"
+          style={{ opacity: loading ? 0.58 : 1 }}
+        >
           <div className="min-w-0 overflow-x-auto">
-            <div className="flex h-44 items-end gap-px sm:gap-1.5" style={{ minWidth: "min-content" }}>
+            <div
+              className="flex h-44 items-end gap-px sm:gap-1.5"
+              style={{ minWidth: "min-content" }}
+            >
               {daily.map((day, index) => {
                 const segments = legend
                   .map((item) => ({
@@ -653,12 +1108,18 @@ function DailyTrendCard({
                   .filter((segment) => segment.value > 0);
                 const totalHeight = Math.max(
                   8,
-                  Math.round((day.total_tokens / trendMax) * TREND_PLOT_HEIGHT_PX),
+                  Math.round(
+                    (day.total_tokens / trendMax) * TREND_PLOT_HEIGHT_PX,
+                  ),
                 );
                 const breakdown = segments.map(
-                  (segment) => `${segment.label} ${formatTokens(segment.value)}`,
+                  (segment) =>
+                    `${segment.label} ${formatTokens(segment.value)}`,
                 );
-                const compactLabel = index === 0 || index === daily.length - 1 || index % labelStride === 0;
+                const compactLabel =
+                  index === 0 ||
+                  index === daily.length - 1 ||
+                  index % labelStride === 0;
 
                 return (
                   <div
@@ -697,7 +1158,10 @@ function DailyTrendCard({
                             key={`${day.date}-${segment.color}-${index}`}
                             style={{
                               height: `${(segment.value / day.total_tokens) * 100}%`,
-                              ...patternFillStyle(segment.color, segment.pattern),
+                              ...patternFillStyle(
+                                segment.color,
+                                segment.pattern,
+                              ),
                             }}
                           />
                         ))}
@@ -707,8 +1171,185 @@ function DailyTrendCard({
                       className="min-h-[1.8rem] text-center text-[9px] leading-3 sm:min-h-0 sm:text-[10px]"
                       style={{ color: "var(--th-text-muted)" }}
                     >
-                      <span className="hidden sm:inline">{day.date.slice(5)}</span>
-                      <span className="sm:hidden">{compactLabel ? day.date.slice(5) : ""}</span>
+                      <span className="hidden sm:inline">
+                        {day.date.slice(5)}
+                      </span>
+                      <span className="sm:hidden">
+                        {compactLabel ? day.date.slice(5) : ""}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyCacheHitTrendCard({
+  daily,
+  t,
+  loading,
+}: {
+  daily: DailyCacheHitPoint[];
+  t: TFunction;
+  loading: boolean;
+}) {
+  const hasData = daily.some((day) => day.promptTokens > 0);
+  const labelStride = Math.max(1, Math.ceil(daily.length / 6));
+  const totalPromptTokens = daily.reduce(
+    (sum, day) => sum + day.promptTokens,
+    0,
+  );
+  const weightedHitRate =
+    totalPromptTokens > 0
+      ? daily.reduce((sum, day) => sum + day.hitRate * day.promptTokens, 0) /
+        totalPromptTokens
+      : 0;
+
+  return (
+    <div
+      className={dashboardCard.standard}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
+            {t({
+              ko: "일별 캐시 히트율",
+              en: "Daily Cache Hit Rate",
+              ja: "日次キャッシュヒット率",
+              zh: "每日缓存命中率",
+            })}
+          </h3>
+          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+            {t({
+              ko: "일자별 prompt 토큰 중 캐시로 처리된 비중을 추적합니다",
+              en: "Track how much of prompt traffic was served from cache each day",
+              ja: "日ごとの prompt トークンのうちキャッシュで処理された比率を追跡します",
+              zh: "追踪每天 prompt Token 中由缓存提供的占比",
+            })}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={dashboardBadge.large}
+            style={{ color: "#22c55e", background: "rgba(34,197,94,0.12)" }}
+          >
+            {formatPercentage(weightedHitRate)}
+          </span>
+          {loading ? (
+            <LoadingIndicator
+              compact
+              label={t({
+                ko: "일별 캐시 히트율 갱신 중",
+                en: "Refreshing daily cache hit rate",
+                ja: "日次キャッシュヒット率を更新中",
+                zh: "刷新每日缓存命中率中",
+              })}
+            />
+          ) : null}
+        </div>
+      </div>
+
+      {!hasData ? (
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {loading
+            ? t({
+                ko: "캐시 히트율을 동기화하는 중입니다",
+                en: "Syncing cache hit rate",
+                ja: "キャッシュヒット率を同期中",
+                zh: "正在同步缓存命中率",
+              })
+            : t({
+                ko: "표시할 캐시 히트율 데이터가 없습니다",
+                en: "No cache hit data to show",
+                ja: "表示するキャッシュヒット率データがありません",
+                zh: "暂无可显示的缓存命中数据",
+              })}
+        </div>
+      ) : (
+        <div
+          className="mt-4 overflow-hidden"
+          style={{ opacity: loading ? 0.58 : 1 }}
+        >
+          <div className="min-w-0 overflow-x-auto">
+            <div
+              className="flex h-44 items-end gap-px sm:gap-1.5"
+              style={{ minWidth: "min-content" }}
+            >
+              {daily.map((day, index) => {
+                const height =
+                  day.hitRate <= 0
+                    ? 0
+                    : Math.max(
+                        8,
+                        Math.round(
+                          (day.hitRate / 100) * DAILY_CACHE_HIT_CHART_HEIGHT_PX,
+                        ),
+                      );
+                const compactLabel =
+                  index === 0 ||
+                  index === daily.length - 1 ||
+                  index % labelStride === 0;
+
+                return (
+                  <div
+                    key={day.date}
+                    className="group relative flex w-2 shrink-0 flex-col items-center gap-1 outline-none sm:min-w-0 sm:flex-1 sm:shrink sm:gap-2"
+                    tabIndex={0}
+                    role="img"
+                    aria-label={[
+                      day.date,
+                      `${formatPercentage(day.hitRate)} cache hit rate`,
+                      `${formatTokens(day.cacheReadTokens)} cache read tokens`,
+                      `${formatTokens(day.promptTokens)} prompt tokens`,
+                    ].join(", ")}
+                  >
+                    <ChartTooltip
+                      lines={[
+                        day.date,
+                        `${formatPercentage(day.hitRate)} cache hit rate`,
+                        `${formatTokens(day.cacheReadTokens)} cache read tokens`,
+                        `${formatTokens(day.promptTokens)} prompt tokens`,
+                      ]}
+                    />
+                    <div className="flex h-36 w-full items-end">
+                      <div
+                        className="w-full min-w-[6px] rounded-t-xl border sm:min-w-[10px]"
+                        style={{
+                          height,
+                          minHeight: height > 0 ? 8 : 0,
+                          maxHeight: DAILY_CACHE_HIT_CHART_HEIGHT_PX,
+                          borderColor: "rgba(255,255,255,0.06)",
+                          background:
+                            "linear-gradient(180deg, #22c55e 0%, #14b8a6 52%, #38bdf8 100%)",
+                          opacity: day.promptTokens > 0 ? 1 : 0.24,
+                        }}
+                      />
+                    </div>
+                    <span
+                      className="min-h-[1.8rem] text-center text-[9px] leading-3 sm:min-h-0 sm:text-[10px]"
+                      style={{ color: "var(--th-text-muted)" }}
+                    >
+                      <span className="hidden sm:inline">
+                        {day.date.slice(5)}
+                      </span>
+                      <span className="sm:hidden">
+                        {compactLabel ? day.date.slice(5) : ""}
+                      </span>
                     </span>
                   </div>
                 );
@@ -737,11 +1378,17 @@ function ModelDistributionCard({
   return (
     <div
       className={dashboardCard.standard}
-      style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
             {t({
               ko: "모델 분포",
               en: "Model Distribution",
@@ -759,21 +1406,50 @@ function ModelDistributionCard({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className={dashboardBadge.large} style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}>
+          <span
+            className={dashboardBadge.large}
+            style={{ color: "#f59e0b", background: "rgba(245,158,11,0.12)" }}
+          >
             {formatTokens(totalTokens)}
           </span>
-          {loading ? <LoadingIndicator compact label={t({ ko: "모델 분포 갱신 중", en: "Refreshing model distribution", ja: "モデル分布を更新中", zh: "刷新模型分布中" })} /> : null}
+          {loading ? (
+            <LoadingIndicator
+              compact
+              label={t({
+                ko: "모델 분포 갱신 중",
+                en: "Refreshing model distribution",
+                ja: "モデル分布を更新中",
+                zh: "刷新模型分布中",
+              })}
+            />
+          ) : null}
         </div>
       </div>
 
       {segments.length === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
           {loading
-            ? t({ ko: "모델 분포를 동기화하는 중입니다", en: "Syncing model distribution", ja: "モデル分布を同期中", zh: "正在同步模型分布" })
-            : t({ ko: "모델 분포 데이터가 없습니다", en: "No model distribution data", ja: "モデル分布データがありません", zh: "暂无模型分布数据" })}
+            ? t({
+                ko: "모델 분포를 동기화하는 중입니다",
+                en: "Syncing model distribution",
+                ja: "モデル分布を同期中",
+                zh: "正在同步模型分布",
+              })
+            : t({
+                ko: "모델 분포 데이터가 없습니다",
+                en: "No model distribution data",
+                ja: "モデル分布データがありません",
+                zh: "暂无模型分布数据",
+              })}
         </div>
       ) : (
-        <div className="mt-5 grid gap-5 md:grid-cols-[180px_minmax(0,1fr)] md:items-center" style={{ opacity: loading ? 0.58 : 1 }}>
+        <div
+          className="mt-5 grid gap-5 md:grid-cols-[180px_minmax(0,1fr)] md:items-center"
+          style={{ opacity: loading ? 0.58 : 1 }}
+        >
           <div className="mx-auto flex w-full max-w-[180px] items-center justify-center">
             <div
               className="relative h-40 w-40 rounded-full"
@@ -782,15 +1458,22 @@ function ModelDistributionCard({
               <div
                 className="absolute inset-[18%] rounded-full border"
                 style={{
-                  background: "color-mix(in srgb, var(--th-surface) 88%, #0f172a 12%)",
+                  background:
+                    "color-mix(in srgb, var(--th-surface) 88%, #0f172a 12%)",
                   borderColor: "rgba(255,255,255,0.06)",
                 }}
               />
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                <div className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                <div
+                  className="text-[11px] uppercase tracking-[0.18em]"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
                   Mix
                 </div>
-                <div className="mt-1 text-xl font-black" style={{ color: "var(--th-text)" }}>
+                <div
+                  className="mt-1 text-xl font-black"
+                  style={{ color: "var(--th-text)" }}
+                >
                   {segments.length}
                 </div>
               </div>
@@ -802,25 +1485,43 @@ function ModelDistributionCard({
               <div
                 key={segment.id}
                 className={dashboardCard.nestedCompact}
-                style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}
+                style={{
+                  borderColor: "rgba(255,255,255,0.06)",
+                  background: "var(--th-bg-surface)",
+                }}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ background: segment.color }} />
-                      <span className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: segment.color }}
+                      />
+                      <span
+                        className="truncate text-sm font-semibold"
+                        style={{ color: "var(--th-text)" }}
+                      >
                         {segment.label}
                       </span>
                     </div>
-                    <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    <div
+                      className="mt-1 text-[11px]"
+                      style={{ color: "var(--th-text-muted)" }}
+                    >
                       {segment.provider}
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-sm font-bold" style={{ color: "var(--th-text)" }}>
+                    <div
+                      className="text-sm font-bold"
+                      style={{ color: "var(--th-text)" }}
+                    >
                       {segment.percentage.toFixed(1)}%
                     </div>
-                    <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    <div
+                      className="text-[11px]"
+                      style={{ color: "var(--th-text-muted)" }}
+                    >
                       {formatTokens(segment.tokens)}
                     </div>
                   </div>
@@ -850,11 +1551,17 @@ function AgentSpendCard({
   return (
     <div
       className={dashboardCard.standard}
-      style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
             {t({
               ko: "에이전트별 비용 비교",
               en: "Agent Cost Comparison",
@@ -871,35 +1578,87 @@ function AgentSpendCard({
             })}
           </p>
         </div>
-        {loading ? <LoadingIndicator compact label={t({ ko: "에이전트 비용 비교 갱신 중", en: "Refreshing agent cost comparison", ja: "エージェント別コスト比較を更新中", zh: "刷新代理成本比较中" })} /> : null}
+        {loading ? (
+          <LoadingIndicator
+            compact
+            label={t({
+              ko: "에이전트 비용 비교 갱신 중",
+              en: "Refreshing agent cost comparison",
+              ja: "エージェント別コスト比較を更新中",
+              zh: "刷新代理成本比较中",
+            })}
+          />
+        ) : null}
       </div>
 
       {agents.length === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
           {loading
-            ? t({ ko: "에이전트 사용량을 동기화하는 중입니다", en: "Syncing agent usage", ja: "エージェント使用量を同期中", zh: "正在同步代理使用量" })
-            : t({ ko: "에이전트 사용량 데이터가 없습니다", en: "No agent usage data", ja: "エージェント使用量データがありません", zh: "暂无代理使用数据" })}
+            ? t({
+                ko: "에이전트 사용량을 동기화하는 중입니다",
+                en: "Syncing agent usage",
+                ja: "エージェント使用量を同期中",
+                zh: "正在同步代理使用量",
+              })
+            : t({
+                ko: "에이전트 사용량 데이터가 없습니다",
+                en: "No agent usage data",
+                ja: "エージェント使用量データがありません",
+                zh: "暂无代理使用数据",
+              })}
         </div>
       ) : (
-        <div className="mt-4 space-y-2.5" style={{ opacity: loading ? 0.58 : 1 }}>
+        <div
+          className="mt-4 space-y-2.5"
+          style={{ opacity: loading ? 0.58 : 1 }}
+        >
           {agents.map((agent, index) => (
-            <div key={agent.agent} className={dashboardCard.nested} style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}>
+            <div
+              key={agent.agent}
+              className={dashboardCard.nested}
+              style={{
+                borderColor: "rgba(255,255,255,0.06)",
+                background: "var(--th-bg-surface)",
+              }}
+            >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold" style={{ color: "#0f172a", background: modelColor("default", index) }}>
+                    <span
+                      className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold"
+                      style={{
+                        color: "#0f172a",
+                        background: modelColor("default", index),
+                      }}
+                    >
                       {index + 1}
                     </span>
-                    <span className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                    <span
+                      className="truncate text-sm font-semibold"
+                      style={{ color: "var(--th-text)" }}
+                    >
                       {agent.agent}
                     </span>
                   </div>
-                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {formatTokens(agent.tokens)} tokens · {numberFormatter.format(Math.round(agent.percentage * 10) / 10)}%
+                  <div
+                    className="mt-1 text-[11px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {formatTokens(agent.tokens)} tokens ·{" "}
+                    {numberFormatter.format(
+                      Math.round(agent.percentage * 10) / 10,
+                    )}
+                    %
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="text-sm font-bold" style={{ color: "#22c55e" }}>
+                  <div
+                    className="text-sm font-bold"
+                    style={{ color: "#22c55e" }}
+                  >
                     {formatCost(agent.cost)}
                   </div>
                 </div>
@@ -922,6 +1681,151 @@ function AgentSpendCard({
   );
 }
 
+function AgentCacheHitCard({
+  t,
+  rows,
+  loading,
+}: {
+  t: TFunction;
+  rows: AgentCacheRow[];
+  loading: boolean;
+}) {
+  return (
+    <div
+      className={dashboardCard.standard}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3
+            className="text-sm font-semibold"
+            style={{ color: "var(--th-text)" }}
+          >
+            {t({
+              ko: "에이전트별 캐시 히트율",
+              en: "Agent Cache Hit Rate",
+              ja: "エージェント別キャッシュヒット率",
+              zh: "按代理查看缓存命中率",
+            })}
+          </h3>
+          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+            {t({
+              ko: "prompt 볼륨이 큰 에이전트를 기준으로 캐시 효율을 비교합니다",
+              en: "Compare cache efficiency across the busiest prompt-heavy agents",
+              ja: "prompt ボリュームが大きいエージェントを基準にキャッシュ効率を比較します",
+              zh: "以 prompt 体量较大的代理为基准比较缓存效率",
+            })}
+          </p>
+        </div>
+        {loading ? (
+          <LoadingIndicator
+            compact
+            label={t({
+              ko: "에이전트별 캐시 히트율 갱신 중",
+              en: "Refreshing agent cache hit rate",
+              ja: "エージェント別キャッシュヒット率を更新中",
+              zh: "刷新代理缓存命中率中",
+            })}
+          />
+        ) : null}
+      </div>
+
+      {rows.length === 0 ? (
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {loading
+            ? t({
+                ko: "에이전트 캐시 히트율을 동기화하는 중입니다",
+                en: "Syncing agent cache hit rate",
+                ja: "エージェントキャッシュヒット率を同期中",
+                zh: "正在同步代理缓存命中率",
+              })
+            : t({
+                ko: "에이전트 캐시 데이터가 없습니다",
+                en: "No agent cache data",
+                ja: "エージェントキャッシュデータがありません",
+                zh: "暂无代理缓存数据",
+              })}
+        </div>
+      ) : (
+        <div
+          className="mt-4 space-y-2.5"
+          style={{ opacity: loading ? 0.58 : 1 }}
+        >
+          {rows.map((row, index) => (
+            <div
+              key={row.id}
+              className={dashboardCard.nested}
+              style={{
+                borderColor: "rgba(255,255,255,0.06)",
+                background: "var(--th-bg-surface)",
+              }}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold"
+                      style={{
+                        color: "#0f172a",
+                        background: modelColor("Codex", index),
+                      }}
+                    >
+                      {index + 1}
+                    </span>
+                    <span
+                      className="truncate text-sm font-semibold"
+                      style={{ color: "var(--th-text)" }}
+                    >
+                      {row.label}
+                    </span>
+                  </div>
+                  <div
+                    className="mt-1 text-[11px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {formatTokens(row.cacheReadTokens)} cache reads ·{" "}
+                    {formatCost(row.savings)} saved
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div
+                    className="text-sm font-bold"
+                    style={{ color: "#22c55e" }}
+                  >
+                    {formatPercentage(row.hitRate)}
+                  </div>
+                  <div
+                    className="text-[11px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {formatTokens(row.promptTokens)} prompt
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 h-2 rounded-full bg-slate-800/50">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${row.hitRate > 0 ? Math.max(6, row.hitRate) : 0}%`,
+                    background: "linear-gradient(90deg, #22c55e, #38bdf8)",
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AgentRoiCard({
   t,
   rows,
@@ -933,12 +1837,18 @@ function AgentRoiCard({
   loading: boolean;
   numberFormatter: Intl.NumberFormat;
 }) {
-  const maxScore = Math.max(0.01, ...rows.map((row) => row.cards_per_million_tokens));
+  const maxScore = Math.max(
+    0.01,
+    ...rows.map((row) => row.cards_per_million_tokens),
+  );
 
   return (
     <div
       className="rounded-2xl border p-4 sm:p-5"
-      style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
+      style={{
+        borderColor: "var(--th-border)",
+        background: "var(--th-surface)",
+      }}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
@@ -970,18 +1880,36 @@ function AgentRoiCard({
           className="rounded-full px-3 py-1 text-xs font-semibold"
           style={{ color: "#38bdf8", background: "rgba(56,189,248,0.12)" }}
         >
-          {numberFormatter.format(rows.reduce((sum, row) => sum + row.completed_cards, 0))}{" "}
+          {numberFormatter.format(
+            rows.reduce((sum, row) => sum + row.completed_cards, 0),
+          )}{" "}
           {t({ ko: "완료", en: "done", ja: "完了", zh: "完成" })}
         </span>
       </div>
 
       {loading && rows.length === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "ROI 지표를 계산하는 중입니다", en: "Calculating ROI", ja: "ROI を計算中", zh: "正在计算 ROI" })}
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {t({
+            ko: "ROI 지표를 계산하는 중입니다",
+            en: "Calculating ROI",
+            ja: "ROI を計算中",
+            zh: "正在计算 ROI",
+          })}
         </div>
       ) : rows.length === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "선택 기간에 계산할 ROI 데이터가 없습니다", en: "No ROI data for this window", ja: "この期間の ROI データがありません", zh: "当前时间窗暂无 ROI 数据" })}
+        <div
+          className="py-10 text-center text-sm"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {t({
+            ko: "선택 기간에 계산할 ROI 데이터가 없습니다",
+            en: "No ROI data for this window",
+            ja: "この期間の ROI データがありません",
+            zh: "当前时间窗暂无 ROI 数据",
+          })}
         </div>
       ) : (
         <div className="mt-4 space-y-2.5">
@@ -989,22 +1917,34 @@ function AgentRoiCard({
             <div
               key={row.id}
               className="rounded-xl border px-3 py-3"
-              style={{ borderColor: "rgba(255,255,255,0.06)", background: "var(--th-bg-surface)" }}
+              style={{
+                borderColor: "rgba(255,255,255,0.06)",
+                background: "var(--th-bg-surface)",
+              }}
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <span
                       className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold"
-                      style={{ color: "#0f172a", background: modelColor("Codex", index) }}
+                      style={{
+                        color: "#0f172a",
+                        background: modelColor("Codex", index),
+                      }}
                     >
                       {index + 1}
                     </span>
-                    <span className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                    <span
+                      className="truncate text-sm font-semibold"
+                      style={{ color: "var(--th-text)" }}
+                    >
                       {row.label}
                     </span>
                   </div>
-                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                  <div
+                    className="mt-1 text-[11px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
                     {numberFormatter.format(row.completed_cards)}{" "}
                     {t({ ko: "카드", en: "cards", ja: "カード", zh: "卡片" })}
                     {" · "}
@@ -1014,11 +1954,22 @@ function AgentRoiCard({
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="text-sm font-bold" style={{ color: "#38bdf8" }}>
+                  <div
+                    className="text-sm font-bold"
+                    style={{ color: "#38bdf8" }}
+                  >
                     {row.cards_per_million_tokens.toFixed(2)}
                   </div>
-                  <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "카드 / 1M", en: "cards / 1M", ja: "カード / 1M", zh: "卡片 / 1M" })}
+                  <div
+                    className="text-[11px]"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {t({
+                      ko: "카드 / 1M",
+                      en: "cards / 1M",
+                      ja: "カード / 1M",
+                      zh: "卡片 / 1M",
+                    })}
                   </div>
                 </div>
               </div>

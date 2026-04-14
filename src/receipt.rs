@@ -62,6 +62,10 @@ pub struct AgentShare {
     pub agent: String,
     pub tokens: u64,
     pub cost: f64,
+    pub cost_without_cache: f64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub percentage: f64,
 }
 
@@ -151,6 +155,16 @@ struct DailyAccum {
     cost: f64,
 }
 
+#[derive(Default)]
+struct AgentAccum {
+    tokens: u64,
+    cost: f64,
+    cost_without_cache: f64,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+}
+
 struct Pricing {
     input_per_m: f64,
     output_per_m: f64,
@@ -232,6 +246,18 @@ fn record_cost(record: &UsageRecord) -> f64 {
         provider: record.provider.clone(),
     };
     actual_cost(&acc, &pricing)
+}
+
+fn record_no_cache_cost(record: &UsageRecord) -> f64 {
+    let pricing = pricing_for(&record.model);
+    let acc = ModelAccum {
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        cache_read_tokens: record.cache_read_tokens,
+        cache_creation_tokens: record.cache_creation_tokens,
+        provider: record.provider.clone(),
+    };
+    no_cache_cost(&acc, &pricing)
 }
 
 fn parse_codex_usage(v: &Value) -> Option<CodexTokenUsage> {
@@ -850,36 +876,45 @@ fn build_receipt_data(
     }
 
     // Agent shares — per-(agent, provider) for accurate provider-split filtering.
-    // Key: (agent, provider) → (tokens, cost)
-    let mut ap_tokens: HashMap<(String, String), u64> = HashMap::new();
-    let mut ap_costs: HashMap<(String, String), f64> = HashMap::new();
+    let mut ap_stats: HashMap<(String, String), AgentAccum> = HashMap::new();
     for r in records {
-        let tok = record_total_tokens(r);
-        let key = (r.agent.clone(), r.provider.clone());
-        *ap_tokens.entry(key.clone()).or_default() += tok;
-        *ap_costs.entry(key).or_default() += record_cost(r);
+        let stats = ap_stats
+            .entry((r.agent.clone(), r.provider.clone()))
+            .or_default();
+        stats.tokens += record_total_tokens(r);
+        stats.cost += record_cost(r);
+        stats.cost_without_cache += record_no_cache_cost(r);
+        stats.input_tokens += r.input_tokens;
+        stats.cache_read_tokens += r.cache_read_tokens;
+        stats.cache_creation_tokens += r.cache_creation_tokens;
     }
     // Collapse to per-agent for the combined receipt
-    let mut agent_tokens: HashMap<String, u64> = HashMap::new();
-    let mut agent_costs: HashMap<String, f64> = HashMap::new();
-    for ((agent, _prov), tok) in &ap_tokens {
-        *agent_tokens.entry(agent.clone()).or_default() += tok;
+    let mut agent_stats: HashMap<String, AgentAccum> = HashMap::new();
+    for ((agent, _prov), stats) in &ap_stats {
+        let entry = agent_stats.entry(agent.clone()).or_default();
+        entry.tokens += stats.tokens;
+        entry.cost += stats.cost;
+        entry.cost_without_cache += stats.cost_without_cache;
+        entry.input_tokens += stats.input_tokens;
+        entry.cache_read_tokens += stats.cache_read_tokens;
+        entry.cache_creation_tokens += stats.cache_creation_tokens;
     }
-    for ((agent, _prov), cost) in &ap_costs {
-        *agent_costs.entry(agent.clone()).or_default() += cost;
-    }
-    let agent_total_tok: u64 = agent_tokens.values().sum();
-    let mut agents: Vec<AgentShare> = agent_tokens
+    let agent_total_tok: u64 = agent_stats.values().map(|stats| stats.tokens).sum();
+    let mut agents: Vec<AgentShare> = agent_stats
         .into_iter()
-        .map(|(agent, tok)| AgentShare {
-            cost: *agent_costs.get(&agent).unwrap_or(&0.0),
+        .map(|(agent, stats)| AgentShare {
             percentage: if agent_total_tok > 0 {
-                tok as f64 / agent_total_tok as f64 * 100.0
+                stats.tokens as f64 / agent_total_tok as f64 * 100.0
             } else {
                 0.0
             },
             agent,
-            tokens: tok,
+            tokens: stats.tokens,
+            cost: stats.cost,
+            cost_without_cache: stats.cost_without_cache,
+            input_tokens: stats.input_tokens,
+            cache_read_tokens: stats.cache_read_tokens,
+            cache_creation_tokens: stats.cache_creation_tokens,
         })
         .collect();
     agents.sort_by(|a, b| {
@@ -939,29 +974,36 @@ fn build_receipt_data(
                 })
                 .collect(),
             per_provider_agents: {
-                let mut by_prov: HashMap<String, Vec<(String, u64, f64)>> = HashMap::new();
-                for ((agent, prov), tok) in &ap_tokens {
-                    let cost = ap_costs
-                        .get(&(agent.clone(), prov.clone()))
-                        .copied()
-                        .unwrap_or(0.0);
-                    by_prov
-                        .entry(prov.clone())
-                        .or_default()
-                        .push((agent.clone(), *tok, cost));
+                let mut by_prov: HashMap<String, Vec<(String, AgentAccum)>> = HashMap::new();
+                for ((agent, prov), stats) in &ap_stats {
+                    by_prov.entry(prov.clone()).or_default().push((
+                        agent.clone(),
+                        AgentAccum {
+                            tokens: stats.tokens,
+                            cost: stats.cost,
+                            cost_without_cache: stats.cost_without_cache,
+                            input_tokens: stats.input_tokens,
+                            cache_read_tokens: stats.cache_read_tokens,
+                            cache_creation_tokens: stats.cache_creation_tokens,
+                        },
+                    ));
                 }
                 by_prov
                     .into_iter()
                     .map(|(prov, items)| {
-                        let prov_total: u64 = items.iter().map(|(_, t, _)| t).sum();
+                        let prov_total: u64 = items.iter().map(|(_, stats)| stats.tokens).sum();
                         let mut shares: Vec<AgentShare> = items
                             .into_iter()
-                            .map(|(agent, tok, cost)| AgentShare {
+                            .map(|(agent, stats)| AgentShare {
                                 agent,
-                                tokens: tok,
-                                cost,
+                                tokens: stats.tokens,
+                                cost: stats.cost,
+                                cost_without_cache: stats.cost_without_cache,
+                                input_tokens: stats.input_tokens,
+                                cache_read_tokens: stats.cache_read_tokens,
+                                cache_creation_tokens: stats.cache_creation_tokens,
                                 percentage: if prov_total > 0 {
-                                    tok as f64 / prov_total as f64 * 100.0
+                                    stats.tokens as f64 / prov_total as f64 * 100.0
                                 } else {
                                     0.0
                                 },
@@ -1536,5 +1578,48 @@ mod tests {
         assert_eq!(records[0].input_tokens, 3000);
         assert_eq!(records[0].cache_read_tokens, 9000);
         assert_eq!(records[0].output_tokens, 80);
+    }
+
+    #[test]
+    fn build_receipt_data_includes_agent_cache_metrics() {
+        let start = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).single().unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 4, 2, 0, 0, 0).single().unwrap();
+        let records = vec![
+            UsageRecord {
+                timestamp: start,
+                model: "gpt-5.4".into(),
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_tokens: 600,
+                cache_creation_tokens: 40,
+                provider: "Codex".into(),
+                agent: "dash-agent".into(),
+                session_id: Some("sess-a".into()),
+            },
+            UsageRecord {
+                timestamp: start + Duration::minutes(5),
+                model: "gpt-5.4".into(),
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read_tokens: 200,
+                cache_creation_tokens: 0,
+                provider: "Codex".into(),
+                agent: "dash-agent".into(),
+                session_id: Some("sess-a".into()),
+            },
+        ];
+
+        let receipt = build_receipt_data(&records, start, end, "Test");
+        let agent = receipt
+            .agents
+            .iter()
+            .find(|item| item.agent == "dash-agent")
+            .expect("agent share");
+
+        assert_eq!(agent.tokens, 1_240);
+        assert_eq!(agent.input_tokens, 300);
+        assert_eq!(agent.cache_read_tokens, 800);
+        assert_eq!(agent.cache_creation_tokens, 40);
+        assert!(agent.cost_without_cache > agent.cost);
     }
 }

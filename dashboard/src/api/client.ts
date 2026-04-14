@@ -19,6 +19,7 @@ export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsRespons
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_ANALYTICS_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 500;
 
@@ -32,13 +33,18 @@ export function onApiError(listener: ApiErrorListener | null): void {
   apiErrorListener = listener;
 }
 
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
 function isRetryable(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-async function request<T>(url: string, opts?: RequestInit): Promise<T> {
+async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
+  const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   if (isGet) {
     const existing = inflightGets.get(url);
@@ -53,15 +59,16 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const { timeoutMs: _timeoutMs, ...fetchOpts } = opts ?? {};
         const res = await fetch(`${BASE}${url}`, {
           credentials: "include",
-          ...opts,
+          ...fetchOpts,
           signal: controller.signal,
           headers: {
             "Content-Type": "application/json",
-            ...opts?.headers,
+            ...fetchOpts.headers,
           },
         });
         clearTimeout(timer);
@@ -413,7 +420,9 @@ export async function getStats(officeId?: string): Promise<DashboardStats> {
 }
 
 export async function getTokenAnalytics(period: "7d" | "30d" | "90d" = "30d"): Promise<TokenAnalyticsResponse> {
-  return request(`/api/token-analytics?period=${period}`);
+  return request(`/api/token-analytics?period=${period}`, {
+    timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
+  });
 }
 
 // ── Kanban & Dispatches ──
