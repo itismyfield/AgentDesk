@@ -250,6 +250,8 @@ pub fn list_transcripts_for_agent(
            ON s.session_key = st.session_key
          LEFT JOIN task_dispatches td
            ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
          WHERE COALESCE(NULLIF(TRIM(st.agent_id), ''), NULLIF(TRIM(s.agent_id), '')) = ?1
             OR (
                 COALESCE(NULLIF(TRIM(st.agent_id), ''), NULLIF(TRIM(s.agent_id), '')) IS NULL

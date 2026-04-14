@@ -20,7 +20,6 @@ use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
-#[cfg(unix)]
 use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package

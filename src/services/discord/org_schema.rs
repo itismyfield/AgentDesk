@@ -6,7 +6,10 @@ use serde::Deserialize;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
-use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{
+    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
+    resolve_memory_settings,
+};
 use crate::services::provider::ProviderKind;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -36,6 +39,11 @@ pub(super) struct AgentDef {
     pub display_name: String,
     pub prompt_file: Option<String>,
     pub keywords: Option<Vec<String>>,
+    pub domain_summary: Option<String>,
+    pub strengths: Option<Vec<String>>,
+    pub task_types: Option<Vec<String>>,
+    pub anti_signals: Option<Vec<String>>,
+    pub provider_hint: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: Option<String>,
@@ -71,6 +79,7 @@ pub(super) struct ChannelsByName {
 pub(super) struct MeetingDef {
     pub channel_name: String,
     pub max_rounds: Option<u32>,
+    pub max_participants: Option<usize>,
     pub summary_agent: Option<SummaryAgentDef>,
     /// Explicit list of agent role_ids eligible for meetings.
     /// When omitted, all agents in the schema are eligible.
@@ -233,12 +242,13 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
         .map(expand_tilde)
         .or_else(|| {
             let root = expand_tilde(schema.prompts_root.as_deref()?);
-            let canonical = format!("{}/agents/_shared.prompt.md", root);
-            if std::path::Path::new(&canonical).exists() {
-                return Some(canonical);
+            let root = std::path::Path::new(&root);
+            let canonical = root.join("agents").join("_shared.prompt.md");
+            if canonical.exists() {
+                return Some(canonical.display().to_string());
             }
-            let legacy = format!("{}/_shared.md", root);
-            std::path::Path::new(&legacy).exists().then_some(legacy)
+            let legacy = root.join("_shared.md");
+            legacy.exists().then(|| legacy.display().to_string())
         })
 }
 
@@ -295,9 +305,10 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     };
 
     let prompts_root = schema.prompts_root.as_deref().map(expand_tilde);
-    // Use explicit meeting.available_agents if set, otherwise all agents
+    // Use explicit meeting.available_agents as-is when present. Only absence
+    // falls back to the full registry.
     let eligible_agents: Box<dyn Iterator<Item = (&String, &AgentDef)>> =
-        if let Some(ref explicit_list) = meeting_def.available_agents {
+        if let Some(explicit_list) = meeting_def.available_agents.as_ref() {
             Box::new(
                 schema
                     .agents
@@ -324,6 +335,17 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 display_name: def.display_name.clone(),
                 keywords: def.keywords.clone().unwrap_or_default(),
                 prompt_file,
+                domain_summary: def.domain_summary.clone(),
+                strengths: def.strengths.clone().unwrap_or_default(),
+                task_types: def.task_types.clone().unwrap_or_default(),
+                anti_signals: def.anti_signals.clone().unwrap_or_default(),
+                provider_hint: def.provider_hint.clone().or_else(|| def.provider.clone()),
+                provider: def.provider.as_deref().and_then(ProviderKind::from_str),
+                model: def.model.clone(),
+                reasoning_effort: None,
+                workspace: def.workspace.as_deref().map(expand_tilde),
+                peer_agents_enabled: def.peer_agents.unwrap_or(true),
+                memory: resolve_memory_settings(def.memory.as_ref(), None),
             }
         })
         .collect();
@@ -331,9 +353,50 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     Some(MeetingConfig {
         channel_name: meeting_def.channel_name.clone(),
         max_rounds: meeting_def.max_rounds.unwrap_or(3),
+        max_participants: meeting_def.max_participants.unwrap_or(5),
         summary_agent,
         available_agents,
     })
+}
+
+pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+
+    let mut bindings = Vec::new();
+    if let Some(by_id) = schema
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.by_id.as_ref())
+    {
+        for (channel_id_raw, binding) in by_id {
+            let Ok(channel_id) = channel_id_raw.parse::<u64>() else {
+                continue;
+            };
+            let owner_provider = binding
+                .provider
+                .as_deref()
+                .or_else(|| {
+                    schema
+                        .agents
+                        .get(&binding.agent)
+                        .and_then(|agent| agent.provider.as_deref())
+                })
+                .and_then(ProviderKind::from_str);
+            let Some(owner_provider) = owner_provider.filter(ProviderKind::is_supported) else {
+                continue;
+            };
+            bindings.push(RegisteredChannelBinding {
+                channel_id,
+                owner_provider,
+                fallback_name: None,
+            });
+        }
+    }
+
+    bindings.sort_by_key(|binding| binding.channel_id);
+    bindings
 }
 
 /// Look up the provider for a channel name suffix from org schema suffix_map.
@@ -346,6 +409,49 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
         }
     }
     None
+}
+
+/// A channel entry exposed to the HTTP layer for the meeting channel selector.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegisteredChannel {
+    pub channel_id: String,
+    pub agent: String,
+    pub provider: Option<String>,
+}
+
+/// List all channels registered via `channels.by_id`.
+/// `by_name`-only entries are excluded because they have no concrete channel_id
+/// and cannot be used for direct-start meeting invocations.
+pub(crate) fn list_registered_channels() -> Vec<RegisteredChannel> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+    let Some(channels) = schema.channels.as_ref() else {
+        return Vec::new();
+    };
+    let Some(by_id) = channels.by_id.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut result: Vec<RegisteredChannel> = by_id
+        .iter()
+        .map(|(channel_id, binding)| {
+            // Provider: channel-level override > agent-level default
+            let provider = binding
+                .provider
+                .clone()
+                .or_else(|| schema.agents.get(&binding.agent)?.provider.clone());
+            RegisteredChannel {
+                channel_id: channel_id.clone(),
+                agent: binding.agent.clone(),
+                provider,
+            }
+        })
+        .collect();
+
+    // Stable ordering by channel_id
+    result.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+    result
 }
 
 #[cfg(test)]
@@ -644,6 +750,11 @@ agents:
   td:
     display_name: "TD"
     keywords: ["code"]
+    domain_summary: "Architecture and implementation review"
+    strengths: ["system design", "performance"]
+    task_types: ["architecture"]
+    anti_signals: ["marketing"]
+    provider_hint: "codex"
   pd:
     display_name: "PD"
     keywords: ["product"]
@@ -652,6 +763,7 @@ agents:
     keywords: ["test"]
 meeting:
   channel_name: "meeting"
+  max_participants: 4
   summary_agent: "td"
   available_agents: ["td", "pd"]
 channels:
@@ -675,6 +787,47 @@ channels:
                 "qad should NOT be in available_agents"
             );
             assert_eq!(config.available_agents.len(), 2);
+            assert_eq!(config.max_participants, 4);
+            let td = config
+                .available_agents
+                .iter()
+                .find(|agent| agent.role_id == "td")
+                .expect("td metadata");
+            assert_eq!(
+                td.domain_summary.as_deref(),
+                Some("Architecture and implementation review")
+            );
+            assert_eq!(
+                td.strengths,
+                vec!["system design".to_string(), "performance".to_string()]
+            );
+            assert_eq!(td.task_types, vec!["architecture".to_string()]);
+            assert_eq!(td.anti_signals, vec!["marketing".to_string()]);
+            assert_eq!(td.provider_hint.as_deref(), Some("codex"));
+        });
+    }
+
+    #[test]
+    fn test_meeting_empty_available_agents_stays_empty() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents:
+  td:
+    display_name: "TD"
+  pd:
+    display_name: "PD"
+meeting:
+  channel_name: "meeting"
+  summary_agent: "td"
+  available_agents: []
+"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            assert!(config.available_agents.is_empty());
         });
     }
 
@@ -720,18 +873,19 @@ channels:
             fs::create_dir_all(canonical.parent().unwrap()).unwrap();
             fs::write(&canonical, "# shared").unwrap();
             let prompts_root = temp_home.path().join(".adk").join("config");
+            let prompts_root_yaml = prompts_root.display().to_string().replace('\\', "/");
             let yaml = format!(
                 r#"
 version: 1
 prompts_root: "{}"
 agents: {{}}
 "#,
-                prompts_root.display()
+                prompts_root_yaml
             );
             write_org_yaml(temp_home.path(), &yaml);
 
             let shared = load_shared_prompt_path().expect("shared prompt path");
-            assert!(shared.ends_with("/config/agents/_shared.prompt.md"));
+            assert_eq!(std::path::Path::new(&shared), canonical);
         });
     }
 

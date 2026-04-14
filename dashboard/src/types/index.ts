@@ -324,10 +324,34 @@ export interface IssueCreationResult {
   attempted_at: number;
 }
 
+export interface RoundTableMeetingChannelOption {
+  channel_id: string;
+  channel_name: string;
+  owner_provider: string;
+  available_experts?: RoundTableMeetingExpertOption[];
+}
+
+export interface RoundTableMeetingExpertOption {
+  role_id: string;
+  display_name: string;
+  keywords: string[];
+  domain_summary?: string | null;
+  strengths: string[];
+  task_types: string[];
+  anti_signals: string[];
+  provider_hint?: string | null;
+  metadata_missing?: boolean;
+  metadata_confidence?: "high" | "medium" | "low";
+}
+
 export interface RoundTableMeeting {
   id: string;
+  channel_id?: string | null;
+  meeting_hash?: string | null;
+  thread_hash?: string | null;
   agenda: string;
   summary: string | null;
+  selection_reason?: string | null;
   status: "in_progress" | "completed" | "cancelled";
   primary_provider: string | null;
   reviewer_provider: string | null;

@@ -52,6 +52,7 @@ export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done"]);
 export const QA_STATUSES = new Set<KanbanCardStatus>(["qa_pending", "qa_in_progress", "qa_failed"]);
 export const PRIORITY_OPTIONS: KanbanCardPriority[] = ["low", "medium", "high", "urgent"];
 export const REVIEW_DISPATCH_TYPES = new Set(["review", "review-decision"]);
+const MANUAL_INTERVENTION_REVIEW_STATUSES = new Set(["dilemma_pending"]);
 
 /** Quick-transition targets per status. Order = button order (primary first). */
 export function isManualStatusTransitionAllowed(
@@ -109,6 +110,23 @@ export interface CardDwellBadge {
 
 export function isReviewCard(card: KanbanCard): boolean {
   return !!(card.latest_dispatch_type && REVIEW_DISPATCH_TYPES.has(card.latest_dispatch_type));
+}
+
+export function hasManualInterventionReason(card: KanbanCard | null | undefined): boolean {
+  return Boolean(card?.blocked_reason);
+}
+
+export function isManualInterventionCard(card: KanbanCard | null | undefined): boolean {
+  if (!card) return false;
+  const reviewStatus = card.review_status;
+  return (
+    card.status === "blocked"
+    || card.status === "pending_decision"
+    || hasManualInterventionReason(card)
+    || (card.status === "review"
+      && reviewStatus != null
+      && MANUAL_INTERVENTION_REVIEW_STATUSES.has(reviewStatus))
+  );
 }
 
 export function getBoardColumnStatus(status: KanbanCardStatus): KanbanCardStatus {

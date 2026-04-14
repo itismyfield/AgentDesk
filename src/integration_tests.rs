@@ -834,31 +834,39 @@ mod tests {
         fs::write(
             dir.path().join("zz-auto-queue-activate-spy.js"),
             r#"
-            var rawPost = agentdesk.http.post;
-            agentdesk.http.post = function(url, body) {
-                if (url && url.indexOf("/api/auto-queue/activate") >= 0) {
-                    var countRows = agentdesk.db.query(
-                        "SELECT value FROM kv_meta WHERE key = ?1",
-                        ["test_auto_queue_activate_count"]
-                    );
-                    var nextCount = countRows.length > 0
-                        ? (parseInt(countRows[0].value, 10) || 0) + 1
-                        : 1;
-                    agentdesk.db.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        ["test_auto_queue_activate_count", "" + nextCount]
-                    );
-                    agentdesk.db.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        ["test_auto_queue_activate_last", JSON.stringify({ url: url, body: body })]
-                    );
-                    return {
-                        ok: true,
-                        count: 1
+            var rawActivate = agentdesk.autoQueue.activate;
+            agentdesk.autoQueue.activate = function(runIdOrBody, threadGroup) {
+                var body;
+                if (runIdOrBody && typeof runIdOrBody === "object" && !Array.isArray(runIdOrBody)) {
+                    body = Object.assign({}, runIdOrBody);
+                } else {
+                    body = {
+                        run_id: runIdOrBody || null,
+                        active_only: true
                     };
+                    if (threadGroup !== null && threadGroup !== undefined) {
+                        body.thread_group = threadGroup;
+                    }
                 }
-                if (rawPost) return rawPost(url, body);
-                return { ok: true };
+                if (body.active_only === undefined) {
+                    body.active_only = true;
+                }
+                var countRows = agentdesk.db.query(
+                    "SELECT value FROM kv_meta WHERE key = ?1",
+                    ["test_auto_queue_activate_count"]
+                );
+                var nextCount = countRows.length > 0
+                    ? (parseInt(countRows[0].value, 10) || 0) + 1
+                    : 1;
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_auto_queue_activate_count", "" + nextCount]
+                );
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_auto_queue_activate_last", JSON.stringify(body)]
+                );
+                return rawActivate(body);
             };
             agentdesk.registerPolicy({
                 name: "auto-queue-activate-spy",
@@ -3006,7 +3014,7 @@ mod tests {
             sql: "INSERT INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
             params: vec![],
         };
-        let result = crate::engine::intent::execute_intents(&db, vec![insert_intent]);
+        let result = crate::engine::intent::execute_intents(&db, None, vec![insert_intent]);
         assert_eq!(
             result.errors, 1,
             "INSERT into card_review_state via ExecuteSQL must be rejected"
@@ -3017,7 +3025,8 @@ mod tests {
             sql: "INSERT OR REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
             params: vec![],
         };
-        let result_replace = crate::engine::intent::execute_intents(&db, vec![replace_intent]);
+        let result_replace =
+            crate::engine::intent::execute_intents(&db, None, vec![replace_intent]);
         assert_eq!(
             result_replace.errors, 1,
             "INSERT OR REPLACE into card_review_state via ExecuteSQL must be rejected"
@@ -3029,7 +3038,7 @@ mod tests {
             params: vec![],
         };
         let result_replace_into =
-            crate::engine::intent::execute_intents(&db, vec![replace_into_intent]);
+            crate::engine::intent::execute_intents(&db, None, vec![replace_into_intent]);
         assert_eq!(
             result_replace_into.errors, 1,
             "REPLACE INTO card_review_state via ExecuteSQL must be rejected"
@@ -3041,7 +3050,7 @@ mod tests {
                 .to_string(),
             params: vec![],
         };
-        let result2 = crate::engine::intent::execute_intents(&db, vec![update_intent]);
+        let result2 = crate::engine::intent::execute_intents(&db, None, vec![update_intent]);
         assert_eq!(
             result2.errors, 1,
             "UPDATE card_review_state via ExecuteSQL must be rejected"
@@ -3052,7 +3061,7 @@ mod tests {
             sql: "DELETE FROM card_review_state WHERE card_id = 'card-158b'".to_string(),
             params: vec![],
         };
-        let result3 = crate::engine::intent::execute_intents(&db, vec![delete_intent]);
+        let result3 = crate::engine::intent::execute_intents(&db, None, vec![delete_intent]);
         assert_eq!(
             result3.errors, 1,
             "DELETE from card_review_state via ExecuteSQL must be rejected"
@@ -4397,16 +4406,23 @@ mod tests {
         let activate_payload = kv_value(&db, "test_auto_queue_activate_last")
             .expect("activate payload should be recorded");
         let activate_json: serde_json::Value = serde_json::from_str(&activate_payload).unwrap();
-        assert!(
-            activate_json["url"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("/api/auto-queue/activate"),
-            "#547: continuation must call the activate API"
+        assert_eq!(activate_json["run_id"], "run-547");
+        assert_eq!(activate_json["thread_group"], 0);
+        assert_eq!(activate_json["active_only"], true);
+
+        let next_entry_status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-next'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            next_entry_status, "dispatched",
+            "#547: deferred activate must still dispatch the next queued entry"
         );
-        assert_eq!(activate_json["body"]["run_id"], "run-547");
-        assert_eq!(activate_json["body"]["thread_group"], 0);
-        assert_eq!(activate_json["body"]["active_only"], true);
     }
 
     #[test]

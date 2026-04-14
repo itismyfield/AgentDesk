@@ -294,6 +294,10 @@ impl PolicyEngine {
         }
     }
 
+    pub(crate) fn is_actor_thread(&self) -> bool {
+        self.actor.is_actor_thread()
+    }
+
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.actor
@@ -559,11 +563,7 @@ impl PolicyEngine {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
-        Self::fire_hook_with_guard(&inner, hook, payload)
+        self.try_fire_hook(hook, payload)
     }
 
     fn fire_hook_with_guard(
@@ -750,7 +750,7 @@ impl PolicyEngine {
         if intents.is_empty() {
             Self::empty_intent_result()
         } else {
-            intent::execute_intents(&self.db, intents)
+            intent::execute_intents(&self.db, Some(self), intents)
         }
     }
 

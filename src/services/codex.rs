@@ -81,6 +81,13 @@ fn build_tmux_launch_env_lines(
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_cancellable(prompt, None)
+}
+
+pub fn execute_command_simple_cancellable(
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -91,14 +98,24 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    let output = command
+    let mut child = command
         .args(&args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
+
+    register_child_pid(cancel_token, child.id());
+    if cancel_requested(cancel_token) {
+        kill_child_tree(&mut child);
+        return Err("Codex request cancelled".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to read Codex output: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
