@@ -44,18 +44,9 @@ fn current_issue_worktree_commit(
         }
     }
 
-    let repo_id: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
-    let repo_dir = match crate::services::platform::resolve_repo_dir_for_id(repo_id.as_deref()) {
-        Ok(Some(repo_dir)) => repo_dir,
-        Ok(None) => return None,
+    match crate::dispatch::resolve_card_worktree(db, card_id, None) {
+        Ok(Some((_worktree_path, _branch, commit))) => Some(commit),
+        Ok(None) => None,
         Err(err) => {
             tracing::warn!(
                 "[review-decision] current_issue_worktree_commit: card {} issue #{}: {}",
@@ -63,10 +54,9 @@ fn current_issue_worktree_commit(
                 issue_num,
                 err
             );
-            return None;
+            None
         }
-    };
-    crate::services::platform::find_worktree_for_issue(&repo_dir, issue_num).map(|wt| wt.commit)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -177,6 +167,7 @@ fn dispatch_status_and_result(
 struct ActiveReviewDispatch {
     id: String,
     reviewed_commit: Option<String>,
+    target_repo: Option<String>,
 }
 
 fn latest_active_review_dispatch(
@@ -193,16 +184,41 @@ fn latest_active_review_dispatch(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .ok()
-        .map(|(id, context_raw)| ActiveReviewDispatch {
-            id,
-            reviewed_commit: context_raw
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .map(|(id, context_raw)| {
+            let context = context_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let target_repo = context
+                .as_ref()
                 .and_then(|value| {
+                    value
+                        .get("target_repo")
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    context
+                        .as_ref()
+                        .and_then(|value| value.get("worktree_path"))
+                        .and_then(|entry| entry.as_str())
+                        .and_then(|path| {
+                            crate::services::platform::shell::resolve_repo_dir_for_target(Some(
+                                path,
+                            ))
+                            .ok()
+                            .flatten()
+                        })
+                });
+            ActiveReviewDispatch {
+                id,
+                reviewed_commit: context.as_ref().and_then(|value| {
                     value
                         .get("reviewed_commit")
                         .and_then(|entry| entry.as_str())
                         .map(str::to_string)
                 }),
+                target_repo,
+            }
         })
     })
 }
@@ -1012,6 +1028,7 @@ pub async fn submit_review_decision(
                     &state.db,
                     &body.card_id,
                     reviewed_commit,
+                    live_review.target_repo.as_deref(),
                 ) {
                     if let Ok(conn) = state.db.lock() {
                         let _ = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(

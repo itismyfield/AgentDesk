@@ -241,6 +241,16 @@ fn dispatch_context_string_field(dispatch: Option<&Value>, key: &str) -> Option<
         .map(str::to_string)
 }
 
+fn dispatch_target_repo_ref(card: &Value, pending_dispatch: Option<&Value>) -> Option<String> {
+    dispatch_context_string_field(pending_dispatch, "target_repo")
+        .or_else(|| dispatch_context_string_field(pending_dispatch, "worktree_path"))
+        .or_else(|| {
+            card.get("repo_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 fn render_queue_thread_links(entry: &Value) -> String {
     let rendered: Vec<String> = entry
         .get("thread_links")
@@ -278,6 +288,11 @@ fn render_queue_thread_links(entry: &Value) -> String {
 
 fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&Value>) -> Value {
     let issue_number = card.get("github_issue_number").and_then(Value::as_i64);
+    let target_repo = dispatch_target_repo_ref(card, pending_dispatch);
+    let target_repo_dir =
+        crate::services::platform::shell::resolve_repo_dir_for_target(target_repo.as_deref())
+            .ok()
+            .flatten();
 
     let mut completed_worktree_path =
         dispatch_context_string_field(pending_dispatch, "worktree_path");
@@ -287,7 +302,7 @@ fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&V
 
     if completed_worktree_path.is_none() {
         if let Some(issue_number) = issue_number {
-            if let Some(repo_dir) = crate::services::platform::resolve_repo_dir() {
+            if let Some(repo_dir) = target_repo_dir.clone() {
                 if let Some(worktree) =
                     crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
                 {
@@ -300,7 +315,8 @@ fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&V
     }
 
     if completed_worktree_path.is_none() {
-        completed_worktree_path = crate::services::platform::resolve_repo_dir();
+        completed_worktree_path =
+            target_repo_dir.or_else(crate::services::platform::resolve_repo_dir);
     }
     if completed_branch.is_none() {
         completed_branch = completed_worktree_path
@@ -321,6 +337,9 @@ fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&V
     );
     if let Some(path) = completed_worktree_path {
         result.insert("completed_worktree_path".to_string(), Value::String(path));
+    }
+    if let Some(target_repo) = target_repo {
+        result.insert("target_repo".to_string(), Value::String(target_repo));
     }
     if let Some(branch) = completed_branch {
         result.insert("completed_branch".to_string(), Value::String(branch));
@@ -977,7 +996,7 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use axum::routing::{get, patch, post};
     use axum::{Json, Router};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::ffi::OsString;
     use std::process::Command;
     use std::sync::MutexGuard;
@@ -1366,6 +1385,10 @@ mod tests {
             result["completed_commit"],
             crate::services::platform::git_head_commit(&repo.path().to_string_lossy()).unwrap()
         );
+        assert_eq!(
+            result["target_repo"],
+            repo.path().to_string_lossy().to_string()
+        );
     }
 
     #[test]
@@ -1392,6 +1415,67 @@ mod tests {
             result["completed_commit"],
             crate::services::platform::git_head_commit(&repo.path().to_string_lossy()).unwrap()
         );
+        assert_eq!(result["target_repo"], Value::Null);
+    }
+
+    #[test]
+    fn cli_advance_completion_result_uses_target_repo_context_for_fallback() {
+        let _lock = env_lock();
+        let default_repo = tempfile::tempdir().unwrap();
+        run_git(default_repo.path(), &["init", "-b", "main"]);
+        run_git(
+            default_repo.path(),
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(default_repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(default_repo.path().join("README.md"), "default\n").unwrap();
+        run_git(default_repo.path(), &["add", "README.md"]);
+        run_git(
+            default_repo.path(),
+            &["commit", "-m", "feat: default (#627)"],
+        );
+        let _repo_env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", default_repo.path());
+
+        let target_repo = tempfile::tempdir().unwrap();
+        run_git(target_repo.path(), &["init", "-b", "main"]);
+        run_git(
+            target_repo.path(),
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(target_repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(target_repo.path().join("README.md"), "target\n").unwrap();
+        run_git(target_repo.path(), &["add", "README.md"]);
+        run_git(target_repo.path(), &["commit", "-m", "feat: target (#627)"]);
+
+        let result = build_cli_advance_completion_result(
+            &json!({"github_issue_number": 627}),
+            Some(&json!({
+                "context": {
+                    "target_repo": target_repo.path().to_string_lossy().to_string()
+                }
+            })),
+        );
+        let expected_target_repo = std::fs::canonicalize(target_repo.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let actual_completed_worktree =
+            std::fs::canonicalize(result["completed_worktree_path"].as_str().unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+        let actual_target_repo = std::fs::canonicalize(result["target_repo"].as_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(actual_completed_worktree, expected_target_repo);
+        assert_eq!(
+            result["completed_commit"],
+            crate::services::platform::git_head_commit(&target_repo.path().to_string_lossy())
+                .unwrap()
+        );
+        assert_eq!(actual_target_repo, expected_target_repo);
     }
 
     #[test]

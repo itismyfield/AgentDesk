@@ -18,6 +18,14 @@ struct DispatchExecutionTarget {
     reviewed_commit: String,
     branch: Option<String>,
     worktree_path: Option<String>,
+    target_repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CardDispatchInfo {
+    issue_number: Option<i64>,
+    repo_id: Option<String>,
+    description: Option<String>,
 }
 
 fn execution_target_from_dir(dir: &str) -> Option<DispatchExecutionTarget> {
@@ -37,6 +45,7 @@ fn execution_target_from_dir(dir: &str) -> Option<DispatchExecutionTarget> {
         reviewed_commit,
         branch,
         worktree_path: Some(dir.to_string()),
+        target_repo: None,
     })
 }
 
@@ -163,21 +172,107 @@ fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
     !is_repo_root || is_non_main_branch
 }
 
-fn load_card_issue_repo(db: &Db, card_id: &str) -> Option<(Option<i64>, Option<String>)> {
+fn load_card_dispatch_info(db: &Db, card_id: &str) -> Option<CardDispatchInfo> {
     db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
-            "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?1",
+            "SELECT github_issue_number, repo_id, description FROM kanban_cards WHERE id = ?1",
             [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok(CardDispatchInfo {
+                    issue_number: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    description: row.get(2)?,
+                })
+            },
         )
         .ok()
     })
 }
 
-fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option<String>> {
-    let repo_id = load_card_issue_repo(db, card_id).and_then(|(_, repo_id)| repo_id);
-    crate::services::platform::resolve_repo_dir_for_id(repo_id.as_deref())
+fn load_card_issue_repo(db: &Db, card_id: &str) -> Option<(Option<i64>, Option<String>)> {
+    load_card_dispatch_info(db, card_id).map(|info| (info.issue_number, info.repo_id))
+}
+
+fn normalize_target_repo_token(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'))
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ':' | ';'));
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn resolve_target_repo_path_candidate(raw: &str) -> Option<String> {
+    let candidate = normalize_target_repo_token(raw)?;
+    if !crate::services::platform::shell::looks_like_explicit_repo_path(&candidate) {
+        return None;
+    }
+    crate::services::platform::shell::resolve_repo_dir_for_target(Some(&candidate))
+        .ok()
+        .flatten()
+}
+
+fn extract_target_repo_from_description(description: &str) -> Option<String> {
+    let labeled = regex::Regex::new(
+        r"(?i)(?:target_repo|target repo|repo_path|repo path|repo dir|external repo(?: path)?)\s*[:=]\s*([^\s]+)",
+    )
+    .expect("target repo description regex must compile");
+    for caps in labeled.captures_iter(description) {
+        if let Some(resolved) = caps
+            .get(1)
+            .and_then(|value| resolve_target_repo_path_candidate(value.as_str()))
+        {
+            return Some(resolved);
+        }
+    }
+
+    description
+        .split_whitespace()
+        .filter_map(resolve_target_repo_path_candidate)
+        .next()
+}
+
+fn resolve_card_target_repo_ref(
+    db: &Db,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(context) = context {
+        if let Some(target_repo) = json_string_field(context, "target_repo") {
+            return Some(target_repo.to_string());
+        }
+        if let Some(worktree_path) = json_string_field(context, "worktree_path") {
+            if let Some(path) =
+                crate::services::platform::shell::resolve_repo_dir_for_target(Some(worktree_path))
+                    .ok()
+                    .flatten()
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    let info = load_card_dispatch_info(db, card_id)?;
+    info.description
+        .as_deref()
+        .and_then(extract_target_repo_from_description)
+        .or(info.repo_id)
+}
+
+fn resolve_card_repo_dir_with_context(
+    db: &Db,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+    purpose: &str,
+) -> Result<Option<String>> {
+    let target_repo = resolve_card_target_repo_ref(db, card_id, context);
+    crate::services::platform::shell::resolve_repo_dir_for_target(target_repo.as_deref())
         .map_err(|e| anyhow::anyhow!("Cannot {purpose} for card {}: {}", card_id, e))
+}
+
+fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option<String>> {
+    resolve_card_repo_dir_with_context(db, card_id, None, purpose)
 }
 
 /// Check whether a commit message references the given card's GitHub issue number.
@@ -190,13 +285,22 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// design ensures the fallback chain always reaches `resolve_card_worktree()` or
 /// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
 /// be confirmed as belonging to this issue.
-pub(crate) fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> bool {
+pub(crate) fn commit_belongs_to_card_issue(
+    db: &Db,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> bool {
     let issue_number = load_card_issue_repo(db, card_id).and_then(|(issue_number, _)| issue_number);
     let Some(issue_number) = issue_number else {
         // No issue number on card — can't validate, assume OK
         return true;
     };
-    let repo_dir = match resolve_card_repo_dir(db, card_id, "validate reviewed commit") {
+    let repo_dir = match crate::services::platform::shell::resolve_repo_dir_for_target(target_repo)
+        .or_else(|_| {
+            resolve_card_repo_dir(db, card_id, "validate reviewed commit")
+                .map_err(|e| e.to_string())
+        }) {
         Ok(Some(repo_dir)) => repo_dir,
         Ok(None) => {
             tracing::warn!(
@@ -308,12 +412,30 @@ fn latest_completed_work_dispatch_target(
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
         .map(str::to_string);
+    let target_repo = context_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "target_repo"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "target_repo"))
+        })
+        .map(str::to_string)
+        .or_else(|| resolve_card_target_repo_ref(db, kanban_card_id, None));
 
     if let Some(reviewed_commit) = reviewed_commit {
-        let fallback_repo_dir =
-            resolve_card_repo_dir(db, kanban_card_id, "recover completed work repo")
-                .ok()
-                .flatten();
+        let fallback_repo_dir = target_repo
+            .as_deref()
+            .and_then(|value| {
+                crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                resolve_card_repo_dir(db, kanban_card_id, "recover completed work repo")
+                    .ok()
+                    .flatten()
+            });
         let worktree_path = path.map(str::to_string).or(fallback_repo_dir);
         let issue_branch_hint = load_card_issue_repo(db, kanban_card_id)
             .and_then(|(issue_number, _)| issue_number.map(|value| value.to_string()));
@@ -337,13 +459,19 @@ fn latest_completed_work_dispatch_target(
             reviewed_commit,
             branch,
             worktree_path,
+            target_repo,
         });
     }
 
     let trusted_path =
         path.filter(|candidate| is_card_scoped_worktree_path(candidate, branch.as_deref()));
 
-    trusted_path.and_then(execution_target_from_dir)
+    trusted_path
+        .and_then(execution_target_from_dir)
+        .map(|mut target| {
+            target.target_repo = target_repo;
+            target
+        })
 }
 
 fn is_work_dispatch_type(dispatch_type: Option<&str>) -> bool {
@@ -434,6 +562,9 @@ fn apply_review_target_context(
     }
     if let Some(path) = target.worktree_path.as_deref() {
         obj.insert("worktree_path".to_string(), json!(path));
+    }
+    if let Some(target_repo) = target.target_repo.as_deref() {
+        obj.insert("target_repo".to_string(), json!(target_repo));
     }
 }
 
@@ -566,6 +697,7 @@ fn inject_review_merge_base_context(obj: &mut serde_json::Map<String, serde_json
 pub(crate) fn resolve_card_worktree(
     db: &Db,
     card_id: &str,
+    context: Option<&serde_json::Value>,
 ) -> Result<Option<(String, String, String)>> {
     let Some((issue_number, _repo_id)) = load_card_issue_repo(db, card_id) else {
         return Ok(None);
@@ -573,7 +705,9 @@ pub(crate) fn resolve_card_worktree(
     let Some(issue_number) = issue_number else {
         return Ok(None);
     };
-    let Some(repo_dir) = resolve_card_repo_dir(db, card_id, "resolve worktree repo")? else {
+    let Some(repo_dir) =
+        resolve_card_repo_dir_with_context(db, card_id, context, "resolve worktree repo")?
+    else {
         return Ok(None);
     };
     Ok(
@@ -585,6 +719,7 @@ pub(crate) fn resolve_card_worktree(
 fn resolve_card_issue_commit_target(
     db: &Db,
     card_id: &str,
+    context: Option<&serde_json::Value>,
 ) -> Result<Option<DispatchExecutionTarget>> {
     let Some((issue_number, _repo_id)) = load_card_issue_repo(db, card_id) else {
         return Ok(None);
@@ -592,7 +727,9 @@ fn resolve_card_issue_commit_target(
     let Some(issue_number) = issue_number else {
         return Ok(None);
     };
-    let Some(repo_dir) = resolve_card_repo_dir(db, card_id, "resolve commit target repo")? else {
+    let Some(repo_dir) =
+        resolve_card_repo_dir_with_context(db, card_id, context, "resolve commit target repo")?
+    else {
         return Ok(None);
     };
     let Some(reviewed_commit) =
@@ -613,15 +750,21 @@ fn resolve_card_issue_commit_target(
         reviewed_commit,
         branch,
         worktree_path: Some(repo_dir),
+        target_repo: resolve_card_target_repo_ref(db, card_id, context),
     }))
 }
 
 fn resolve_repo_head_fallback_target(
     db: &Db,
     kanban_card_id: &str,
+    context: Option<&serde_json::Value>,
 ) -> Result<Option<DispatchExecutionTarget>> {
-    let Some(repo_dir) =
-        resolve_card_repo_dir(db, kanban_card_id, "resolve repo-root HEAD fallback target")?
+    let Some(repo_dir) = resolve_card_repo_dir_with_context(
+        db,
+        kanban_card_id,
+        context,
+        "resolve repo-root HEAD fallback target",
+    )?
     else {
         return Ok(None);
     };
@@ -648,7 +791,10 @@ fn resolve_repo_head_fallback_target(
         );
     }
 
-    Ok(execution_target_from_dir(&repo_dir))
+    Ok(execution_target_from_dir(&repo_dir).map(|mut target| {
+        target.target_repo = resolve_card_target_repo_ref(db, kanban_card_id, context);
+        target
+    }))
 }
 
 /// Build the context JSON string for a review dispatch.
@@ -662,6 +808,14 @@ fn build_review_context(
     context: &serde_json::Value,
 ) -> Result<String> {
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
+    let target_repo = resolve_card_target_repo_ref(db, kanban_card_id, Some(&ctx_val));
+    if let Some(obj) = ctx_val.as_object_mut() {
+        if let Some(target_repo) = target_repo.as_deref() {
+            obj.entry("target_repo".to_string())
+                .or_insert_with(|| json!(target_repo));
+        }
+    }
+    let ctx_snapshot = ctx_val.clone();
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
             if latest_completed_work_dispatch_is_noop(db, kanban_card_id) {
@@ -686,8 +840,12 @@ fn build_review_context(
             // validation already failed.
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
             let validated_work_target = latest_work_target.as_ref().filter(|t| {
-                let valid =
-                    commit_belongs_to_card_issue(db, kanban_card_id, &t.reviewed_commit);
+                let valid = commit_belongs_to_card_issue(
+                    db,
+                    kanban_card_id,
+                    &t.reviewed_commit,
+                    t.target_repo.as_deref().or(target_repo.as_deref()),
+                );
                 if !valid {
                     tracing::warn!(
                         "[dispatch] Review dispatch for card {}: work target commit {} doesn't match card issue — skipping to next fallback",
@@ -715,13 +873,14 @@ fn build_review_context(
                     );
                 }
                 if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
-                    resolve_card_worktree(db, kanban_card_id)?
+                    resolve_card_worktree(db, kanban_card_id, Some(&ctx_snapshot))?
                 {
                     apply_review_target_context(
                         &DispatchExecutionTarget {
                             reviewed_commit: wt_commit.clone(),
                             branch: Some(wt_branch.clone()),
                             worktree_path: Some(wt_path.clone()),
+                            target_repo: target_repo.clone(),
                         },
                         obj,
                     );
@@ -732,7 +891,9 @@ fn build_review_context(
                         &wt_commit[..8.min(wt_commit.len())],
                         wt_path
                     );
-                } else if let Some(target) = resolve_card_issue_commit_target(db, kanban_card_id)? {
+                } else if let Some(target) =
+                    resolve_card_issue_commit_target(db, kanban_card_id, Some(&ctx_snapshot))?
+                {
                     apply_review_target_context(&target, obj);
                     tracing::info!(
                         "[dispatch] Review dispatch for card {}: recovered issue commit target ({})",
@@ -754,8 +915,11 @@ fn build_review_context(
                         // Last fallback: review the current repo HEAD. This path is used
                         // only when we have neither an execution target nor a canonical
                         // issue worktree.
-                        if let Some(target) = resolve_repo_head_fallback_target(db, kanban_card_id)?
-                        {
+                        if let Some(target) = resolve_repo_head_fallback_target(
+                            db,
+                            kanban_card_id,
+                            Some(&ctx_snapshot),
+                        )? {
                             apply_review_target_context(&target, obj);
                             tracing::info!(
                                 "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
@@ -1137,8 +1301,16 @@ fn create_dispatch_core_internal(
     let (parent_dispatch_id, chain_depth) =
         resolve_parent_dispatch_context(&conn, kanban_card_id, context)?;
 
-    let context_with_session_strategy =
+    let mut context_with_session_strategy =
         dispatch_context_with_session_strategy(dispatch_type, context);
+    let target_repo =
+        resolve_card_target_repo_ref(db, kanban_card_id, Some(&context_with_session_strategy));
+    if let Some(obj) = context_with_session_strategy.as_object_mut() {
+        if let Some(target_repo) = target_repo.as_deref() {
+            obj.entry("target_repo".to_string())
+                .or_insert_with(|| json!(target_repo));
+        }
+    }
     let context_str = if dispatch_type == "review" {
         build_review_context(
             db,
@@ -1156,7 +1328,7 @@ fn create_dispatch_core_internal(
         {
             Some((wt_path, wt_branch))
         } else {
-            resolve_card_worktree(db, kanban_card_id)?
+            resolve_card_worktree(db, kanban_card_id, Some(&context_with_session_strategy))?
                 .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
         };
 
@@ -2201,6 +2373,15 @@ mod tests {
         conn.execute(
             "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
             rusqlite::params![repo_id, card_id],
+        )
+        .unwrap();
+    }
+
+    fn set_card_description(db: &Db, card_id: &str, description: &str) {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET description = ?1 WHERE id = ?2",
+            rusqlite::params![description, card_id],
         )
         .unwrap();
     }
@@ -3512,11 +3693,55 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-no-issue", "ready");
         // Card has no github_issue_number → should return None
-        let result = resolve_card_worktree(&db, "card-no-issue").unwrap();
+        let result = resolve_card_worktree(&db, "card-no-issue", None).unwrap();
         assert!(
             result.is_none(),
             "card without issue number should return None"
         );
+    }
+
+    #[test]
+    fn resolve_card_worktree_uses_target_repo_from_card_description() {
+        let default_repo = init_test_repo();
+        let default_repo_dir = default_repo.path().to_str().unwrap();
+        let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
+
+        let external_repo = init_test_repo();
+        let external_repo_dir = external_repo.path().to_str().unwrap();
+        let external_wt_dir = external_repo.path().join("wt-external-627");
+        let external_wt_path = external_wt_dir.to_str().unwrap();
+        run_git(
+            external_repo_dir,
+            &["worktree", "add", external_wt_path, "-b", "wt/external-627"],
+        );
+        let external_commit = git_commit(external_wt_path, "fix: external target repo (#627)");
+
+        let db = test_db();
+        seed_card(&db, "card-desc-target-repo", "ready");
+        set_card_issue_number(&db, "card-desc-target-repo", 627);
+        set_card_repo_id(&db, "card-desc-target-repo", "owner/missing");
+        set_card_description(
+            &db,
+            "card-desc-target-repo",
+            &format!("target_repo: {}", external_repo_dir),
+        );
+
+        let result = resolve_card_worktree(&db, "card-desc-target-repo", None)
+            .unwrap()
+            .expect("external repo worktree should resolve from card description");
+
+        let actual_path = std::fs::canonicalize(&result.0)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let expected_path = std::fs::canonicalize(external_wt_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(actual_path, expected_path);
+        assert_eq!(result.1, "wt/external-627");
+        assert_eq!(result.2, external_commit);
     }
 
     #[test]
@@ -3659,6 +3884,67 @@ mod tests {
         assert_eq!(ctx["worktree_path"], repo_dir);
         assert_eq!(ctx["worktree_branch"], "wt/explicit-515");
         assert_eq!(ctx["branch"], "wt/explicit-515");
+    }
+
+    #[test]
+    fn create_dispatch_injects_target_repo_from_card_description() {
+        let default_repo = init_test_repo();
+        let default_repo_dir = default_repo.path().to_str().unwrap();
+        let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
+
+        let external_repo = init_test_repo();
+        let external_repo_dir = external_repo.path().to_str().unwrap();
+        let external_wt_dir = external_repo.path().join("wt-target-627");
+        let external_wt_path = external_wt_dir.to_str().unwrap();
+        run_git(
+            external_repo_dir,
+            &["worktree", "add", external_wt_path, "-b", "wt/target-627"],
+        );
+        let _external_commit = git_commit(external_wt_path, "fix: dispatch target repo (#627)");
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-dispatch-target-repo", "ready");
+        set_card_issue_number(&db, "card-dispatch-target-repo", 627);
+        set_card_repo_id(&db, "card-dispatch-target-repo", "owner/missing");
+        set_card_description(
+            &db,
+            "card-dispatch-target-repo",
+            &format!("external repo path: {}", external_repo_dir),
+        );
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-dispatch-target-repo",
+            "agent-1",
+            "implementation",
+            "Implement external repo task",
+            &json!({}),
+        )
+        .expect("description target_repo should bypass missing repo mapping");
+
+        let ctx = &dispatch["context"];
+        let actual_target_repo = std::fs::canonicalize(ctx["target_repo"].as_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let expected_target_repo = std::fs::canonicalize(external_repo_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let actual_worktree = std::fs::canonicalize(ctx["worktree_path"].as_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let expected_worktree = std::fs::canonicalize(external_wt_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(actual_target_repo, expected_target_repo);
+        assert_eq!(actual_worktree, expected_worktree);
+        assert_eq!(ctx["worktree_branch"], "wt/target-627");
     }
 
     #[test]
@@ -4089,6 +4375,71 @@ mod tests {
             json!(default_head),
             "default repo HEAD must not be injected after rejection"
         );
+    }
+
+    #[test]
+    fn review_context_accepts_external_work_target_when_card_target_repo_is_known() {
+        let db = test_db();
+        seed_card(&db, "card-review-external-accept", "review");
+        set_card_issue_number(&db, "card-review-external-accept", 627);
+        set_card_repo_id(&db, "card-review-external-accept", "owner/missing");
+
+        let default_repo = init_test_repo();
+        let default_repo_dir = default_repo.path().to_str().unwrap();
+        let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
+
+        let external_repo = init_test_repo();
+        let external_dir = external_repo.path().to_str().unwrap();
+        run_git(external_dir, &["checkout", "-b", "codex/627-target-repo"]);
+        let external_commit = git_commit(external_dir, "fix: cross repo review target (#627)");
+        set_card_description(
+            &db,
+            "card-review-external-accept",
+            &format!("target_repo: {}", external_dir),
+        );
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-external-accept', 'card-review-external-accept', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": external_dir,
+                    "completed_branch": "codex/627-target-repo",
+                    "completed_commit": external_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-external-accept", "agent-1", &json!({}))
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let actual_target_repo = std::fs::canonicalize(parsed["target_repo"].as_str().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let expected_external_dir = std::fs::canonicalize(external_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(parsed["reviewed_commit"], external_commit);
+        assert_eq!(parsed["branch"], "codex/627-target-repo");
+        assert_eq!(actual_worktree, expected_external_dir);
+        assert_eq!(actual_target_repo, expected_external_dir);
     }
 
     #[test]
