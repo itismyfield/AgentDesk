@@ -2850,12 +2850,12 @@ async fn kanban_terminal_status_fires_hook() {
     {
         let conn = db.lock().unwrap();
         conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'pending_decision', 'medium', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'requested', 'medium', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
     }
 
-    // Use force transition: pending_decision → done (force_only in YAML pipeline)
+    // Use force transition: requested → done (force_only in YAML pipeline)
     let result =
         crate::kanban::transition_status_with_opts(&db, &engine, "c1", "done", "pmd", true);
     assert!(
@@ -2872,7 +2872,7 @@ async fn kanban_terminal_status_fires_hook() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(transition, "pending_decision->done");
+    assert_eq!(transition, "requested->done");
 
     let terminal: String = conn
         .query_row(

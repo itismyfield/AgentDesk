@@ -940,7 +940,7 @@ pub async fn submit_review_decision(
 
             // #108: Drain all pending intents and transitions from OnReviewEnter hooks.
             // drain_hook_side_effects handles both transition processing (e.g. setStatus
-            // for pending_decision on max rounds) and Discord notifications for any
+            // for review/manual-intervention follow-up on max rounds) and Discord notifications for any
             // dispatches created by the hooks, eliminating the previous manual drain loop
             // that only handled transitions and missed dispatch notifications.
             crate::kanban::drain_hook_side_effects(&state.db, &state.engine);

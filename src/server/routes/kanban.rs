@@ -1775,7 +1775,7 @@ pub struct PmDecisionBody {
 }
 
 /// POST /api/pm-decision
-/// PM's decision on a pending_decision card.
+/// PM's decision on a manual-intervention card.
 /// - resume: return card to in_progress (continue work)
 /// - rework: create rework dispatch to assigned agent
 /// - dismiss: move card to done (PM decides work is sufficient)
@@ -1792,8 +1792,8 @@ pub async fn pm_decision(
         );
     }
 
-    // Verify card exists and is in pending_decision
-    let card_info: Option<(String, String, String)> = {
+    // Verify card exists and currently requires manual intervention.
+    let card_info: Option<(String, Option<String>, Option<String>, String, String)> = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -1804,32 +1804,30 @@ pub async fn pm_decision(
             }
         };
         conn.query_row(
-            "SELECT status, COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
+            "SELECT status, review_status, blocked_reason, COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
             [&body.card_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .ok()
     };
 
-    let Some((status, agent_id, title)) = card_info else {
+    let Some((status, review_status, blocked_reason, agent_id, title)) = card_info else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "card not found"})),
         );
     };
 
-    // Pipeline-driven: PMD decisions only allowed from force-only states
-    let is_force_only = {
-        crate::pipeline::ensure_loaded();
-        crate::pipeline::try_get()
-            .map(|p| p.is_force_only_state(&status))
-            .unwrap_or(false)
-    };
-    if !is_force_only {
+    let manual_fingerprint = crate::manual_intervention::manual_intervention_fingerprint(
+        review_status.as_deref(),
+        blocked_reason.as_deref(),
+    );
+    let legacy_manual_state = matches!(status.as_str(), "pending_decision" | "blocked");
+    if !legacy_manual_state && manual_fingerprint.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                json!({"error": format!("card is '{}', which is not a decision-pending state", status)}),
+                json!({"error": format!("card is '{}', which does not currently require manual decision", status)}),
             ),
         );
     }
@@ -1861,13 +1859,31 @@ pub async fn pm_decision(
                 .ok();
         }
     }
-    // Clear blocked_reason
+    // Clear manual-intervention markers before applying the selected decision.
     if let Ok(conn) = state.db.lock() {
         conn.execute(
             "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?1",
             [&body.card_id],
         )
         .ok();
+        if legacy_manual_state || review_status.as_deref() == Some("dilemma_pending") {
+            crate::engine::transition::execute_intent_on_conn(
+                &conn,
+                &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                    card_id: body.card_id.clone(),
+                    review_status: None,
+                },
+            )
+            .ok();
+            crate::engine::transition::execute_intent_on_conn(
+                &conn,
+                &crate::engine::transition::TransitionIntent::SyncReviewState {
+                    card_id: body.card_id.clone(),
+                    state: "idle".to_string(),
+                },
+            )
+            .ok();
+        }
     }
 
     let message = match body.decision.as_str() {
@@ -1910,14 +1926,19 @@ pub async fn pm_decision(
                     tracing::warn!("Pipeline has no dispatchable states, using initial state");
                     pipeline.initial_state().to_string()
                 });
-            let _ = crate::kanban::transition_status_with_opts(
+            if let Err(e) = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
                 &body.card_id,
                 &resume_target,
                 "pm-decision",
                 true,
-            );
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("resume transition failed: {e}")})),
+                );
+            }
             "Card resumed"
         }
         "rework" => {
@@ -1997,14 +2018,19 @@ pub async fn pm_decision(
                             pipeline.dispatchable_states().first().map(|s| s.to_string())
                                 .unwrap_or_else(|| pipeline.initial_state().to_string())
                         });
-                    let _ = crate::kanban::transition_status_with_opts(
+                    if let Err(e) = crate::kanban::transition_status_with_opts(
                         &state.db,
                         &state.engine,
                         &body.card_id,
                         &rework_target,
                         "pm-decision",
                         true,
-                    );
+                    ) {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("rework transition failed: {e}")})),
+                        );
+                    }
                     if let Ok(conn) = state.db.lock() {
                         // #155: Use intent for review_status mutation
                         crate::engine::transition::execute_intent_on_conn(
@@ -2040,14 +2066,19 @@ pub async fn pm_decision(
                 .find(|s| s.terminal)
                 .map(|s| s.id.as_str())
                 .expect("Pipeline must have at least one terminal state");
-            let _ = crate::kanban::transition_status_with_opts(
+            if let Err(e) = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
                 &body.card_id,
                 terminal,
                 "pm-decision",
                 true,
-            );
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("dismiss transition failed: {e}")})),
+                );
+            }
             "Card dismissed"
         }
         "requeue" => {
@@ -2061,14 +2092,19 @@ pub async fn pm_decision(
                     tracing::warn!("Pipeline has no dispatchable states, using initial state");
                     pipeline.initial_state()
                 });
-            let _ = crate::kanban::transition_status_with_opts(
+            if let Err(e) = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
                 &body.card_id,
                 requeue_target,
                 "pm-decision",
                 true,
-            );
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("requeue transition failed: {e}")})),
+                );
+            }
             "Card requeued"
         }
         _ => "Unknown decision",

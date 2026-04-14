@@ -18,6 +18,7 @@ import {
   getCardDelayBadge,
   getCardMetadata,
   getChecklistSummary,
+  hasManualInterventionReason,
   isReviewCard,
   labelForStatus,
   parseIssueSections,
@@ -594,9 +595,9 @@ function KanbanCardArticle({
         </div>
       )}
 
-      {card.status === "blocked" && card.blocked_reason && (
+      {hasManualInterventionReason(card) && card.blocked_reason && (
         <div className="mt-2 rounded-md px-2.5 py-2 text-xs" style={{ backgroundColor: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}>
-          <span className="font-semibold">{tr("차단 사유", "Blocked reason")}:</span>{" "}
+          <span className="font-semibold">{tr("수동 개입 사유", "Manual intervention reason")}:</span>{" "}
           {card.blocked_reason}
         </div>
       )}

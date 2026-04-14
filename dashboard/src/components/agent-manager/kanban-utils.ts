@@ -26,8 +26,6 @@ export const COLUMN_DEFS: Array<{
   { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#e879f9" },
   { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#c084fc" },
   { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: "#fb7185" },
-  { status: "pending_decision", labelKo: "판단 대기", labelEn: "Pending Decision", accent: "#f472b6" },
-  { status: "blocked", labelKo: "막힘", labelEn: "Blocked", accent: "#ef4444" },
   { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
 ];
 
@@ -68,12 +66,10 @@ export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = 
   requested: ["backlog"],
   in_progress: ["backlog"],
   review: ["backlog"],
-  blocked: ["backlog"],
   done: ["backlog"],
   qa_pending: ["backlog"],
   qa_in_progress: ["backlog"],
   qa_failed: ["backlog"],
-  pending_decision: ["backlog"],
 };
 
 export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
@@ -94,6 +90,18 @@ export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
 
 export const REQUEST_TIMEOUT_MS = 45 * 60 * 1000;
 export const IN_PROGRESS_STALE_MS = 60 * 60 * 1000;
+const BENIGN_BLOCKED_REASON_PREFIXES = [
+  "ci:waiting",
+  "ci:running",
+  "ci:rerunning",
+  "ci:rework",
+  "deploy:waiting",
+  "deploy:deploying:",
+] as const;
+const LEGACY_STATUS_LABELS: Record<string, { labelKo: string; labelEn: string }> = {
+  blocked: { labelKo: "막힘", labelEn: "Blocked" },
+  pending_decision: { labelKo: "판단 대기", labelEn: "Pending Decision" },
+};
 
 export interface CardDwellBadge {
   label: string;
@@ -130,9 +138,23 @@ export function isManualInterventionCard(card: KanbanCard | null | undefined): b
 }
 
 export function getBoardColumnStatus(status: KanbanCardStatus): KanbanCardStatus {
-  if (status === "blocked") return "in_progress";
-  if (status === "pending_decision") return "review";
   return status;
+}
+
+export function isBenignBlockedReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return BENIGN_BLOCKED_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix));
+}
+
+export function hasManualInterventionReason(card: Pick<KanbanCard, "blocked_reason">): boolean {
+  const reason = card.blocked_reason?.trim();
+  return Boolean(reason) && !isBenignBlockedReason(reason);
+}
+
+export function isManualInterventionCard(
+  card: Pick<KanbanCard, "review_status" | "blocked_reason">,
+): boolean {
+  return card.review_status === "dilemma_pending" || hasManualInterventionReason(card);
 }
 
 export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en: string) => string): string {
@@ -247,10 +269,7 @@ function dwellThresholdsForStatus(status: KanbanCardStatus): { warmMs: number; s
     case "in_progress":
       return { warmMs: 90 * 60 * 1000, staleMs: 4 * 60 * 60 * 1000 };
     case "review":
-    case "pending_decision":
       return { warmMs: 45 * 60 * 1000, staleMs: 2 * 60 * 60 * 1000 };
-    case "blocked":
-      return { warmMs: 30 * 60 * 1000, staleMs: 90 * 60 * 1000 };
     case "qa_pending":
     case "qa_in_progress":
     case "qa_failed":
@@ -271,11 +290,9 @@ export function getCardStateEnteredAt(card: KanbanCard): number | null {
     case "in_progress":
       return coerceTimestampMs(card.started_at ?? card.updated_at ?? card.created_at);
     case "review":
-    case "pending_decision":
       return coerceTimestampMs(card.review_entered_at ?? card.updated_at ?? card.started_at ?? card.created_at);
     case "done":
       return coerceTimestampMs(card.completed_at ?? card.updated_at ?? card.created_at);
-    case "blocked":
     case "qa_pending":
     case "qa_in_progress":
     case "qa_failed":
@@ -861,5 +878,7 @@ export function getCardDelayBadge(
 
 export function labelForStatus(status: KanbanCardStatus, tr: (ko: string, en: string) => string): string {
   const col = COLUMN_DEFS.find((column) => column.status === status);
-  return col ? tr(col.labelKo, col.labelEn) : status;
+  if (col) return tr(col.labelKo, col.labelEn);
+  const legacy = LEGACY_STATUS_LABELS[String(status)];
+  return legacy ? tr(legacy.labelKo, legacy.labelEn) : status;
 }

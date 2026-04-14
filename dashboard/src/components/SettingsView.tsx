@@ -852,8 +852,8 @@ export default function SettingsView({
           eyebrow={tr("에스컬레이션", "Escalation")}
           title={tr("PM / owner 라우팅 전환", "Switch between PM and owner routing")}
           description={tr(
-            "pending_decision 에스컬레이션을 PM 채널로 보낼지, owner 스레드로 보낼지, 시간대 기반으로 전환할지를 관리합니다.",
-            "Controls whether pending-decision escalations go to the PM channel, an owner thread, or switch automatically by time window.",
+            "리뷰 판단 대기(dilemma_pending) 에스컬레이션을 PM 채널로 보낼지, owner 스레드로 보낼지, 시간대 기반으로 전환할지를 관리합니다.",
+            "Controls whether review dilemma escalations go to the PM channel, an owner thread, or switch automatically by time window.",
           )}
           badge={tr("api/settings/escalation", "api/settings/escalation")}
         />

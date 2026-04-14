@@ -3,6 +3,7 @@ import type { Agent, DashboardStats } from "../../types";
 import * as api from "../../api/client";
 import type { TFunction } from "./model";
 import { getAgentLevel, getAgentTitle } from "../agent-manager/AgentInfoCard";
+import { hasManualInterventionReason, isManualInterventionCard } from "../agent-manager/kanban-utils";
 import { cx, dashboardBadge, dashboardButton, dashboardCard } from "./ui";
 
 // ── CookingHeart Role Board Widget ──
@@ -160,7 +161,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
     review: (c) => c.status === "review",
     acceptance: (c) => c.status === "requested",
     stalled: (c) => c.status === "in_progress",
-    blocked: (c) => c.status === "blocked",
+    blocked: (c) => isManualInterventionCard(c),
   }), []);
 
   const handleToggle = async (cat: OpsCategory) => {
@@ -191,7 +192,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
     { key: "review", label: t({ ko: "검토 대기", en: "Review", ja: "レビュー待ち", zh: "待审查" }), value: kanban.review_queue, color: "#14b8a6" },
     { key: "acceptance", label: t({ ko: "수락 지연", en: "Ack delay", ja: "受諾遅延", zh: "接收延迟" }), value: kanban.waiting_acceptance, color: "#8b5cf6" },
     { key: "stalled", label: t({ ko: "진행 정체", en: "Stalled", ja: "停滞", zh: "停滞" }), value: kanban.stale_in_progress, color: "#f59e0b" },
-    { key: "blocked", label: t({ ko: "막힘", en: "Blocked", ja: "詰まり", zh: "阻塞" }), value: kanban.blocked, color: "#ef4444" },
+    { key: "blocked", label: t({ ko: "수동 개입", en: "Manual intervention", ja: "手動介入", zh: "人工介入" }), value: kanban.blocked, color: "#ef4444" },
   ];
 
   return (
@@ -286,7 +287,7 @@ function OpsCardRow({ card, t, onAction }: {
   onAction: (id: string, action: "retry" | "ready" | "done") => void;
 }) {
   const repo = card.github_repo?.replace(/^[^/]+\//, "") ?? "";
-  const statusColor = card.status === "blocked" ? "#f59e0b"
+  const statusColor = isManualInterventionCard(card) ? "#f59e0b"
     : card.status === "review" ? "#14b8a6"
     : "#8b5cf6";
 
@@ -313,12 +314,12 @@ function OpsCardRow({ card, t, onAction }: {
           <div className="text-sm font-medium mt-0.5 truncate" style={{ color: "var(--th-text)" }}>
             {card.title}
           </div>
-          {card.blocked_reason && (
+          {hasManualInterventionReason(card) && card.blocked_reason && (
             <div className="text-xs mt-0.5" style={{ color: "#fca5a5" }}>
               {card.blocked_reason}
             </div>
           )}
-          {card.latest_dispatch_result_summary && card.status === "blocked" && (
+          {card.latest_dispatch_result_summary && isManualInterventionCard(card) && (
             <div className="text-xs mt-0.5" style={{ color: "#fca5a5" }}>
               {card.latest_dispatch_result_summary}
             </div>
@@ -337,7 +338,7 @@ function OpsCardRow({ card, t, onAction }: {
         )}
       </div>
       <div className="flex items-center gap-1.5">
-        {card.status === "blocked" && (
+        {isManualInterventionCard(card) && (
           <>
             <button
               type="button"

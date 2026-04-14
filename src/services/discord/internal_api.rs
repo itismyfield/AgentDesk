@@ -236,6 +236,28 @@ pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn take_kv_value(key: &str) -> Result<Option<String>, String> {
+    let ctx = load_context()?;
+    let conn = ctx
+        .db
+        .lock()
+        .map_err(|err| format!("db lock failed: {err}"))?;
+    let value = match conn.query_row(
+        "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
+        rusqlite::params![key],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(err) => return Err(err.to_string()),
+    };
+    if value.is_some() {
+        conn.execute("DELETE FROM kv_meta WHERE key = ?1", rusqlite::params![key])
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(value)
+}
+
 pub(super) fn gc_stale_thread_sessions() -> Result<usize, String> {
     let ctx = load_context()?;
     let conn = ctx

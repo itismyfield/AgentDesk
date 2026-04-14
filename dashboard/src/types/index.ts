@@ -411,12 +411,10 @@ export type KanbanCardStatus =
   | "requested"
   | "in_progress"
   | "review"
-  | "blocked"
   | "done"
   | "qa_pending"
   | "qa_in_progress"
-  | "qa_failed"
-  | "pending_decision";
+  | "qa_failed";
 
 export type KanbanCardPriority = "low" | "medium" | "high" | "urgent";
 

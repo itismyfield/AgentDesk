@@ -1558,7 +1558,7 @@ mod tests {
     // ── Scenario 5: Timeout recovery ────────────────────────────────
 
     #[test]
-    fn scenario_5_timeout_recovery_stale_to_pending_decision() {
+    fn scenario_5_timeout_recovery_requested_to_manual_intervention() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
@@ -1599,10 +1599,22 @@ mod tests {
             }
         }
 
-        let status = get_card_status(&db, "card-s5");
+        let conn = db.lock().unwrap();
+        let (status, blocked_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-s5'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(
-            status, "pending_decision",
-            "stale requested card with exhausted retries → pending_decision"
+            status, "requested",
+            "stale requested card with exhausted retries must stay in requested"
+        );
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("Timed out waiting for agent (10 retries exhausted)"),
+            "stale requested card must carry a manual-intervention blocked_reason"
         );
     }
 
@@ -1656,7 +1668,7 @@ mod tests {
 
         assert_eq!(
             status, "requested",
-            "requested preflight cards without a dispatch must not be forced to pending_decision"
+            "requested preflight cards without a dispatch must remain requested"
         );
         assert!(
             latest_dispatch_id.is_none(),
@@ -1678,7 +1690,14 @@ mod tests {
         let policy_dir = setup_escalation_policy_dir();
         let engine = test_engine_with_dir(&db, policy_dir.path());
         seed_agent(&db);
-        seed_card(&db, "card-escalation", "pending_decision");
+        seed_card(&db, "card-escalation", "review");
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE kanban_cards SET review_status = 'dilemma_pending' WHERE id = 'card-escalation'",
+                [],
+            )
+            .unwrap();
         set_config_key(&db, "server_port", json!(8791));
 
         engine
@@ -1728,7 +1747,7 @@ mod tests {
             "pm_decision_sent:card-escalation",
             &json!({
                 "sent_at": stale_sent_at,
-                "status": "pending_decision"
+                "status": "review:dilemma_pending"
             })
             .to_string(),
         );
@@ -1753,27 +1772,34 @@ mod tests {
     }
 
     #[test]
-    fn entering_force_only_state_preserves_pending_escalation_bundle() {
+    fn active_manual_intervention_preserves_pending_escalation_bundle() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-force-enter", "requested");
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-enter'",
+                [],
+            )
+            .unwrap();
         set_kv(
             &db,
             "pm_pending:card-force-enter",
-            r#"{"title":"Test Card","reasons":["new pending decision"]}"#,
+            r#"{"title":"Test Card","reasons":["manual intervention"]}"#,
         );
         set_kv(
             &db,
             "pm_decision_sent:card-force-enter",
-            r#"{"sent_at":123,"status":"requested"}"#,
+            r#"{"sent_at":123,"status":"blocked:Needs PM review"}"#,
         );
 
         kanban::transition_status_with_opts(
             &db,
             &engine,
             "card-force-enter",
-            "pending_decision",
+            "backlog",
             "test",
             true,
         )
@@ -1784,40 +1810,48 @@ mod tests {
     }
 
     #[test]
-    fn leaving_force_only_state_clears_escalation_cooldown_keys() {
+    fn resolving_manual_intervention_clears_escalation_cooldown_keys() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
-        seed_card(&db, "card-force-leave", "pending_decision");
+        seed_card(&db, "card-force-leave", "requested");
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-leave'",
+                [],
+            )
+            .unwrap();
         set_kv(
             &db,
             "pm_pending:card-force-leave",
-            r#"{"title":"Test Card","reasons":["awaiting PM"]}"#,
+            r#"{"title":"Test Card","reasons":["manual intervention"]}"#,
         );
         set_kv(
             &db,
             "pm_decision_sent:card-force-leave",
-            r#"{"sent_at":123,"status":"pending_decision"}"#,
+            r#"{"sent_at":123,"status":"blocked:Needs PM review"}"#,
         );
 
-        kanban::transition_status_with_opts(
+        kanban::transition_status_with_opts_and_on_conn(
             &db,
             &engine,
             "card-force-leave",
-            "requested",
+            "backlog",
             "test",
             true,
+            |conn| {
+                conn.execute(
+                    "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = 'card-force-leave'",
+                    [],
+                )?;
+                Ok(())
+            },
         )
         .unwrap();
 
-        assert!(
-            kv_value(&db, "pm_pending:card-force-leave").is_none(),
-            "resolving a force-only state must clear pending escalation bundle"
-        );
-        assert!(
-            kv_value(&db, "pm_decision_sent:card-force-leave").is_none(),
-            "resolving a force-only state must clear resend cooldown"
-        );
+        assert!(kv_value(&db, "pm_pending:card-force-leave").is_none());
+        assert!(kv_value(&db, "pm_decision_sent:card-force-leave").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2687,7 +2721,6 @@ mod tests {
                 {"id": "in_progress", "label": "In Progress"},
                 {"id": "review", "label": "Review"},
                 {"id": "qa_test", "label": "QA Test"},
-                {"id": "pending_decision", "label": "Pending"},
                 {"id": "done", "label": "Done", "terminal": true}
             ],
             "transitions": [
@@ -2699,8 +2732,10 @@ mod tests {
                 {"from": "review", "to": "in_progress", "type": "gated", "gates": ["review_rework"]},
                 {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]},
                 {"from": "qa_test", "to": "in_progress", "type": "force_only"},
-                {"from": "requested", "to": "pending_decision", "type": "force_only"},
-                {"from": "pending_decision", "to": "done", "type": "force_only"}
+                {"from": "requested", "to": "done", "type": "force_only"},
+                {"from": "in_progress", "to": "requested", "type": "force_only"},
+                {"from": "review", "to": "requested", "type": "force_only"},
+                {"from": "qa_test", "to": "requested", "type": "force_only"}
             ],
             "gates": {
                 "active_dispatch": {"type": "builtin", "check": "has_active_dispatch"},

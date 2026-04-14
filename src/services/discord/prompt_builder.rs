@@ -282,7 +282,9 @@ pub(super) fn build_system_prompt(
         discord_token_hash(token),
         narration_guidance,
         disabled_notice,
-        // ReviewLite: omit skills to save tokens — reviewer only submits verdict
+        // Skill inventory is caller-supplied. Production currently passes an
+        // empty string to avoid duplicating providers' native skill injection.
+        // ReviewLite also omits it defensively even if a caller provides one.
         if profile == DispatchProfile::ReviewLite {
             ""
         } else {
@@ -604,19 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn test_review_lite_omits_skills() {
-        let skills_notice = "\n\nAvailable skills:\n\
-            The entries below are descriptions only, not the full skill body.\n\
-            If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
-            Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
-              - /commit: Commit changes";
-        let with_skills = build_system_prompt(
+    fn test_empty_skills_notice_omits_skills_for_full_profile() {
+        let prompt = build_system_prompt(
             "ctx",
             "/tmp",
             ChannelId::new(1),
             "tok",
             "",
-            skills_notice,
+            "",
             true,
             None,
             false,
@@ -627,30 +624,10 @@ mod tests {
             None,
             None,
         );
-        let without_skills = build_system_prompt(
-            "ctx",
-            "/tmp",
-            ChannelId::new(1),
-            "tok",
-            "",
-            skills_notice,
-            true,
-            None,
-            false,
-            DispatchProfile::ReviewLite,
-            Some("review"),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(with_skills.contains("Available skills"));
-        assert!(with_skills.contains("descriptions only"));
-        assert!(with_skills.contains("`SKILL.md`"));
-        assert!(!without_skills.contains("Available skills"));
-        assert!(!without_skills.contains("[Context Compression]"));
-        // ReviewLite prompt should be shorter
-        assert!(without_skills.len() < with_skills.len());
+
+        assert!(!prompt.contains("Available skills"));
+        assert!(!prompt.contains("descriptions only"));
+        assert!(!prompt.contains("`SKILL.md`"));
     }
 
     #[test]

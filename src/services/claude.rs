@@ -668,6 +668,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     let mut last_session_id: Option<String> = None;
     let mut last_model: Option<String> = None;
     let mut accum_input_tokens: u64 = 0;
+    let mut accum_cache_create_tokens: u64 = 0;
+    let mut accum_cache_read_tokens: u64 = 0;
     let mut accum_output_tokens: u64 = 0;
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
@@ -750,7 +752,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        accum_input_tokens += inp + cache_read + cache_creation;
+                        accum_input_tokens += inp;
+                        accum_cache_read_tokens += cache_read;
+                        accum_cache_create_tokens += cache_creation;
                         if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
                             accum_output_tokens += out;
                         }
@@ -788,7 +792,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    accum_input_tokens = inp + cache_read + cache_creation;
+                    accum_input_tokens = inp;
+                    accum_cache_read_tokens = cache_read;
+                    accum_cache_create_tokens = cache_creation;
                     accum_output_tokens = out;
                 }
 
@@ -801,6 +807,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         num_turns,
                         input_tokens: if accum_input_tokens > 0 {
                             Some(accum_input_tokens)
+                        } else {
+                            None
+                        },
+                        cache_create_tokens: if accum_cache_create_tokens > 0 {
+                            Some(accum_cache_create_tokens)
+                        } else {
+                            None
+                        },
+                        cache_read_tokens: if accum_cache_read_tokens > 0 {
+                            Some(accum_cache_read_tokens)
                         } else {
                             None
                         },
@@ -885,11 +901,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         model,
                         cost_usd,
                         total_cost_usd,
+                        cache_create_tokens,
+                        cache_read_tokens,
                         ..
                     } => {
                         debug_log(&format!(
-                            "  >>> StatusUpdate: model={:?}, cost={:?}, total_cost={:?}",
-                            model, cost_usd, total_cost_usd
+                            "  >>> StatusUpdate: model={:?}, cost={:?}, total_cost={:?}, cache_create={:?}, cache_read={:?}",
+                            model, cost_usd, total_cost_usd, cache_create_tokens, cache_read_tokens
                         ));
                     }
                     StreamMessage::TmuxReady { .. } | StreamMessage::ProcessReady { .. } => {

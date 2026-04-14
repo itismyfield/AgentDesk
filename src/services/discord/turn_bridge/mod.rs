@@ -16,6 +16,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
+use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -109,6 +110,67 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn total_model_input_tokens(
+    input_tokens: u64,
+    cache_create_tokens: u64,
+    cache_read_tokens: u64,
+) -> u64 {
+    input_tokens
+        .saturating_add(cache_create_tokens)
+        .saturating_add(cache_read_tokens)
+}
+
+pub(super) fn persist_turn_analytics_row(
+    db: &crate::db::Db,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    role_binding: Option<&RoleBinding>,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    session_id: Option<&str>,
+    inflight_state: &InflightTurnState,
+    token_usage: TurnTokenUsage,
+    duration_ms: i64,
+) {
+    let thread_id = inflight_state
+        .thread_id
+        .map(|value| value.to_string())
+        .or_else(|| {
+            inflight_state
+                .channel_name
+                .as_deref()
+                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
+                .map(|value| value.to_string())
+        });
+    let entry = PersistTurnOwned {
+        turn_id: format!("discord:{}:{}", channel_id.get(), user_msg_id.get()),
+        session_key: session_key.map(str::to_string),
+        thread_id,
+        thread_title: inflight_state.thread_title.clone(),
+        channel_id: inflight_state
+            .logical_channel_id
+            .unwrap_or(channel_id.get())
+            .to_string(),
+        agent_id: role_binding.map(|binding| binding.role_id.clone()),
+        provider: Some(provider.as_str().to_string()),
+        session_id: session_id
+            .map(str::to_string)
+            .or_else(|| inflight_state.session_id.clone()),
+        dispatch_id: dispatch_id
+            .map(str::to_string)
+            .or_else(|| inflight_state.dispatch_id.clone()),
+        started_at: Some(inflight_state.started_at.clone()),
+        finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        duration_ms: Some(duration_ms),
+        token_usage,
+    };
+    if let Err(error) = upsert_turn_owned(db, &entry) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
+    }
+}
+
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -147,6 +209,8 @@ pub(super) fn spawn_turn_bridge(
         let mut last_tool_name: Option<String> = None;
         let mut last_tool_summary: Option<String> = None;
         let mut accumulated_input_tokens: u64 = 0;
+        let mut accumulated_cache_create_tokens: u64 = 0;
+        let mut accumulated_cache_read_tokens: u64 = 0;
         let mut accumulated_output_tokens: u64 = 0;
         let mut accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
         let mut accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
@@ -582,14 +646,21 @@ pub(super) fn spawn_turn_bridge(
                         }
                         StreamMessage::StatusUpdate {
                             input_tokens,
+                            cache_create_tokens,
+                            cache_read_tokens,
                             output_tokens,
                             ..
                         } => {
-                            // Use latest value (not cumulative) — each StatusUpdate
-                            // from claude.rs already includes cumulative cache tokens,
-                            // representing the current context window occupancy.
+                            // Use latest values (not cumulative) — provider adapters emit
+                            // cumulative totals for the current turn/session snapshot.
                             if let Some(it) = input_tokens {
                                 accumulated_input_tokens = it;
+                            }
+                            if let Some(tokens) = cache_create_tokens {
+                                accumulated_cache_create_tokens = tokens;
+                            }
+                            if let Some(tokens) = cache_read_tokens {
+                                accumulated_cache_read_tokens = tokens;
                             }
                             if let Some(ot) = output_tokens {
                                 accumulated_output_tokens = ot;
@@ -883,7 +954,14 @@ pub(super) fn spawn_turn_bridge(
             "idle",
             &provider,
             adk_session_info.as_deref(),
-            persisted_context_tokens(accumulated_input_tokens, accumulated_output_tokens),
+            persisted_context_tokens(
+                total_model_input_tokens(
+                    accumulated_input_tokens,
+                    accumulated_cache_create_tokens,
+                    accumulated_cache_read_tokens,
+                ),
+                accumulated_output_tokens,
+            ),
             adk_cwd.as_deref(),
             dispatch_id.as_deref(),
             adk_session_name
@@ -1436,6 +1514,12 @@ pub(super) fn spawn_turn_bridge(
         let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
         let recall_feedback_analysis =
             should_persist_transcript.then(|| analyze_recall_feedback_turn(&transcript_events));
+        let model_token_usage = TurnTokenUsage {
+            input_tokens: accumulated_input_tokens,
+            cache_create_tokens: accumulated_cache_create_tokens,
+            cache_read_tokens: accumulated_cache_read_tokens,
+            output_tokens: accumulated_output_tokens,
+        };
 
         if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
             let channel_id_text = channel_id.get().to_string();
@@ -1492,6 +1576,24 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
             }
+        }
+
+        if let Some(db) = shared_owned.db.as_ref() {
+            persist_turn_analytics_row(
+                db,
+                &provider,
+                channel_id,
+                user_msg_id,
+                role_binding.as_ref(),
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                new_session_id
+                    .as_deref()
+                    .or(session_id_to_persist.as_deref()),
+                &inflight_state,
+                model_token_usage,
+                turn_duration_ms(turn_start),
+            );
         }
 
         let mut auto_feedback_count = 0usize;
@@ -1627,14 +1729,19 @@ pub(super) fn spawn_turn_bridge(
                 let settings = shared_owned.settings.read().await;
                 settings.provider.as_str().to_string()
             };
+            let total_input_tokens = total_model_input_tokens(
+                accumulated_input_tokens,
+                accumulated_cache_create_tokens,
+                accumulated_cache_read_tokens,
+            );
             super::metrics::record_turn(&super::metrics::TurnMetric {
                 channel_id: channel_id.get(),
                 provider: provider_name,
                 timestamp: chrono::Local::now().to_rfc3339(),
                 duration_secs: duration,
                 model: None, // model info from StatusUpdate not yet accumulated in turn_bridge
-                input_tokens: if accumulated_input_tokens > 0 {
-                    Some(accumulated_input_tokens)
+                input_tokens: if total_input_tokens > 0 {
+                    Some(total_input_tokens)
                 } else {
                     None
                 },

@@ -486,6 +486,8 @@ fn process_gemini_json_event(
                 duration_ms,
                 num_turns: None,
                 input_tokens,
+                cache_create_tokens: None,
+                cache_read_tokens: None,
                 output_tokens,
             });
         }
