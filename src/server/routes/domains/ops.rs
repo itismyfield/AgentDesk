@@ -114,6 +114,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/auto-queue/history", get(auto_queue::history))
             .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
             .route(
+                "/auto-queue/runs/{id}/restore",
+                post(auto_queue::restore_run),
+            )
+            .route(
                 "/auto-queue/runs/{id}/entries",
                 post(auto_queue::add_run_entry),
             )
@@ -123,6 +127,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
             .route("/auto-queue/reorder", patch(auto_queue::reorder))
+            .route(
+                "/auto-queue/slots/{agent_id}/{slot_index}/rebind",
+                post(auto_queue::rebind_slot),
+            )
             .route(
                 "/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
                 post(auto_queue::reset_slot_thread),

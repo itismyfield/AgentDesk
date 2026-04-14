@@ -105,6 +105,13 @@ pub struct DispatchBody {
 pub struct UpdateEntryBody {
     pub thread_group: Option<i64>,
     pub priority_rank: Option<i64>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RebindSlotBody {
+    pub run_id: String,
+    pub thread_group: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +486,8 @@ struct ActivateCardState {
     latest_dispatch_id: Option<String>,
     latest_dispatch_status: Option<String>,
     entry_status: String,
+    repo_id: Option<String>,
+    assigned_agent_id: Option<String>,
 }
 
 impl ActivateCardState {
@@ -489,6 +498,42 @@ impl ActivateCardState {
                 Some("pending") | Some("dispatched")
             )
     }
+
+    fn is_terminal(&self, conn: &rusqlite::Connection) -> bool {
+        crate::pipeline::ensure_loaded();
+        crate::pipeline::resolve_for_card(
+            conn,
+            self.repo_id.as_deref(),
+            self.assigned_agent_id.as_deref(),
+        )
+        .is_terminal(&self.status)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RestoreEntryRecord {
+    entry_id: String,
+    card_id: String,
+    agent_id: String,
+    thread_group: i64,
+}
+
+#[derive(Debug, Default)]
+struct RestoreRunCounts {
+    restored_pending: usize,
+    restored_done: usize,
+    restored_dispatched: usize,
+    rebound_slots: usize,
+    created_dispatches: usize,
+    unbound_dispatches: usize,
+}
+
+#[derive(Debug, Clone)]
+enum RestoreEntryDecision {
+    Pending,
+    Done,
+    ExistingDispatch { dispatch_id: String },
+    NewDispatch { title: String },
 }
 
 fn load_activate_card_state(
@@ -496,15 +541,28 @@ fn load_activate_card_state(
     card_id: &str,
     entry_id: &str,
 ) -> rusqlite::Result<ActivateCardState> {
-    let (status, title, metadata, latest_dispatch_id): (
+    let (status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id): (
         String,
         String,
+        Option<String>,
+        Option<String>,
         Option<String>,
         Option<String>,
     ) = conn.query_row(
-        "SELECT status, title, metadata, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+        "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = ?1",
         [card_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
     )?;
     let latest_dispatch_status = latest_dispatch_id.as_deref().and_then(|dispatch_id| {
         conn.query_row(
@@ -529,7 +587,62 @@ fn load_activate_card_state(
         latest_dispatch_id,
         latest_dispatch_status,
         entry_status,
+        repo_id,
+        assigned_agent_id,
     })
+}
+
+fn load_restore_entries(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+) -> rusqlite::Result<Vec<RestoreEntryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kanban_card_id, agent_id, COALESCE(thread_group, 0)
+         FROM auto_queue_entries
+         WHERE run_id = ?1
+           AND status = 'skipped'
+         ORDER BY priority_rank ASC, created_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map([run_id], |row| {
+        Ok(RestoreEntryRecord {
+            entry_id: row.get(0)?,
+            card_id: row.get(1)?,
+            agent_id: row.get(2)?,
+            thread_group: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn decide_restore_transition(
+    conn: &rusqlite::Connection,
+    entry: &RestoreEntryRecord,
+) -> rusqlite::Result<RestoreEntryDecision> {
+    let card_state = load_activate_card_state(conn, &entry.card_id, &entry.entry_id)?;
+    let dispatch_history =
+        crate::db::auto_queue::list_entry_dispatch_history(conn, &entry.entry_id)?;
+
+    if dispatch_history.is_empty() {
+        return Ok(RestoreEntryDecision::Pending);
+    }
+    if card_state.is_terminal(conn) {
+        return Ok(RestoreEntryDecision::Done);
+    }
+    if card_state.has_active_dispatch() {
+        if let Some(dispatch_id) = card_state.latest_dispatch_id {
+            return Ok(RestoreEntryDecision::ExistingDispatch { dispatch_id });
+        }
+    }
+    if matches!(
+        card_state.status.as_str(),
+        "requested" | "in_progress" | "review"
+    ) {
+        return Ok(RestoreEntryDecision::NewDispatch {
+            title: card_state.title,
+        });
+    }
+
+    Ok(RestoreEntryDecision::Pending)
 }
 
 #[derive(Clone)]
@@ -3759,7 +3872,7 @@ pub async fn update_entry(
     Path(id): Path<String>,
     Json(body): Json<UpdateEntryBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if body.thread_group.is_none() && body.priority_rank.is_none() {
+    if body.thread_group.is_none() && body.priority_rank.is_none() && body.status.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
@@ -3781,6 +3894,30 @@ pub async fn update_entry(
             );
         }
     }
+    let requested_status = match body.status.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(crate::db::auto_queue::ENTRY_STATUS_PENDING) => {
+            Some(crate::db::auto_queue::ENTRY_STATUS_PENDING)
+        }
+        Some(crate::db::auto_queue::ENTRY_STATUS_SKIPPED) => {
+            Some(crate::db::auto_queue::ENTRY_STATUS_SKIPPED)
+        }
+        Some(crate::db::auto_queue::ENTRY_STATUS_DISPATCHED)
+        | Some(crate::db::auto_queue::ENTRY_STATUS_DONE) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "manual entry status updates only support pending or skipped"
+                })),
+            );
+        }
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("unsupported entry status '{other}'")})),
+            );
+        }
+    };
 
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
@@ -3807,36 +3944,75 @@ pub async fn update_entry(
             Json(json!({"error": "entry not found"})),
         );
     };
-    if status != "pending" {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "only pending entries can be updated"})),
-        );
+
+    let mut effective_status = status.clone();
+    if let Some(new_status) = requested_status {
+        match crate::db::auto_queue::update_entry_status_on_conn(
+            &conn,
+            &id,
+            new_status,
+            "manual_update",
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        ) {
+            Ok(result) => effective_status = result.to_status,
+            Err(crate::db::auto_queue::EntryStatusUpdateError::NotFound { .. }) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "entry not found"})),
+                );
+            }
+            Err(crate::db::auto_queue::EntryStatusUpdateError::InvalidTransition { .. }) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!(
+                            "entry status transition not allowed: {} -> {}",
+                            status, new_status
+                        ),
+                    })),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
     }
 
-    let changed = conn
-        .execute(
-            "UPDATE auto_queue_entries
-             SET thread_group = COALESCE(?1, thread_group),
-                 priority_rank = COALESCE(?2, priority_rank)
-             WHERE id = ?3
-               AND status = 'pending'",
-            rusqlite::params![body.thread_group, body.priority_rank, id],
-        )
-        .unwrap_or(0);
-    if changed == 0 {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "entry not found or not pending"})),
-        );
-    }
-
-    if body.thread_group.is_some() {
-        if let Err(err) = crate::db::auto_queue::sync_run_group_metadata(&conn, &run_id) {
+    if body.thread_group.is_some() || body.priority_rank.is_some() {
+        if effective_status != crate::db::auto_queue::ENTRY_STATUS_PENDING {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{err}")})),
+                StatusCode::CONFLICT,
+                Json(json!({"error": "only pending entries can be reprioritized"})),
             );
+        }
+
+        let changed = conn
+            .execute(
+                "UPDATE auto_queue_entries
+                 SET thread_group = COALESCE(?1, thread_group),
+                     priority_rank = COALESCE(?2, priority_rank)
+                 WHERE id = ?3
+                   AND status = 'pending'",
+                rusqlite::params![body.thread_group, body.priority_rank, id],
+            )
+            .unwrap_or(0);
+        if changed == 0 {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "entry not found or not pending"})),
+            );
+        }
+
+        if body.thread_group.is_some() {
+            if let Err(err) = crate::db::auto_queue::sync_run_group_metadata(&conn, &run_id) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{err}")})),
+                );
+            }
         }
     }
 
@@ -4020,6 +4196,552 @@ pub async fn add_run_entry(
                 .auto_queue_service()
                 .entry_json(&inserted_entry.entry_id, None)
                 .unwrap_or(serde_json::Value::Null),
+        })),
+    )
+}
+
+/// POST /api/auto-queue/runs/{id}/restore
+pub async fn restore_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let run_status: Option<String> = conn
+        .query_row(
+            "SELECT status
+             FROM auto_queue_runs
+             WHERE id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .ok();
+    match run_status.as_deref() {
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
+            );
+        }
+        Some("cancelled") => {}
+        Some("active") => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("auto-queue run '{run_id}' is already active")})),
+            );
+        }
+        Some(status) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("only cancelled runs can be restored (status={status})"),
+                    "run_id": run_id,
+                    "status": status,
+                })),
+            );
+        }
+    }
+
+    let entries = match load_restore_entries(&conn, &run_id) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load restore entries: {error}")})),
+            );
+        }
+    };
+    let restored_run = conn
+        .execute(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 completed_at = NULL
+             WHERE id = ?1
+               AND status = 'cancelled'",
+            [&run_id],
+        )
+        .unwrap_or(0);
+    if restored_run == 0 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("failed to restore cancelled run '{run_id}'")})),
+        );
+    }
+    drop(conn);
+
+    let deps = AutoQueueActivateDeps::from_state(&state);
+    let mut counts = RestoreRunCounts::default();
+    let mut errors = Vec::new();
+
+    for entry in entries {
+        let conn = match deps.db.separate_conn() {
+            Ok(c) => c,
+            Err(error) => {
+                errors.push(format!(
+                    "{}: open restore context failed: {error}",
+                    entry.entry_id
+                ));
+                continue;
+            }
+        };
+        let decision = match decide_restore_transition(&conn, &entry) {
+            Ok(decision) => decision,
+            Err(error) => {
+                errors.push(format!(
+                    "{}: decide restore transition failed: {error}",
+                    entry.entry_id
+                ));
+                continue;
+            }
+        };
+        drop(conn);
+
+        match decision {
+            RestoreEntryDecision::Pending => {
+                let conn = match deps.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: restore to pending failed to open DB: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
+                match crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    &entry.entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                    "restore_run_pending",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                ) {
+                    Ok(result) if result.changed => counts.restored_pending += 1,
+                    Ok(_) => {}
+                    Err(error) => errors.push(format!(
+                        "{}: restore to pending failed: {error}",
+                        entry.entry_id
+                    )),
+                }
+            }
+            RestoreEntryDecision::Done => {
+                let conn = match deps.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: restore to done failed to open DB: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
+                match crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    &entry.entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_DONE,
+                    "restore_run_done",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                ) {
+                    Ok(result) if result.changed => counts.restored_done += 1,
+                    Ok(_) => {}
+                    Err(error) => errors.push(format!(
+                        "{}: restore to done failed: {error}",
+                        entry.entry_id
+                    )),
+                }
+            }
+            RestoreEntryDecision::ExistingDispatch { dispatch_id } => {
+                let conn = match deps.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: attach existing dispatch failed to open DB: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
+                let slot_allocation = crate::db::auto_queue::allocate_slot_for_group_agent(
+                    &conn,
+                    &run_id,
+                    entry.thread_group,
+                    &entry.agent_id,
+                );
+                let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+                if let Some((_, newly_assigned)) = slot_allocation {
+                    if newly_assigned {
+                        counts.rebound_slots += 1;
+                    }
+                } else {
+                    counts.unbound_dispatches += 1;
+                }
+                match crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    &entry.entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                    "restore_run_attach_existing_dispatch",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions {
+                        dispatch_id: Some(dispatch_id),
+                        slot_index,
+                    },
+                ) {
+                    Ok(result) if result.changed => counts.restored_dispatched += 1,
+                    Ok(_) => {}
+                    Err(error) => errors.push(format!(
+                        "{}: attach existing dispatch failed: {error}",
+                        entry.entry_id
+                    )),
+                }
+            }
+            RestoreEntryDecision::NewDispatch { title } => {
+                let conn = match deps.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: restore dispatch failed to open DB: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
+                let slot_allocation = crate::db::auto_queue::allocate_slot_for_group_agent(
+                    &conn,
+                    &run_id,
+                    entry.thread_group,
+                    &entry.agent_id,
+                );
+                let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+                if let Some((_, newly_assigned)) = slot_allocation {
+                    if newly_assigned {
+                        counts.rebound_slots += 1;
+                    }
+                }
+                drop(conn);
+
+                if slot_index.is_none() {
+                    let conn = match deps.db.separate_conn() {
+                        Ok(c) => c,
+                        Err(error) => {
+                            errors.push(format!(
+                                "{}: restore fallback pending failed to open DB: {error}",
+                                entry.entry_id
+                            ));
+                            continue;
+                        }
+                    };
+                    match crate::db::auto_queue::update_entry_status_on_conn(
+                        &conn,
+                        &entry.entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                        "restore_run_pending_no_slot",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                    ) {
+                        Ok(result) if result.changed => counts.restored_pending += 1,
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!(
+                            "{}: restore fallback pending failed: {error}",
+                            entry.entry_id
+                        )),
+                    }
+                    continue;
+                }
+
+                let dispatch_result = run_activate_blocking(|| {
+                    crate::dispatch::create_dispatch(
+                        &deps.db,
+                        &deps.engine,
+                        &entry.card_id,
+                        &entry.agent_id,
+                        "implementation",
+                        &title,
+                        &json!({
+                            "auto_queue": true,
+                            "restored_run": true,
+                            "run_id": run_id,
+                            "entry_id": entry.entry_id,
+                            "thread_group": entry.thread_group,
+                            "slot_index": slot_index,
+                        }),
+                    )
+                });
+
+                let created_dispatch = dispatch_result.is_ok();
+                let dispatch_id = match dispatch_result {
+                    Ok(dispatch) => dispatch
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned),
+                    Err(error) => {
+                        tracing::warn!(
+                            "[auto-queue] restore_run create_dispatch failed for entry {}: {}",
+                            entry.entry_id,
+                            error
+                        );
+                        let conn = match deps.db.separate_conn() {
+                            Ok(c) => c,
+                            Err(open_error) => {
+                                errors.push(format!(
+                                    "{}: reload after create_dispatch failure failed: {open_error}",
+                                    entry.entry_id
+                                ));
+                                continue;
+                            }
+                        };
+                        load_activate_card_state(&conn, &entry.card_id, &entry.entry_id)
+                            .ok()
+                            .filter(|state| state.has_active_dispatch())
+                            .and_then(|state| state.latest_dispatch_id)
+                    }
+                };
+
+                if let Some(dispatch_id) = dispatch_id {
+                    let conn = match deps.db.separate_conn() {
+                        Ok(c) => c,
+                        Err(error) => {
+                            errors.push(format!(
+                                "{}: restore dispatched failed to open DB: {error}",
+                                entry.entry_id
+                            ));
+                            continue;
+                        }
+                    };
+                    match crate::db::auto_queue::update_entry_status_on_conn(
+                        &conn,
+                        &entry.entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                        "restore_run_create_dispatch",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions {
+                            dispatch_id: Some(dispatch_id),
+                            slot_index,
+                        },
+                    ) {
+                        Ok(result) if result.changed => {
+                            counts.restored_dispatched += 1;
+                            if created_dispatch {
+                                counts.created_dispatches += 1;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!(
+                            "{}: restore to dispatched failed: {error}",
+                            entry.entry_id
+                        )),
+                    }
+                } else {
+                    let conn = match deps.db.separate_conn() {
+                        Ok(c) => c,
+                        Err(error) => {
+                            errors.push(format!(
+                                "{}: restore fallback pending failed to open DB: {error}",
+                                entry.entry_id
+                            ));
+                            continue;
+                        }
+                    };
+                    match crate::db::auto_queue::update_entry_status_on_conn(
+                        &conn,
+                        &entry.entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                        "restore_run_pending_dispatch_failed",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                    ) {
+                        Ok(result) if result.changed => counts.restored_pending += 1,
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!(
+                            "{}: restore fallback pending failed: {error}",
+                            entry.entry_id
+                        )),
+                    }
+                }
+            }
+        }
+    }
+
+    let conn = match deps.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let final_run_status = conn
+        .query_row(
+            "SELECT status
+             FROM auto_queue_runs
+             WHERE id = ?1",
+            [&run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "unknown".to_string());
+    drop(conn);
+
+    let mut payload = json!({
+        "ok": errors.is_empty(),
+        "run_id": run_id,
+        "run_status": final_run_status,
+        "restored_pending": counts.restored_pending,
+        "restored_done": counts.restored_done,
+        "restored_dispatched": counts.restored_dispatched,
+        "rebound_slots": counts.rebound_slots,
+        "created_dispatches": counts.created_dispatches,
+        "unbound_dispatches": counts.unbound_dispatches,
+    });
+    if !errors.is_empty() {
+        payload["errors"] = json!(errors);
+    }
+    if counts.unbound_dispatches > 0 {
+        payload["warning"] = json!(format!(
+            "{} restored dispatch(es) still need slot rebind",
+            counts.unbound_dispatches
+        ));
+    }
+
+    (StatusCode::OK, Json(payload))
+}
+
+/// POST /api/auto-queue/slots/{agent_id}/{slot_index}/rebind
+pub async fn rebind_slot(
+    State(state): State<AppState>,
+    Path((agent_id, slot_index)): Path<(String, i64)>,
+    Json(body): Json<RebindSlotBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if slot_index < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "slot_index must be >= 0"})),
+        );
+    }
+    if body.thread_group < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_group must be >= 0"})),
+        );
+    }
+    let run_id = body.run_id.trim();
+    if run_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run_id is required"})),
+        );
+    }
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let run_status: Option<String> = conn
+        .query_row(
+            "SELECT status
+             FROM auto_queue_runs
+             WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .ok();
+    match run_status.as_deref() {
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
+            );
+        }
+        Some("active") | Some("paused") => {}
+        Some(status) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("slot rebind requires an active or paused run (status={status})"),
+                    "run_id": run_id,
+                    "status": status,
+                })),
+            );
+        }
+    }
+
+    let slot_pool_size = crate::db::auto_queue::run_slot_pool_size(&conn, run_id);
+    if slot_index >= slot_pool_size {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "slot_index {} is outside the slot pool for run '{}' (size={})",
+                    slot_index,
+                    run_id,
+                    slot_pool_size
+                ),
+            })),
+        );
+    }
+
+    let current_binding: Option<(Option<String>, Option<i64>)> = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = ?1
+               AND slot_index = ?2",
+            rusqlite::params![&agent_id, slot_index],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    let same_binding = current_binding
+        .as_ref()
+        .is_some_and(|(assigned_run_id, assigned_group)| {
+            assigned_run_id.as_deref() == Some(run_id)
+                && assigned_group.unwrap_or_default() == body.thread_group
+        });
+    if !same_binding
+        && crate::db::auto_queue::slot_has_active_dispatch(&conn, &agent_id, slot_index)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "slot {} for {} has an active dispatch; reset or complete it before rebind",
+                    slot_index, agent_id
+                ),
+            })),
+        );
+    }
+
+    let updated_entries = match crate::db::auto_queue::rebind_slot_for_group_agent(
+        &conn,
+        run_id,
+        body.thread_group,
+        &agent_id,
+        slot_index,
+    ) {
+        Ok(updated_entries) => updated_entries,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "agent_id": agent_id,
+            "slot_index": slot_index,
+            "run_id": run_id,
+            "thread_group": body.thread_group,
+            "rebound": !same_binding,
+            "updated_entries": updated_entries,
         })),
     )
 }

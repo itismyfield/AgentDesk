@@ -286,6 +286,40 @@ pub fn list_entry_dispatch_history(
     rows.collect()
 }
 
+pub fn rebind_slot_for_group_agent(
+    conn: &Connection,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+    slot_index: i64,
+) -> rusqlite::Result<usize> {
+    ensure_agent_slot_rows(conn, run_id, agent_id)?;
+
+    let slot_updated = conn.execute(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = ?1,
+             assigned_thread_group = ?2,
+             updated_at = datetime('now')
+         WHERE agent_id = ?3
+           AND slot_index = ?4",
+        rusqlite::params![run_id, thread_group, agent_id, slot_index],
+    )?;
+    if slot_updated == 0 {
+        return Ok(0);
+    }
+
+    conn.execute(
+        "UPDATE auto_queue_entries
+         SET slot_index = ?1
+         WHERE run_id = ?2
+           AND agent_id = ?3
+           AND COALESCE(thread_group, 0) = ?4
+           AND status = 'dispatched'
+           AND COALESCE(slot_index, -1) != ?1",
+        rusqlite::params![slot_index, run_id, agent_id, thread_group],
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GenerateCardFilter {
     pub repo: Option<String>,
@@ -1114,6 +1148,9 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str) -> bool {
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_PENDING)
+            | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DISPATCHED)
+            | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_DONE, ENTRY_STATUS_DISPATCHED)
     )
 }
@@ -1720,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_transition_blocks_invalid_skipped_reactivation() {
+    fn entry_transition_allows_skipped_restore_to_dispatched() {
         let conn = setup_conn();
         conn.execute(
             "INSERT INTO auto_queue_entries (
@@ -1730,10 +1767,48 @@ mod tests {
         )
         .expect("seed entry");
 
-        let error = update_entry_status_on_conn(
+        let restored = update_entry_status_on_conn(
             &conn,
             "entry-3",
             ENTRY_STATUS_DISPATCHED,
+            "test_restore_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-restored".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("restore transition");
+        assert!(restored.changed);
+        assert_eq!(restored.from_status, ENTRY_STATUS_SKIPPED);
+        assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+
+        let (status, dispatch_id, slot_index): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index FROM auto_queue_entries WHERE id = 'entry-3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-restored"));
+        assert_eq!(slot_index, Some(0));
+    }
+
+    #[test]
+    fn entry_transition_blocks_invalid_done_to_pending_restore() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-4', 'run-1', 'card-4', 'agent-1', 'done', 0)",
+            [],
+        )
+        .expect("seed done entry");
+
+        let error = update_entry_status_on_conn(
+            &conn,
+            "entry-4",
+            ENTRY_STATUS_PENDING,
             "test_invalid",
             &EntryStatusUpdateOptions::default(),
         )
