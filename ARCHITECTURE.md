@@ -214,6 +214,7 @@ src/
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
 │   │   ├── tmux.rs
+│   │   ├── tmux_lifecycle.rs
 │   │   └── tmux_reaper.rs
 │   ├── memory/
 │   │   ├── local.rs
