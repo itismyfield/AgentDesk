@@ -76,6 +76,7 @@ pub struct ReorderBody {
 pub struct UpdateRunBody {
     pub status: Option<String>,
     pub unified_thread: Option<bool>,
+    pub deploy_phases: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3952,6 +3953,17 @@ pub async fn update_run(
                 rusqlite::params![status, id],
             )
             .unwrap_or(0);
+    }
+
+    if let Some(ref deploy_phases) = body.deploy_phases {
+        if let Ok(json_str) = serde_json::to_string(deploy_phases) {
+            changed += conn
+                .execute(
+                    "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
+                    rusqlite::params![json_str, id],
+                )
+                .unwrap_or(0);
+        }
     }
 
     let ignored_unified_thread = body.unified_thread.is_some();
