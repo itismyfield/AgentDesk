@@ -2450,22 +2450,6 @@ pub(crate) fn activate_with_deps(
     };
 
     let active_group_count = active_groups.len() as i64;
-    let mut occupied_agents: HashMap<String, i64> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT agent_id, COUNT(*)
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1 AND status = 'dispatched'
-                 GROUP BY agent_id",
-            )
-            .unwrap();
-        stmt.query_map([&run_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        .unwrap_or_default()
-    };
 
     // Find pending groups not currently active, ordered by group number
     let pending_groups: Vec<i64> = {
@@ -2601,16 +2585,6 @@ pub(crate) fn activate_with_deps(
             .thread_group(*group)
             .batch_phase(batch_phase);
 
-        if *occupied_agents.get(&agent_id).unwrap_or(&0) >= max_concurrent {
-            crate::auto_queue_log!(
-                info,
-                "activate_same_agent_guard_blocked",
-                entry_log_ctx.clone(),
-                "[auto-queue] Skipping group {group} for {agent_id}: agent slot pool exhausted ({max_concurrent} slots)"
-            );
-            continue;
-        }
-
         let initial_state = {
             let conn = deps.db.separate_conn().unwrap();
             let card_state = load_activate_card_state(&conn, &card_id, &entry_id);
@@ -2701,7 +2675,6 @@ pub(crate) fn activate_with_deps(
             ) {
                 ActivatePreflightOutcome::Continue => {}
                 ActivatePreflightOutcome::Dispatched(entry_json) => {
-                    *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
                     dispatched_groups_this_activate += 1;
                     dispatched.push(entry_json);
                     continue;
@@ -2894,7 +2867,6 @@ pub(crate) fn activate_with_deps(
                                     error
                                 );
                             }
-                            *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
                             dispatched_groups_this_activate += 1;
                             dispatched.push(deps.entry_json(&entry_id));
                             crate::auto_queue_log!(
@@ -3007,7 +2979,6 @@ pub(crate) fn activate_with_deps(
                 // call was walking the card. Treat the slot as occupied for
                 // scheduling, but do not count it as a dispatch created by this
                 // request.
-                *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
                 dispatched_groups_this_activate += 1;
             }
             continue;
@@ -3059,7 +3030,6 @@ pub(crate) fn activate_with_deps(
             drop(conn);
             // Repair the entry linkage to the dispatch that already exists, but
             // do not report it as a new dispatch created by this activate call.
-            *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
             dispatched_groups_this_activate += 1;
             continue;
         }
@@ -3075,7 +3045,6 @@ pub(crate) fn activate_with_deps(
         ) {
             ActivatePreflightOutcome::Continue => {}
             ActivatePreflightOutcome::Dispatched(entry_json) => {
-                *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
                 dispatched_groups_this_activate += 1;
                 dispatched.push(entry_json);
                 continue;
@@ -3285,7 +3254,6 @@ pub(crate) fn activate_with_deps(
         }
         drop(conn);
 
-        *occupied_agents.entry(agent_id.clone()).or_insert(0) += 1;
         dispatched_groups_this_activate += 1;
         dispatched.push(deps.entry_json(&entry_id));
     }
