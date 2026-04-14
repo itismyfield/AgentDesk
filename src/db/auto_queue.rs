@@ -835,6 +835,228 @@ pub fn run_has_blocking_phase_gate(conn: &Connection, run_id: &str) -> bool {
     .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PhaseGateStateWrite {
+    pub status: String,
+    pub verdict: Option<String>,
+    pub dispatch_ids: Vec<String>,
+    pub pass_verdict: String,
+    pub next_phase: Option<i64>,
+    pub final_phase: bool,
+    pub anchor_card_id: Option<String>,
+    pub failure_reason: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseGateSaveResult {
+    pub persisted_dispatch_ids: Vec<String>,
+    pub removed_stale_rows: usize,
+}
+
+fn normalize_phase_gate_status(status: &str) -> String {
+    let trimmed = status.trim();
+    if trimmed.is_empty() {
+        "pending".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_phase_gate_pass_verdict(pass_verdict: &str) -> String {
+    let trimmed = pass_verdict.trim();
+    if trimmed.is_empty() {
+        "phase_gate_passed".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value.and_then(|item| {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn dedupe_phase_gate_dispatch_ids(dispatch_ids: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for dispatch_id in dispatch_ids {
+        let normalized = dispatch_id.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if seen.insert(normalized.to_string()) {
+            deduped.push(normalized.to_string());
+        }
+    }
+    deduped
+}
+
+fn valid_phase_gate_dispatch_ids(
+    conn: &Connection,
+    dispatch_ids: &[String],
+) -> rusqlite::Result<Vec<String>> {
+    if dispatch_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", dispatch_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id FROM task_dispatches WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str));
+    let mut rows = stmt.query(params)?;
+    let mut valid = std::collections::HashSet::new();
+    while let Some(row) = rows.next()? {
+        let dispatch_id: String = row.get(0)?;
+        valid.insert(dispatch_id);
+    }
+
+    Ok(dispatch_ids
+        .iter()
+        .filter(|dispatch_id| valid.contains(dispatch_id.as_str()))
+        .cloned()
+        .collect())
+}
+
+fn delete_stale_phase_gate_rows(
+    conn: &Connection,
+    run_id: &str,
+    phase: i64,
+    dispatch_ids: &[String],
+) -> rusqlite::Result<usize> {
+    if dispatch_ids.is_empty() {
+        return conn.execute(
+            "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
+            rusqlite::params![run_id, phase],
+        );
+    }
+
+    let placeholders = std::iter::repeat_n("?", dispatch_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "DELETE FROM auto_queue_phase_gates
+         WHERE run_id = ?1
+           AND phase = ?2
+           AND (dispatch_id IS NULL OR dispatch_id NOT IN ({}))",
+        placeholders
+    );
+    let mut values = vec![rusqlite::types::Value::from(run_id.to_string())];
+    values.push(rusqlite::types::Value::from(phase));
+    values.extend(
+        dispatch_ids
+            .iter()
+            .cloned()
+            .map(rusqlite::types::Value::from),
+    );
+    conn.execute(&sql, rusqlite::params_from_iter(values))
+}
+
+pub fn save_phase_gate_state_on_conn(
+    conn: &Connection,
+    run_id: &str,
+    phase: i64,
+    state: &PhaseGateStateWrite,
+) -> rusqlite::Result<PhaseGateSaveResult> {
+    let dispatch_ids =
+        valid_phase_gate_dispatch_ids(conn, &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids))?;
+    let removed_stale_rows = delete_stale_phase_gate_rows(conn, run_id, phase, &dispatch_ids)?;
+    let status = normalize_phase_gate_status(&state.status);
+    let verdict = normalize_optional_text(state.verdict.as_deref());
+    let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
+    let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
+    let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
+    let created_at = normalize_optional_text(state.created_at.as_deref());
+
+    if dispatch_ids.is_empty() {
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
+                final_phase, anchor_card_id, failure_reason, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9,
+                COALESCE(?10, CURRENT_TIMESTAMP), datetime('now')
+             )",
+            rusqlite::params![
+                run_id,
+                phase,
+                status,
+                verdict,
+                pass_verdict,
+                state.next_phase,
+                if state.final_phase { 1 } else { 0 },
+                anchor_card_id,
+                failure_reason,
+                created_at
+            ],
+        )?;
+    } else {
+        for dispatch_id in &dispatch_ids {
+            conn.execute(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
+                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    COALESCE(?11, CURRENT_TIMESTAMP), datetime('now')
+                 )
+                 ON CONFLICT(dispatch_id) DO UPDATE SET
+                    run_id = excluded.run_id,
+                    phase = excluded.phase,
+                    status = excluded.status,
+                    verdict = excluded.verdict,
+                    pass_verdict = excluded.pass_verdict,
+                    next_phase = excluded.next_phase,
+                    final_phase = excluded.final_phase,
+                    anchor_card_id = excluded.anchor_card_id,
+                    failure_reason = excluded.failure_reason,
+                    updated_at = datetime('now')",
+                rusqlite::params![
+                    run_id,
+                    phase,
+                    status,
+                    verdict,
+                    dispatch_id,
+                    pass_verdict,
+                    state.next_phase,
+                    if state.final_phase { 1 } else { 0 },
+                    anchor_card_id,
+                    failure_reason,
+                    created_at
+                ],
+            )?;
+        }
+    }
+
+    Ok(PhaseGateSaveResult {
+        persisted_dispatch_ids: dispatch_ids,
+        removed_stale_rows,
+    })
+}
+
+pub fn clear_phase_gate_state_on_conn(
+    conn: &Connection,
+    run_id: &str,
+    phase: i64,
+) -> rusqlite::Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
+        rusqlite::params![run_id, phase],
+    )?;
+    Ok(deleted > 0)
+}
+
 pub fn group_has_pending_entries(
     conn: &Connection,
     run_id: &str,
@@ -1458,7 +1680,8 @@ fn append_card_filters(
 mod tests {
     use super::{
         ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED,
-        EntryStatusUpdateError, EntryStatusUpdateOptions, list_entry_dispatch_history,
+        EntryStatusUpdateError, EntryStatusUpdateOptions, PhaseGateStateWrite,
+        clear_phase_gate_state_on_conn, list_entry_dispatch_history, save_phase_gate_state_on_conn,
         update_entry_status_on_conn,
     };
     use rusqlite::Connection;
@@ -1526,6 +1749,27 @@ mod tests {
                 to_agent_id TEXT,
                 status TEXT,
                 context TEXT
+            );
+            CREATE TABLE kanban_cards (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                status TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE auto_queue_phase_gates (
+                run_id TEXT NOT NULL,
+                phase INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                verdict TEXT,
+                dispatch_id TEXT UNIQUE,
+                pass_verdict TEXT NOT NULL DEFAULT 'phase_gate_passed',
+                next_phase INTEGER,
+                final_phase INTEGER NOT NULL DEFAULT 0,
+                anchor_card_id TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+                failure_reason TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
         )
         .expect("schema");
@@ -1886,5 +2130,136 @@ mod tests {
             super::slot_has_active_dispatch(&conn, "agent-1", 0),
             "primary dispatches must still block slot reuse"
         );
+    }
+
+    #[test]
+    fn save_phase_gate_state_filters_invalid_dispatches_and_removes_stale_rows() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-valid-1', 'agent-1', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-valid-2', 'agent-1', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-stale', 'agent-1', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES ('run-1', 2, 'pending', 'dispatch-stale', 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+
+        let result = save_phase_gate_state_on_conn(
+            &conn,
+            "run-1",
+            2,
+            &PhaseGateStateWrite {
+                status: "failed".to_string(),
+                verdict: Some("deploy_failed".to_string()),
+                dispatch_ids: vec![
+                    "dispatch-valid-1".to_string(),
+                    "dispatch-valid-1".to_string(),
+                    "dispatch-missing".to_string(),
+                    "dispatch-valid-2".to_string(),
+                ],
+                pass_verdict: "phase_gate_passed".to_string(),
+                next_phase: Some(3),
+                final_phase: true,
+                anchor_card_id: None,
+                failure_reason: Some("deploy-dev failed".to_string()),
+                created_at: Some("2026-04-15 00:00:00".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.persisted_dispatch_ids,
+            vec![
+                "dispatch-valid-1".to_string(),
+                "dispatch-valid-2".to_string()
+            ]
+        );
+        assert_eq!(result.removed_stale_rows, 1);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT dispatch_id, status, verdict, next_phase, final_phase, failure_reason
+                 FROM auto_queue_phase_gates
+                 WHERE run_id = ?1 AND phase = ?2
+                 ORDER BY dispatch_id ASC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(rusqlite::params!["run-1", 2], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.as_deref(), Some("dispatch-valid-1"));
+        assert_eq!(rows[1].0.as_deref(), Some("dispatch-valid-2"));
+        assert_eq!(rows[0].1, "failed");
+        assert_eq!(rows[0].2.as_deref(), Some("deploy_failed"));
+        assert_eq!(rows[0].3, Some(3));
+        assert_eq!(rows[0].4, 1);
+        assert_eq!(rows[0].5.as_deref(), Some("deploy-dev failed"));
+    }
+
+    #[test]
+    fn clear_phase_gate_state_removes_phase_rows() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES ('run-1', 2, 'pending', NULL, 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+             ) VALUES ('run-1', 3, 'pending', NULL, 'phase_gate_passed')",
+            [],
+        )
+        .unwrap();
+
+        assert!(clear_phase_gate_state_on_conn(&conn, "run-1", 2).unwrap());
+
+        let phase_two_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
+                rusqlite::params!["run-1", 2],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_three_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
+                rusqlite::params!["run-1", 3],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase_two_count, 0);
+        assert_eq!(phase_three_count, 1);
     }
 }

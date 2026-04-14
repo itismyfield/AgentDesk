@@ -1112,6 +1112,133 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
 }
 
 #[test]
+fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-phase-agent', 'AQ Phase Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'aq-phase-card', 'AQ Phase Card', 'ready', 'medium', 'aq-phase-agent',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('aq-phase-run', 'repo-1', 'aq-phase-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-valid-1', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-valid-2', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-stale', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+            ) VALUES (
+                'aq-phase-run', 2, 'pending', 'aq-phase-stale', 'phase_gate_passed'
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let raw: String = ctx
+            .eval(
+                r#"
+                JSON.stringify((function() {
+                    var saved = agentdesk.autoQueue.savePhaseGateState("aq-phase-run", 2, {
+                        status: "failed",
+                        verdict: "deploy_failed",
+                        dispatch_ids: [
+                            "aq-phase-valid-1",
+                            "aq-phase-valid-1",
+                            "aq-phase-missing",
+                            "aq-phase-valid-2"
+                        ],
+                        pass_verdict: "phase_gate_passed",
+                        next_phase: 3,
+                        final_phase: true,
+                        anchor_card_id: "aq-phase-card",
+                        failure_reason: "deploy-dev failed",
+                        created_at: "2026-04-15 00:00:00"
+                    });
+                    var rows = agentdesk.db.query(
+                        "SELECT dispatch_id, status, verdict, next_phase, final_phase, anchor_card_id, failure_reason " +
+                        "FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ? ORDER BY COALESCE(dispatch_id, '')",
+                        ["aq-phase-run", 2]
+                    );
+                    var cleared = agentdesk.autoQueue.clearPhaseGateState("aq-phase-run", 2);
+                    var remaining = agentdesk.db.query(
+                        "SELECT COUNT(*) AS cnt FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
+                        ["aq-phase-run", 2]
+                    )[0].cnt;
+                    return {
+                        saved: saved,
+                        rows: rows,
+                        cleared: cleared.changed,
+                        remaining: remaining
+                    };
+                })())
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["saved"]["dispatch_ids"],
+            serde_json::json!(["aq-phase-valid-1", "aq-phase-valid-2"])
+        );
+        assert_eq!(parsed["saved"]["removed_stale_rows"], 1);
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["rows"][0]["dispatch_id"], "aq-phase-valid-1");
+        assert_eq!(parsed["rows"][1]["dispatch_id"], "aq-phase-valid-2");
+        assert_eq!(parsed["rows"][0]["status"], "failed");
+        assert_eq!(parsed["rows"][0]["verdict"], "deploy_failed");
+        assert_eq!(parsed["rows"][0]["next_phase"], 3);
+        assert_eq!(parsed["rows"][0]["final_phase"], 1);
+        assert_eq!(parsed["rows"][0]["anchor_card_id"], "aq-phase-card");
+        assert_eq!(parsed["rows"][0]["failure_reason"], "deploy-dev failed");
+        assert_eq!(parsed["cleared"], true);
+        assert_eq!(parsed["remaining"], 0);
+    });
+}
+
+#[test]
 fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
     crate::pipeline::ensure_loaded();
 

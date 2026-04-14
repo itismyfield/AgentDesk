@@ -562,120 +562,25 @@ function loadPhaseGateState(runId, phase) {
   return state;
 }
 
-function _dedupePhaseGateDispatchIds(dispatchIds) {
-  var seen = {};
-  var deduped = [];
-  for (var i = 0; i < dispatchIds.length; i++) {
-    var dispatchId = dispatchIds[i];
-    if (!dispatchId || seen[dispatchId]) continue;
-    seen[dispatchId] = true;
-    deduped.push(dispatchId);
-  }
-  return deduped;
-}
-
-function _loadValidPhaseGateDispatchIds(dispatchIds) {
-  if (dispatchIds.length === 0) return [];
-
-  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
-  var rows = agentdesk.db.query(
-    "SELECT id FROM task_dispatches WHERE id IN (" + placeholders + ")",
-    dispatchIds
-  );
-  var validIds = {};
-  for (var i = 0; i < rows.length; i++) {
-    validIds[rows[i].id] = true;
-  }
-
-  var valid = [];
-  for (var j = 0; j < dispatchIds.length; j++) {
-    var dispatchId = dispatchIds[j];
-    if (validIds[dispatchId]) {
-      valid.push(dispatchId);
-    }
-  }
-  return valid;
-}
-
-function _deleteStalePhaseGateRows(runId, phase, dispatchIds) {
-  if (dispatchIds.length === 0) {
-    agentdesk.db.execute(
-      "DELETE FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
-      [runId, phase]
-    );
-    return;
-  }
-
-  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
-  agentdesk.db.execute(
-    "DELETE FROM auto_queue_phase_gates " +
-    "WHERE run_id = ? AND phase = ? " +
-    "AND (dispatch_id IS NULL OR dispatch_id NOT IN (" + placeholders + "))",
-    [runId, phase].concat(dispatchIds)
-  );
-}
-
 function savePhaseGateState(runId, phase, state) {
   if (!state) return;
-  var dispatchIds = [];
-  if (Array.isArray(state.dispatch_ids)) {
-    dispatchIds = state.dispatch_ids.filter(function(dispatchId) {
-      return !!dispatchId;
-    });
-  }
-  dispatchIds = _loadValidPhaseGateDispatchIds(_dedupePhaseGateDispatchIds(dispatchIds));
-  var status = state.status || "pending";
-  var verdict = state.failed_verdict || state.verdict || null;
-  var passVerdict = state.pass_verdict ||
-    (state.gates && state.gates[0] && state.gates[0].pass_verdict) ||
-    "phase_gate_passed";
-  var nextPhase = state.next_phase !== undefined ? state.next_phase : null;
-  var finalPhase = !!state.final_phase;
-  var anchorCardId = state.anchor_card_id || null;
-  var failureReason = state.failed_reason || null;
-  var createdAt = state.created_at || null;
-
-  _deleteStalePhaseGateRows(runId, phase, dispatchIds);
-
-  if (dispatchIds.length === 0) {
-    agentdesk.db.execute(
-      "INSERT INTO auto_queue_phase_gates (" +
-      "run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase, " +
-      "final_phase, anchor_card_id, failure_reason, created_at, updated_at" +
-      ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), datetime('now'))",
-      [runId, phase, status, verdict, passVerdict, nextPhase, finalPhase ? 1 : 0, anchorCardId, failureReason, createdAt]
-    );
-    return;
-  }
-
-  for (var i = 0; i < dispatchIds.length; i++) {
-    var dispatchId = dispatchIds[i];
-    agentdesk.db.execute(
-      "INSERT INTO auto_queue_phase_gates (" +
-      "run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase, " +
-      "final_phase, anchor_card_id, failure_reason, created_at, updated_at" +
-      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), datetime('now')) " +
-      "ON CONFLICT(dispatch_id) DO UPDATE SET " +
-      "run_id = excluded.run_id, " +
-      "phase = excluded.phase, " +
-      "status = excluded.status, " +
-      "verdict = excluded.verdict, " +
-      "pass_verdict = excluded.pass_verdict, " +
-      "next_phase = excluded.next_phase, " +
-      "final_phase = excluded.final_phase, " +
-      "anchor_card_id = excluded.anchor_card_id, " +
-      "failure_reason = excluded.failure_reason, " +
-      "updated_at = datetime('now')",
-      [runId, phase, status, verdict, dispatchId, passVerdict, nextPhase, finalPhase ? 1 : 0, anchorCardId, failureReason, createdAt]
-    );
-  }
+  agentdesk.autoQueue.savePhaseGateState(runId, phase, {
+    status: state.status || "pending",
+    verdict: state.failed_verdict || state.verdict || null,
+    dispatch_ids: Array.isArray(state.dispatch_ids) ? state.dispatch_ids : [],
+    pass_verdict: state.pass_verdict ||
+      (state.gates && state.gates[0] && state.gates[0].pass_verdict) ||
+      "phase_gate_passed",
+    next_phase: state.next_phase !== undefined ? state.next_phase : null,
+    final_phase: !!state.final_phase,
+    anchor_card_id: state.anchor_card_id || null,
+    failure_reason: state.failed_reason || null,
+    created_at: state.created_at || null
+  });
 }
 
 function clearPhaseGateState(runId, phase) {
-  agentdesk.db.execute(
-    "DELETE FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
-    [runId, phase]
-  );
+  agentdesk.autoQueue.clearPhaseGateState(runId, phase);
 }
 
 function loadRunInfo(runId) {
