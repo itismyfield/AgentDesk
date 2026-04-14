@@ -1453,6 +1453,7 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock.
         let mut should_persist_transcript = false;
+        let mut should_analyze_recall_feedback = false;
         let mut should_spawn_memory_capture = false;
         let mut reflect_request = None;
         let mut session_end_reason = None;
@@ -1504,6 +1505,7 @@ pub(super) fn spawn_turn_bridge(
                         }
                     }
                     should_spawn_memory_capture = memory_plan.spawn_capture;
+                    should_analyze_recall_feedback = memory_plan.analyze_recall_feedback;
                     session.session_id.clone()
                 } else {
                     None
@@ -1562,8 +1564,8 @@ pub(super) fn spawn_turn_bridge(
         let turn_id = should_persist_transcript
             .then(|| format!("discord:{}:{}", channel_id.get(), user_msg_id.get()));
         let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
-        let recall_feedback_analysis =
-            should_persist_transcript.then(|| analyze_recall_feedback_turn(&transcript_events));
+        let recall_feedback_analysis = should_analyze_recall_feedback
+            .then(|| analyze_recall_feedback_turn(&transcript_events));
         let model_token_usage = TurnTokenUsage {
             input_tokens: accumulated_input_tokens,
             cache_create_tokens: accumulated_cache_create_tokens,

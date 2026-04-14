@@ -118,6 +118,7 @@ pub(super) struct TurnEndMemoryPlan {
     pub(super) session_end_reason: Option<SessionEndReason>,
     pub(super) clear_provider_session: bool,
     pub(super) persist_transcript: bool,
+    pub(super) analyze_recall_feedback: bool,
     pub(super) spawn_capture: bool,
 }
 
@@ -158,6 +159,7 @@ pub(super) fn plan_turn_end_memory(
         session_end_reason,
         clear_provider_session,
         persist_transcript,
+        analyze_recall_feedback: persist_transcript,
         spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
     })
 }
