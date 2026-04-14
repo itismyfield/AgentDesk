@@ -31,6 +31,13 @@ import type {
   DiscordBinding,
   AgentOfficeMembership,
 } from "../../api/client";
+import {
+  describeDiscordBinding,
+  describeDiscordTarget,
+  describeDispatchedSession,
+  formatDiscordSummary,
+  isDiscordSnowflake,
+} from "./discord-routing";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -168,6 +175,63 @@ function compactToken(value: string, head = 8, tail = 4): string {
   return `${value.slice(0, head)}...${value.slice(-tail)}`;
 }
 
+function DiscordSummaryLabel({
+  summary,
+}: {
+  summary: {
+    title: string;
+    subtitle: string | null;
+    webUrl: string | null;
+    deepLink: string | null;
+  };
+}) {
+  const href = summary.deepLink ?? summary.webUrl;
+  const label = formatDiscordSummary(summary);
+
+  if (!href) {
+    return (
+      <span
+        className="block min-w-0 flex-1 truncate text-xs font-medium"
+        style={{ color: "var(--th-text-primary)" }}
+        title={label}
+      >
+        {label}
+      </span>
+    );
+  }
+
+  return (
+    <a
+      href={href}
+      className="block min-w-0 flex-1 truncate text-xs font-medium hover:underline"
+      style={{ color: "var(--th-text-primary)" }}
+      title={summary.deepLink ?? summary.webUrl ?? label}
+    >
+      {label}
+    </a>
+  );
+}
+
+function DiscordDeepLinkChip({
+  deepLink,
+  label,
+}: {
+  deepLink: string | null;
+  label: string;
+}) {
+  if (!deepLink) return null;
+  return (
+    <a
+      href={deepLink}
+      className="shrink-0 rounded px-1.5 py-0.5 text-xs"
+      style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}
+      title={deepLink}
+    >
+      {label}
+    </a>
+  );
+}
+
 interface DetailAccordionProps {
   title: string;
   subtitle?: string | null;
@@ -260,6 +324,9 @@ export default function AgentInfoCard({
   const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
+  const [discordChannelInfoById, setDiscordChannelInfoById] = useState<
+    Record<string, api.DiscordChannelInfo>
+  >({});
   const [loadingBindings, setLoadingBindings] = useState(true);
   const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
   const [loadingAudit, setLoadingAudit] = useState(true);
@@ -461,6 +528,70 @@ export default function AgentInfoCard({
       });
   }, [agent.id]);
 
+  useEffect(() => {
+    const seedIds = Array.from(
+      new Set(
+        [
+          ...discordBindings.flatMap((binding) => [
+            binding.channelId,
+            binding.counterModelChannelId ?? null,
+          ]),
+          ...claudeSessions.map((session) => session.thread_channel_id ?? null),
+        ].filter((value): value is string => isDiscordSnowflake(value)),
+      ),
+    );
+
+    if (seedIds.length === 0) {
+      setDiscordChannelInfoById({});
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadChannelInfo = async (ids: string[]) => {
+      const entries = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const info = await api.getDiscordChannelInfo(id);
+            return info?.id ? ([id, info] as const) : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return Object.fromEntries(
+        entries.filter(
+          (entry): entry is readonly [string, api.DiscordChannelInfo] =>
+            entry !== null,
+        ),
+      );
+    };
+
+    void (async () => {
+      const initialInfo = await loadChannelInfo(seedIds);
+      const parentIds = Array.from(
+        new Set(
+          Object.values(initialInfo)
+            .map((info) => info.parent_id ?? null)
+            .filter(
+              (value): value is string =>
+                isDiscordSnowflake(value) && !(value in initialInfo),
+            ),
+        ),
+      );
+      const parentInfo =
+        parentIds.length > 0 ? await loadChannelInfo(parentIds) : {};
+
+      if (!cancelled) {
+        setDiscordChannelInfoById({ ...initialInfo, ...parentInfo });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [claudeSessions, discordBindings]);
+
   const statusLabel: Record<string, { ko: string; en: string }> = {
     working: { ko: "근무 중", en: "Working" },
     idle: { ko: "대기", en: "Idle" },
@@ -507,6 +638,18 @@ export default function AgentInfoCard({
     (binding) => inferBindingSource(binding) === "role-map",
   );
   const dbBindings = discordBindings.filter((binding) => inferBindingSource(binding) !== "role-map");
+  const resolveDiscordChannelInfo = (
+    channelId: string | null | undefined,
+  ): api.DiscordChannelInfo | null =>
+    channelId && isDiscordSnowflake(channelId)
+      ? discordChannelInfoById[channelId] ?? null
+      : null;
+  const resolveDiscordParentInfo = (
+    channelInfo: api.DiscordChannelInfo | null | undefined,
+  ): api.DiscordChannelInfo | null =>
+    channelInfo?.parent_id && isDiscordSnowflake(channelInfo.parent_id)
+      ? discordChannelInfoById[channelInfo.parent_id] ?? null
+      : null;
   const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
     { label: tr("Agent ID", "Agent ID"), value: agent.id },
     { label: tr("이름", "Name"), value: agent.name },
@@ -891,21 +1034,38 @@ export default function AgentInfoCard({
                   {discordBindings.map((b) => {
                     const source = inferBindingSource(b);
                     const sourceLabel = bindingSourceLabel(source);
-                    const title = b.channelId;
-                    const subtitle = b.counterModelChannelId && b.counterModelChannelId !== b.channelId
-                      ? `counter: ${b.counterModelChannelId}`
-                      : null;
+                    const channelInfo = resolveDiscordChannelInfo(b.channelId);
+                    const channelSummary = describeDiscordBinding(
+                      b,
+                      channelInfo,
+                      resolveDiscordParentInfo(channelInfo),
+                    );
+                    const counterChannelInfo = resolveDiscordChannelInfo(
+                      b.counterModelChannelId ?? null,
+                    );
+                    const counterSummary =
+                      b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                        ? describeDiscordTarget(
+                            b.counterModelChannelId,
+                            counterChannelInfo,
+                            resolveDiscordParentInfo(counterChannelInfo),
+                          )
+                        : null;
 
                     return (
                       <SurfaceCard key={`${b.channelId}:${source}`} className="flex items-center gap-2 px-2.5 py-1.5" style={{ background: "var(--th-bg-surface)" }}>
                         <span className="text-sm">💬</span>
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
-                            {title}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <DiscordSummaryLabel summary={channelSummary} />
+                            <DiscordDeepLinkChip
+                              deepLink={channelSummary.deepLink}
+                              label={tr("앱", "App")}
+                            />
                           </div>
-                          {subtitle && (
+                          {counterSummary && (
                             <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
-                              {subtitle}
+                              {`counter: ${formatDiscordSummary(counterSummary)}`}
                             </div>
                           )}
                         </div>
@@ -928,52 +1088,67 @@ export default function AgentInfoCard({
                 </SurfaceEmptyState>
               ) : (
                 <div className="space-y-1.5">
-                  {claudeSessions.map((s) => (
-                    <SurfaceCard key={s.id} className="flex items-start justify-between gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
-                      <div className="min-w-0">
-                        <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
-                          {s.name || s.session_key}
+                  {claudeSessions.map((s) => {
+                    const sessionChannelInfo = resolveDiscordChannelInfo(
+                      s.thread_channel_id ?? null,
+                    );
+                    const sessionSummary = describeDispatchedSession(
+                      s,
+                      sessionChannelInfo,
+                      resolveDiscordParentInfo(sessionChannelInfo),
+                    );
+
+                    return (
+                      <SurfaceCard key={s.id} className="flex items-start justify-between gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <DiscordSummaryLabel summary={sessionSummary} />
+                            <DiscordDeepLinkChip
+                              deepLink={sessionSummary.deepLink}
+                              label={tr("앱", "App")}
+                            />
+                          </div>
+                          <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                            {s.session_info || s.model || "AgentDesk session"}
+                          </div>
                         </div>
-                        <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
-                          {s.session_info || s.model || "AgentDesk session"}
+                        <div className="flex shrink-0 items-center gap-1">
+                          <span
+                            className="rounded px-1.5 py-0.5 text-xs"
+                            style={{
+                              background:
+                                s.provider === "codex"
+                                  ? "rgba(56,189,248,0.18)"
+                                  : s.provider === "gemini"
+                                    ? "rgba(250,204,21,0.18)"
+                                    : s.provider === "qwen"
+                                      ? "rgba(34,197,94,0.18)"
+                                      : "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                              color:
+                                s.provider === "codex"
+                                  ? "#38bdf8"
+                                  : s.provider === "gemini"
+                                    ? "#facc15"
+                                    : s.provider === "qwen"
+                                      ? "#86efac"
+                                      : "var(--th-accent-primary)",
+                            }}
+                          >
+                            {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
+                          </span>
+                          <span
+                            className="rounded px-1.5 py-0.5 text-xs"
+                            style={{
+                              background: s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(100,116,139,0.15)",
+                              color: s.status === "working" ? "#34d399" : "#94a3b8",
+                            }}
+                          >
+                            {s.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
+                          </span>
                         </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <span
-                          className="rounded px-1.5 py-0.5 text-xs"
-                          style={{
-                            background:
-                              s.provider === "codex"
-                                ? "rgba(56,189,248,0.18)"
-                                : s.provider === "gemini"
-                                  ? "rgba(250,204,21,0.18)"
-                                  : s.provider === "qwen"
-                                    ? "rgba(34,197,94,0.18)"
-                                  : "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
-                            color:
-                              s.provider === "codex"
-                                ? "#38bdf8"
-                                : s.provider === "gemini"
-                                  ? "#facc15"
-                                  : s.provider === "qwen"
-                                    ? "#86efac"
-                                  : "var(--th-accent-primary)",
-                          }}
-                        >
-                          {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
-                        </span>
-                        <span
-                          className="rounded px-1.5 py-0.5 text-xs"
-                          style={{
-                            background: s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(100,116,139,0.15)",
-                            color: s.status === "working" ? "#34d399" : "#94a3b8",
-                          }}
-                        >
-                          {s.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
-                        </span>
-                      </div>
-                    </SurfaceCard>
-                  ))}
+                      </SurfaceCard>
+                    );
+                  })}
                 </div>
               )}
             </SurfaceSubsection>
