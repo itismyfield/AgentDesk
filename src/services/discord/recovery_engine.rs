@@ -680,6 +680,7 @@ pub(super) async fn restore_inflight_turns(
                                 last_active: tokio::time::Instant::now(),
                                 worktree: None,
                                 born_generation: super::runtime_store::load_generation(),
+                                assistant_turns: 0,
                             });
                     session.channel_id = Some(state.channel_id);
                     session.last_active = tokio::time::Instant::now();
@@ -1243,6 +1244,7 @@ pub(super) async fn restore_inflight_turns(
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
                         born_generation: super::runtime_store::load_generation(),
+                        assistant_turns: 0,
                     });
                 session.channel_id = Some(channel_id.get());
                 session.last_active = tokio::time::Instant::now();
@@ -1358,6 +1360,7 @@ pub(super) async fn restore_inflight_turns(
                     worktree: None,
 
                     born_generation: super::runtime_store::load_generation(),
+                    assistant_turns: 0,
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
@@ -1777,6 +1780,7 @@ mod tests {
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,
+            assistant_turns: 0,
             any_tool_used: true,
             has_post_tool_text: false,
             session_key: Some("host:tmux-1".to_string()),
@@ -1879,6 +1883,7 @@ mod tests {
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,
+            assistant_turns: 0,
             any_tool_used: true,
             has_post_tool_text: false,
             session_key: None,

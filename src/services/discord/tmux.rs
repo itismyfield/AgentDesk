@@ -2830,6 +2830,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                         worktree: None,
 
                         born_generation: super::runtime_store::load_generation(),
+                        assistant_turns: 0,
                     });
 
             if session.session_id.is_none() && persisted_session_id.is_some() {
