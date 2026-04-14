@@ -51,6 +51,42 @@ fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     });
 }
 
+fn load_existing_session_active_dispatch_id(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT active_dispatch_id FROM sessions WHERE session_key = ?1",
+        [session_key],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+}
+
+fn resolve_hook_active_dispatch_id(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+    status: &str,
+    dispatch_id: Option<&str>,
+) -> Option<String> {
+    let incoming_dispatch_id = dispatch_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if status.eq_ignore_ascii_case("disconnected") {
+        return None;
+    }
+
+    if status.eq_ignore_ascii_case("working") {
+        return incoming_dispatch_id;
+    }
+
+    incoming_dispatch_id.or_else(|| load_existing_session_active_dispatch_id(conn, session_key))
+}
+
 // ── Query / Body types ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -291,6 +327,12 @@ pub async fn hook_session(
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
+    let active_dispatch_id = resolve_hook_active_dispatch_id(
+        &conn,
+        &body.session_key,
+        status,
+        body.dispatch_id.as_deref(),
+    );
     // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
     // strings are never persisted — prevents invalid --resume attempts after restart.
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
@@ -313,11 +355,7 @@ pub async fn hook_session(
            model = COALESCE(excluded.model, sessions.model),
            tokens = excluded.tokens,
            cwd = COALESCE(excluded.cwd, sessions.cwd),
-           active_dispatch_id = CASE
-             WHEN excluded.status IN ('idle', 'disconnected') THEN NULL
-             WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
-             ELSE sessions.active_dispatch_id
-           END,
+           active_dispatch_id = excluded.active_dispatch_id,
            agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
@@ -331,7 +369,7 @@ pub async fn hook_session(
             body.model,
             tokens,
             body.cwd,
-            body.dispatch_id,
+            active_dispatch_id,
             thread_channel_id,
             claude_session_id,
         ],
@@ -1833,6 +1871,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         // Card may move to in_progress via kanban-rules policy when session reports working,
         // but must NOT advance to review (which would happen if idle auto-completed the dispatch).
@@ -1843,6 +1888,11 @@ mod tests {
         assert_eq!(
             dispatch_status, "pending",
             "implementation dispatch should stay pending on idle"
+        );
+        assert_eq!(
+            active_dispatch_id.as_deref(),
+            Some(dispatch_id),
+            "idle dispatch sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
         );
     }
 
@@ -1929,6 +1979,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-rework'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         // Card stays in rework — must NOT advance to review (which would happen
         // if idle auto-completed the rework dispatch).
@@ -1936,6 +1993,11 @@ mod tests {
         assert_eq!(
             dispatch_status, "pending",
             "rework dispatch should stay pending on idle"
+        );
+        assert_eq!(
+            active_dispatch_id.as_deref(),
+            Some(dispatch_id),
+            "idle rework sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
         );
     }
 
@@ -2031,7 +2093,11 @@ mod tests {
         // review dispatches must stay pending until an explicit review-verdict arrives
         assert_eq!(dispatch_status, "pending");
         assert!(dispatch_result.is_none());
-        assert_eq!(active_dispatch_id, None);
+        assert_eq!(
+            active_dispatch_id.as_deref(),
+            Some(dispatch_id),
+            "idle review sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
+        );
     }
 
     #[tokio::test]
@@ -2108,10 +2174,118 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review-decision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         // review-decision dispatches must NOT be auto-completed on idle —
         // they require explicit agent action (accept/dispute/dismiss)
         assert_eq!(dispatch_status, "pending");
+        assert_eq!(
+            active_dispatch_id.as_deref(),
+            Some(dispatch_id),
+            "idle review-decision sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_hook_without_dispatch_id_preserves_existing_dispatch_binding() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-sticky', 'Sticky Card', 'in_progress', 'dispatch-sticky', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES ('dispatch-sticky', 'card-sticky', 'project-agentdesk', 'implementation', 'completed', 'Sticky', '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (working_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-sticky".to_string(),
+                agent_id: None,
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some("dispatch-sticky".to_string()),
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(working_status, StatusCode::OK);
+
+        let (idle_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-sticky".to_string(),
+                agent_id: None,
+                status: Some("idle".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(17),
+                cwd: None,
+                dispatch_id: Some("dispatch-sticky".to_string()),
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(idle_status, StatusCode::OK);
+
+        let (idle_refresh_status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "session-sticky".to_string(),
+                agent_id: None,
+                status: Some("idle".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(33),
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(idle_refresh_status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-sticky'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_dispatch_id.as_deref(), Some("dispatch-sticky"));
     }
 
     #[test]
