@@ -11,6 +11,7 @@ export const dashboardCard = {
   accentCompact: "dash-card dash-card-accent dash-card-pad-compact",
   nested: "dash-card dash-card-nested dash-card-pad-standard",
   nestedCompact: "dash-card dash-card-nested dash-card-pad-compact",
+  interactiveNestedCompact: "dash-card dash-card-nested dash-card-surface-muted dash-card-hover-emphasis dash-card-pad-compact",
   smallCompact: "dash-card dash-card-small dash-card-pad-compact",
   accentNestedCompact: "dash-card dash-card-accent dash-card-nested dash-card-pad-compact",
 } as const;

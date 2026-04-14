@@ -167,6 +167,19 @@ body {
   border-radius: 0.75rem;
 }
 
+.dash-card-surface-muted {
+  border-color: var(--dash-card-muted-border, var(--th-border-subtle));
+  background: var(--dash-card-muted-bg, var(--th-bg-surface));
+}
+
+.dash-card-hover-emphasis {
+  transition: transform 200ms ease, background-color 200ms ease, border-color 200ms ease;
+}
+
+.dash-card-hover-emphasis:hover {
+  background: color-mix(in srgb, var(--dash-card-muted-bg, var(--th-bg-surface)) 92%, var(--th-overlay-light));
+}
+
 .dash-card-small {
   border-radius: 0.5rem;
 }

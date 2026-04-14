@@ -305,7 +305,7 @@ export function DashboardRankingBoard({
           )}
 
           {topAgents.length > 3 && (
-            <div className="space-y-2 border-t border-surface-light pt-4">
+            <div className="space-y-2 border-t pt-4" style={{ borderTopColor: "var(--th-border-subtle)" }}>
               {topAgents.slice(3).map((agent, idx) => {
                 const rank = idx + 4;
                 const tier = getRankTier(agent.xp);
@@ -313,7 +313,7 @@ export function DashboardRankingBoard({
                 return (
                   <div
                     key={agent.id}
-                    className={cx(dashboardCard.nestedCompact, "group flex items-center gap-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1")}
+                    className={cx(dashboardCard.interactiveNestedCompact, "group flex items-center gap-3 hover:translate-x-1")}
                     style={{ borderLeftWidth: "3px", borderLeftColor: `${tier.color}60` }}
                   >
                     <span className="w-8 text-center font-mono text-sm font-black" style={{ color: `${tier.color}80` }}>
