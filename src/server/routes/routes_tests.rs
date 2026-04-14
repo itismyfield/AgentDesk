@@ -6230,7 +6230,7 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
-async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
+async fn auto_queue_dispatch_rejects_when_live_run_exists_without_force() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -6305,14 +6305,20 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["run"]["id"], "run-dispatch-active");
-    assert_eq!(json["run"]["status"], "active");
-    assert_eq!(json["activated"], false);
+    assert_eq!(json["existing_run_id"], "run-dispatch-active");
+    assert_eq!(json["existing_run_status"], "active");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("run_id=run-dispatch-active"),
+        "conflict response must include the existing run id: {json}"
+    );
 
     let conn = db.lock().unwrap();
     let total_runs: i64 = conn
@@ -6325,10 +6331,10 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(total_runs, 1, "dispatch must reuse the existing active run");
+    assert_eq!(total_runs, 1, "dispatch conflict must not create a new run");
     assert_eq!(
         active_runs, 1,
-        "dispatch must not create a second active run"
+        "dispatch conflict must leave the original live run untouched"
     );
 
     let backlog_status: String = conn
@@ -6338,7 +6344,10 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(backlog_status, "ready");
+    assert_eq!(
+        backlog_status, "backlog",
+        "409 conflict must happen before backlog auto-promotion"
+    );
 
     let entry_layout: Vec<(i64, i64, i64, i64)> = {
         let mut stmt = conn
@@ -6364,7 +6373,8 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
     };
     assert_eq!(
         entry_layout,
-        vec![(4901, 0, 0, 0), (4902, 7, 0, 3), (4903, 0, 1, 1)]
+        vec![(4901, 0, 0, 0)],
+        "dispatch conflict must not enqueue new entries into the existing run"
     );
 
     let run_meta: (i64, i64) = conn
@@ -6376,7 +6386,136 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(run_meta, (2, 2));
+    assert_eq!(run_meta, (1, 1));
+}
+
+#[tokio::test]
+async fn auto_queue_dispatch_force_cancels_live_run_and_creates_new_run() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-force-existing",
+        4911,
+        "ready",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-force-backlog",
+        4912,
+        "backlog",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at
+            ) VALUES (
+                'run-dispatch-force-old', 'test-repo', 'project-agentdesk', 'active', 1, 1, datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-force-existing', 'run-dispatch-force-old', 'card-dispatch-force-existing', 'project-agentdesk', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [
+                            {"issues": [4912], "thread_group": 2, "batch_phase": 3}
+                        ],
+                        "activate": false,
+                        "force": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_run_id = json["run"]["id"].as_str().unwrap_or("");
+    assert!(
+        !new_run_id.is_empty() && new_run_id != "run-dispatch-force-old",
+        "force dispatch must create a replacement run: {json}"
+    );
+    assert_eq!(json["run"]["status"], "generated");
+
+    let conn = db.lock().unwrap();
+    let old_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-dispatch-force-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_run_status, "cancelled");
+
+    let old_entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-dispatch-force-existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_entry_status, "skipped");
+
+    let new_entry_layout: Vec<(i64, i64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, e.thread_group, COALESCE(e.batch_phase, 0)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = ?1
+                 ORDER BY e.priority_rank ASC, kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([new_run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(new_entry_layout, vec![(4912, 2, 3)]);
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-dispatch-force-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog_status, "ready");
 }
 
 #[tokio::test]
@@ -8947,6 +9086,84 @@ async fn auto_queue_generate_issue_numbers_filters_cards_and_promotes_backlog() 
 }
 
 #[tokio::test]
+async fn auto_queue_generate_rejects_when_live_run_exists_without_force() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-generate-conflict");
+    seed_repo(&db, "test-repo");
+    seed_auto_queue_card(
+        &db,
+        "card-gen-conflict-backlog",
+        3281,
+        "backlog",
+        "agent-generate-conflict",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-generate-conflict', 'test-repo', 'agent-generate-conflict', 'active', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-generate-conflict",
+                        "issue_numbers": [3281],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["existing_run_id"], "run-generate-conflict");
+    assert_eq!(json["existing_run_status"], "active");
+
+    let conn = db.lock().unwrap();
+    let run_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        run_count, 1,
+        "generate conflict must not create a second run"
+    );
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-gen-conflict-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        backlog_status, "backlog",
+        "generate conflict must happen before backlog auto-promotion"
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_generate_empty_state_reports_filtered_counts() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -10165,6 +10382,135 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_targets_only_requested_run() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-target");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-target-a",
+        4601,
+        "ready",
+        "agent-cancel-target",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-target-b",
+        4602,
+        "ready",
+        "agent-cancel-target",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-target-a', 'test-repo', 'agent-cancel-target', 'active', datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-target-b', 'test-repo', 'agent-cancel-target', 'paused', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-target-a', 'run-cancel-target-a', 'card-cancel-target-a',
+                'agent-cancel-target', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-target-b', 'run-cancel-target-b', 'card-cancel-target-b',
+                'agent-cancel-target', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel?run_id=run-cancel-target-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_runs
+                 WHERE id IN ('run-cancel-target-a', 'run-cancel-target-b')
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        run_states,
+        vec![
+            ("run-cancel-target-a".to_string(), "active".to_string()),
+            ("run-cancel-target-b".to_string(), "cancelled".to_string()),
+        ]
+    );
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE id IN ('entry-cancel-target-a', 'entry-cancel-target-b')
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            ("entry-cancel-target-a".to_string(), "pending".to_string()),
+            ("entry-cancel-target-b".to_string(), "skipped".to_string()),
+        ]
+    );
 }
 
 #[tokio::test]
