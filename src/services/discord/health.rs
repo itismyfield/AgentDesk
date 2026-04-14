@@ -1017,6 +1017,190 @@ pub async fn resolve_bot_http(
     }
 }
 
+pub async fn fetch_channel_name(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+) -> Option<String> {
+    let http = resolve_bot_http(registry, provider.as_str()).await.ok()?;
+    let channel = channel_id.to_channel(&*http).await.ok()?;
+    channel.guild().map(|guild_channel| guild_channel.name)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectMeetingRuntimeCandidate {
+    index: usize,
+    explicit_channel_match: bool,
+    live_channel_match: bool,
+}
+
+fn select_direct_meeting_runtime_candidate(
+    provider_name: &str,
+    channel_id: ChannelId,
+    candidates: &[DirectMeetingRuntimeCandidate],
+) -> Result<Option<usize>, String> {
+    let explicit_matches = candidates
+        .iter()
+        .filter(|candidate| candidate.explicit_channel_match)
+        .map(|candidate| candidate.index)
+        .collect::<Vec<_>>();
+    if explicit_matches.len() > 1 {
+        return Err(serde_json::json!({
+            "ok": false,
+            "error": format!(
+                "multiple runtimes explicitly allow channel {} for provider {}",
+                channel_id.get(),
+                provider_name
+            ),
+        })
+        .to_string());
+    }
+    if let Some(index) = explicit_matches.first().copied() {
+        return Ok(Some(index));
+    }
+
+    let live_matches = candidates
+        .iter()
+        .filter(|candidate| candidate.live_channel_match)
+        .map(|candidate| candidate.index)
+        .collect::<Vec<_>>();
+    if live_matches.len() > 1 {
+        return Err(serde_json::json!({
+            "ok": false,
+            "error": format!(
+                "multiple runtimes can handle channel {} for provider {}",
+                channel_id.get(),
+                provider_name
+            ),
+        })
+        .to_string());
+    }
+    Ok(live_matches.first().copied())
+}
+
+async fn resolve_direct_meeting_runtime(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    owner_provider: &ProviderKind,
+) -> Result<(Arc<serenity::Http>, Arc<SharedData>), String> {
+    let provider_name = owner_provider.as_str();
+    let shared_candidates = {
+        let providers = registry.providers.lock().await;
+        providers
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.name.eq_ignore_ascii_case(provider_name))
+            .map(|(index, entry)| (index, entry.shared.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    if shared_candidates.is_empty() {
+        return Err(serde_json::json!({
+            "ok": false,
+            "error": format!("provider runtime not registered: {}", provider_name),
+        })
+        .to_string());
+    }
+
+    let mut candidate_matches = Vec::with_capacity(shared_candidates.len());
+    for (index, shared) in &shared_candidates {
+        let settings = shared.settings.read().await.clone();
+        let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
+        let live_channel_match = match shared.cached_serenity_ctx.get() {
+            Some(ctx) => {
+                super::provider_handles_channel(ctx, owner_provider, &settings, channel_id).await
+            }
+            None => false,
+        };
+        candidate_matches.push(DirectMeetingRuntimeCandidate {
+            index: *index,
+            explicit_channel_match,
+            live_channel_match,
+        });
+    }
+
+    if let Some(selected_index) =
+        select_direct_meeting_runtime_candidate(provider_name, channel_id, &candidate_matches)?
+    {
+        let (_, shared) = shared_candidates
+            .iter()
+            .find(|(index, _)| *index == selected_index)
+            .cloned()
+            .ok_or_else(|| {
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "selected runtime index vanished for provider {} on channel {}",
+                        provider_name,
+                        channel_id.get()
+                    ),
+                })
+                .to_string()
+            })?;
+        let http = shared
+            .cached_serenity_ctx
+            .get()
+            .map(|ctx| ctx.http.clone())
+            .ok_or_else(|| {
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "matched runtime is not ready for provider {} on channel {}",
+                        provider_name,
+                        channel_id.get()
+                    ),
+                })
+                .to_string()
+            })?;
+        return Ok((http, shared));
+    }
+
+    if shared_candidates.len() == 1 {
+        let (_, shared) = shared_candidates[0].clone();
+        if let Some(ctx) = shared.cached_serenity_ctx.get() {
+            return Ok((ctx.http.clone(), shared));
+        }
+        let http = resolve_bot_http(registry, provider_name)
+            .await
+            .map_err(|(_, body)| body)?;
+        return Ok((http, shared));
+    }
+
+    Err(serde_json::json!({
+        "ok": false,
+        "error": format!(
+            "could not resolve a unique runtime for provider {} on channel {}",
+            provider_name,
+            channel_id.get()
+        ),
+    })
+    .to_string())
+}
+
+pub async fn start_direct_meeting(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    owner_provider: ProviderKind,
+    primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
+    agenda: String,
+    fixed_participants: Vec<String>,
+) -> Result<(), String> {
+    let (http, shared) =
+        resolve_direct_meeting_runtime(registry, channel_id, &owner_provider).await?;
+
+    super::meeting::spawn_direct_start(
+        http,
+        channel_id,
+        agenda,
+        primary_provider,
+        reviewer_provider,
+        fixed_participants,
+        shared,
+    )
+    .await
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum SendTargetResolutionError {
     BadRequest(&'static str),
@@ -1686,5 +1870,51 @@ mod tests {
 
         assert_eq!(err.0, "503 Service Unavailable");
         assert!(err.1.contains("notify bot not configured"));
+    }
+
+    #[test]
+    fn select_direct_meeting_runtime_candidate_prefers_explicit_channel_match() {
+        let selected = select_direct_meeting_runtime_candidate(
+            "claude",
+            ChannelId::new(123),
+            &[
+                DirectMeetingRuntimeCandidate {
+                    index: 0,
+                    explicit_channel_match: false,
+                    live_channel_match: true,
+                },
+                DirectMeetingRuntimeCandidate {
+                    index: 1,
+                    explicit_channel_match: true,
+                    live_channel_match: true,
+                },
+            ],
+        )
+        .expect("selection should succeed");
+
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn select_direct_meeting_runtime_candidate_rejects_ambiguous_explicit_matches() {
+        let err = select_direct_meeting_runtime_candidate(
+            "claude",
+            ChannelId::new(123),
+            &[
+                DirectMeetingRuntimeCandidate {
+                    index: 0,
+                    explicit_channel_match: true,
+                    live_channel_match: true,
+                },
+                DirectMeetingRuntimeCandidate {
+                    index: 1,
+                    explicit_channel_match: true,
+                    live_channel_match: false,
+                },
+            ],
+        )
+        .expect_err("ambiguous explicit matches must fail");
+
+        assert!(err.contains("multiple runtimes explicitly allow channel 123"));
     }
 }

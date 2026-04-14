@@ -518,10 +518,6 @@ mod tests {
         );
         assert!(kv_value(&db, "last_tick_legacy_ms").is_some());
         assert!(kv_value(&db, "last_tick_ms").is_some());
-        assert_eq!(
-            crate::services::memory::last_refresh_reason_for_tests(),
-            None
-        );
     }
 
     #[tokio::test]

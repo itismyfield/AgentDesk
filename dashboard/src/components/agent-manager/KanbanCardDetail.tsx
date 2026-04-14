@@ -16,7 +16,6 @@ import type {
 } from "../../types";
 import {
   hasManualInterventionReason,
-  isManualInterventionCard,
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
@@ -29,7 +28,7 @@ import {
 } from "./kanban-utils";
 
 export function canRetryCard(card: KanbanCard | null) {
-  return Boolean(card && (isManualInterventionCard(card) || ["requested", "in_progress"].includes(card.status)));
+  return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
 }
 
 export function canRedispatchCard(card: KanbanCard | null) {

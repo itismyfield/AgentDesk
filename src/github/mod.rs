@@ -7,11 +7,13 @@ use crate::services::platform::binary_resolver::{
     apply_runtime_path, resolve_binary_with_login_shell,
 };
 use regex::Regex;
+use std::fs::File;
 use std::future::Future;
+use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const GH_PATH_OVERRIDE_ENV: &str = "AGENTDESK_GH_PATH";
 
@@ -172,6 +174,9 @@ fn create_issue_with<'a>(
             return Err("title is required".to_string());
         }
 
+        let body_file_path = write_issue_body_temp_file(body)?;
+        let body_file_arg = body_file_path.to_string_lossy().to_string();
+
         let url = adapter
             .run_async(
                 vec![
@@ -181,20 +186,46 @@ fn create_issue_with<'a>(
                     repo.to_string(),
                     "--title".to_string(),
                     title.to_string(),
-                    "--body".to_string(),
-                    body.to_string(),
+                    "--body-file".to_string(),
+                    body_file_arg,
                 ],
                 Duration::from_secs(10),
                 format!("gh issue create timed out after 10s: {repo}"),
             )
-            .await?
-            .trim()
-            .to_string();
+            .await;
+        let _ = std::fs::remove_file(&body_file_path);
+        let url = url?.trim().to_string();
         let number = parse_issue_number_from_url(&url)
             .ok_or_else(|| format!("gh issue create returned unparseable url: {url}"))?;
 
         Ok(CreatedIssue { number, url })
     })
+}
+
+fn write_issue_body_temp_file(body: &str) -> Result<PathBuf, String> {
+    for attempt in 0..8 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "agentdesk-gh-issue-body-{}-{now}-{attempt}.md",
+            std::process::id()
+        ));
+
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(body.as_bytes())
+                    .map_err(|err| format!("gh body temp write: {err}"))?;
+                file.flush()
+                    .map_err(|err| format!("gh body temp flush: {err}"))?;
+                return Ok(path);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    Err("gh body temp file: unable to allocate unique path".to_string())
 }
 
 fn parse_issue_locator_from_url(url: &str) -> Result<(String, String), String> {
@@ -663,19 +694,22 @@ mod tests {
             created.url,
             "https://github.com/itismyfield/AgentDesk/issues/458"
         );
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 1);
         assert_eq!(
-            adapter.calls(),
-            vec![vec![
+            calls[0][..7],
+            [
                 "issue".to_string(),
                 "create".to_string(),
                 "--repo".to_string(),
                 "itismyfield/AgentDesk".to_string(),
                 "--title".to_string(),
                 "Refactor gh adapter".to_string(),
-                "--body".to_string(),
-                "Body".to_string(),
-            ]]
+                "--body-file".to_string(),
+            ]
         );
+        assert_eq!(calls[0].len(), 8);
+        assert!(calls[0][7].contains("agentdesk-gh-issue-body-"));
     }
 
     #[tokio::test]

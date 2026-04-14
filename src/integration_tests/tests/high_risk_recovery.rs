@@ -386,6 +386,21 @@ mod outbox_boundary {
             .collect()
     }
 
+    fn outbox_status_for_action(db: &db::Db, dispatch_id: &str, action: &str) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT status FROM dispatch_outbox
+                 WHERE dispatch_id = ?1 AND action = ?2
+                 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![dispatch_id, action], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
     fn has_reconcile_marker(db: &db::Db, dispatch_id: &str) -> bool {
         let conn = db.lock().unwrap();
         conn.query_row(
@@ -438,18 +453,42 @@ mod outbox_boundary {
             }]
         );
 
-        // Verify outbox entry transitioned to done
-        assert_eq!(outbox_status(&db, "d-160-1"), vec!["done"]);
+        // Verify notify row is done and a follow-up status sync row is queued.
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160-1", "notify"),
+            vec!["done"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160-1", "status_reaction"),
+            vec!["pending"]
+        );
         assert_eq!(
             get_dispatch_status(&db, "d-160-1"),
             "dispatched",
             "successful notify must transition pending dispatch to dispatched"
         );
 
-        // Second batch should find nothing pending
+        // Second batch drains the queued status reaction.
         let processed2 = process_outbox_batch(&db, &mock).await;
-        assert_eq!(processed2, 0, "No pending entries after first drain");
-        assert_eq!(mock.notify_count(), 1, "No additional calls on empty queue");
+        assert_eq!(
+            processed2, 1,
+            "status reaction should be processed on next drain"
+        );
+        assert_eq!(
+            mock.notify_count(),
+            1,
+            "No additional notify calls after dispatch"
+        );
+        assert!(
+            mock.call_log().contains(&MockCall::StatusReaction {
+                dispatch_id: "d-160-1".into(),
+            }),
+            "status reaction must be queued after notify success"
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160-1", "status_reaction"),
+            vec!["done"]
+        );
     }
 
     /// Scenario 160-2: Recovery API failure → DB fallback completes dispatch
@@ -561,10 +600,31 @@ mod outbox_boundary {
             "Order reversal detected — outbox must process in id ASC (FIFO)"
         );
 
-        // All entries should be done
-        assert_eq!(outbox_status(&db, "d-160o-a"), vec!["done"]);
-        assert_eq!(outbox_status(&db, "d-160o-b"), vec!["done"]);
-        assert_eq!(outbox_status(&db, "d-160o-c"), vec!["done"]);
+        // Notify rows are done and each dispatch gets a queued status sync.
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-a", "notify"),
+            vec!["done"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-a", "status_reaction"),
+            vec!["pending"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-b", "notify"),
+            vec!["done"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-b", "status_reaction"),
+            vec!["pending"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-c", "notify"),
+            vec!["done"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160o-c", "status_reaction"),
+            vec!["pending"]
+        );
         assert_eq!(get_dispatch_status(&db, "d-160o-a"), "dispatched");
         assert_eq!(get_dispatch_status(&db, "d-160o-b"), "dispatched");
         assert_eq!(get_dispatch_status(&db, "d-160o-c"), "dispatched");
@@ -600,8 +660,15 @@ mod outbox_boundary {
             "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
         );
 
-        // Both entries should transition to done (second via idempotent reservation check)
-        assert_eq!(outbox_status(&db, "d-160d"), vec!["done", "done"]);
+        // Both notify rows are done; dispatch transition queues a single status sync.
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160d", "notify"),
+            vec!["done", "done"]
+        );
+        assert_eq!(
+            outbox_status_for_action(&db, "d-160d", "status_reaction"),
+            vec!["pending"]
+        );
     }
 
     /// Scenario 160-5: Mixed actions (notify + followup) are dispatched to the

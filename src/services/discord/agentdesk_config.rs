@@ -1,9 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use poise::serenity_prelude::ChannelId;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
-use super::settings::{PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{
+    PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
+};
 use crate::config::{AgentChannel, Config, MeetingAgentEntry, MeetingSummaryAgentDef};
 use crate::services::provider::ProviderKind;
 
@@ -19,17 +21,38 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn load_agentdesk_config() -> Option<Config> {
+fn load_agentdesk_config_with_path() -> Option<(Config, std::path::PathBuf)> {
     let root = crate::config::runtime_root()?;
     for path in [
         crate::runtime_layout::config_file_path(&root),
         crate::runtime_layout::legacy_config_file_path(&root),
     ] {
         if path.is_file() {
-            return crate::config::load_from_path(&path).ok();
+            return crate::config::load_from_path(&path)
+                .ok()
+                .map(|config| (config, path));
         }
     }
     None
+}
+
+fn load_agentdesk_config() -> Option<Config> {
+    load_agentdesk_config_with_path().map(|(config, _)| config)
+}
+
+fn meeting_available_agents_explicitly_empty(config_path: &std::path::Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("meeting")
+        .and_then(|meeting| meeting.get("available_agents"))
+        .and_then(|agents| agents.as_sequence())
+        .map(|agents| agents.is_empty())
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +212,17 @@ fn meeting_agent_from_entry(
                     .map(|agent| agent.keywords.clone())
                     .unwrap_or_default(),
                 prompt_file: default_prompt_path(role_id).unwrap_or_default(),
+                domain_summary: None,
+                strengths: Vec::new(),
+                task_types: Vec::new(),
+                anti_signals: Vec::new(),
+                provider_hint: agent.map(|agent| agent.provider.clone()),
+                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
+                model: None,
+                reasoning_effort: None,
+                workspace: default_workspace(role_id),
+                peer_agents_enabled: true,
+                memory: resolve_memory_settings(None, None),
             })
         }
         MeetingAgentEntry::Detailed(def) => {
@@ -214,6 +248,20 @@ fn meeting_agent_from_entry(
                     .map(expand_tilde)
                     .or_else(|| default_prompt_path(&def.role_id))
                     .unwrap_or_default(),
+                domain_summary: def.domain_summary.clone(),
+                strengths: def.strengths.clone(),
+                task_types: def.task_types.clone(),
+                anti_signals: def.anti_signals.clone(),
+                provider_hint: def
+                    .provider_hint
+                    .clone()
+                    .or_else(|| agent.map(|agent| agent.provider.clone())),
+                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
+                model: None,
+                reasoning_effort: None,
+                workspace: default_workspace(&def.role_id),
+                peer_agents_enabled: true,
+                memory: resolve_memory_settings(None, None),
             })
         }
     }
@@ -286,26 +334,74 @@ pub(super) fn find_discord_bot_by_token(token: &str) -> Option<ResolvedDiscordBo
 /// Only these bots should be launched as full agent bots via `run_bot()`.
 /// Utility bots (e.g. announce, notify) that aren't mapped to any agent channel
 /// are excluded, preventing them from processing agent messages.
+///
+/// Supported launchable shapes:
+/// - legacy provider-named bots (`claude`, `codex`, ...)
+/// - onboarding-managed alias bots (`command`, `command_2`, ...)
+/// - bots explicitly scoped to agent channel IDs
+/// - bots explicitly pinned to a concrete agent id
 pub(super) fn collect_agent_bot_names() -> HashSet<String> {
     let Some(config) = load_agentdesk_config() else {
         return HashSet::new();
     };
-    let mut names = HashSet::new();
+
+    let mut provider_keys = HashSet::new();
+    let mut agent_ids = HashSet::new();
+    let mut concrete_channel_ids = HashSet::new();
     for agent in &config.agents {
-        if agent.channels.claude.is_some() {
-            names.insert("claude".to_string());
-        }
-        if agent.channels.codex.is_some() {
-            names.insert("codex".to_string());
-        }
-        if agent.channels.gemini.is_some() {
-            names.insert("gemini".to_string());
-        }
-        if agent.channels.qwen.is_some() {
-            names.insert("qwen".to_string());
+        agent_ids.insert(agent.id.trim().to_ascii_lowercase());
+        for (provider_key, channel) in agent.channels.iter() {
+            let Some(channel) = channel else {
+                continue;
+            };
+            if channel.target().is_some() {
+                provider_keys.insert(provider_key.to_ascii_lowercase());
+            }
+            if let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                concrete_channel_ids.insert(channel_id);
+            }
         }
     }
-    names
+
+    config
+        .discord
+        .bots
+        .iter()
+        .filter_map(|(name, bot)| {
+            let normalized_name = name.trim().to_ascii_lowercase();
+            let normalized_provider = bot
+                .provider
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase());
+            let normalized_agent = bot
+                .agent
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase());
+            let is_provider_named_bot = provider_keys.contains(&normalized_name);
+            let is_command_alias = matches!(
+                normalized_provider.as_deref(),
+                Some(provider) if provider_keys.contains(provider)
+            ) && (normalized_name == "command"
+                || normalized_name.starts_with("command_"));
+            let has_explicit_agent = normalized_agent
+                .as_deref()
+                .is_some_and(|agent_id| agent_ids.contains(agent_id));
+            let has_agent_channel_allowlist = bot
+                .auth
+                .allowed_channel_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| concrete_channel_ids.contains(id)));
+
+            (is_provider_named_bot
+                || is_command_alias
+                || has_explicit_agent
+                || has_agent_channel_allowlist)
+                .then(|| name.clone())
+        })
+        .collect()
 }
 
 pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
@@ -318,25 +414,26 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
         return Vec::new();
     };
 
-    if let Some(meeting) = &config.meeting
-        && !meeting.available_agents.is_empty()
-    {
-        let mut peers = Vec::new();
-        let mut seen = HashSet::new();
-        for entry in &meeting.available_agents {
-            let Some(agent) = meeting_agent_from_entry(&config, entry) else {
-                continue;
-            };
-            if !seen.insert(agent.role_id.clone()) {
-                continue;
+    if let Some(meeting) = &config.meeting {
+        let available_agents = &meeting.available_agents;
+        if !available_agents.is_empty() {
+            let mut peers = Vec::new();
+            let mut seen = HashSet::new();
+            for entry in available_agents {
+                let Some(agent) = meeting_agent_from_entry(&config, entry) else {
+                    continue;
+                };
+                if !seen.insert(agent.role_id.clone()) {
+                    continue;
+                }
+                peers.push(PeerAgentInfo {
+                    role_id: agent.role_id,
+                    display_name: agent.display_name,
+                    keywords: agent.keywords,
+                });
             }
-            peers.push(PeerAgentInfo {
-                role_id: agent.role_id,
-                display_name: agent.display_name,
-                keywords: agent.keywords,
-            });
+            return peers;
         }
-        return peers;
     }
 
     let mut peers = config
@@ -353,7 +450,7 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
 }
 
 pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
-    let config = load_agentdesk_config()?;
+    let (config, config_path) = load_agentdesk_config_with_path()?;
     let meeting = config.meeting.as_ref()?;
     let summary_agent = match meeting.summary_agent.as_ref()? {
         MeetingSummaryAgentDef::Static(agent) => SummaryAgentConfig::Static(agent.clone()),
@@ -369,31 +466,85 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let available_agents = if meeting.available_agents.is_empty() {
-        config
-            .agents
-            .iter()
-            .map(|agent| MeetingAgentConfig {
-                role_id: agent.id.clone(),
-                display_name: agent_display_name(agent),
-                keywords: agent.keywords.clone(),
-                prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
-            })
-            .collect()
-    } else {
-        meeting
-            .available_agents
-            .iter()
-            .filter_map(|entry| meeting_agent_from_entry(&config, entry))
-            .collect()
-    };
+    let explicit_empty_available_agents =
+        meeting_available_agents_explicitly_empty(config_path.as_path());
+    let available_agents =
+        if meeting.available_agents.is_empty() && !explicit_empty_available_agents {
+            config
+                .agents
+                .iter()
+                .map(|agent| MeetingAgentConfig {
+                    role_id: agent.id.clone(),
+                    display_name: agent_display_name(agent),
+                    keywords: agent.keywords.clone(),
+                    prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
+                    domain_summary: None,
+                    strengths: Vec::new(),
+                    task_types: Vec::new(),
+                    anti_signals: Vec::new(),
+                    provider_hint: Some(agent.provider.clone()),
+                    provider: ProviderKind::from_str(&agent.provider),
+                    model: None,
+                    reasoning_effort: None,
+                    workspace: default_workspace(&agent.id),
+                    peer_agents_enabled: true,
+                    memory: resolve_memory_settings(None, None),
+                })
+                .collect()
+        } else {
+            meeting
+                .available_agents
+                .iter()
+                .filter_map(|entry| meeting_agent_from_entry(&config, entry))
+                .collect()
+        };
 
     Some(MeetingConfig {
         channel_name: meeting.channel_name.clone(),
         max_rounds: meeting.max_rounds.unwrap_or(3),
+        max_participants: meeting.max_participants.unwrap_or(5).clamp(2, 5),
         summary_agent,
         available_agents,
     })
+}
+
+pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let Some(config) = load_agentdesk_config() else {
+        return Vec::new();
+    };
+
+    let mut bindings = BTreeMap::<u64, RegisteredChannelBinding>::new();
+    for agent in &config.agents {
+        for (provider_key, maybe_channel) in agent.channels.iter() {
+            let Some(channel) = maybe_channel else {
+                continue;
+            };
+            let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(owner_provider) =
+                binding_provider(agent, provider_key, channel).filter(ProviderKind::is_supported)
+            else {
+                continue;
+            };
+            let fallback_name = channel
+                .channel_name()
+                .or_else(|| channel.aliases().into_iter().next());
+            bindings.insert(
+                channel_id,
+                RegisteredChannelBinding {
+                    channel_id,
+                    owner_provider,
+                    fallback_name,
+                },
+            );
+        }
+    }
+
+    bindings.into_values().collect()
 }
 
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
@@ -633,6 +784,31 @@ meeting:
                 meeting.available_agents[0].display_name,
                 "TD (테크니컬 디렉터)"
             );
+        });
+    }
+
+    #[test]
+    fn load_meeting_config_preserves_explicit_empty_available_agents() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: ch-td
+    name: "TD"
+  - id: ch-pd
+    name: "PD"
+meeting:
+  channel_name: "round-table"
+  summary_agent: "ch-td"
+  available_agents: []
+"#,
+            );
+
+            let meeting = load_meeting_config().expect("meeting config");
+            assert!(meeting.available_agents.is_empty());
         });
     }
 }
