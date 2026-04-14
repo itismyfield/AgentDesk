@@ -149,7 +149,7 @@
 | `POST` | `/api/review-tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:335` | `src/server/routes/domains/reviews.rs:24` |
 | `POST` | `/api/review-verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:70` | `src/server/routes/domains/reviews.rs:19` |
 | `GET` | `/api/round-table-meetings` | `meetings::list_meetings` | `src/server/routes/meetings.rs:528` | `src/server/routes/domains/integrations.rs:33` |
-| `POST` | `/api/round-table-meetings` | `meetings::upsert_meeting` | `src/server/routes/meetings.rs:1165` | `src/server/routes/domains/integrations.rs:33` |
+| `POST` | `/api/round-table-meetings` | `meetings::upsert_meeting` | `src/server/routes/meetings.rs:1168` | `src/server/routes/domains/integrations.rs:33` |
 | `GET` | `/api/round-table-meetings/channels` | `meetings::list_meeting_channels` | `src/server/routes/meetings.rs:581` | `src/server/routes/domains/integrations.rs:37` |
 | `POST` | `/api/round-table-meetings/start` | `meetings::start_meeting` | `src/server/routes/meetings.rs:1081` | `src/server/routes/domains/integrations.rs:41` |
 | `DELETE` | `/api/round-table-meetings/{id}` | `meetings::delete_meeting` | `src/server/routes/meetings.rs:680` | `src/server/routes/domains/integrations.rs:42` |
