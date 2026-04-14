@@ -909,7 +909,48 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use std::sync::{Arc, Mutex};
+    use std::{
+        ffi::OsString,
+        path::Path as FsPath,
+        sync::{Arc, Mutex},
+    };
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &FsPath) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn write_test_bot_tokens(root: &FsPath) {
+        let credential_dir = root.join("credential");
+        std::fs::create_dir_all(&credential_dir).unwrap();
+        std::fs::write(
+            credential_dir.join("announce_bot_token"),
+            "announce-token\n",
+        )
+        .unwrap();
+        std::fs::write(credential_dir.join("notify_bot_token"), "notify-token\n").unwrap();
+    }
 
     fn test_db() -> crate::db::Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -981,6 +1022,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_mode_reuses_existing_thread_for_same_card() {
+        let _env_lock = env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        write_test_bot_tokens(runtime_root.path());
+
         #[derive(Clone, Default)]
         struct MockDiscord {
             created_threads: Arc<Mutex<usize>>,
@@ -1089,6 +1135,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_mode_falls_back_to_pm_when_owner_routing_unavailable() {
+        let _env_lock = env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        write_test_bot_tokens(runtime_root.path());
+
         async fn send_message(
             Path(channel_id): Path<String>,
             Json(body): Json<serde_json::Value>,
