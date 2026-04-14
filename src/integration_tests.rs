@@ -4720,6 +4720,7 @@ mod tests {
             Some("wait-ci")
         );
         assert_eq!(pr_tracking_pr_number(&db, "card-211-create"), Some(411));
+        assert_eq!(get_card_status(&db, "card-211-create"), "done");
 
         let conn = db.lock().unwrap();
         let blocked_reason: Option<String> = conn
@@ -4730,6 +4731,187 @@ mod tests {
             )
             .unwrap();
         assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_create_pr_completion_respects_custom_review_pass_target() {
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "pr:list",
+            contains: Some("--head wt/card-211-qa-create"),
+            stdout: "[{\"number\":412,\"headRefName\":\"wt/card-211-qa-create\",\"headRefOid\":\"abc222\"}]",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/qa");
+        let qa_override = serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "ready", "label": "Ready"},
+                {"id": "requested", "label": "Requested"},
+                {"id": "in_progress", "label": "In Progress"},
+                {"id": "review", "label": "Review"},
+                {"id": "qa_test", "label": "QA Test"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "ready", "type": "free"},
+                {"from": "ready", "to": "requested", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "requested", "to": "in_progress", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "in_progress", "to": "review", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "review", "to": "qa_test", "type": "gated", "gates": ["review_passed"]},
+                {"from": "review", "to": "in_progress", "type": "gated", "gates": ["review_rework"]},
+                {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "qa_test", "to": "in_progress", "type": "force_only"},
+                {"from": "requested", "to": "done", "type": "force_only"},
+                {"from": "in_progress", "to": "requested", "type": "force_only"},
+                {"from": "review", "to": "requested", "type": "force_only"},
+                {"from": "qa_test", "to": "requested", "type": "force_only"}
+            ],
+            "gates": {
+                "active_dispatch": {"type": "builtin", "check": "has_active_dispatch"},
+                "review_passed": {"type": "builtin", "check": "review_verdict_pass"},
+                "review_rework": {"type": "builtin", "check": "review_verdict_rework"}
+            },
+            "hooks": {
+                "in_progress": {"on_enter": ["OnCardTransition"], "on_exit": []},
+                "review": {"on_enter": ["OnCardTransition", "OnReviewEnter"], "on_exit": []},
+                "qa_test": {"on_enter": ["OnCardTransition"], "on_exit": []},
+                "done": {"on_enter": ["OnCardTransition", "OnCardTerminal"], "on_exit": []}
+            },
+            "clocks": {
+                "requested": {"set": "requested_at"},
+                "in_progress": {"set": "started_at", "mode": "coalesce"},
+                "review": {"set": "review_entered_at"},
+                "done": {"set": "completed_at"}
+            }
+        });
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE github_repos SET pipeline_config = ?1 WHERE id = 'test/qa'",
+                [qa_override.to_string()],
+            )
+            .unwrap();
+        }
+        seed_card_with_repo(&db, "card-211-qa-create", "review", "test/qa", 212, None);
+        seed_pr_tracking(
+            &db,
+            "card-211-qa-create",
+            "test/qa",
+            None,
+            "wt/card-211-qa-create",
+            None,
+            Some("oldsha"),
+            "create-pr",
+        );
+        seed_dispatch(
+            &db,
+            "create-pr-211-qa",
+            "card-211-qa-create",
+            "create-pr",
+            "pending",
+        );
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "create-pr-211-qa",
+            &serde_json::json!({"completion_source": "test_harness"}),
+        );
+        assert!(
+            result.is_ok(),
+            "create-pr completion should succeed for qa pipeline: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-qa-create").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(pr_tracking_pr_number(&db, "card-211-qa-create"), Some(412));
+        assert_eq!(get_card_status(&db, "card-211-qa-create"), "qa_test");
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-qa-create'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_create_pr_completion_does_not_override_reopened_card() {
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "pr:list",
+            contains: Some("--head wt/card-211-reopened"),
+            stdout: "[{\"number\":413,\"headRefName\":\"wt/card-211-reopened\",\"headRefOid\":\"abc333\"}]",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-211-reopened",
+            "in_progress",
+            "test/repo",
+            214,
+            None,
+        );
+        seed_pr_tracking(
+            &db,
+            "card-211-reopened",
+            "test/repo",
+            None,
+            "wt/card-211-reopened",
+            None,
+            Some("oldsha"),
+            "create-pr",
+        );
+        seed_dispatch(
+            &db,
+            "create-pr-211-reopened",
+            "card-211-reopened",
+            "create-pr",
+            "pending",
+        );
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "create-pr-211-reopened",
+            &serde_json::json!({"completion_source": "test_harness"}),
+        );
+        assert!(
+            result.is_ok(),
+            "create-pr completion should succeed for reopened card: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-reopened").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(pr_tracking_pr_number(&db, "card-211-reopened"), Some(413));
+        assert_eq!(get_card_status(&db, "card-211-reopened"), "in_progress");
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-reopened'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason, None);
     }
 
     #[cfg(unix)]
