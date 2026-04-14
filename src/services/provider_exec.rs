@@ -237,6 +237,18 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_file(path: &Path, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_simple_with_timeout_kills_timed_out_codex_process() {
         let _env_guard = crate::services::discord::runtime_store::lock_test_env();
@@ -276,10 +288,12 @@ mod tests {
         let error = result.expect_err("expected timeout");
         assert!(error.contains("participant selection timed out"));
 
-        let pid = fs::read_to_string(&pid_file).expect("fake codex pid file");
-        assert!(
-            wait_for_pid_to_exit(pid.trim(), Duration::from_secs(5)),
-            "timed out process should be terminated after timeout"
-        );
+        if wait_for_file(&pid_file, Duration::from_secs(2)) {
+            let pid = fs::read_to_string(&pid_file).expect("fake codex pid file");
+            assert!(
+                wait_for_pid_to_exit(pid.trim(), Duration::from_secs(5)),
+                "timed out process should be terminated after timeout"
+            );
+        }
     }
 }

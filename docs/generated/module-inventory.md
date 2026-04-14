@@ -62,13 +62,13 @@
 | `db::auto_queue` | `src/db/auto_queue.rs` | 1678 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::schema` | `src/db/schema.rs` | 1687 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 1694 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 3883 | giant-file |
-| `engine` | `src/engine/mod.rs` | 1496 | giant-file |
+| `engine` | `src/engine/mod.rs` | 1492 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
-| `engine::intent` | `src/engine/intent.rs` | 814 |  |
+| `engine::intent` | `src/engine/intent.rs` | 812 |  |
 | `engine::loader` | `src/engine/loader.rs` | 281 |  |
 | `engine::ops` | `src/engine/ops.rs` | 156 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 167 |  |
@@ -172,7 +172,7 @@
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 525 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 1914 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 716 |  |
-| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 790 |  |
+| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 814 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 38 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1141 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 534 |  |
@@ -209,7 +209,7 @@
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 975 |  |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3186 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1356 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1336 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 982 |  |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 3221 | giant-file |
@@ -242,10 +242,10 @@
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 178 |  |
 | `services::process` | `src/services/process.rs` | 638 |  |
 | `services::provider` | `src/services/provider.rs` | 1925 | giant-file |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 285 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 299 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 247 |  |
-| `services::qwen` | `src/services/qwen.rs` | 2182 | giant-file |
+| `services::qwen` | `src/services/qwen.rs` | 2185 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1047 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 635 |  |

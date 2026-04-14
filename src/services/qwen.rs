@@ -496,6 +496,9 @@ fn collect_qwen_stream_events(
                 return QwenStreamLoopResult::Eof;
             }
             Err(RecvTimeoutError::Timeout) => {
+                if is_cancelled(cancel_token) {
+                    return QwenStreamLoopResult::Cancelled;
+                }
                 if state.terminal_result_seen {
                     return QwenStreamLoopResult::Eof;
                 }
