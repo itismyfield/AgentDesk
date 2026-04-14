@@ -241,7 +241,7 @@
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 122 |  |
 | `services::dispatches` | `src/services/dispatches.rs` | 331 |  |
-| `services::gemini` | `src/services/gemini.rs` | 1957 | giant-file |
+| `services::gemini` | `src/services/gemini.rs` | 2048 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 145 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 346 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 113 |  |

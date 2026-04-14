@@ -1,14 +1,16 @@
 use serde_json::Value;
-use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
-use crate::services::process::{configure_child_process_group, kill_child_tree};
+use crate::services::process::{
+    configure_child_process_group, kill_child_tree, wait_with_output_timeout,
+};
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
@@ -26,7 +28,6 @@ const GEMINI_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
 const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
 const GEMINI_TRUSTED_FOLDERS_PATH: &str = ".gemini/trustedFolders.json";
-const GEMINI_MEETING_READONLY_POLICY_FILENAME: &str = "agentdesk-gemini-meeting-readonly.toml";
 const GEMINI_MEETING_READONLY_POLICY: &str = r#"
 [[rule]]
 toolName = [
@@ -48,6 +49,21 @@ denyMessage = "AgentDesk meeting_readonly mode allows only filesystem read/searc
 "#;
 
 type GeminiStreamEvent = LineStreamEvent;
+
+static GEMINI_MEETING_READONLY_POLICY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct GeminiExecArgs {
+    args: Vec<String>,
+    _readonly_policy_path: Option<PathBuf>,
+}
+
+impl Drop for GeminiExecArgs {
+    fn drop(&mut self) {
+        if let Some(path) = self._readonly_policy_path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GeminiTrustRuleKind {
@@ -122,14 +138,44 @@ pub fn execute_command_simple_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<String, String> {
-    let prompt = prompt.to_string();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(execute_command_simple(&prompt));
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
+    let resolution = resolve_gemini_binary();
+    let gemini_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Gemini CLI not found".to_string())?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let working_dir = resolve_gemini_requested_dir(current_dir)?;
+    let exec_args = build_exec_args(prompt, None, None, false)?;
+
+    let mut command = Command::new(&gemini_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    configure_child_process_group(&mut command);
+    let output = command
+        .args(&exec_args.args)
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start Gemini: {}", e))
+        .and_then(|child| wait_with_output_timeout(child, timeout, label))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(derive_error_message(
+            &stdout,
+            &stderr,
+            output.status.code(),
+            "Gemini",
+        ));
+    }
+
+    let text = extract_text_from_stream_output(&stdout);
+    if text.trim().is_empty() {
+        Err("Empty response from Gemini".to_string())
+    } else {
+        Ok(text)
     }
 }
 
@@ -144,11 +190,12 @@ pub fn execute_command_simple_cancellable(
         .ok_or_else(|| "Gemini CLI not found".to_string())?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let working_dir = resolve_gemini_requested_dir(current_dir)?;
-    let args = build_exec_args(prompt, None, None, false)?;
+    let exec_args = build_exec_args(prompt, None, None, false)?;
     let mut command = Command::new(&gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    configure_child_process_group(&mut command);
     let mut child = command
-        .args(args)
+        .args(&exec_args.args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -271,9 +318,9 @@ fn execute_gemini_streaming_attempt(
     let mut command = Command::new(gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, resolution);
     configure_child_process_group(&mut command);
-    let args = build_exec_args(prompt, model, resume_selector.as_deref(), readonly_mode)?;
+    let exec_args = build_exec_args(prompt, model, resume_selector.as_deref(), readonly_mode)?;
     let mut child = command
-        .args(args)
+        .args(&exec_args.args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -765,7 +812,7 @@ fn build_exec_args(
     model: Option<&str>,
     session_id: Option<&str>,
     readonly_mode: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<GeminiExecArgs, String> {
     let mut args = Vec::new();
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
     if session_id.is_none() {
@@ -784,29 +831,41 @@ fn build_exec_args(
     args.push(prompt.to_string());
     args.push("--output-format".to_string());
     args.push("stream-json".to_string());
+    let mut readonly_policy_path = None;
     if readonly_mode {
         args.push("--sandbox".to_string());
         args.push("true".to_string());
         args.push("--approval-mode".to_string());
         args.push("default".to_string());
         args.push("--admin-policy".to_string());
-        args.push(
-            ensure_gemini_meeting_readonly_policy_file()?
-                .to_string_lossy()
-                .to_string(),
-        );
+        let policy_path = ensure_gemini_meeting_readonly_policy_file()?;
+        args.push(policy_path.to_string_lossy().to_string());
+        readonly_policy_path = Some(policy_path);
     } else {
         args.push("--approval-mode".to_string());
         args.push("yolo".to_string());
         args.push("--sandbox".to_string());
         args.push("false".to_string());
     }
-    Ok(args)
+    Ok(GeminiExecArgs {
+        args,
+        _readonly_policy_path: readonly_policy_path,
+    })
 }
 
 fn ensure_gemini_meeting_readonly_policy_file() -> Result<PathBuf, String> {
-    let path = std::env::temp_dir().join(GEMINI_MEETING_READONLY_POLICY_FILENAME);
-    fs::write(&path, GEMINI_MEETING_READONLY_POLICY).map_err(|error| {
+    let unique = GEMINI_MEETING_READONLY_POLICY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentdesk-gemini-meeting-readonly-{}-{}-{}.toml",
+        std::process::id(),
+        timestamp,
+        unique
+    ));
+    std::fs::write(&path, GEMINI_MEETING_READONLY_POLICY).map_err(|error| {
         format!(
             "Failed to write Gemini meeting read-only admin policy at {}: {}",
             path.display(),
@@ -992,9 +1051,9 @@ fn render_gemini_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_MEETING_READONLY_POLICY_FILENAME,
-        GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState, GeminiStreamEvent, GeminiStreamLoopResult,
-        build_exec_args, build_gemini_tool_result_message, build_gemini_tool_use_message,
+        GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState,
+        GeminiExecArgs, GeminiStreamEvent, GeminiStreamLoopResult, build_exec_args,
+        build_gemini_tool_result_message, build_gemini_tool_use_message,
         collect_gemini_stream_events, execute_command_streaming, extract_gemini_error_message,
         extract_text_from_stream_output, finalize_gemini_attempt, gemini_trust_rule_for_entry,
         gemini_trust_status_allows_root, looks_like_uuid, normalize_resume_selector,
@@ -1014,14 +1073,27 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn admin_policy_path(args: &GeminiExecArgs) -> String {
+        args.args
+            .windows(2)
+            .find(|pair| pair[0] == "--admin-policy")
+            .map(|pair| pair[1].clone())
+            .expect("readonly Gemini must pass an admin policy")
+    }
+
     #[test]
     fn build_exec_args_includes_resume_when_session_present() {
         let args = build_exec_args("hello", Some("gemini-2.5-flash"), Some("latest"), false)
             .expect("args");
-        assert!(args.windows(2).any(|pair| pair == ["--resume", "latest"]));
-        assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "latest"])
+        );
+        assert!(args.args.windows(2).any(|pair| pair == ["-p", "hello"]));
         assert!(
             !args
+                .args
                 .windows(2)
                 .any(|pair| pair == ["-m", "gemini-2.5-flash"])
         );
@@ -1031,42 +1103,61 @@ mod tests {
     fn build_exec_args_includes_model_for_fresh_session() {
         let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, false).expect("args");
         assert!(
-            args.windows(2)
+            args.args
+                .windows(2)
                 .any(|pair| pair == ["-m", "gemini-2.5-flash"])
         );
-        assert!(!args.iter().any(|arg| arg == "--resume"));
+        assert!(!args.args.iter().any(|arg| arg == "--resume"));
     }
 
     #[test]
     fn build_exec_args_uses_default_mode_with_admin_policy_for_readonly_sessions() {
         let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, true).expect("args");
-        assert!(args.windows(2).any(|pair| pair == ["--sandbox", "true"]));
         assert!(
-            args.windows(2)
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "true"])
+        );
+        assert!(
+            args.args
+                .windows(2)
                 .any(|pair| pair == ["--approval-mode", "default"])
         );
-        let policy_path = args
-            .windows(2)
-            .find(|pair| pair[0] == "--admin-policy")
-            .map(|pair| pair[1].clone())
-            .expect("readonly Gemini must pass an admin policy");
-        assert!(policy_path.ends_with(GEMINI_MEETING_READONLY_POLICY_FILENAME));
+        let policy_path = admin_policy_path(&args);
         let policy = std::fs::read_to_string(policy_path).expect("policy file should exist");
         assert!(policy.contains("read_many_files"));
         assert!(policy.contains("toolName = \"*\""));
         assert!(!policy.contains("modes ="));
-        assert!(!args.iter().any(|arg| arg == "-y"));
+        assert!(!args.args.iter().any(|arg| arg == "-y"));
+    }
+
+    #[test]
+    fn build_exec_args_uses_unique_admin_policy_path_per_readonly_request() {
+        let first = build_exec_args("hello", Some("gemini-2.5-flash"), None, true).expect("args");
+        let second =
+            build_exec_args("hello again", Some("gemini-2.5-flash"), None, true).expect("args");
+
+        let first_path = admin_policy_path(&first);
+        let second_path = admin_policy_path(&second);
+        assert_ne!(first_path, second_path);
+        assert!(std::path::Path::new(&first_path).exists());
+        assert!(std::path::Path::new(&second_path).exists());
     }
 
     #[test]
     fn build_exec_args_uses_approval_mode_yolo_without_legacy_y_flag() {
         let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, false).expect("args");
         assert!(
-            args.windows(2)
+            args.args
+                .windows(2)
                 .any(|pair| pair == ["--approval-mode", "yolo"])
         );
-        assert!(args.windows(2).any(|pair| pair == ["--sandbox", "false"]));
-        assert!(!args.iter().any(|arg| arg == "-y" || arg == "--yolo"));
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "false"])
+        );
+        assert!(!args.args.iter().any(|arg| arg == "-y" || arg == "--yolo"));
     }
 
     #[test]
