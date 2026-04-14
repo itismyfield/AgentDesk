@@ -50,6 +50,12 @@ The binary doubles as a CLI. Subcommands are parsed before the tokio runtime sta
 
 Default (no subcommand) starts the full HTTP server + policy engine + Discord gateway.
 
+## Database Path
+
+- Canonical DB path is `~/.adk/{release|dev}/data/agentdesk.sqlite` (or `$AGENTDESK_ROOT_DIR/data/agentdesk.sqlite` when overridden).
+- Do not point `sqlite3` at guessed paths such as `~/.adk/release/agentdesk.db` or `~/.adk/release/data.db`. SQLite will create empty files there, which then mislead diagnostics.
+- Prefer the HTTP API first for operational inspection; use direct DB access only when the task explicitly requires it and the canonical path is confirmed.
+
 ## Architecture
 
 ### Core Components (src/)

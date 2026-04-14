@@ -656,6 +656,24 @@ fn health_endpoint(base: &str) -> String {
     format!("{}/api/health", base.trim_end_matches('/'))
 }
 
+fn stale_zero_byte_db_candidates(
+    runtime_root: &std::path::Path,
+    canonical_db_path: &std::path::Path,
+) -> Vec<PathBuf> {
+    [
+        runtime_root.join("agentdesk.db"),
+        runtime_root.join("data.db"),
+    ]
+    .into_iter()
+    .filter(|candidate| candidate != canonical_db_path)
+    .filter(|candidate| {
+        fs::metadata(candidate)
+            .map(|meta| meta.is_file() && meta.len() == 0)
+            .unwrap_or(false)
+    })
+    .collect()
+}
+
 fn provider_check_id(provider: &ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Claude => "provider_claude",
@@ -675,6 +693,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_tmux(),
         check_service_manager(),
         check_db_integrity(cfg),
+        check_stale_zero_byte_db_files(cfg),
         check_github_repo_registry(cfg),
         check_disk_usage(),
     ]
@@ -859,6 +878,46 @@ fn apply_safe_fixes(cfg: &config::Config) -> Vec<FixAction> {
             "db_schema",
             "DB Schema",
             format!("cannot open {}: {}", db_path.display(), e),
+        )),
+    }
+
+    match dcserver::agentdesk_runtime_root() {
+        Some(root) => {
+            let stale_paths = stale_zero_byte_db_candidates(&root, &db_path);
+            if stale_paths.is_empty() {
+                actions.push(FixAction::ok(
+                    "stale_db_files",
+                    "Stale DB Files",
+                    "no stale zero-byte DB files found".to_string(),
+                ));
+            } else {
+                let mut removed = Vec::new();
+                let mut failed = None;
+                for path in stale_paths {
+                    match fs::remove_file(&path) {
+                        Ok(()) => removed.push(path.display().to_string()),
+                        Err(error) => {
+                            failed = Some(format!("{}: {}", path.display(), error));
+                            break;
+                        }
+                    }
+                }
+                match failed {
+                    Some(detail) => {
+                        actions.push(FixAction::fail("stale_db_files", "Stale DB Files", detail))
+                    }
+                    None => actions.push(FixAction::ok(
+                        "stale_db_files",
+                        "Stale DB Files",
+                        format!("removed {}", removed.join(", ")),
+                    )),
+                }
+            }
+        }
+        None => actions.push(FixAction::fail(
+            "stale_db_files",
+            "Stale DB Files",
+            "unable to determine runtime root",
         )),
     }
 
@@ -1667,6 +1726,58 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
         )
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
     }
+}
+
+fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
+    let Some(runtime_root) = dcserver::agentdesk_runtime_root() else {
+        return Check::warn(
+            "stale_db_files",
+            CheckGroup::Core,
+            "Stale DB Files",
+            "runtime root unresolved",
+            "실제 DB 경로를 먼저 확인한 뒤 root 경로의 0바이트 stale DB 파일을 정리하세요.",
+        )
+        .with_expected_actual(
+            "runtime root path resolvable",
+            "runtime root path unresolved",
+        );
+    };
+
+    let canonical_db_path = cfg.data.dir.join(&cfg.data.db_name);
+    let stale_paths = stale_zero_byte_db_candidates(&runtime_root, &canonical_db_path);
+    if stale_paths.is_empty() {
+        return Check::ok(
+            "stale_db_files",
+            CheckGroup::Core,
+            "Stale DB Files",
+            format!(
+                "none near {} (canonical DB: {})",
+                runtime_root.display(),
+                canonical_db_path.display()
+            ),
+        )
+        .with_path(runtime_root.display().to_string())
+        .with_expected_actual("no zero-byte stale DB files", "no zero-byte stale DB files");
+    }
+
+    let listed = stale_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Check::warn(
+        "stale_db_files",
+        CheckGroup::Core,
+        "Stale DB Files",
+        format!("zero-byte stale DB file(s): {listed}"),
+        format!(
+            "실제 DB는 {} 입니다. 추측 경로로 sqlite3를 열지 말고, 필요하면 agentdesk doctor --fix 로 stale 파일을 정리하세요.",
+            canonical_db_path.display()
+        ),
+    )
+    .with_path(runtime_root.display().to_string())
+    .with_expected_actual("no zero-byte stale DB files", listed)
+    .with_next_steps(vec!["agentdesk doctor --fix".to_string()])
 }
 
 fn check_github_repo_registry(cfg: &config::Config) -> Check {
