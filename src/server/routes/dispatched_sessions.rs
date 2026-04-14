@@ -78,9 +78,6 @@ fn resolve_hook_active_dispatch_id(
     if status.eq_ignore_ascii_case("disconnected") {
         return None;
     }
-    if status.eq_ignore_ascii_case("working") {
-        return incoming_dispatch_id;
-    }
 
     incoming_dispatch_id.or_else(|| load_existing_session_active_dispatch_id(conn, session_key))
 }

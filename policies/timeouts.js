@@ -18,8 +18,8 @@
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
  * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
- * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 review(dilemma_pending)
- * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill + notify
+ * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 pending_decision
+ * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill
  */
 
 // Get PMD channel for alerts
