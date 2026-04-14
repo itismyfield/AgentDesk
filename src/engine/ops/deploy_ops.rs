@@ -8,67 +8,66 @@ pub(super) fn register_deploy_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     ad.set(
         "deploy",
         Function::new(ctx.clone(), || -> String {
-            let scripts_dir = resolve_scripts_dir();
-            let Some(scripts_dir) = scripts_dir else {
-                return serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "error": "could not resolve scripts directory"
-                }))
-                .unwrap_or_default();
-            };
-
-            let deploy_dev = scripts_dir.join("deploy-dev.sh");
-            let promote = scripts_dir.join("promote-release.sh");
-
-            if !deploy_dev.exists() || !promote.exists() {
-                return serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "error": format!(
-                        "deploy scripts not found: deploy-dev={} promote={}",
-                        deploy_dev.exists(),
-                        promote.exists()
-                    )
-                }))
-                .unwrap_or_default();
-            }
-
-            tracing::info!("[deploy-gate] starting deploy-dev.sh");
-            let dev_result = run_script(&deploy_dev, &[]);
-            if !dev_result.success {
-                return serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "stage": "deploy-dev",
-                    "error": dev_result.stderr,
-                    "stdout": truncate(&dev_result.stdout, 500),
-                    "summary": "deploy-dev.sh failed"
-                }))
-                .unwrap_or_default();
-            }
-            tracing::info!("[deploy-gate] deploy-dev.sh succeeded");
-
-            tracing::info!("[deploy-gate] starting promote-release.sh --skip-review");
-            let promote_result = run_script(&promote, &["--skip-review"]);
-            if !promote_result.success {
-                return serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "stage": "promote-release",
-                    "error": promote_result.stderr,
-                    "stdout": truncate(&promote_result.stdout, 500),
-                    "summary": "promote-release.sh failed"
-                }))
-                .unwrap_or_default();
-            }
-            tracing::info!("[deploy-gate] promote-release.sh succeeded");
-
-            serde_json::to_string(&serde_json::json!({
-                "ok": true,
-                "summary": "deploy-dev + promote-release completed successfully"
-            }))
-            .unwrap_or_default()
+            let result = run_deploy();
+            serde_json::to_string(&result).unwrap_or_default()
         })?,
     )?;
 
     Ok(())
+}
+
+pub fn run_deploy() -> serde_json::Value {
+    let Some(scripts_dir) = resolve_scripts_dir() else {
+        return serde_json::json!({
+            "ok": false,
+            "error": "could not resolve scripts directory"
+        });
+    };
+
+    let deploy_dev = scripts_dir.join("deploy-dev.sh");
+    let promote = scripts_dir.join("promote-release.sh");
+
+    if !deploy_dev.exists() || !promote.exists() {
+        return serde_json::json!({
+            "ok": false,
+            "error": format!(
+                "deploy scripts not found: deploy-dev={} promote={}",
+                deploy_dev.exists(),
+                promote.exists()
+            )
+        });
+    }
+
+    tracing::info!("[deploy-gate] starting deploy-dev.sh");
+    let dev_result = run_script(&deploy_dev, &[]);
+    if !dev_result.success {
+        return serde_json::json!({
+            "ok": false,
+            "stage": "deploy-dev",
+            "error": dev_result.stderr,
+            "stdout": truncate(&dev_result.stdout, 500),
+            "summary": "deploy-dev.sh failed"
+        });
+    }
+    tracing::info!("[deploy-gate] deploy-dev.sh succeeded");
+
+    tracing::info!("[deploy-gate] starting promote-release.sh --skip-review");
+    let promote_result = run_script(&promote, &["--skip-review"]);
+    if !promote_result.success {
+        return serde_json::json!({
+            "ok": false,
+            "stage": "promote-release",
+            "error": promote_result.stderr,
+            "stdout": truncate(&promote_result.stdout, 500),
+            "summary": "promote-release.sh failed"
+        });
+    }
+    tracing::info!("[deploy-gate] promote-release.sh succeeded");
+
+    serde_json::json!({
+        "ok": true,
+        "summary": "deploy-dev + promote-release completed successfully"
+    })
 }
 
 fn resolve_scripts_dir() -> Option<std::path::PathBuf> {

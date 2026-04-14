@@ -9,7 +9,7 @@ mod auto_queue_ops;
 mod cards_ops;
 mod config_ops;
 mod db_ops;
-mod deploy_ops;
+pub(crate) mod deploy_ops;
 mod dispatch_ops;
 mod dm_reply_ops;
 mod exec_ops;
