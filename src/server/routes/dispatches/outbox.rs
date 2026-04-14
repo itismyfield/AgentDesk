@@ -988,6 +988,12 @@ pub(super) fn format_dispatch_message(
                 ));
             }
         }
+        if let Some(warning) = context_json
+            .get("review_target_warning")
+            .and_then(|value| value.as_str())
+        {
+            message.push_str(&format!("\n\n리뷰 타겟 안내: {warning}"));
+        }
         let review_scope_reminder = context_json
             .get("review_quality_scope_reminder")
             .and_then(|value| value.as_str())

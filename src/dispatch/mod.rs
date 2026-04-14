@@ -437,6 +437,15 @@ fn apply_review_target_context(
     }
 }
 
+fn apply_review_target_warning(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    reason: &str,
+    warning: &str,
+) {
+    obj.insert("review_target_reject_reason".to_string(), json!(reason));
+    obj.insert("review_target_warning".to_string(), json!(warning));
+}
+
 fn latest_completed_work_dispatch_is_noop(db: &Db, kanban_card_id: &str) -> bool {
     let Ok(conn) = db.separate_conn() else {
         return false;
@@ -731,16 +740,29 @@ fn build_review_context(
                         &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                     );
                 } else {
-                    // Last fallback: review the current repo HEAD. This path is used
-                    // only when we have neither an execution target nor a canonical
-                    // issue worktree.
-                    if let Some(target) = resolve_repo_head_fallback_target(db, kanban_card_id)? {
-                        apply_review_target_context(&target, obj);
-                        tracing::info!(
-                            "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
-                            kanban_card_id,
-                            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                    if latest_work_target.is_some() && validated_work_target.is_none() {
+                        apply_review_target_warning(
+                            obj,
+                            "latest_work_target_issue_mismatch",
+                            "브랜치 정보 없음 — 직접 확인 필요. 최근 완료 작업 커밋이 현재 카드 이슈와 일치하지 않아 repo HEAD 폴백을 생략했습니다.",
                         );
+                        tracing::warn!(
+                            "[dispatch] Review dispatch for card {}: latest work target was rejected, downstream worktree recovery failed, and repo HEAD fallback is disabled",
+                            kanban_card_id
+                        );
+                    } else {
+                        // Last fallback: review the current repo HEAD. This path is used
+                        // only when we have neither an execution target nor a canonical
+                        // issue worktree.
+                        if let Some(target) = resolve_repo_head_fallback_target(db, kanban_card_id)?
+                        {
+                            apply_review_target_context(&target, obj);
+                            tracing::info!(
+                                "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
+                                kanban_card_id,
+                                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                            );
+                        }
                     }
                 }
             }
@@ -3981,6 +4003,91 @@ mod tests {
             err.to_string()
                 .contains("repo-root HEAD fallback is unsafe while tracked changes exist"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn review_context_skips_repo_head_fallback_after_rejected_external_work_target() {
+        let db = test_db();
+        seed_card(&db, "card-review-external-reject", "review");
+        set_card_issue_number(&db, "card-review-external-reject", 595);
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let default_head = crate::services::platform::git_head_commit(repo_dir).unwrap();
+
+        let external_repo = tempfile::tempdir().unwrap();
+        let external_dir = external_repo.path().to_str().unwrap();
+        run_git(external_dir, &["init", "-b", "main"]);
+        run_git(external_dir, &["config", "user.email", "test@test.com"]);
+        run_git(external_dir, &["config", "user.name", "Test"]);
+        run_git(external_dir, &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(
+            external_dir,
+            &["checkout", "-b", "codex/595-agentdesk-aiinstructions"],
+        );
+        let external_commit = git_commit(
+            external_dir,
+            "fix: shrink aiInstructions in external repo (#595)",
+        );
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-external-reject', 'card-review-external-reject', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": external_dir,
+                    "completed_branch": "codex/595-agentdesk-aiinstructions",
+                    "completed_commit": external_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-external-reject", "agent-1", &json!({}))
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert!(
+            parsed.get("reviewed_commit").is_none(),
+            "rejected external work target must not fall back to repo HEAD"
+        );
+        assert!(
+            parsed.get("branch").is_none(),
+            "rejected external work target must not inject a fake branch"
+        );
+        assert!(
+            parsed.get("worktree_path").is_none(),
+            "rejected external work target must not inject the default repo path"
+        );
+        assert!(
+            parsed.get("merge_base").is_none(),
+            "rejected external work target must not emit a fake diff range"
+        );
+        assert_eq!(
+            parsed["review_target_reject_reason"],
+            "latest_work_target_issue_mismatch"
+        );
+        assert!(
+            parsed["review_target_warning"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("브랜치 정보 없음"),
+            "warning must tell reviewers that manual lookup is required"
+        );
+        assert_ne!(
+            parsed["reviewed_commit"],
+            json!(default_head),
+            "default repo HEAD must not be injected after rejection"
         );
     }
 
