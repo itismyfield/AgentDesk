@@ -38,6 +38,10 @@
 - 리뷰 pass 시 카드는 시스템이 자동으로 `done` 전환하므로, 에이전트가 수동으로 카드 상태를 변경하지 않는다.
 - `cargo` target lock이 걸리면 기다린다. `CARGO_TARGET_DIR`을 임시 디렉터리로 바꿔 우회 빌드하지 않는다.
 
+## Data Access
+
+- ADK 데이터는 먼저 API와 `/api/docs`로 확인한다. `sqlite3`로 DB를 직접 열지 않는다. 경로를 추측해 잘못 열면 `~/.adk/{release|dev}/agentdesk.db`나 `data.db` 같은 0바이트 stale 파일을 만들 수 있다.
+
 ## Discord Response Style
 
 Discord에서는 중간 과정을 과도하게 서술하지 않는다.
