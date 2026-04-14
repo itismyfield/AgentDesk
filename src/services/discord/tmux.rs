@@ -1997,49 +1997,64 @@ pub(super) async fn tmux_output_watcher(
         shared.tmux_watchers.remove(&channel_id);
     }
 
-    // Kill dead tmux session to prevent accumulation (especially for thread sessions
-    // which are created per-dispatch and would otherwise linger for 24h).
-    // #145: skip kill for unified-thread sessions with active auto-queue runs.
-    {
-        let sess = tmux_session_name.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
-                // Check if this is a unified-thread session before killing
-                if let Some((_, ch_name)) =
-                    crate::services::provider::parse_provider_and_channel_from_tmux_name(&sess)
-                {
-                    if crate::dispatch::is_unified_thread_channel_name_active(&ch_name) {
-                        return;
-                    }
-                }
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_watcher",
-                    "dead_after_turn",
-                    Some("watcher cleanup: dead session after turn"),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                crate::services::platform::tmux::kill_session(&sess);
-            }
-        })
-        .await;
-    }
+    let api_port = shared.api_port;
+    let provider = shared.settings.read().await.provider.clone();
+    let session_key =
+        super::adk_session::build_adk_session_key(&shared, channel_id, &provider).await;
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.clone())
+    };
+    let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+        shared.db.as_ref(),
+        &shared.token_hash,
+        &provider,
+        &tmux_session_name,
+        channel_name.as_deref(),
+    );
 
-    // Report idle status to DB so the dashboard doesn't show stale "working" state.
-    // Without this, a dead tmux session leaves the DB row as working/dispatched.
-    {
-        let api_port = shared.api_port;
-        let provider = shared.settings.read().await.provider.clone();
-        let session_key =
-            super::adk_session::build_adk_session_key(&shared, channel_id, &provider).await;
-        let channel_name = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.clone())
-        };
+    if let Some(protection) = dispatch_protection {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ tmux watcher: preserving dispatch session {} — {}",
+            tmux_session_name,
+            protection.log_reason()
+        );
+    } else {
+        // Kill dead tmux session to prevent accumulation (especially for thread sessions
+        // which are created per-dispatch and would otherwise linger for 24h).
+        // #145: skip kill for unified-thread sessions with active auto-queue runs.
+        {
+            let sess = tmux_session_name.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
+                    // Check if this is a unified-thread session before killing
+                    if let Some((_, ch_name)) =
+                        crate::services::provider::parse_provider_and_channel_from_tmux_name(&sess)
+                    {
+                        if crate::dispatch::is_unified_thread_channel_name_active(&ch_name) {
+                            return;
+                        }
+                    }
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "dead_after_turn",
+                        Some("watcher cleanup: dead session after turn"),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
+                    crate::services::platform::tmux::kill_session(&sess);
+                }
+            })
+            .await;
+        }
+
+        // Report idle status to DB so the dashboard doesn't show stale "working" state.
+        // Without this, a dead tmux session leaves the DB row as working/dispatched.
         let thread_channel_id = channel_name
             .as_deref()
             .and_then(super::adk_session::parse_thread_channel_id_from_name);
@@ -2841,7 +2856,24 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let api_port = shared.api_port;
         let provider = shared.settings.read().await.provider.clone();
 
+        let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
+            if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+                shared.db.as_ref(),
+                &shared.token_hash,
+                &provider,
+                &dc.session_name,
+                Some(&dc.channel_name),
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ♻ tmux startup: preserving dispatch session {} — {}",
+                    dc.session_name,
+                    protection.log_reason()
+                );
+                continue;
+            }
+
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
             let thread_channel_id =
                 super::adk_session::parse_thread_channel_id_from_name(&dc.channel_name);
@@ -2885,13 +2917,16 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 crate::services::platform::tmux::kill_session(&sess);
             })
             .await;
+            cleaned_dead_sessions += 1;
         }
 
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 🧹 Cleaned {} dead tmux session(s) on startup",
-            dead_cleanups.len()
-        );
+        if cleaned_dead_sessions > 0 {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🧹 Cleaned {} dead tmux session(s) on startup",
+                cleaned_dead_sessions
+            );
+        }
     }
 }
 

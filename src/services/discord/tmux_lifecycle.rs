@@ -1,0 +1,307 @@
+use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DispatchTmuxProtection {
+    SessionRow {
+        dispatch_id: String,
+        session_status: String,
+    },
+    ThreadDispatch {
+        dispatch_id: String,
+        dispatch_status: String,
+    },
+}
+
+impl DispatchTmuxProtection {
+    pub(super) fn log_reason(&self) -> String {
+        match self {
+            Self::SessionRow {
+                dispatch_id,
+                session_status,
+            } => format!(
+                "session row keeps active_dispatch_id={dispatch_id} (status={session_status})"
+            ),
+            Self::ThreadDispatch {
+                dispatch_id,
+                dispatch_status,
+            } => {
+                format!("thread dispatch {dispatch_id} is still active (status={dispatch_status})")
+            }
+        }
+    }
+}
+
+pub(super) fn resolve_dispatch_tmux_protection(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_name_hint: Option<&str>,
+) -> Option<DispatchTmuxProtection> {
+    let db = db?;
+    let conn = db.separate_conn().ok()?;
+    resolve_dispatch_tmux_protection_from_conn(
+        &conn,
+        token_hash,
+        provider,
+        tmux_session_name,
+        channel_name_hint,
+    )
+}
+
+fn resolve_dispatch_tmux_protection_from_conn(
+    conn: &rusqlite::Connection,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_name_hint: Option<&str>,
+) -> Option<DispatchTmuxProtection> {
+    let parsed_channel_name = parse_provider_and_channel_from_tmux_name(tmux_session_name)
+        .and_then(|(parsed_provider, channel_name)| {
+            (parsed_provider == *provider).then_some(channel_name)
+        });
+    let thread_channel_id = channel_name_hint
+        .and_then(super::adk_session::parse_thread_channel_id_from_name)
+        .or_else(|| {
+            parsed_channel_name
+                .as_deref()
+                .and_then(super::adk_session::parse_thread_channel_id_from_name)
+        })
+        .map(|value| value.to_string());
+
+    let session_keys =
+        super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
+    if let Ok(protection) = conn.query_row(
+        "SELECT active_dispatch_id, status
+         FROM sessions
+         WHERE active_dispatch_id IS NOT NULL
+           AND (
+             session_key = ?1
+             OR session_key = ?2
+             OR (?3 IS NOT NULL AND thread_channel_id = ?3)
+           )
+         ORDER BY
+           CASE status
+             WHEN 'working' THEN 0
+             WHEN 'idle' THEN 1
+             WHEN 'disconnected' THEN 2
+             ELSE 3
+           END,
+           datetime(COALESCE(last_heartbeat, created_at)) DESC,
+           rowid DESC
+         LIMIT 1",
+        rusqlite::params![
+            session_keys[0].as_str(),
+            session_keys[1].as_str(),
+            thread_channel_id.as_deref(),
+        ],
+        |row| {
+            Ok(DispatchTmuxProtection::SessionRow {
+                dispatch_id: row.get::<_, String>(0)?,
+                session_status: row.get::<_, String>(1)?,
+            })
+        },
+    ) {
+        return Some(protection);
+    }
+
+    let thread_channel_id = thread_channel_id?;
+    conn.query_row(
+        "SELECT id, status
+         FROM task_dispatches
+         WHERE thread_id = ?1
+           AND status IN ('pending', 'dispatched')
+         ORDER BY
+           CASE status
+             WHEN 'dispatched' THEN 0
+             WHEN 'pending' THEN 1
+             ELSE 2
+           END,
+           datetime(created_at) DESC,
+           rowid DESC
+         LIMIT 1",
+        [thread_channel_id.as_str()],
+        |row| {
+            Ok(DispatchTmuxProtection::ThreadDispatch {
+                dispatch_id: row.get::<_, String>(0)?,
+                dispatch_status: row.get::<_, String>(1)?,
+            })
+        },
+    )
+    .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DispatchTmuxProtection, resolve_dispatch_tmux_protection_from_conn};
+    use crate::services::provider::ProviderKind;
+
+    fn sample_tmux_name() -> String {
+        ProviderKind::Codex.build_tmux_session_name("adk-cdx-t1485506232256168011")
+    }
+
+    #[test]
+    fn protects_session_rows_with_active_dispatch_even_when_idle() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                session_key TEXT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            ",
+        )
+        .unwrap();
+
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz", &provider, &tmux_name,
+        );
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+             VALUES (?1, 'idle', 'dispatch-495', datetime('now'), datetime('now'), '1485506232256168011')",
+            [session_key.as_str()],
+        )
+        .unwrap();
+
+        let protection = resolve_dispatch_tmux_protection_from_conn(
+            &conn,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some("adk-cdx-t1485506232256168011"),
+        );
+
+        assert_eq!(
+            protection,
+            Some(DispatchTmuxProtection::SessionRow {
+                dispatch_id: "dispatch-495".to_string(),
+                session_status: "idle".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn protects_thread_dispatches_when_session_row_is_missing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                session_key TEXT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            INSERT INTO task_dispatches (id, status, thread_id, created_at)
+            VALUES
+                ('dispatch-pending', 'pending', '1485506232256168011', '2026-04-14 01:00:00'),
+                ('dispatch-dispatched', 'dispatched', '1485506232256168011', '2026-04-14 01:01:00');
+            ",
+        )
+        .unwrap();
+
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        let protection = resolve_dispatch_tmux_protection_from_conn(
+            &conn, "tokenxyz", &provider, &tmux_name, None,
+        );
+
+        assert_eq!(
+            protection,
+            Some(DispatchTmuxProtection::ThreadDispatch {
+                dispatch_id: "dispatch-dispatched".to_string(),
+                dispatch_status: "dispatched".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_completed_dispatches_without_active_session_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                session_key TEXT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            INSERT INTO task_dispatches (id, status, thread_id, created_at)
+            VALUES ('dispatch-done', 'completed', '1485506232256168011', '2026-04-14 01:01:00');
+            ",
+        )
+        .unwrap();
+
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        let protection = resolve_dispatch_tmux_protection_from_conn(
+            &conn, "tokenxyz", &provider, &tmux_name, None,
+        );
+
+        assert_eq!(protection, None);
+    }
+
+    #[test]
+    fn shared_db_wrapper_preserves_dispatch_session_lookup() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz", &provider, &tmux_name,
+        );
+
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, provider, status, active_dispatch_id, thread_channel_id, created_at, last_heartbeat)
+                 VALUES (?1, ?2, 'idle', 'dispatch-db-wrapper', '1485506232256168011', datetime('now'), datetime('now'))",
+                rusqlite::params![session_key, provider.as_str()],
+            )
+            .unwrap();
+
+        let protection = super::resolve_dispatch_tmux_protection(
+            Some(&db),
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some("adk-cdx-t1485506232256168011"),
+        );
+
+        assert_eq!(
+            protection,
+            Some(DispatchTmuxProtection::SessionRow {
+                dispatch_id: "dispatch-db-wrapper".to_string(),
+                session_status: "idle".to_string(),
+            })
+        );
+    }
+}

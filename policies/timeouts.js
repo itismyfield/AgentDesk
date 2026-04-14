@@ -166,6 +166,31 @@ function findAgentByChannelValue(agents, channelValue) {
   return null;
 }
 
+function buildChannelTarget(rawChannel) {
+  var channel = normalizedText(rawChannel);
+  return channel ? ("channel:" + channel) : null;
+}
+
+function resolveAgentNotifyTarget(agent, provider) {
+  if (!agent) return null;
+  var normalizedProviderValue = normalizedText(provider);
+  var candidates = [];
+  if (normalizedProviderValue === "claude") {
+    candidates.push(agent.discord_channel_cc);
+  } else if (normalizedProviderValue === "codex") {
+    candidates.push(agent.discord_channel_cdx);
+  }
+  candidates.push(agent.discord_channel_id);
+  candidates.push(agent.discord_channel_alt);
+  candidates.push(agent.discord_channel_cc);
+  candidates.push(agent.discord_channel_cdx);
+  for (var i = 0; i < candidates.length; i++) {
+    var target = buildChannelTarget(candidates[i]);
+    if (target) return target;
+  }
+  return null;
+}
+
 function lookupDispatchTargetAgentId(dispatchId) {
   var target = normalizedText(dispatchId);
   if (!target) return null;
@@ -222,12 +247,16 @@ function resolveSessionAgentContext(sessionRow, agents) {
     sessionChannelName ||
     parseSessionTmuxName(sessionRow.session_key) ||
     "unknown-session";
+  var notifyTarget = resolvedAgent
+    ? resolveAgentNotifyTarget(resolvedAgent, sessionRow.provider)
+    : null;
 
   return {
     agent_id: resolvedAgentId,
     agent_label: resolvedLabel,
     thread_channel_id: threadChannelId,
-    session_channel_name: sessionChannelName
+    session_channel_name: sessionChannelName,
+    notify_target: notifyTarget
   };
 }
 
@@ -1469,19 +1498,7 @@ var timeouts = {
         );
 
         var agentContext = resolveSessionAgentContext(s, agents);
-        var primaryChannel = agentContext.agent_id ? agentdesk.agents.resolvePrimaryChannel(agentContext.agent_id) : null;
-        var notifyTarget = primaryChannel ? ("channel:" + primaryChannel) : getPMDChannel();
-        if (notifyTarget) {
-          sendNotifyAlert(
-            notifyTarget,
-            "💤 [Idle 세션 자동 종료] " + agentContext.agent_label + "\n" +
-            "agent_id: `" + (agentContext.agent_id || "unknown") + "`\n" +
-            "provider: `" + (s.provider || "unknown") + "`\n" +
-            "session_key: `" + s.session_key + "`\n" +
-            "idle: `" + idleMin + "분`\n" +
-            "원인: " + reasonLabel + " → tmux kill"
-          );
-        }
+        agentdesk.log.info("[timeouts] idle kill: " + (agentContext.agent_id || "unknown") + " idle=" + idleMin + "m reason=" + reasonLabel);
       }
     }
 

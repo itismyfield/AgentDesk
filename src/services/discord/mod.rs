@@ -29,6 +29,8 @@ pub(crate) mod shared_memory;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
+mod tmux_lifecycle;
+#[cfg(unix)]
 mod tmux_reaper;
 mod turn_bridge;
 

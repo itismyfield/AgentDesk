@@ -48,11 +48,12 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
             });
 
             if !has_owner {
+                let parsed_channel_name = parse_provider_and_channel_from_tmux_name(session_name)
+                    .as_ref()
+                    .map(|(_, ch_name)| ch_name.clone());
+
                 // #145: skip orphan cleanup for unified-thread sessions with active runs
-                if let Some((_, ref ch_name)) =
-                    parse_provider_and_channel_from_tmux_name(session_name)
-                        .as_ref()
-                        .map(|(p, c)| (p.clone(), c.clone()))
+                if let Some(ref ch_name) = parsed_channel_name
                     && crate::dispatch::is_unified_thread_channel_name_active(ch_name)
                 {
                     continue;
@@ -65,6 +66,22 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                 if tmux_session_has_live_pane(session_name) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}]   skipped orphan (live pane): {}", session_name);
+                    continue;
+                }
+
+                if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+                    shared.db.as_ref(),
+                    &shared.token_hash,
+                    &provider,
+                    session_name,
+                    parsed_channel_name.as_deref(),
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ♻ orphan cleanup: preserving dispatch session {} — {}",
+                        session_name,
+                        protection.log_reason()
+                    );
                     continue;
                 }
 
@@ -173,6 +190,22 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
 
         // If a watcher is attached, let it handle the cleanup
         if shared.tmux_watchers.contains_key(&channel_id) {
+            continue;
+        }
+
+        if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+            shared.db.as_ref(),
+            &shared.token_hash,
+            &provider,
+            session_name,
+            channel_name.as_deref(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ♻ reaper: preserving dispatch session {} — {}",
+                session_name,
+                protection.log_reason()
+            );
             continue;
         }
 
