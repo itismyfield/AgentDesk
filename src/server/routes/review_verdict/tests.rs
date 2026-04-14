@@ -974,7 +974,6 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
 
 #[tokio::test]
 async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_reviewer() {
-    let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
     let engine = test_engine(&db);
