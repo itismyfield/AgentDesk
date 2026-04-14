@@ -80,7 +80,7 @@ pub async fn execute_structured(
 ) -> Result<String, String> {
     let cancel_token = Arc::new(CancelToken::new());
     let cancel_for_timeout = Arc::clone(&cancel_token);
-    let handle = tokio::task::spawn_blocking(move || {
+    let mut handle = tokio::task::spawn_blocking(move || {
         let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
         let system_prompt_ref = system_prompt.as_deref();
         let allowed_tools_ref = (!allowed_tools.is_empty()).then_some(allowed_tools.as_slice());
@@ -152,9 +152,9 @@ pub async fn execute_structured(
         collect_stream_result(result, receiver)
     });
 
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), handle).await {
-        Ok(joined) => joined.map_err(|err| format!("Task join error: {err}"))?,
-        Err(_) => {
+    tokio::select! {
+        joined = &mut handle => joined.map_err(|err| format!("Task join error: {err}"))?,
+        _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
             cancel_for_timeout.cancel_with_tmux_cleanup();
             if let Some(pid) = cancel_for_timeout
                 .child_pid
@@ -163,6 +163,9 @@ pub async fn execute_structured(
                 .and_then(|guard| *guard)
             {
                 kill_pid_tree(pid);
+            }
+            if tokio::time::timeout(Duration::from_secs(3), &mut handle).await.is_err() {
+                handle.abort();
             }
             Err(format!("{stage_label} timeout after {timeout_secs}s"))
         }
@@ -293,6 +296,59 @@ mod tests {
             assert!(
                 wait_for_pid_to_exit(pid.trim(), Duration::from_secs(5)),
                 "timed out process should be terminated after timeout"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_structured_timeout_kills_timed_out_codex_process() {
+        let _env_guard = crate::services::discord::runtime_store::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let fake_codex = temp.path().join("fake-codex");
+        let pid_file = temp.path().join("fake-codex-structured.pid");
+        let previous_codex_path = std::env::var_os("AGENTDESK_CODEX_PATH");
+        let previous_pid_file = std::env::var_os("AGENTDESK_TEST_PID_FILE");
+
+        write_executable(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$AGENTDESK_TEST_PID_FILE\"\nwhile :; do :; done\n",
+        );
+
+        unsafe {
+            std::env::set_var("AGENTDESK_CODEX_PATH", &fake_codex);
+            std::env::set_var("AGENTDESK_TEST_PID_FILE", &pid_file);
+        }
+
+        let result = execute_structured(
+            ProviderKind::Codex,
+            "pick a meeting participant".to_string(),
+            temp.path().display().to_string(),
+            None,
+            Vec::new(),
+            None,
+            1,
+            "structured participant selection",
+        )
+        .await;
+
+        match previous_codex_path {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_CODEX_PATH", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_CODEX_PATH") },
+        }
+        match previous_pid_file {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_TEST_PID_FILE", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_TEST_PID_FILE") },
+        }
+
+        let error = result.expect_err("expected timeout");
+        assert!(error.contains("structured participant selection timeout"));
+
+        if wait_for_file(&pid_file, Duration::from_secs(2)) {
+            let pid = fs::read_to_string(&pid_file).expect("fake codex pid file");
+            assert!(
+                wait_for_pid_to_exit(pid.trim(), Duration::from_secs(5)),
+                "timed out structured process should be terminated after timeout"
             );
         }
     }

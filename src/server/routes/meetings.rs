@@ -1153,10 +1153,13 @@ pub async fn start_meeting(
             StatusCode::OK,
             Json(json!({"ok": true, "message": "Meeting start scheduled"})),
         ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": error})),
-        ),
+        Err(error) => {
+            let error_message = normalize_direct_start_error(&error);
+            (
+                direct_start_error_status(&error_message),
+                Json(json!({"ok": false, "error": error_message})),
+            )
+        }
     }
 }
 
@@ -1477,6 +1480,35 @@ fn validate_reviewer_provider(
         return Err("reviewer_provider must differ from primary_provider".to_string());
     }
     Ok(())
+}
+
+fn normalize_direct_start_error(error: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(error)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn direct_start_error_status(error: &str) -> StatusCode {
+    if error.contains("이미 회의가 진행 중")
+        || error.to_ascii_lowercase().contains("already in progress")
+    {
+        return StatusCode::CONFLICT;
+    }
+
+    if error.contains("Too many fixed participants")
+        || error.contains("Unknown fixed meeting participant role_id")
+        || error.contains("reviewer_provider must differ")
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKind>) -> String {
@@ -1923,6 +1955,35 @@ mod tests {
         assert_eq!(
             body.0["error"],
             "channel_id is not a registered meeting channel"
+        );
+    }
+
+    #[test]
+    fn normalize_direct_start_error_extracts_embedded_json_message() {
+        let raw = r#"{"ok":false,"error":"provider runtime not registered: codex"}"#;
+        assert_eq!(
+            normalize_direct_start_error(raw),
+            "provider runtime not registered: codex"
+        );
+    }
+
+    #[test]
+    fn direct_start_error_status_maps_known_validation_and_conflict_errors() {
+        assert_eq!(
+            direct_start_error_status("이 채널에서 이미 회의가 진행 중이야."),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            direct_start_error_status("Too many fixed participants: 6 (max 5)"),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            direct_start_error_status("Unknown fixed meeting participant role_id: role-123"),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            direct_start_error_status("provider runtime not registered: codex"),
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 
