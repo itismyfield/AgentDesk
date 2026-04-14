@@ -125,8 +125,12 @@ jobs:
   scripts:
     name: Script checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && format('refs/heads/{0}', github.head_ref) || github.ref }}
 
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
@@ -183,4 +187,24 @@ jobs:
           exit $FAIL
 
       - name: Generated docs and architecture drift check
+        id: generated_docs_drift
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: python3 scripts/generate_inventory_docs.py --check
+
+      - name: Regenerate generated docs for same-repo PRs
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'github-actions[bot]' && steps.generated_docs_drift.outcome == 'failure'
+        run: python3 scripts/generate_inventory_docs.py
+
+      - name: Commit regenerated docs back to PR branch
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'github-actions[bot]' && steps.generated_docs_drift.outcome == 'failure'
+        run: |
+          if git diff --quiet --exit-code -- ARCHITECTURE.md docs/generated; then
+            echo "ERROR: docs drift was detected, but regenerate produced no tracked changes"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ARCHITECTURE.md docs/generated
+          git commit -m "chore(ci): regenerate generated docs for #${{ github.event.pull_request.number }}"
+          git push origin HEAD:${{ github.head_ref }}
