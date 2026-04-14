@@ -2,6 +2,7 @@ use super::{
     discord_delivery::{discord_api_base_url, discord_api_url},
     thread_reuse::clear_all_threads,
 };
+use rusqlite::OptionalExtension;
 use std::process::Command;
 
 #[derive(Clone, Debug)]
@@ -121,6 +122,23 @@ const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 /// Maximum number of retries before marking as permanent failure.
 const MAX_RETRY_COUNT: i32 = 4;
 
+fn dispatch_notify_delivery_suppressed(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> rusqlite::Result<bool> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(
+        status.as_deref(),
+        Some("completed") | Some("failed") | Some("cancelled")
+    ))
+}
+
 /// Process one batch of pending outbox entries.
 /// Returns the number of entries processed (0 if queue was empty).
 ///
@@ -175,6 +193,24 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
 
     let count = pending.len();
     for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
+        if action == "notify" {
+            let suppress_delivery = if let Ok(conn) = db.lock() {
+                dispatch_notify_delivery_suppressed(&conn, &dispatch_id).unwrap_or(false)
+            } else {
+                false
+            };
+            if suppress_delivery {
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now'), error = NULL WHERE id = ?1",
+                        [id],
+                    )
+                    .ok();
+                }
+                continue;
+            }
+        }
+
         // Mark as processing
         if let Ok(conn) = db.lock() {
             conn.execute(
@@ -1051,19 +1087,8 @@ pub(super) fn prefix_dispatch_message(dispatch_type: &str, message: &str) -> Str
 /// Replaces `tokio::spawn(handle_completed_dispatch_followups(...))`.
 pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
     if let Ok(conn) = db.separate_conn() {
-        // Dedup: skip if a followup entry already exists for this dispatch
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'followup'",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if exists {
-            return;
-        }
         conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
+            "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
             [dispatch_id],
         )
         .ok();

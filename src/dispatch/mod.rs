@@ -1413,21 +1413,26 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
     card_id: &str,
     title: &str,
 ) -> rusqlite::Result<bool> {
-    let exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-        [dispatch_id],
-        |row| row.get(0),
-    )?;
-    if exists {
+    let dispatch_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(
+        dispatch_status.as_deref(),
+        Some("completed") | Some("failed") | Some("cancelled")
+    ) {
         return Ok(false);
     }
 
-    conn.execute(
-        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
          VALUES (?1, 'notify', ?2, ?3, ?4)",
         rusqlite::params![dispatch_id, agent_id, card_id, title],
     )?;
-    Ok(true)
+    Ok(inserted > 0)
 }
 
 /// Ensure a pending status-reaction outbox row exists for a dispatch.
@@ -2874,6 +2879,41 @@ mod tests {
             count_notify_outbox(&conn, "dispatch-core-id-skip"),
             0,
             "skip_outbox must suppress notify outbox insertion inside the transaction"
+        );
+    }
+
+    #[test]
+    fn ensure_dispatch_notify_outbox_skips_completed_dispatch() {
+        let db = test_db();
+        seed_card(&db, "card-completed-notify", "done");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at, completed_at)
+                 VALUES ('dispatch-completed-notify', 'card-completed-notify', 'agent-1', 'review', 'completed', 'Completed review', datetime('now'), datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = db.separate_conn().unwrap();
+        let inserted = ensure_dispatch_notify_outbox_on_conn(
+            &conn,
+            "dispatch-completed-notify",
+            "agent-1",
+            "card-completed-notify",
+            "Completed review",
+        )
+        .unwrap();
+
+        assert!(
+            !inserted,
+            "completed dispatches must not enqueue new notify outbox rows"
+        );
+        assert_eq!(
+            count_notify_outbox(&conn, "dispatch-completed-notify"),
+            0,
+            "completed dispatches must not retain notify outbox rows"
         );
     }
 

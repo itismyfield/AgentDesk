@@ -649,6 +649,23 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    // #626: One-shot outbox actions must not duplicate for the same dispatch.
+    // Keep the earliest row so pending retries/history remain stable, then enforce
+    // the invariant at the DB layer to close cross-connection race windows.
+    conn.execute_batch(
+        "DELETE FROM dispatch_outbox
+         WHERE action IN ('notify', 'followup')
+           AND id NOT IN (
+               SELECT MIN(id)
+               FROM dispatch_outbox
+               WHERE action IN ('notify', 'followup')
+               GROUP BY dispatch_id, action
+           );
+         CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatch_outbox_one_shot_action
+             ON dispatch_outbox(dispatch_id, action)
+             WHERE action IN ('notify', 'followup');",
+    )?;
+
     // #212: Session termination audit trail
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_termination_events (
