@@ -160,6 +160,7 @@ export default function PipelineVisualEditor({
   const [success, setSuccess] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [compactGraph, setCompactGraph] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
 
   useEffect(() => {
     const updateLayoutMode = () => {
@@ -795,8 +796,12 @@ export default function PipelineVisualEditor({
         backgroundColor: "var(--th-bg-surface)",
       }}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 text-left"
+      >
+        <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
               {tr("비주얼 파이프라인 에디터", "Visual Pipeline Editor")}
@@ -826,6 +831,19 @@ export default function PipelineVisualEditor({
               </span>
             )}
           </div>
+        </div>
+        <span
+          className="shrink-0 text-lg transition-transform"
+          style={{ color: "var(--th-text-muted)", transform: collapsed ? "rotate(0deg)" : "rotate(180deg)" }}
+        >
+          ▼
+        </span>
+      </button>
+
+      {!collapsed && (
+      <>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-2">
           <p className="text-xs" style={MUTED_TEXT_STYLE}>
             {tr(
               "노드는 상태, 화살표는 전환입니다. 노드/전환을 눌러 우측 속성을 수정하고, 하단에서 스테이지를 함께 편집합니다.",
@@ -1051,33 +1069,75 @@ export default function PipelineVisualEditor({
                           onClick={() => setSelection({ kind: "transition", index: edge.index })}
                           className="cursor-pointer"
                         />
-                        <g
-                          transform={`translate(${edge.labelX}, ${edge.labelY})`}
-                          onClick={() => setSelection({ kind: "transition", index: edge.index })}
-                          className="cursor-pointer"
-                        >
-                          <rect
-                            x={-48}
-                            y={-13}
-                            width={96}
-                            height={26}
-                            rx={13}
-                            fill={isSelected ? "rgba(15,23,42,0.92)" : "rgba(15,23,42,0.82)"}
-                            stroke={accent.stroke}
-                            strokeOpacity={isSelected ? 1 : 0.55}
-                          />
-                          <text
-                            x="0"
-                            y="4"
-                            textAnchor="middle"
-                            fontSize="11"
-                            fontWeight="600"
-                            fill={accent.text}
-                          >
-                            {edge.type}
-                            {edge.gates.length > 0 ? ` · ${edge.gates.length}` : ""}
-                          </text>
-                        </g>
+                        {(() => {
+                          const typeLabel = edge.type === "free"
+                            ? tr("자동", "auto")
+                            : edge.type === "gated"
+                              ? edge.gates.length > 0 ? tr(`조건${edge.gates.length}`, `cond${edge.gates.length}`) : tr("조건부", "cond")
+                              : String(edge.type);
+                          const label = typeLabel;
+                          if (edge.labelRotated) {
+                            const labelLen = Math.max(44, label.length * 7 + 14);
+                            return (
+                              <g
+                                transform={`translate(${edge.labelX}, ${edge.labelY}) rotate(-90)`}
+                                onClick={() => setSelection({ kind: "transition", index: edge.index })}
+                                className="cursor-pointer"
+                              >
+                                <rect
+                                  x={-labelLen / 2}
+                                  y={-11}
+                                  width={labelLen}
+                                  height={22}
+                                  rx={11}
+                                  fill={isSelected ? "rgba(15,23,42,0.96)" : "rgba(15,23,42,0.92)"}
+                                  stroke={accent.stroke}
+                                  strokeOpacity={isSelected ? 1 : 0.5}
+                                  strokeWidth={1.5}
+                                />
+                                <text
+                                  x="0"
+                                  y="4"
+                                  textAnchor="middle"
+                                  fontSize="10"
+                                  fontWeight="700"
+                                  fill={accent.text}
+                                >
+                                  {label}
+                                </text>
+                              </g>
+                            );
+                          }
+                          const labelWidth = Math.max(48, label.length * 7 + 16);
+                          return (
+                            <g
+                              transform={`translate(${edge.labelX}, ${edge.labelY})`}
+                              onClick={() => setSelection({ kind: "transition", index: edge.index })}
+                              className="cursor-pointer"
+                            >
+                              <rect
+                                x={-labelWidth / 2}
+                                y={-11}
+                                width={labelWidth}
+                                height={22}
+                                rx={11}
+                                fill={isSelected ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.88)"}
+                                stroke={accent.stroke}
+                                strokeOpacity={isSelected ? 1 : 0.55}
+                              />
+                              <text
+                                x="0"
+                                y="4"
+                                textAnchor="middle"
+                                fontSize="10"
+                                fontWeight="600"
+                                fill={accent.text}
+                              >
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
                       </g>
                     );
                   })}
@@ -1102,24 +1162,24 @@ export default function PipelineVisualEditor({
                           strokeWidth={isSelected ? 2.5 : 1.5}
                         />
                         <text
-                          x="14"
-                          y="24"
-                          fontSize="11"
+                          x="12"
+                          y={compactGraph ? 20 : 24}
+                          fontSize={compactGraph ? 10 : 11}
                           fontFamily="ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
                           fill={isSelected ? "#e9d5ff" : "#cbd5f5"}
                         >
                           {node.id}
                         </text>
                         <text
-                          x="14"
-                          y="45"
-                          fontSize="14"
+                          x="12"
+                          y={compactGraph ? 38 : 45}
+                          fontSize={compactGraph ? 13 : 14}
                           fontWeight="700"
                           fill={node.terminal ? "#86efac" : "#f8fafc"}
                         >
                           {node.label}
                         </text>
-                        <text x="14" y="66" fontSize="11" fill="#94a3b8">
+                        <text x="12" y={compactGraph ? 54 : 66} fontSize={compactGraph ? 9 : 11} fill="#94a3b8">
                           {[
                             node.hookCount > 0 ? `${node.hookCount}h` : null,
                             node.hasClock ? "clock" : null,
@@ -2019,6 +2079,8 @@ export default function PipelineVisualEditor({
             )}
           </div>
         </>
+      )}
+      </>
       )}
     </section>
   );

@@ -142,8 +142,8 @@ export default function DashboardPageView({
 
   return (
     <div
-      className="mx-auto h-full max-w-6xl min-w-0 space-y-5 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className="mx-auto h-full w-full max-w-6xl min-w-0 space-y-5 overflow-y-auto p-4 pb-40 sm:p-6"
+      style={{ overflowX: "clip", paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" } as React.CSSProperties}
     >
       <DashboardHeroHeader
         companyName={settings.companyName}
