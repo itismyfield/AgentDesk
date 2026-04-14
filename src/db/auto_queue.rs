@@ -1020,6 +1020,8 @@ pub fn slot_has_active_dispatch_excluding(
          WHERE to_agent_id = ?1
            AND status IN ('pending', 'dispatched')
            AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2
+           AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
+           AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL
            AND id != ?3",
         rusqlite::params![agent_id, slot_index, exclude_id],
         |row| row.get(0),
@@ -1455,6 +1457,12 @@ mod tests {
                 content TEXT,
                 bot TEXT,
                 source TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                to_agent_id TEXT,
+                status TEXT,
+                context TEXT
             );",
         )
         .expect("schema");
@@ -1731,5 +1739,51 @@ mod tests {
             error,
             EntryStatusUpdateError::InvalidTransition { .. }
         ));
+    }
+
+    #[test]
+    fn slot_has_active_dispatch_ignores_sidecar_dispatches() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES (?1, ?2, 'dispatched', ?3)",
+            rusqlite::params![
+                "dispatch-sidecar",
+                "agent-1",
+                serde_json::json!({
+                    "slot_index": 0,
+                    "sidecar_dispatch": true,
+                    "phase_gate": {
+                        "run_id": "run-1",
+                    }
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed sidecar dispatch");
+
+        assert!(
+            !super::slot_has_active_dispatch(&conn, "agent-1", 0),
+            "sidecar phase-gate dispatches must not keep a slot occupied"
+        );
+
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES (?1, ?2, 'dispatched', ?3)",
+            rusqlite::params![
+                "dispatch-primary",
+                "agent-1",
+                serde_json::json!({
+                    "slot_index": 0
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed primary dispatch");
+
+        assert!(
+            super::slot_has_active_dispatch(&conn, "agent-1", 0),
+            "primary dispatches must still block slot reuse"
+        );
     }
 }

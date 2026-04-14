@@ -414,6 +414,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 .entry(channel_id)
                                 .or_insert_with(|| DiscordSession {
                                     session_id: None,
+                                    assistant_turns: 0,
                                     memento_context_loaded: false,
                                     memento_reflected: false,
                                     current_path: None,
@@ -1917,6 +1918,7 @@ pub(super) async fn handle_text_command(
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
                         session_id: None,
+                        assistant_turns: 0,
                         memento_context_loaded: false,
                         memento_reflected: false,
                         current_path: None,
@@ -2981,6 +2983,7 @@ mod tests {
     ) -> DiscordSession {
         DiscordSession {
             session_id: None,
+            assistant_turns: 0,
             memento_context_loaded: false,
             memento_reflected: false,
             current_path,
