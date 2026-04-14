@@ -284,7 +284,9 @@ impl MementoBackend {
                 .map_err(|err| format!("memento {tool_name} response read failed: {err}"))?;
 
             if !status.is_success() {
-                if attempt == 0 && is_session_error(&text) {
+                if attempt == 0
+                    && (status == reqwest::StatusCode::UNAUTHORIZED || is_session_error(&text))
+                {
                     self.clear_session_id(&config.endpoint);
                     session_id = self.initialize_session(config).await?;
                     continue;
@@ -489,6 +491,8 @@ fn is_session_error(message: &str) -> bool {
     message.contains("session required")
         || message.contains("session not found")
         || message.contains("session expired")
+        || message.contains("unauthorized")
+        || message.contains("401")
 }
 
 fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<ToolCallResult, String> {
@@ -1719,6 +1723,105 @@ mod tests {
             crate::services::memory::TokenUsage {
                 input_tokens: 8,
                 output_tokens: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memento_tool_feedback_reinitializes_after_unauthorized_response() {
+        let feedback_content = serde_json::to_string(&json!({
+            "success": true,
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 1
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": feedback_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-initial")],
+                body: initialize_response.clone(),
+            },
+            MockHttpResponse {
+                status_line: "401 Unauthorized",
+                headers: vec![("MCP-Session-Id", "session-initial")],
+                body: "Unauthorized".to_string(),
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-retry")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-retry")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
+        let backend = MementoBackend::new(memento_settings());
+
+        let usage = backend
+            .tool_feedback(MementoToolFeedbackRequest {
+                tool_name: "recall".to_string(),
+                relevant: true,
+                sufficient: true,
+                session_id: Some("session-keep".to_string()),
+                search_event_id: Some("search-1".to_string()),
+                fragment_ids: vec!["frag-1".to_string()],
+                suggestion: None,
+                context: None,
+                trigger_type: Some("automatic".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests[1]
+                .to_lowercase()
+                .contains("mcp-session-id: session-initial")
+        );
+        assert!(
+            requests[3]
+                .to_lowercase()
+                .contains("mcp-session-id: session-retry")
+        );
+        assert!(requests[3].contains("\"sessionId\":\"session-keep\""));
+        assert_eq!(
+            usage,
+            crate::services::memory::TokenUsage {
+                input_tokens: 5,
+                output_tokens: 1,
             }
         );
     }

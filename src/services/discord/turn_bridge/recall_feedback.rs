@@ -9,6 +9,7 @@ use crate::services::memory::{MementoBackend, MementoToolFeedbackRequest, TokenU
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingRecallFeedback {
+    pub session_id: Option<String>,
     pub search_event_id: Option<String>,
     pub fragment_ids: Vec<String>,
     pub relevant: bool,
@@ -16,12 +17,14 @@ pub(super) struct PendingRecallFeedback {
 }
 
 impl PendingRecallFeedback {
-    fn into_request(self, session_id: Option<&str>) -> MementoToolFeedbackRequest {
+    fn into_request(self, session_id_fallback: Option<&str>) -> MementoToolFeedbackRequest {
         MementoToolFeedbackRequest {
             tool_name: "recall".to_string(),
             relevant: self.relevant,
             sufficient: self.sufficient,
-            session_id: normalized_opt(session_id),
+            session_id: self
+                .session_id
+                .or_else(|| normalized_opt(session_id_fallback)),
             search_event_id: self.search_event_id,
             fragment_ids: self.fragment_ids,
             suggestion: None,
@@ -77,6 +80,7 @@ struct CompletedMementoToolCall {
 #[derive(Debug, Clone)]
 struct RecallObservation {
     completed_at: usize,
+    session_id: Option<String>,
     search_event_id: Option<String>,
     fragment_ids: Vec<String>,
 }
@@ -123,6 +127,7 @@ pub(super) fn analyze_recall_feedback_turn(
         .enumerate()
         .filter(|(index, _)| !matched_recalls[*index])
         .map(|(index, recall)| PendingRecallFeedback {
+            session_id: recall.session_id.clone(),
             search_event_id: recall.search_event_id.clone(),
             fragment_ids: recall.fragment_ids.clone(),
             relevant: recall_is_relevant(events, recall),
@@ -219,9 +224,11 @@ fn completed_memento_tool_calls(
 }
 
 fn parse_recall_observation(call: &CompletedMementoToolCall) -> RecallObservation {
+    let input = serde_json::from_str::<Value>(&call.input).unwrap_or(Value::Null);
     let payload = serde_json::from_str::<Value>(&call.output).unwrap_or(Value::Null);
     RecallObservation {
         completed_at: call.completed_at,
+        session_id: string_field(&input, &["session_id", "sessionId"]),
         search_event_id: string_field(
             &payload,
             &["_searchEventId", "searchEventId", "search_event_id"],
@@ -488,12 +495,14 @@ mod tests {
             analysis.pending_feedbacks,
             vec![
                 PendingRecallFeedback {
+                    session_id: None,
                     search_event_id: Some("search-1".to_string()),
                     fragment_ids: vec!["frag-1".to_string()],
                     relevant: true,
                     sufficient: false,
                 },
                 PendingRecallFeedback {
+                    session_id: None,
                     search_event_id: Some("search-2".to_string()),
                     fragment_ids: vec!["frag-2".to_string()],
                     relevant: false,
@@ -528,6 +537,7 @@ mod tests {
         assert_eq!(
             analysis.pending_feedbacks,
             vec![PendingRecallFeedback {
+                session_id: None,
                 search_event_id: Some("search-1".to_string()),
                 fragment_ids: vec!["frag-1".to_string()],
                 relevant: true,
@@ -611,6 +621,38 @@ mod tests {
         assert_eq!(
             analysis.pending_feedbacks[0].search_event_id.as_deref(),
             Some("search-1")
+        );
+    }
+
+    #[test]
+    fn analyze_turn_preserves_recall_session_id_for_auto_feedback() {
+        let events = vec![
+            tool_use("recall", json!({"query":"foo", "sessionId":"session-keep"})),
+            tool_result(
+                "recall",
+                json!({
+                    "success": true,
+                    "_searchEventId": "search-1",
+                    "fragments": [{"id": "frag-1"}]
+                }),
+            ),
+            assistant("frag-1을 사용한 답변"),
+        ];
+
+        let analysis = analyze_recall_feedback_turn(&events);
+
+        assert_eq!(analysis.pending_feedbacks.len(), 1);
+        assert_eq!(
+            analysis.pending_feedbacks[0].session_id.as_deref(),
+            Some("session-keep")
+        );
+        assert_eq!(
+            analysis.pending_feedbacks[0]
+                .clone()
+                .into_request(Some("session-fallback"))
+                .session_id
+                .as_deref(),
+            Some("session-keep")
         );
     }
 }
