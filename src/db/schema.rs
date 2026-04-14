@@ -927,6 +927,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
     )?;
     ensure_auto_queue_column(
         conn,
+        "auto_queue_runs",
+        "deploy_phases",
+        "ALTER TABLE auto_queue_runs ADD COLUMN deploy_phases TEXT;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
         "auto_queue_entries",
         "dispatch_id",
         "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",

@@ -840,7 +840,22 @@ function countDistinctBatchPhases(runId) {
   return (rows.length > 0) ? (rows[0].cnt || 0) : 0;
 }
 
+function _isDeployPhase(runId, phase) {
+  var rows = agentdesk.db.query(
+    "SELECT deploy_phases FROM auto_queue_runs WHERE id = ?",
+    [runId]
+  );
+  if (rows.length === 0 || !rows[0].deploy_phases) return false;
+  try {
+    var phases = JSON.parse(rows[0].deploy_phases);
+    return Array.isArray(phases) && phases.indexOf(phase) >= 0;
+  } catch (e) {
+    return false;
+  }
+}
+
 function _phaseGateRequired(runId, phase) {
+  if (_isDeployPhase(runId, phase)) return true;
   return countDistinctBatchPhases(runId) > 1;
 }
 
@@ -1037,7 +1052,68 @@ function _phaseGateTitle(group, phase, runId) {
   return "[" + group.dispatch_type + " P" + phase + "] " + issueLabel;
 }
 
+function _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCardId) {
+  pauseRun(runId);
+
+  var state = {
+    run_id: runId,
+    batch_phase: phase,
+    next_phase: nextPhase,
+    final_phase: !!finalPhase,
+    anchor_card_id: anchorCardId,
+    status: "pending",
+    dispatch_ids: [],
+    gates: [],
+    created_at: new Date().toISOString()
+  };
+
+  autoQueueLog("info", "Deploy gate: starting build + deploy for phase " + phase, {
+    run_id: runId,
+    card_id: anchorCardId,
+    batch_phase: phase
+  });
+
+  var deployResult;
+  try {
+    deployResult = agentdesk.deploy();
+    if (typeof deployResult === "string") {
+      try { deployResult = JSON.parse(deployResult); } catch (e) { deployResult = { ok: false, error: deployResult }; }
+    }
+  } catch (e) {
+    deployResult = { ok: false, error: String(e) };
+  }
+
+  if (deployResult && deployResult.ok) {
+    autoQueueLog("info", "Deploy gate passed for phase " + phase + ": " + (deployResult.summary || "deploy succeeded"), {
+      run_id: runId,
+      card_id: anchorCardId,
+      batch_phase: phase
+    });
+    if (finalPhase) {
+      completeRunAndNotify(runId);
+    } else {
+      resumeRunAndActivate(runId, nextPhase);
+    }
+    return state;
+  }
+
+  state.status = "failed";
+  state.failed_reason = (deployResult && deployResult.error) || "deploy failed";
+  savePhaseGateState(runId, phase, state);
+  notifyPMD(anchorCardId, "[deploy-gate] phase " + phase + " deploy failed: " + state.failed_reason);
+  autoQueueLog("warn", "Deploy gate failed for phase " + phase + ": " + state.failed_reason, {
+    run_id: runId,
+    card_id: anchorCardId,
+    batch_phase: phase
+  });
+  return state;
+}
+
 function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorCardId) {
+  if (_isDeployPhase(runId, phase)) {
+    return _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCardId);
+  }
+
   var existing = loadPhaseGateState(runId, phase);
   if (existing) {
     pauseRun(runId);

@@ -9,6 +9,7 @@ mod auto_queue_ops;
 mod cards_ops;
 mod config_ops;
 mod db_ops;
+mod deploy_ops;
 mod dispatch_ops;
 mod dm_reply_ops;
 mod exec_ops;
@@ -109,6 +110,7 @@ pub fn register_globals_with_supervisor(
 
     // ── agentdesk.exec ──────────────────────────────────────────
     exec_ops::register_exec_ops(ctx)?;
+    deploy_ops::register_deploy_ops(ctx)?;
 
     // ── agentdesk.pipeline ────────────────────────────────────────
     pipeline_ops::register_pipeline_ops(ctx, db_for_pipeline)?;

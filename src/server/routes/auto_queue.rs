@@ -95,6 +95,7 @@ pub struct DispatchBody {
     pub activate: Option<bool>,
     pub auto_assign_agent: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
+    pub deploy_phases: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3496,6 +3497,18 @@ pub async fn dispatch(
             );
         }
     };
+
+    if let Some(ref deploy_phases) = body.deploy_phases {
+        if !deploy_phases.is_empty() {
+            if let Ok(json_str) = serde_json::to_string(deploy_phases) {
+                let _ = conn.execute(
+                    "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
+                    rusqlite::params![json_str, run_id],
+                );
+            }
+        }
+    }
+
     let mut rank_per_group = HashMap::<i64, i64>::new();
     for entry in &requested_entries {
         let thread_group = entry.thread_group.unwrap_or(0);
