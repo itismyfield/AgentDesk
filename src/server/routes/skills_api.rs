@@ -7,12 +7,15 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
-use super::AppState;
+use super::{
+    AppState,
+    skill_usage_analytics::{SkillUsageRecord, collect_skill_usage},
+};
 
 fn skill_description_from_markdown(content: &str) -> String {
     content
@@ -41,7 +44,7 @@ fn codex_skill_file(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn sync_skills_from_disk(conn: &rusqlite::Connection) {
+pub(super) fn sync_skills_from_disk(conn: &rusqlite::Connection) {
     let mut roots = Vec::new();
     if let Some(runtime_root) = crate::config::runtime_root() {
         let _ = crate::runtime_layout::sync_managed_skills(&runtime_root);
@@ -117,6 +120,74 @@ fn sync_skills_from_disk(conn: &rusqlite::Connection) {
     }
 }
 
+#[derive(Default)]
+struct UsageAggregate {
+    calls: i64,
+    last_used_at: Option<i64>,
+}
+
+#[derive(Default)]
+struct ByAgentAggregate {
+    agent_name: String,
+    calls: i64,
+    last_used_at: Option<i64>,
+}
+
+fn ranking_days(window: &str) -> Option<i64> {
+    match window {
+        "30d" => Some(30),
+        "90d" => Some(90),
+        "all" => None,
+        _ => Some(7),
+    }
+}
+
+fn load_skill_metadata(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<HashMap<String, (String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,
+                COALESCE(name, id) AS skill_name,
+                COALESCE(description, name, id) AS skill_desc
+         FROM skills",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut metadata = HashMap::new();
+    for row in rows {
+        let (skill_id, skill_name, skill_desc) = row?;
+        metadata.insert(skill_id, (skill_name, skill_desc));
+    }
+
+    Ok(metadata)
+}
+
+fn apply_usage(aggregate: &mut UsageAggregate, used_at_ms: i64) {
+    aggregate.calls += 1;
+    aggregate.last_used_at = Some(
+        aggregate
+            .last_used_at
+            .map_or(used_at_ms, |last_used_at| last_used_at.max(used_at_ms)),
+    );
+}
+
+fn aggregate_overall_usage(records: &[SkillUsageRecord]) -> HashMap<String, UsageAggregate> {
+    let mut totals = HashMap::new();
+    for record in records {
+        apply_usage(
+            totals.entry(record.skill_id.clone()).or_default(),
+            record.used_at_ms,
+        );
+    }
+    totals
+}
+
 /// GET /api/skills/catalog
 pub async fn catalog(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.lock() {
@@ -129,49 +200,72 @@ pub async fn catalog(State(state): State<AppState>) -> (StatusCode, Json<serde_j
         }
     };
     sync_skills_from_disk(&conn);
-
-    let mut stmt = match conn.prepare(
-        "SELECT s.name,
-                COALESCE(s.description, s.name, '') AS description,
-                COALESCE(s.description, s.name, '') AS description_ko,
-                COALESCE(u.total_calls, 0) AS total_calls,
-                CASE
-                    WHEN u.last_used_at IS NULL THEN NULL
-                    ELSE CAST(strftime('%s', u.last_used_at) AS INTEGER) * 1000
-                END AS last_used_at
-         FROM skills s
-         LEFT JOIN (
-            SELECT skill_id, COUNT(*) AS total_calls, MAX(used_at) AS last_used_at
-            FROM skill_usage
-            GROUP BY skill_id
-         ) u ON u.skill_id = s.id
-         ORDER BY total_calls DESC, s.name ASC",
-    ) {
-        Ok(s) => s,
+    let metadata = match load_skill_metadata(&conn) {
+        Ok(data) => data,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query prepare failed: {e}")})),
+                Json(json!({"error": format!("metadata query failed: {e}")})),
             );
         }
     };
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(json!({
-                "name": row.get::<_, String>(0)?,
-                "description": row.get::<_, String>(1)?,
-                "description_ko": row.get::<_, String>(2)?,
-                "total_calls": row.get::<_, i64>(3)?,
-                "last_used_at": row.get::<_, Option<i64>>(4)?,
-            }))
-        })
-        .ok();
-
-    let catalog = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-        None => Vec::new(),
+    let usage = match collect_skill_usage(&conn, None) {
+        Ok(data) => data,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("usage query failed: {e}")})),
+            );
+        }
     };
+    let totals = aggregate_overall_usage(&usage);
+    let known_ids: HashSet<String> = metadata.keys().cloned().collect();
+
+    let mut catalog = metadata
+        .into_iter()
+        .map(|(skill_id, (name, description))| {
+            let aggregate = totals.get(&skill_id);
+            json!({
+                "name": name,
+                "description": description,
+                "description_ko": description,
+                "total_calls": aggregate.map_or(0, |item| item.calls),
+                "last_used_at": aggregate.and_then(|item| item.last_used_at),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (skill_id, aggregate) in totals {
+        if known_ids.contains(&skill_id) {
+            continue;
+        }
+        catalog.push(json!({
+            "name": skill_id,
+            "description": skill_id,
+            "description_ko": skill_id,
+            "total_calls": aggregate.calls,
+            "last_used_at": aggregate.last_used_at,
+        }));
+    }
+
+    catalog.sort_by(|left, right| {
+        let left_calls = left["total_calls"].as_i64().unwrap_or(0);
+        let right_calls = right["total_calls"].as_i64().unwrap_or(0);
+        right_calls
+            .cmp(&left_calls)
+            .then_with(|| {
+                right["last_used_at"]
+                    .as_i64()
+                    .unwrap_or_default()
+                    .cmp(&left["last_used_at"].as_i64().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["name"].as_str().unwrap_or_default())
+            })
+    });
 
     (StatusCode::OK, Json(json!({ "catalog": catalog })))
 }
@@ -200,107 +294,130 @@ pub async fn ranking(
 
     let window = params.window.as_deref().unwrap_or("7d");
     let limit = params.limit.unwrap_or(20);
-
-    let date_filter = match window {
-        "30d" => "AND su.used_at > datetime('now', '-30 days')",
-        "90d" => "AND su.used_at > datetime('now', '-90 days')",
-        "all" => "",
-        _ => "AND su.used_at > datetime('now', '-7 days')", // default 7d
+    let metadata = match load_skill_metadata(&conn) {
+        Ok(data) => data,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("metadata query failed: {e}")})),
+            );
+        }
     };
-
-    let overall_sql = format!(
-        "SELECT COALESCE(s.name, su.skill_id) AS skill_name,
-                COALESCE(s.description, s.name, su.skill_id) AS skill_desc_ko,
-                COUNT(su.id) AS calls,
-                CASE
-                    WHEN MAX(su.used_at) IS NULL THEN NULL
-                    ELSE CAST(strftime('%s', MAX(su.used_at)) AS INTEGER) * 1000
-                END AS last_used_at
-         FROM skill_usage su
-         LEFT JOIN skills s ON s.id = su.skill_id
-         WHERE 1=1 {date_filter}
-         GROUP BY COALESCE(s.name, su.skill_id), COALESCE(s.description, s.name, su.skill_id)
-         ORDER BY calls DESC, last_used_at DESC
-         LIMIT ?1"
-    );
-
-    let overall = {
-        let mut stmt = match conn.prepare(&overall_sql) {
-            Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("query prepare failed: {e}")})),
-                );
-            }
-        };
-
-        let rows = stmt
-            .query_map([limit], |row| {
-                Ok(json!({
-                    "skill_name": row.get::<_, String>(0)?,
-                    "skill_desc_ko": row.get::<_, String>(1)?,
-                    "calls": row.get::<_, i64>(2)?,
-                    "last_used_at": row.get::<_, Option<i64>>(3)?,
-                }))
-            })
-            .ok();
-
-        match rows {
-            Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-            None => Vec::new(),
+    let usage = match collect_skill_usage(&conn, ranking_days(window)) {
+        Ok(data) => data,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("usage query failed: {e}")})),
+            );
         }
     };
 
-    // By-agent ranking
-    let by_agent_sql = format!(
-        "SELECT su.agent_id AS agent_role_id,
-                COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
-                COALESCE(s.name, su.skill_id) AS skill_name,
-                COALESCE(s.description, s.name, su.skill_id) AS skill_desc_ko,
-                COUNT(su.id) AS calls,
-                CASE
-                    WHEN MAX(su.used_at) IS NULL THEN NULL
-                    ELSE CAST(strftime('%s', MAX(su.used_at)) AS INTEGER) * 1000
-                END AS last_used_at
-         FROM skill_usage su
-         LEFT JOIN skills s ON s.id = su.skill_id
-         LEFT JOIN agents a ON a.id = su.agent_id
-         WHERE su.agent_id IS NOT NULL {date_filter}
-         GROUP BY su.agent_id, agent_name, skill_name, skill_desc_ko
-         ORDER BY calls DESC, last_used_at DESC
-         LIMIT 100"
-    );
-
-    let by_agent = {
-        let mut stmt = match conn.prepare(&by_agent_sql) {
-            Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("query prepare failed: {e}")})),
-                );
-            }
-        };
-
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(json!({
-                    "agent_role_id": row.get::<_, String>(0)?,
-                    "agent_name": row.get::<_, String>(1)?,
-                    "skill_name": row.get::<_, String>(2)?,
-                    "skill_desc_ko": row.get::<_, String>(3)?,
-                    "calls": row.get::<_, i64>(4)?,
-                    "last_used_at": row.get::<_, Option<i64>>(5)?,
-                }))
+    let mut overall = aggregate_overall_usage(&usage)
+        .into_iter()
+        .map(|(skill_id, aggregate)| {
+            let (skill_name, skill_desc_ko) = metadata
+                .get(&skill_id)
+                .cloned()
+                .unwrap_or_else(|| (skill_id.clone(), skill_id.clone()));
+            json!({
+                "skill_name": skill_name,
+                "skill_desc_ko": skill_desc_ko,
+                "calls": aggregate.calls,
+                "last_used_at": aggregate.last_used_at,
             })
-            .ok();
+        })
+        .collect::<Vec<_>>();
+    overall.sort_by(|left, right| {
+        let left_calls = left["calls"].as_i64().unwrap_or(0);
+        let right_calls = right["calls"].as_i64().unwrap_or(0);
+        right_calls
+            .cmp(&left_calls)
+            .then_with(|| {
+                right["last_used_at"]
+                    .as_i64()
+                    .unwrap_or_default()
+                    .cmp(&left["last_used_at"].as_i64().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["skill_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["skill_name"].as_str().unwrap_or_default())
+            })
+    });
+    overall.truncate(limit.max(0) as usize);
 
-        match rows {
-            Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-            None => Vec::new(),
+    let mut by_agent_totals = HashMap::<(String, String), ByAgentAggregate>::new();
+    for record in &usage {
+        let Some(agent_role_id) = record.agent_id.clone() else {
+            continue;
+        };
+        let agent_name = record
+            .agent_name
+            .clone()
+            .unwrap_or_else(|| agent_role_id.clone());
+        let aggregate = by_agent_totals
+            .entry((agent_role_id, record.skill_id.clone()))
+            .or_insert_with(|| ByAgentAggregate {
+                agent_name: agent_name.clone(),
+                ..ByAgentAggregate::default()
+            });
+        if aggregate.agent_name.is_empty() {
+            aggregate.agent_name = agent_name;
         }
-    };
+        aggregate.calls += 1;
+        aggregate.last_used_at = Some(
+            aggregate
+                .last_used_at
+                .map_or(record.used_at_ms, |last_used_at| {
+                    last_used_at.max(record.used_at_ms)
+                }),
+        );
+    }
+
+    let mut by_agent = by_agent_totals
+        .into_iter()
+        .map(|((agent_role_id, skill_id), aggregate)| {
+            let (skill_name, skill_desc_ko) = metadata
+                .get(&skill_id)
+                .cloned()
+                .unwrap_or_else(|| (skill_id.clone(), skill_id.clone()));
+            json!({
+                "agent_role_id": agent_role_id,
+                "agent_name": aggregate.agent_name,
+                "skill_name": skill_name,
+                "skill_desc_ko": skill_desc_ko,
+                "calls": aggregate.calls,
+                "last_used_at": aggregate.last_used_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    by_agent.sort_by(|left, right| {
+        let left_calls = left["calls"].as_i64().unwrap_or(0);
+        let right_calls = right["calls"].as_i64().unwrap_or(0);
+        right_calls
+            .cmp(&left_calls)
+            .then_with(|| {
+                right["last_used_at"]
+                    .as_i64()
+                    .unwrap_or_default()
+                    .cmp(&left["last_used_at"].as_i64().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["agent_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["agent_name"].as_str().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["skill_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["skill_name"].as_str().unwrap_or_default())
+            })
+    });
+    by_agent.truncate(100);
 
     (
         StatusCode::OK,
