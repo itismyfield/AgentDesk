@@ -329,6 +329,7 @@ pub struct AutoQueueRunRecord {
     pub completed_at: Option<i64>,
     pub max_concurrent_threads: i64,
     pub thread_group_count: i64,
+    pub deploy_phases: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,7 +410,8 @@ pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQ
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
                 COALESCE(max_concurrent_threads, 1),
-                COALESCE(thread_group_count, 1)
+                COALESCE(thread_group_count, 1),
+                deploy_phases
          FROM auto_queue_runs
          WHERE id = ?1",
         [run_id],
@@ -426,6 +428,7 @@ pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQ
                 completed_at: row.get(8)?,
                 max_concurrent_threads: row.get(9)?,
                 thread_group_count: row.get(10)?,
+                deploy_phases: row.get(11)?,
             })
         },
     )

@@ -150,6 +150,7 @@ export type {
   TokenAnalyticsResponse,
   TimelineEvent,
   PipelineConfigResponse,
+  PhaseGateInfo,
 } from "./client";
 
 // ── Sprite processing (stub for PCD — no backend sprite processor) ──
