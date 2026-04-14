@@ -208,8 +208,9 @@ pub(super) fn build_model_picker_option_specs(
         None => override_model.is_none(),
     };
     let selected_explicit_model = match pending_model {
-        Some(value) if !is_default_picker_value(value) => Some(value),
-        _ => override_model,
+        Some(value) if is_default_picker_value(value) => None,
+        Some(value) => Some(value),
+        None => override_model,
     };
 
     let resolved_models = resolved_models(provider, working_dir);
@@ -368,6 +369,60 @@ mod tests {
                 "Current override | Not in current catalog"
             );
             assert!(missing.selected);
+        });
+    }
+
+    #[test]
+    fn build_model_picker_option_specs_selects_only_default_when_clearing_override() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Claude,
+            Some(crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
+            Some("claude-sonnet-4-6"),
+            "claude-opus-4-6",
+            SOURCE_PROVIDER_DEFAULT,
+            None,
+        );
+
+        let selected: Vec<_> = options.iter().filter(|entry| entry.selected).collect();
+        assert_eq!(selected.len(), 1, "expected exactly one selected option");
+        assert_eq!(
+            selected[0].value,
+            crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+        );
+        assert!(
+            options
+                .iter()
+                .filter(|entry| entry.value == "claude-sonnet-4-6")
+                .all(|entry| !entry.selected),
+            "stale override should not stay selected when pending value is default"
+        );
+    }
+
+    #[test]
+    fn build_model_picker_option_specs_clearing_missing_override_keeps_single_selection() {
+        with_temp_qwen_env(|_temp_home, _temp_project| {
+            let options = build_model_picker_option_specs(
+                &ProviderKind::Qwen,
+                Some(crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
+                Some("coder-model"),
+                "default",
+                SOURCE_PROVIDER_DEFAULT,
+                None,
+            );
+
+            let selected: Vec<_> = options.iter().filter(|entry| entry.selected).collect();
+            assert_eq!(selected.len(), 1, "expected exactly one selected option");
+            assert_eq!(
+                selected[0].value,
+                crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+            );
+            assert!(
+                options
+                    .iter()
+                    .filter(|entry| entry.value == "coder-model")
+                    .all(|entry| !entry.selected),
+                "missing override should not remain selected when pending value is default"
+            );
         });
     }
 

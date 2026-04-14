@@ -193,11 +193,43 @@ var reviewAutomation = {
         "wait-ci",
         null
       );
+      var completeCfg = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
+      var completeTerminalState = agentdesk.pipeline.terminalState(completeCfg);
+      var completeInitialState = agentdesk.pipeline.kickoffState(completeCfg);
+      var completeInProgressState = agentdesk.pipeline.nextGatedTarget(completeInitialState, completeCfg);
+      var completeReviewState = agentdesk.pipeline.nextGatedTarget(completeInProgressState, completeCfg);
+      var completeReviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(completeReviewState, "review_passed", completeCfg) || completeTerminalState;
+      var lifecycleRows = agentdesk.db.query(
+        "SELECT status FROM kanban_cards WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      var currentStatus = lifecycleRows.length > 0 ? lifecycleRows[0].status : null;
+      var statusEligible =
+        currentStatus === completeReviewState ||
+        currentStatus === completeReviewPassTarget ||
+        (currentStatus === completeTerminalState && completeReviewPassTarget === completeTerminalState);
+
+      if (!statusEligible) {
+        agentdesk.log.info(
+          "[review] Create-PR completed for card " + dispatch.kanban_card_id +
+          " → wait-ci on PR #" + pr.number +
+          " (status transition skipped; current status " + currentStatus + " is outside review lifecycle)"
+        );
+        return;
+      }
+
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
         [dispatch.kanban_card_id]
       );
-      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → wait-ci on PR #" + pr.number);
+      if (currentStatus === completeReviewState) {
+        agentdesk.kanban.setStatus(dispatch.kanban_card_id, completeReviewPassTarget, true);
+      }
+      agentdesk.log.info(
+        "[review] Create-PR completed for card " + dispatch.kanban_card_id +
+        " → wait-ci on PR #" + pr.number +
+        " (card lifecycle " + currentStatus + " → " + completeReviewPassTarget + ")"
+      );
       return;
     }
 

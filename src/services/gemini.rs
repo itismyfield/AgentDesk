@@ -1,16 +1,19 @@
 use serde_json::Value;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
-use crate::services::process::kill_child_tree;
+use crate::services::process::{
+    configure_child_process_group, kill_child_tree, wait_with_output_timeout,
+};
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
-    cancel_requested, register_child_pid, run_retrying_stream_attempts,
+    cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
 };
 use crate::services::provider_runtime::{LineStreamEvent, spawn_line_stream_reader};
 use crate::services::remote::RemoteProfile;
@@ -24,8 +27,71 @@ const GEMINI_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const GEMINI_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
 const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
+const GEMINI_TRUSTED_FOLDERS_PATH: &str = ".gemini/trustedFolders.json";
+const GEMINI_MEETING_READONLY_POLICY: &str = r#"
+[[rule]]
+toolName = [
+  "glob",
+  "grep",
+  "grep_search",
+  "list_directory",
+  "read_file",
+  "read_many_files"
+]
+decision = "allow"
+priority = 950
+
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 900
+denyMessage = "AgentDesk meeting_readonly mode allows only filesystem read/search tools."
+"#;
 
 type GeminiStreamEvent = LineStreamEvent;
+
+static GEMINI_MEETING_READONLY_POLICY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct GeminiExecArgs {
+    args: Vec<String>,
+    _readonly_policy_path: Option<PathBuf>,
+}
+
+impl Drop for GeminiExecArgs {
+    fn drop(&mut self) {
+        if let Some(path) = self._readonly_policy_path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GeminiTrustRuleKind {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeminiTrustRule {
+    root: PathBuf,
+    kind: GeminiTrustRuleKind,
+}
+
+impl GeminiTrustRule {
+    fn allow(root: PathBuf) -> Self {
+        Self {
+            root,
+            kind: GeminiTrustRuleKind::Allow,
+        }
+    }
+
+    fn deny(root: PathBuf) -> Self {
+        Self {
+            root,
+            kind: GeminiTrustRuleKind::Deny,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum GeminiStreamLoopResult {
@@ -67,6 +133,52 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_cancellable(prompt, None)
 }
 
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    let resolution = resolve_gemini_binary();
+    let gemini_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Gemini CLI not found".to_string())?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let working_dir = resolve_gemini_requested_dir(current_dir)?;
+    let exec_args = build_exec_args(prompt, None, None, false)?;
+
+    let mut command = Command::new(&gemini_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    configure_child_process_group(&mut command);
+    let output = command
+        .args(&exec_args.args)
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start Gemini: {}", e))
+        .and_then(|child| wait_with_output_timeout(child, timeout, label))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(derive_error_message(
+            &stdout,
+            &stderr,
+            output.status.code(),
+            "Gemini",
+        ));
+    }
+
+    let text = extract_text_from_stream_output(&stdout);
+    if text.trim().is_empty() {
+        Err("Empty response from Gemini".to_string())
+    } else {
+        Ok(text)
+    }
+}
+
 pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -76,11 +188,14 @@ pub fn execute_command_simple_cancellable(
         .resolved_path
         .clone()
         .ok_or_else(|| "Gemini CLI not found".to_string())?;
-    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let working_dir = resolve_gemini_requested_dir(current_dir)?;
+    let exec_args = build_exec_args(prompt, None, None, false)?;
     let mut command = Command::new(&gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    configure_child_process_group(&mut command);
     let mut child = command
-        .args(build_exec_args(prompt, None, None))
+        .args(&exec_args.args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -147,7 +262,9 @@ pub fn execute_command_streaming(
         .resolved_path
         .clone()
         .ok_or_else(|| "Gemini CLI not found".to_string())?;
+    let resolved_working_dir = resolve_gemini_working_dir(working_dir)?;
     let prompt = compose_gemini_prompt(prompt, system_prompt, allowed_tools);
+    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     run_gemini_streaming_attempts(&sender, resume_selector, |resume_selector| {
         execute_gemini_streaming_attempt(
             &gemini_bin,
@@ -155,9 +272,10 @@ pub fn execute_command_streaming(
             &prompt,
             model,
             resume_selector,
-            working_dir,
+            &resolved_working_dir,
             sender.clone(),
             cancel_token.clone(),
+            readonly_mode,
         )
     })
 }
@@ -192,14 +310,17 @@ fn execute_gemini_streaming_attempt(
     prompt: &str,
     model: Option<&str>,
     resume_selector: Option<String>,
-    working_dir: &str,
+    working_dir: &Path,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
+    readonly_mode: bool,
 ) -> Result<StreamAttemptResult, String> {
     let mut command = Command::new(gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, resolution);
+    configure_child_process_group(&mut command);
+    let exec_args = build_exec_args(prompt, model, resume_selector.as_deref(), readonly_mode)?;
     let mut child = command
-        .args(build_exec_args(prompt, model, resume_selector.as_deref()))
+        .args(&exec_args.args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -208,6 +329,10 @@ fn execute_gemini_streaming_attempt(
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    if cancel_requested(cancel_token.as_deref()) {
+        kill_child_tree(&mut child);
+        return Ok(StreamAttemptResult::Cancelled);
+    }
 
     let stdout = child
         .stdout
@@ -572,7 +697,122 @@ fn compose_gemini_prompt(
     crate::services::provider::compose_structured_turn_prompt(prompt, system_prompt, allowed_tools)
 }
 
-fn build_exec_args(prompt: &str, model: Option<&str>, session_id: Option<&str>) -> Vec<String> {
+fn resolve_gemini_requested_dir(requested_dir: PathBuf) -> Result<PathBuf, String> {
+    let trust_rules = gemini_trust_rules();
+    select_gemini_working_dir(requested_dir, dirs::home_dir(), &trust_rules)
+}
+
+fn resolve_gemini_working_dir(working_dir: &str) -> Result<PathBuf, String> {
+    resolve_gemini_requested_dir(expand_gemini_working_dir(working_dir))
+}
+
+fn expand_gemini_working_dir(raw: &str) -> PathBuf {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    }
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return dirs::home_dir()
+            .map(|home| home.join(stripped))
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+    PathBuf::from(raw)
+}
+
+fn gemini_trust_rules() -> Vec<GeminiTrustRule> {
+    let Some(path) = dirs::home_dir().map(|home| home.join(GEMINI_TRUSTED_FOLDERS_PATH)) else {
+        return Vec::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(entries) = json.as_object() else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|(path, status)| gemini_trust_rule_for_entry(path, status))
+        .collect()
+}
+
+fn gemini_trust_status_allows_root(status: &Value) -> bool {
+    matches!(status.as_str(), Some("TRUST_FOLDER") | Some("TRUST_PARENT"))
+}
+
+fn gemini_trust_rule_for_entry(path: &str, status: &Value) -> Option<GeminiTrustRule> {
+    if matches!(status.as_str(), Some("TRUST_PARENT")) {
+        let rule_path = Path::new(path);
+        let parent = rule_path.parent().unwrap_or(rule_path);
+        return Some(GeminiTrustRule::allow(normalize_gemini_path(parent)));
+    }
+    if gemini_trust_status_allows_root(status) {
+        return Some(GeminiTrustRule::allow(normalize_gemini_path(path)));
+    }
+    if matches!(status.as_str(), Some("DO_NOT_TRUST")) {
+        return Some(GeminiTrustRule::deny(normalize_gemini_path(path)));
+    }
+    None
+}
+
+fn select_gemini_working_dir(
+    requested_dir: PathBuf,
+    home_dir: Option<PathBuf>,
+    trust_rules: &[GeminiTrustRule],
+) -> Result<PathBuf, String> {
+    if path_is_trusted_by_gemini(&requested_dir, trust_rules) {
+        return Ok(requested_dir);
+    }
+
+    if requested_dir.has_root() && requested_dir.parent().is_none() {
+        if let Some(home_dir) = home_dir {
+            let normalized_home = normalize_gemini_path(home_dir);
+            if path_is_trusted_by_gemini(&normalized_home, trust_rules) {
+                return Ok(normalized_home);
+            }
+        }
+        return Err(format!(
+            "Gemini cannot use `{}` as the working directory in headless mode because it is not trusted in `~/{}`. Trust that filesystem root or switch the session to a trusted folder.",
+            requested_dir.display(),
+            GEMINI_TRUSTED_FOLDERS_PATH
+        ));
+    }
+
+    Err(format!(
+        "Gemini working directory `{}` is not trusted in `~/{}`. Switch to a trusted folder or add it to Gemini trusted folders.",
+        requested_dir.display(),
+        GEMINI_TRUSTED_FOLDERS_PATH
+    ))
+}
+
+fn path_is_trusted_by_gemini(path: &Path, trust_rules: &[GeminiTrustRule]) -> bool {
+    let normalized = normalize_gemini_path(path);
+    let most_specific_rule = trust_rules
+        .iter()
+        .filter(|rule| normalized.starts_with(&rule.root))
+        .max_by_key(|rule| rule.root.components().count());
+    matches!(
+        most_specific_rule.map(|rule| &rule.kind),
+        Some(GeminiTrustRuleKind::Allow)
+    )
+}
+
+fn normalize_gemini_path(path: impl AsRef<Path>) -> PathBuf {
+    std::fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf())
+}
+
+fn build_exec_args(
+    prompt: &str,
+    model: Option<&str>,
+    session_id: Option<&str>,
+    readonly_mode: bool,
+) -> Result<GeminiExecArgs, String> {
     let mut args = Vec::new();
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
     if session_id.is_none() {
@@ -591,10 +831,48 @@ fn build_exec_args(prompt: &str, model: Option<&str>, session_id: Option<&str>) 
     args.push(prompt.to_string());
     args.push("--output-format".to_string());
     args.push("stream-json".to_string());
-    args.push("-y".to_string());
-    args.push("--sandbox".to_string());
-    args.push("false".to_string());
-    args
+    let mut readonly_policy_path = None;
+    if readonly_mode {
+        args.push("--sandbox".to_string());
+        args.push("true".to_string());
+        args.push("--approval-mode".to_string());
+        args.push("default".to_string());
+        args.push("--admin-policy".to_string());
+        let policy_path = ensure_gemini_meeting_readonly_policy_file()?;
+        args.push(policy_path.to_string_lossy().to_string());
+        readonly_policy_path = Some(policy_path);
+    } else {
+        args.push("--approval-mode".to_string());
+        args.push("yolo".to_string());
+        args.push("--sandbox".to_string());
+        args.push("false".to_string());
+    }
+    Ok(GeminiExecArgs {
+        args,
+        _readonly_policy_path: readonly_policy_path,
+    })
+}
+
+fn ensure_gemini_meeting_readonly_policy_file() -> Result<PathBuf, String> {
+    let unique = GEMINI_MEETING_READONLY_POLICY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentdesk-gemini-meeting-readonly-{}-{}-{}.toml",
+        std::process::id(),
+        timestamp,
+        unique
+    ));
+    std::fs::write(&path, GEMINI_MEETING_READONLY_POLICY).map_err(|error| {
+        format!(
+            "Failed to write Gemini meeting read-only admin policy at {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    Ok(path)
 }
 
 fn normalize_resume_selector(session_id: Option<&str>) -> Result<Option<String>, String> {
@@ -774,12 +1052,14 @@ fn render_gemini_value(value: &Value) -> String {
 mod tests {
     use super::{
         GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState,
-        GeminiStreamEvent, GeminiStreamLoopResult, build_exec_args,
+        GeminiExecArgs, GeminiStreamEvent, GeminiStreamLoopResult, build_exec_args,
         build_gemini_tool_result_message, build_gemini_tool_use_message,
         collect_gemini_stream_events, execute_command_streaming, extract_gemini_error_message,
-        extract_text_from_stream_output, finalize_gemini_attempt, looks_like_uuid,
-        normalize_resume_selector, observed_session_to_resume_selector, process_gemini_stream_line,
+        extract_text_from_stream_output, finalize_gemini_attempt, gemini_trust_rule_for_entry,
+        gemini_trust_status_allows_root, looks_like_uuid, normalize_resume_selector,
+        observed_session_to_resume_selector, process_gemini_stream_line,
         remote_profile_not_supported_message, run_gemini_streaming_attempts,
+        select_gemini_working_dir,
     };
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::{
@@ -787,18 +1067,33 @@ mod tests {
     };
     use crate::services::remote::{RemoteAuth, RemoteProfile};
     use serde_json::json;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn admin_policy_path(args: &GeminiExecArgs) -> String {
+        args.args
+            .windows(2)
+            .find(|pair| pair[0] == "--admin-policy")
+            .map(|pair| pair[1].clone())
+            .expect("readonly Gemini must pass an admin policy")
+    }
+
     #[test]
     fn build_exec_args_includes_resume_when_session_present() {
-        let args = build_exec_args("hello", Some("gemini-2.5-flash"), Some("latest"));
-        assert!(args.windows(2).any(|pair| pair == ["--resume", "latest"]));
-        assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
+        let args = build_exec_args("hello", Some("gemini-2.5-flash"), Some("latest"), false)
+            .expect("args");
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "latest"])
+        );
+        assert!(args.args.windows(2).any(|pair| pair == ["-p", "hello"]));
         assert!(
             !args
+                .args
                 .windows(2)
                 .any(|pair| pair == ["-m", "gemini-2.5-flash"])
         );
@@ -806,12 +1101,195 @@ mod tests {
 
     #[test]
     fn build_exec_args_includes_model_for_fresh_session() {
-        let args = build_exec_args("hello", Some("gemini-2.5-flash"), None);
+        let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, false).expect("args");
         assert!(
-            args.windows(2)
+            args.args
+                .windows(2)
                 .any(|pair| pair == ["-m", "gemini-2.5-flash"])
         );
-        assert!(!args.iter().any(|arg| arg == "--resume"));
+        assert!(!args.args.iter().any(|arg| arg == "--resume"));
+    }
+
+    #[test]
+    fn build_exec_args_uses_default_mode_with_admin_policy_for_readonly_sessions() {
+        let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, true).expect("args");
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "true"])
+        );
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--approval-mode", "default"])
+        );
+        let policy_path = admin_policy_path(&args);
+        let policy = std::fs::read_to_string(policy_path).expect("policy file should exist");
+        assert!(policy.contains("read_many_files"));
+        assert!(policy.contains("toolName = \"*\""));
+        assert!(!policy.contains("modes ="));
+        assert!(!args.args.iter().any(|arg| arg == "-y"));
+    }
+
+    #[test]
+    fn build_exec_args_uses_unique_admin_policy_path_per_readonly_request() {
+        let first = build_exec_args("hello", Some("gemini-2.5-flash"), None, true).expect("args");
+        let second =
+            build_exec_args("hello again", Some("gemini-2.5-flash"), None, true).expect("args");
+
+        let first_path = admin_policy_path(&first);
+        let second_path = admin_policy_path(&second);
+        assert_ne!(first_path, second_path);
+        assert!(std::path::Path::new(&first_path).exists());
+        assert!(std::path::Path::new(&second_path).exists());
+    }
+
+    #[test]
+    fn build_exec_args_uses_approval_mode_yolo_without_legacy_y_flag() {
+        let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, false).expect("args");
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--approval-mode", "yolo"])
+        );
+        assert!(
+            args.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "false"])
+        );
+        assert!(!args.args.iter().any(|arg| arg == "-y" || arg == "--yolo"));
+    }
+
+    #[test]
+    fn select_gemini_working_dir_keeps_trusted_descendant() {
+        let trusted = vec![super::GeminiTrustRule::allow(PathBuf::from(
+            "/Users/kunkun",
+        ))];
+        let resolved = select_gemini_working_dir(
+            PathBuf::from("/Users/kunkun/kunkunGames/agentdesk"),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/Users/kunkun/kunkunGames/agentdesk")
+        );
+    }
+
+    #[test]
+    fn select_gemini_working_dir_falls_back_from_root_to_trusted_home() {
+        let trusted = vec![super::GeminiTrustRule::allow(PathBuf::from(
+            "/Users/kunkun",
+        ))];
+        let resolved = select_gemini_working_dir(
+            PathBuf::from("/"),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/Users/kunkun"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn select_gemini_working_dir_falls_back_from_drive_root_to_trusted_home() {
+        let trusted = vec![super::GeminiTrustRule::allow(PathBuf::from(
+            r"C:\Users\kunkun",
+        ))];
+        let resolved = select_gemini_working_dir(
+            PathBuf::from(r"C:\"),
+            Some(PathBuf::from(r"C:\Users\kunkun")),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from(r"C:\Users\kunkun"));
+    }
+
+    #[test]
+    fn select_gemini_working_dir_rejects_untrusted_directory() {
+        let trusted = vec![super::GeminiTrustRule::allow(PathBuf::from(
+            "/Users/kunkun",
+        ))];
+        let error = select_gemini_working_dir(
+            PathBuf::from("/private/tmp/example"),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(error.contains("/private/tmp/example"));
+        assert!(error.contains("not trusted"));
+    }
+
+    #[test]
+    fn gemini_trust_status_accepts_folder_and_parent_entries() {
+        assert!(gemini_trust_status_allows_root(&json!("TRUST_FOLDER")));
+        assert!(gemini_trust_status_allows_root(&json!("TRUST_PARENT")));
+        assert!(!gemini_trust_status_allows_root(&json!("UNTRUSTED")));
+    }
+
+    #[test]
+    fn gemini_trust_rule_maps_supported_statuses() {
+        assert_eq!(
+            gemini_trust_rule_for_entry("/private/tmp/worktree-a", &json!("TRUST_PARENT")).unwrap(),
+            super::GeminiTrustRule::allow(PathBuf::from("/private/tmp"))
+        );
+        assert_eq!(
+            gemini_trust_rule_for_entry("/private/tmp/worktree-a", &json!("TRUST_FOLDER")).unwrap(),
+            super::GeminiTrustRule::allow(PathBuf::from("/private/tmp/worktree-a"))
+        );
+        assert_eq!(
+            gemini_trust_rule_for_entry("/private/tmp/worktree-b", &json!("DO_NOT_TRUST")).unwrap(),
+            super::GeminiTrustRule::deny(PathBuf::from("/private/tmp/worktree-b"))
+        );
+    }
+
+    #[test]
+    fn select_gemini_working_dir_accepts_trust_parent_sibling() {
+        let trusted = vec![
+            gemini_trust_rule_for_entry("/private/tmp/worktree-a", &json!("TRUST_PARENT")).unwrap(),
+        ];
+        let resolved = select_gemini_working_dir(
+            PathBuf::from("/private/tmp/worktree-b/project"),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/private/tmp/worktree-b/project"));
+    }
+
+    #[test]
+    fn select_gemini_working_dir_rejects_denied_child_under_trusted_parent() {
+        let trusted = vec![
+            gemini_trust_rule_for_entry("/private/tmp/worktree-a", &json!("TRUST_PARENT")).unwrap(),
+            gemini_trust_rule_for_entry("/private/tmp/worktree-b", &json!("DO_NOT_TRUST")).unwrap(),
+        ];
+        let error = select_gemini_working_dir(
+            PathBuf::from("/private/tmp/worktree-b/project"),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap_err();
+        assert!(error.contains("/private/tmp/worktree-b/project"));
+        assert!(error.contains("not trusted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_gemini_working_dir_keeps_non_utf8_trusted_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let trusted_path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/private/tmp/gemini-\xff".to_vec(),
+        ));
+        let trusted = vec![super::GeminiTrustRule::allow(trusted_path.clone())];
+        let resolved = select_gemini_working_dir(
+            trusted_path.clone(),
+            Some(PathBuf::from("/Users/kunkun")),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(resolved, trusted_path);
     }
 
     #[test]

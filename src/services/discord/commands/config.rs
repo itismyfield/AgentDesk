@@ -189,14 +189,14 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     provider: &ProviderKind,
     next_override: Option<String>,
 ) -> bool {
+    if !would_channel_model_override_change(shared, channel_id, next_override.as_deref()) {
+        return false;
+    }
+
     let current_override = shared
         .model_overrides
         .get(&channel_id)
         .map(|value| value.clone());
-    if same_model_override(current_override.as_deref(), next_override.as_deref()) {
-        return false;
-    }
-
     let reset_required = session_reset_required_for_model_change(
         provider,
         current_override.as_deref(),
@@ -229,6 +229,18 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     }
 
     true
+}
+
+pub(in crate::services::discord) fn would_channel_model_override_change(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    next_override: Option<&str>,
+) -> bool {
+    let current_override = shared
+        .model_overrides
+        .get(&channel_id)
+        .map(|value| value.clone());
+    !same_model_override(current_override.as_deref(), next_override)
 }
 
 pub(in crate::services::discord) async fn resolve_model_for_turn(

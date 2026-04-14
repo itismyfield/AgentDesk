@@ -10,6 +10,17 @@ pub(super) fn build_model_picker_close_response() -> serenity::CreateInteraction
     serenity::CreateInteractionResponse::Acknowledge
 }
 
+pub(super) fn build_model_picker_saved_response(
+    content: impl Into<String>,
+) -> serenity::CreateInteractionResponse {
+    serenity::CreateInteractionResponse::UpdateMessage(
+        serenity::CreateInteractionResponseMessage::new()
+            .content(content)
+            .embeds(Vec::new())
+            .components(Vec::new()),
+    )
+}
+
 async fn close_model_picker_interaction(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -22,6 +33,35 @@ async fn close_model_picker_interaction(
     Ok(())
 }
 
+async fn save_model_picker_interaction(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    content: impl Into<String>,
+) -> Result<(), Error> {
+    component
+        .create_response(ctx, build_model_picker_saved_response(content))
+        .await?;
+    Ok(())
+}
+
+fn model_picker_submit_notice(
+    saved_model: Option<&str>,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    use crate::services::provider::ProviderKind;
+    let session_note = match provider {
+        ProviderKind::Gemini => "새 세션 + 새 모델로 적용됩니다.",
+        _ => "현재 세션을 유지한 채 다음 turn부터 새 모델로 적용됩니다.",
+    };
+    match saved_model {
+        Some(model) => format!("모델 설정을 `{model}`로 저장했습니다. {session_note}"),
+        None => format!("모델 설정을 기본값으로 저장했습니다. {session_note}"),
+    }
+}
+
+fn model_picker_no_change_notice() -> String {
+    "변경 사항이 없습니다. 현재 모델 설정을 유지합니다.".to_string()
+}
 pub(super) async fn handle_model_picker_interaction(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -209,46 +249,70 @@ pub(super) async fn handle_model_picker_interaction(
                 .get(&message_id)
                 .and_then(|state| state.pending_model.clone());
 
-            super::commands::clear_model_picker_pending(&data.shared, message_id);
-            close_model_picker_interaction(ctx, component).await?;
-
-            match super::commands::model_picker_pending_to_override(pending_model.as_deref()) {
+            let next_override =
+                super::commands::model_picker_pending_to_override(pending_model.as_deref());
+            let changed = super::commands::would_channel_model_override_change(
+                &data.shared,
+                target_channel_id,
+                next_override.as_ref().and_then(|model| model.as_deref()),
+            );
+            let notice = match next_override.as_ref() {
                 Some(Some(model)) => {
-                    super::commands::update_channel_model_override(
-                        &data.shared,
-                        &data.token,
-                        target_channel_id,
-                        &data.provider,
-                        Some(model),
-                    )
-                    .await;
+                    if changed {
+                        model_picker_submit_notice(Some(model), &data.provider)
+                    } else {
+                        model_picker_no_change_notice()
+                    }
                 }
                 Some(None) => {
+                    if changed {
+                        model_picker_submit_notice(None, &data.provider)
+                    } else {
+                        model_picker_no_change_notice()
+                    }
+                }
+                None => model_picker_no_change_notice(),
+            };
+
+            super::commands::clear_model_picker_pending(&data.shared, message_id);
+            save_model_picker_interaction(ctx, component, notice).await?;
+            if changed {
+                if let Some(override_to_persist) = next_override {
                     super::commands::update_channel_model_override(
                         &data.shared,
                         &data.token,
                         target_channel_id,
                         &data.provider,
-                        None,
+                        override_to_persist,
                     )
                     .await;
                 }
-                None => {}
             }
-
             return Ok(());
         }
         super::commands::ModelPickerAction::Reset => {
-            super::commands::clear_model_picker_pending(&data.shared, message_id);
-            close_model_picker_interaction(ctx, component).await?;
-            super::commands::update_channel_model_override(
+            let changed = super::commands::would_channel_model_override_change(
                 &data.shared,
-                &data.token,
                 target_channel_id,
-                &data.provider,
                 None,
-            )
-            .await;
+            );
+            super::commands::clear_model_picker_pending(&data.shared, message_id);
+            let notice = if changed {
+                model_picker_submit_notice(None, &data.provider)
+            } else {
+                model_picker_no_change_notice()
+            };
+            save_model_picker_interaction(ctx, component, notice).await?;
+            if changed {
+                super::commands::update_channel_model_override(
+                    &data.shared,
+                    &data.token,
+                    target_channel_id,
+                    &data.provider,
+                    None,
+                )
+                .await;
+            }
             return Ok(());
         }
         super::commands::ModelPickerAction::Cancel => {
@@ -292,4 +356,69 @@ pub(super) async fn handle_model_picker_interaction(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_model_picker_saved_response, model_picker_no_change_notice,
+        model_picker_submit_notice,
+    };
+
+    #[test]
+    fn model_picker_submit_notice_non_gemini_keeps_session() {
+        use crate::services::provider::ProviderKind;
+        for provider in [
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::Qwen,
+        ] {
+            let notice = model_picker_submit_notice(Some("gpt-5.4-mini"), &provider);
+            assert!(
+                notice.contains("`gpt-5.4-mini`"),
+                "{provider:?}: model name missing"
+            );
+            assert!(
+                notice.contains("현재 세션을 유지"),
+                "{provider:?}: should say session is kept"
+            );
+            assert!(
+                !notice.contains("새 세션"),
+                "{provider:?}: must not claim new session"
+            );
+        }
+    }
+
+    #[test]
+    fn model_picker_submit_notice_gemini_starts_new_session() {
+        use crate::services::provider::ProviderKind;
+        let notice = model_picker_submit_notice(Some("gemini-2.5-pro"), &ProviderKind::Gemini);
+        assert!(notice.contains("`gemini-2.5-pro`"));
+        assert!(notice.contains("새 세션"));
+    }
+
+    #[test]
+    fn model_picker_submit_notice_default_reset_is_provider_aware() {
+        use crate::services::provider::ProviderKind;
+        let notice_claude = model_picker_submit_notice(None, &ProviderKind::Claude);
+        assert!(notice_claude.contains("현재 세션을 유지"));
+        let notice_gemini = model_picker_submit_notice(None, &ProviderKind::Gemini);
+        assert!(notice_gemini.contains("새 세션"));
+    }
+
+    #[test]
+    fn model_picker_no_change_notice_does_not_claim_new_session() {
+        let notice = model_picker_no_change_notice();
+        assert!(notice.contains("변경 사항이 없습니다"));
+        assert!(!notice.contains("새 세션"));
+    }
+
+    #[test]
+    fn model_picker_saved_response_clears_components_and_embeds() {
+        let response = build_model_picker_saved_response("저장 완료");
+        let debug = format!("{response:?}");
+        assert!(debug.contains("UpdateMessage"));
+        assert!(debug.contains("components: Some([])"));
+        assert!(debug.contains("embeds: Some([])"));
+    }
 }

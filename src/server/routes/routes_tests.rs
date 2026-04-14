@@ -3796,10 +3796,10 @@ fn on_tick5min_stalled_timeout_uses_latest_activity_timestamp() {
         Some("in_progress"),
         "in_progress re-entry must reset the stalled timer even if latest dispatch is older"
     );
-    assert_ne!(
+    assert_eq!(
         rows.get("card-truly-stalled").map(|row| row.0.as_str()),
         Some("in_progress"),
-        "truly stale card must still be detected by timeout policy"
+        "manual-intervention escalation keeps the card in_progress while attaching blocked_reason"
     );
     assert!(
         rows.get("card-truly-stalled")

@@ -231,26 +231,23 @@ describe("filterMeetingExpertsByQuery", () => {
 });
 
 describe("MeetingMinutesView rendered form contract", () => {
-  it("renders the meeting start form with provider terminology, multi-select expert search, and 3-row agenda input", () => {
+  it("renders the simplified meeting start form with a single primary model selector", () => {
     const markup = renderMeetingStartFormMarkup();
 
-    expect(markup).toContain("진행 프로바이더");
-    expect(markup).toContain("리뷰 프로바이더");
-    expect(markup).toContain("고정 전문 에이전트");
-    expect(markup).toContain(
-      'placeholder="전문 에이전트 검색 후 여러 명 선택"',
-    );
+    expect(markup).toContain("진행 모델");
+    expect(markup).toContain("반대 모델이 자동 교차검증");
     expect(markup).toContain('placeholder="회의 안건을 입력하세요"');
-    expect(markup).toContain('rows="3"');
+    expect(markup).not.toContain("리뷰 프로바이더");
+    expect(markup).not.toContain("고정 전문 에이전트");
   });
 
-  it("renders configured expert chips for the selected meeting channel", () => {
+  it("renders the current provider options in the primary model selector", () => {
     const markup = renderMeetingStartFormMarkup();
 
-    expect(markup).toContain("QWEN");
-    expect(markup).toContain("GEMINI");
-    expect(markup).toContain("#qwen");
-    expect(markup).toContain("#gemini");
+    expect(markup).toContain("Claude");
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("Gemini");
+    expect(markup).toContain("Qwen");
   });
 });
 
@@ -282,7 +279,7 @@ describe("MeetingMinutesView rendered meeting cards", () => {
   });
 
   it("keeps provider flow labels only in the top row of meeting cards", () => {
-    const markup = renderMeetingListMarkup([meeting()]);
+    const markup = renderMeetingListMarkup([meeting({ summary: "" })]);
 
     expect(markup.match(/초안\/최종/g) ?? []).toHaveLength(1);
     expect(markup.match(/비판 검토/g) ?? []).toHaveLength(1);

@@ -3181,8 +3181,9 @@ mod tests {
     #[test]
     fn session_reset_reason_triggers_after_idle_timeout() {
         let mut session = make_session(Some("/tmp/project".to_string()), None);
-        let now = tokio::time::Instant::now();
-        session.last_active = now - Duration::from_secs(60 * 60) - Duration::from_secs(1);
+        let last_active = tokio::time::Instant::now();
+        let now = last_active + crate::services::discord::SESSION_MAX_IDLE + Duration::from_secs(1);
+        session.last_active = last_active;
 
         assert_eq!(
             session_reset_reason_for_turn(&session, now),

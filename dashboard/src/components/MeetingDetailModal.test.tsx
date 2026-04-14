@@ -35,7 +35,7 @@ function meeting(
 }
 
 describe("MeetingDetailModal provider flow contract", () => {
-  it("keeps only the header provider flow and removes duplicated captions", () => {
+  it("renders the provider flow panel with both chips and a caption summary", () => {
     const markup = renderToStaticMarkup(
       createElement(
         I18nProvider,
@@ -51,10 +51,9 @@ describe("MeetingDetailModal provider flow contract", () => {
 
     expect(markup).toContain("Claude");
     expect(markup).toContain("Qwen");
-    expect(markup).not.toContain("Provider Flow");
-    expect(markup).not.toContain("초안/최종:");
-    expect(markup).not.toContain("비판 검토:");
-    expect(markup.match(/초안\/최종/g) ?? []).toHaveLength(0);
-    expect(markup.match(/비판 검토/g) ?? []).toHaveLength(0);
+    expect(markup).toContain("Provider Flow");
+    expect(markup).toContain("초안/최종");
+    expect(markup).toContain("비판 검토");
+    expect(markup).toContain("초안/최종: Claude · 비판 검토: Qwen");
   });
 });

@@ -769,14 +769,15 @@ fn build_review_context(
                         }
                     }
                     if !obj.contains_key("target_provider") {
-                        if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
-                            obj.insert("target_provider".to_string(), json!(tp.as_str()));
-                        } else if let Some(tp) = bindings
+                        if let Some(tp) = bindings
                             .counter_model_channel()
                             .as_deref()
                             .and_then(provider_from_channel_suffix)
                         {
                             obj.insert("target_provider".to_string(), json!(tp));
+                        } else if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart())
+                        {
+                            obj.insert("target_provider".to_string(), json!(tp.as_str()));
                         }
                     }
                 }
@@ -2557,6 +2558,39 @@ mod tests {
         assert_eq!(provider_from_channel_suffix("agent-gm"), Some("gemini"));
         assert_eq!(provider_from_channel_suffix("agent-qw"), Some("qwen"));
         assert_eq!(provider_from_channel_suffix("agent"), None);
+    }
+
+    #[test]
+    fn review_context_uses_actual_review_channel_provider() {
+        let db = test_db();
+        seed_card(&db, "card-review-provider", "review");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "UPDATE agents
+             SET provider = 'claude',
+                 discord_channel_id = 'agent-cc',
+                 discord_channel_alt = 'agent-qw',
+                 discord_channel_cc = 'agent-cc',
+                 discord_channel_cdx = 'agent-qw'
+             WHERE id = 'agent-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context = build_review_context(
+            &db,
+            "card-review-provider",
+            "agent-1",
+            &json!({"reviewed_commit": "provider-fixture"}),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], "provider-fixture");
+        assert_eq!(parsed["from_provider"], "claude");
+        assert_eq!(parsed["target_provider"], "qwen");
     }
 
     #[test]

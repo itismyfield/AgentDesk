@@ -164,7 +164,7 @@ describe("pipeline-visual-editor-model", () => {
     expect(desktop.nodes[1].x).toBeGreaterThan(desktop.nodes[0].x);
   });
 
-  it("routes upward transitions from the source top edge", () => {
+  it("routes upward transitions through the left-side return lane", () => {
     const pipeline = makePipeline();
     pipeline.transitions.push({
       from: "review",
@@ -181,13 +181,22 @@ describe("pipeline-visual-editor-model", () => {
     expect(edge).toBeTruthy();
     expect(fromNode).toBeTruthy();
     expect(toNode).toBeTruthy();
-    expect(edge?.path.startsWith(`M ${fromNode!.x + fromNode!.width / 2} ${fromNode!.y}`)).toBe(
-      true,
-    );
     expect(
-      edge?.path.endsWith(`${toNode!.x + toNode!.width / 2} ${toNode!.y + toNode!.height}`),
+      edge?.path.startsWith(
+        `M ${fromNode!.x} ${fromNode!.y + fromNode!.height / 2}`,
+      ),
     ).toBe(true);
-    expect(edge?.labelY).toBeLessThan(fromNode!.y);
+    expect(
+      edge?.path.endsWith(
+        `${toNode!.x} ${toNode!.y + toNode!.height / 2}`,
+      ),
+    ).toBe(true);
+    expect(edge?.labelRotated).toBe(true);
+    expect(edge?.labelX).toBeLessThan(fromNode!.x);
+    expect(edge?.labelY).toBe(
+      (fromNode!.y + fromNode!.height / 2 + toNode!.y + toNode!.height / 2) /
+        2,
+    );
   });
 
   it("renders self-loop transitions as looped bezier paths", () => {
