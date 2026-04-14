@@ -1025,14 +1025,10 @@ mod tests {
     fn install_mock_gh_issue_create(url: &str) -> MockGhIssueCreateEnv {
         let dir = tempfile::tempdir().unwrap();
         let gh_cmd_path = dir.path().join("gh.cmd");
-        let gh_ps1_path = dir.path().join("gh.ps1");
-        let wrapper =
-            "@echo off\r\npwsh -NoProfile -ExecutionPolicy Bypass -File \"%~dp0gh.ps1\" %*\r\n";
-        let script = format!(
-            "$key = if ($args.Count -ge 2) {{ \"$($args[0]):$($args[1])\" }} elseif ($args.Count -eq 1) {{ \"$($args[0]):\" }} else {{ ':' }}\nif ($key -eq 'issue:create') {{\n@'\n{url}\n'@ | Write-Output\nexit 0\n}}\nexit 1\n"
+        let wrapper = format!(
+            "@echo off\r\nif /I \"%~1\"==\"--version\" (\r\n  echo gh mock 1.0\r\n  exit /b 0\r\n)\r\nif /I \"%~1\"==\"issue\" if /I \"%~2\"==\"create\" (\r\n  echo {url}\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
         );
         fs::write(&gh_cmd_path, wrapper).unwrap();
-        fs::write(&gh_ps1_path, script).unwrap();
 
         let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
         unsafe { std::env::set_var("AGENTDESK_GH_PATH", &gh_cmd_path) };
@@ -1308,8 +1304,8 @@ mod tests {
             .unwrap();
         drop(lock);
 
-        assert_eq!(summary.created_issues.len(), 1);
-        assert!(summary.failed_patterns.is_empty());
+        assert_eq!(summary.created_issues.len(), 1, "{summary:?}");
+        assert!(summary.failed_patterns.is_empty(), "{summary:?}");
         let conn = db.lock().unwrap();
         let issue_number: i64 = conn
             .query_row(
