@@ -44,7 +44,8 @@ src/
 │   ├── mod.rs
 │   ├── schema.rs
 │   ├── session_agent_resolution.rs
-│   └── session_transcripts.rs
+│   ├── session_transcripts.rs
+│   └── turns.rs
 ├── dispatch/
 │   └── mod.rs
 ├── engine/
@@ -54,6 +55,7 @@ src/
 │   │   ├── cards_ops.rs
 │   │   ├── config_ops.rs
 │   │   ├── db_ops.rs
+│   │   ├── deploy_ops.rs
 │   │   ├── dispatch_ops.rs
 │   │   ├── dm_reply_ops.rs
 │   │   ├── exec_ops.rs
@@ -82,6 +84,12 @@ src/
 ├── integration_tests/
 │   └── tests/
 │       └── high_risk_recovery.rs
+├── runtime_layout/
+│   ├── config_merge.rs
+│   ├── legacy_migration.rs
+│   ├── mod.rs
+│   ├── paths.rs
+│   └── skill_sync.rs
 ├── server/
 │   ├── routes/
 │   │   ├── dispatches/
@@ -139,6 +147,7 @@ src/
 │   │   ├── routes_tests.rs
 │   │   ├── session_activity.rs
 │   │   ├── settings.rs
+│   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
 │   │   ├── stats.rs
 │   │   └── termination_events.rs
@@ -188,6 +197,7 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── config_audit.rs
 │   │   ├── discord_io.rs
+│   │   ├── dm_reply_store.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── handoff.rs
@@ -273,11 +283,11 @@ src/
 ├── launch.rs
 ├── logging.rs
 ├── main.rs
+├── manual_intervention.rs
 ├── pipeline.rs
 ├── receipt.rs
 ├── reconcile.rs
-├── runtime.rs
-└── runtime_layout.rs
+└── runtime.rs
 ```
 <!-- END GENERATED: SRC TREE -->
 
@@ -298,6 +308,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/integration_tests/` | Scenario-specific integration test modules that supplement `src/integration_tests.rs`. |
+| `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
 | `src/supervisor/` | Runtime supervisor signals and recovery decisions for orphaned or stalled work. |
@@ -312,11 +323,11 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |
 | `src/main.rs` | Binary entry point. Dispatches CLI commands or boots the server runtime. |
+| `src/manual_intervention.rs` | Manual intervention parsing and helpers shared by Discord reply/requeue flows. |
 | `src/pipeline.rs` | Pipeline stage loading, resolution, and transition helpers. |
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
 | `src/runtime.rs` | Session runtime abstraction (`SessionRuntime`) plus the tmux-backed implementation. |
-| `src/runtime_layout.rs` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
 
 ### Discord Runtime

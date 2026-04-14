@@ -134,6 +134,52 @@ mod tests {
         }
     }
 
+    struct GeminiStreamingEnvOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous_gemini_path: Option<OsString>,
+        previous_home: Option<OsString>,
+    }
+
+    impl GeminiStreamingEnvOverride {
+        fn new(gemini_path: &std::path::Path, trusted_dir: &std::path::Path) -> Self {
+            let guard = crate::services::discord::runtime_store::lock_test_env();
+            let previous_gemini_path = std::env::var_os("AGENTDESK_GEMINI_PATH");
+            let previous_home = std::env::var_os("HOME");
+            let gemini_config_dir = trusted_dir.join(".gemini");
+            fs::create_dir_all(&gemini_config_dir).unwrap();
+            let trusted_folders = serde_json::json!({
+                trusted_dir.display().to_string(): "TRUST_FOLDER"
+            });
+            fs::write(
+                gemini_config_dir.join("trustedFolders.json"),
+                serde_json::to_vec(&trusted_folders).unwrap(),
+            )
+            .unwrap();
+            unsafe {
+                std::env::set_var("AGENTDESK_GEMINI_PATH", gemini_path);
+                std::env::set_var("HOME", trusted_dir);
+            }
+            Self {
+                _guard: guard,
+                previous_gemini_path,
+                previous_home,
+            }
+        }
+    }
+
+    impl Drop for GeminiStreamingEnvOverride {
+        fn drop(&mut self) {
+            match self.previous_gemini_path.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_GEMINI_PATH", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_GEMINI_PATH") },
+            }
+            match self.previous_home.take() {
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
     impl Drop for RuntimeRootOverride {
         fn drop(&mut self) {
             match self.previous.take() {
@@ -5892,7 +5938,7 @@ while true; do
 done
 "#,
         );
-        let _gemini_override = GeminiPathOverride::new(&gemini_path);
+        let _gemini_override = GeminiStreamingEnvOverride::new(&gemini_path, dir.path());
 
         let (tx, rx) = std::sync::mpsc::channel();
         let token = Arc::new(crate::services::provider::CancelToken::new());

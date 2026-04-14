@@ -489,6 +489,19 @@ pub fn compose_structured_turn_prompt(
     sections.join("\n\n")
 }
 
+pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
+    let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) else {
+        return false;
+    };
+
+    allowed_tools.iter().all(|tool| {
+        matches!(
+            tool.trim().to_ascii_lowercase().as_str(),
+            "read" | "grep" | "glob"
+        )
+    })
+}
+
 /// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
 pub struct CancelToken {
     pub cancelled: AtomicBool,
@@ -985,7 +998,7 @@ mod tests {
     use super::{
         CancelToken, FollowupResult, ProviderKind, ReadOutputResult, StreamAttemptFailure,
         StreamAttemptResult, StreamFinalState, cancel_requested, compose_structured_turn_prompt,
-        fold_read_output_result, followup_result_from_read_output_result,
+        fold_read_output_result, followup_result_from_read_output_result, is_readonly_tool_policy,
         parse_provider_and_channel_from_tmux_name, poll_output_file_until_result,
         provider_registry, register_child_pid, run_retrying_stream_attempts,
     };
@@ -1586,6 +1599,30 @@ mod tests {
     fn test_compose_structured_turn_prompt_returns_plain_prompt_without_overrides() {
         let prompt = compose_structured_turn_prompt("just answer", None, None);
         assert_eq!(prompt, "just answer");
+    }
+
+    #[test]
+    fn test_is_readonly_tool_policy_accepts_read_and_search_tools() {
+        assert!(is_readonly_tool_policy(Some(&[
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+        ])));
+        assert!(is_readonly_tool_policy(Some(&[" read ".to_string()])));
+    }
+
+    #[test]
+    fn test_is_readonly_tool_policy_rejects_empty_or_write_tools() {
+        assert!(!is_readonly_tool_policy(None));
+        assert!(!is_readonly_tool_policy(Some(&[])));
+        assert!(!is_readonly_tool_policy(Some(&[
+            "Read".to_string(),
+            "Write".to_string(),
+        ])));
+        assert!(!is_readonly_tool_policy(Some(&[
+            "Read".to_string(),
+            "WebSearch".to_string(),
+        ])));
     }
 
     #[test]

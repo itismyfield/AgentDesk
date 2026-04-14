@@ -1,6 +1,55 @@
 #![allow(dead_code)]
 
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Configure a child command so `kill_pid_tree(child.id())` can clean up descendants.
+pub fn configure_child_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+/// Wait for process output and kill the child process group on timeout.
+pub fn wait_with_output_timeout(
+    child: std::process::Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output, String> {
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            let _ = waiter.join();
+            result.map_err(|e| format!("Failed to read output: {}", e))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            kill_pid_tree(pid);
+            if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
+                let _ = waiter.join();
+            }
+            Err(format!("{} timed out after {}s", label, timeout.as_secs()))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(format!("{} output waiter disconnected", label))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortField {
@@ -634,5 +683,19 @@ mod tests {
         assert_eq!(cloned.pid, info.pid);
         assert_eq!(cloned.user, info.user);
         assert_eq!(cloned.command, info.command);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wait_with_output_timeout_kills_child_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        configure_child_process_group(&mut command);
+        let child = command.spawn().expect("spawn sleep");
+
+        let error = wait_with_output_timeout(child, Duration::from_millis(20), "test child")
+            .expect_err("expected timeout");
+
+        assert!(error.contains("timed out"));
     }
 }

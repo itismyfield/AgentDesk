@@ -296,8 +296,10 @@ var rules = {
     // Skip terminal cards
     if (agentdesk.pipeline.isTerminal(card.status, cfg)) return;
 
-    // Review/decision dispatches — handled by review-automation policy
-    if (dispatch.dispatch_type === "review" || dispatch.dispatch_type === "review-decision") return;
+    // Review/create-pr lifecycle dispatches are handled by review-automation.
+    if (dispatch.dispatch_type === "review"
+        || dispatch.dispatch_type === "review-decision"
+        || dispatch.dispatch_type === "create-pr") return;
 
     // #197: e2e-test dispatches — handled by deploy-pipeline policy
     if (dispatch.dispatch_type === "e2e-test") return;

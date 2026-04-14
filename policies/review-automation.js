@@ -197,6 +197,9 @@ var reviewAutomation = {
         "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
         [dispatch.kanban_card_id]
       );
+      var completeCfg = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
+      var terminalState = agentdesk.pipeline.terminalState(completeCfg);
+      agentdesk.kanban.setStatus(dispatch.kanban_card_id, terminalState, true);
       agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → wait-ci on PR #" + pr.number);
       return;
     }

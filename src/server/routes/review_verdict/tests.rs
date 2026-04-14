@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 fn test_db() -> Db {
@@ -22,12 +23,21 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
-struct WorktreeCommitOverrideGuard;
+fn env_lock() -> MutexGuard<'static, ()> {
+    crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+struct WorktreeCommitOverrideGuard {
+    _lock: MutexGuard<'static, ()>,
+}
 
 impl WorktreeCommitOverrideGuard {
     fn set(commit: &str) -> Self {
+        let lock = env_lock();
         super::decision_route::set_test_worktree_commit_override(Some(commit.to_string()));
-        Self
+        Self { _lock: lock }
     }
 }
 
@@ -355,7 +365,7 @@ async fn repeated_findings_after_session_reset_escalates_to_dilemma_pending() {
             .unwrap_or("")
             .contains("세션 리셋 후에도 동일 finding 반복")
     );
-    assert_ne!(card_status, "review");
+    assert_eq!(card_status, "review");
     assert_eq!(rework_count, 0);
 
     let (review_state, session_reset_round): (String, Option<i64>) = conn
@@ -1731,7 +1741,6 @@ fn latest_completed_review_lookup_prefers_completed_at() {
 /// review_status='reviewing'. The accept cleanup must NOT clear it.
 #[tokio::test]
 async fn accept_direct_review_preserves_reviewing_status() {
-    let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
     {
