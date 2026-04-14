@@ -29,6 +29,7 @@ pub mod review_verdict;
 pub mod reviews;
 mod session_activity;
 pub mod settings;
+mod skill_usage_analytics;
 pub mod skills_api;
 pub mod stats;
 pub mod termination_events;

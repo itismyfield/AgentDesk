@@ -1045,6 +1045,18 @@ export async function getSkillRanking(
   return request(`/api/skills/ranking?window=${window}&limit=${limit}`);
 }
 
+export interface SkillTrendPoint {
+  day: string;
+  count: number;
+}
+
+export async function getSkillTrend(days = 30): Promise<SkillTrendPoint[]> {
+  const data = await request<{ trend: SkillTrendPoint[] }>(
+    `/api/skills-trend?days=${days}`,
+  );
+  return data.trend;
+}
+
 // ── GitHub Issues ──
 
 export interface GitHubIssue {

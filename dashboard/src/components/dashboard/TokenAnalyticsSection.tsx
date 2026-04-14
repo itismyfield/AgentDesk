@@ -58,6 +58,7 @@ const HEATMAP_COLORS = [
   "rgba(245,158,11,0.52)",
   "rgba(249,115,22,0.72)",
 ];
+const DAILY_TREND_CHART_HEIGHT_PX = 160;
 
 function formatTokens(value: number): string {
   if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
@@ -195,6 +196,15 @@ function ChartTooltip({ lines }: { lines: string[] }) {
       </div>
     </div>
   );
+}
+
+export function hasDailyTrendData(daily: TokenAnalyticsDailyPoint[]): boolean {
+  return daily.some((day) => day.total_tokens > 0);
+}
+
+export function dailyTrendBarHeightPx(totalTokens: number, trendMax: number): number {
+  if (totalTokens <= 0 || trendMax <= 0) return 0;
+  return Math.max(8, Math.round((totalTokens / trendMax) * DAILY_TREND_CHART_HEIGHT_PX));
 }
 
 export default function TokenAnalyticsSection({
@@ -531,6 +541,8 @@ function DailyTrendCard({
     { key: "cache_read_tokens", color: "#22c55e", pattern: "horizontal", label: t({ ko: "캐시 읽기", en: "Cache Read", ja: "キャッシュ読取", zh: "缓存读取" }) },
     { key: "cache_creation_tokens", color: "#a855f7", pattern: "cross", label: t({ ko: "캐시 쓰기", en: "Cache Write", ja: "キャッシュ書込", zh: "缓存写入" }) },
   ];
+  const hasData = hasDailyTrendData(daily);
+  const labelStride = Math.max(1, Math.ceil(daily.length / 6));
 
   return (
     <div
@@ -573,7 +585,7 @@ function DailyTrendCard({
         </div>
       </div>
 
-      {daily.length === 0 ? (
+      {!hasData ? (
         <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
           {loading
             ? t({ ko: "토큰 추이를 동기화하는 중입니다", en: "Syncing token trend", ja: "トークン推移を同期中", zh: "正在同步 Token 趋势" })
@@ -597,7 +609,7 @@ function DailyTrendCard({
                 const breakdown = segments.map(
                   (segment) => `${segment.label} ${formatTokens(segment.value)}`,
                 );
-                const compactLabel = index === 0 || index === daily.length - 1 || index % 5 === 0;
+                const compactLabel = index === 0 || index === daily.length - 1 || index % labelStride === 0;
 
                 return (
                   <div

@@ -63,7 +63,7 @@ export default function DashboardPageView({
   );
 
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
-  const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("7d");
+  const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("30d");
 
   useEffect(() => {
     let mounted = true;
