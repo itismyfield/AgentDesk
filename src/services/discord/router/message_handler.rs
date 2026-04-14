@@ -186,7 +186,7 @@ fn build_race_requeued_intervention(
     user_msg_id: MessageId,
     user_text: &str,
     reply_context: Option<String>,
-    reply_to_user_message: bool,
+    has_reply_boundary: bool,
     merge_consecutive: bool,
 ) -> Intervention {
     Intervention {
@@ -197,7 +197,7 @@ fn build_race_requeued_intervention(
         mode: super::super::InterventionMode::Soft,
         created_at: std::time::Instant::now(),
         reply_context,
-        has_reply_boundary: reply_to_user_message,
+        has_reply_boundary,
         merge_consecutive,
     }
 }
@@ -216,6 +216,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     wait_for_completion: bool,
     merge_consecutive: bool,
     reply_context: Option<String>,
+    has_reply_boundary: bool,
 ) -> Result<(), Error> {
     let original_channel_id = channel_id;
     // Get session info, allowed tools, and pending uploads
@@ -790,7 +791,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 user_msg_id,
                 user_text,
                 reply_context.clone(),
-                reply_to_user_message,
+                has_reply_boundary,
                 merge_consecutive,
             ),
         )
@@ -2847,6 +2848,7 @@ Any other message is sent to {p}.
                 false,
                 false,
                 None,
+                false,
             )
             .await?;
             return Ok(true);

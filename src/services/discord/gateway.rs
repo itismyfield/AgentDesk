@@ -232,6 +232,7 @@ impl TurnGateway for DiscordGateway {
                 true,
                 intervention.merge_consecutive,
                 intervention.reply_context.clone(),
+                intervention.has_reply_boundary,
             )
             .await
             .map_err(|e| e.to_string())

@@ -966,6 +966,7 @@ pub(in crate::services::discord) async fn handle_event(
                 false,
                 merge_consecutive,
                 reply_context,
+                has_reply_boundary,
             )
             .await?;
         }
