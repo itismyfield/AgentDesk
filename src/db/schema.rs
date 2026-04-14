@@ -1323,6 +1323,8 @@ fn load_existing_ids(conn: &Connection, table: &str, ids: &[String]) -> Result<H
     }
 
     let mut existing = HashSet::new();
+    // Legacy backfills can accumulate thousands of FK candidates, so keep each
+    // IN(...) lookup below SQLite's bind-parameter limit during migrate().
     for chunk in normalized_ids.chunks(EXISTING_ID_LOOKUP_CHUNK_SIZE) {
         let placeholders = (0..chunk.len()).map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = match table {

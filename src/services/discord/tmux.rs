@@ -67,6 +67,19 @@ fn watcher_ready_for_input_turn_completed(
     tracker.observe_idle(current_offset > data_start_offset, ready_for_input, now)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeadSessionCleanupPlan {
+    preserve_tmux_session: bool,
+    report_idle_status: bool,
+}
+
+fn dead_session_cleanup_plan(dispatch_protected: bool) -> DeadSessionCleanupPlan {
+    DeadSessionCleanupPlan {
+        preserve_tmux_session: dispatch_protected,
+        report_idle_status: true,
+    }
+}
+
 fn is_prompt_too_long_message(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("prompt is too long")
@@ -2014,6 +2027,7 @@ pub(super) async fn tmux_output_watcher(
         &tmux_session_name,
         channel_name.as_deref(),
     );
+    let cleanup_plan = dead_session_cleanup_plan(dispatch_protection.is_some());
 
     if let Some(protection) = dispatch_protection {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2022,7 +2036,9 @@ pub(super) async fn tmux_output_watcher(
             tmux_session_name,
             protection.log_reason()
         );
-    } else {
+    }
+
+    if !cleanup_plan.preserve_tmux_session {
         // Kill dead tmux session to prevent accumulation (especially for thread sessions
         // which are created per-dispatch and would otherwise linger for 24h).
         // #145: skip kill for unified-thread sessions with active auto-queue runs.
@@ -2052,9 +2068,12 @@ pub(super) async fn tmux_output_watcher(
             })
             .await;
         }
+    }
 
+    if cleanup_plan.report_idle_status {
         // Report idle status to DB so the dashboard doesn't show stale "working" state.
-        // Without this, a dead tmux session leaves the DB row as working/dispatched.
+        // Always report idle when the watcher exits, even if dispatch protection
+        // keeps the dead tmux session around for the active-dispatch safety path.
         let thread_channel_id = channel_name
             .as_deref()
             .and_then(super::adk_session::parse_thread_channel_id_from_name);
@@ -2858,20 +2877,22 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
         let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
-            if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+            let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
                 shared.db.as_ref(),
                 &shared.token_hash,
                 &provider,
                 &dc.session_name,
                 Some(&dc.channel_name),
-            ) {
+            );
+            let cleanup_plan = dead_session_cleanup_plan(dispatch_protection.is_some());
+
+            if let Some(protection) = dispatch_protection {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ♻ tmux startup: preserving dispatch session {} — {}",
                     dc.session_name,
                     protection.log_reason()
                 );
-                continue;
             }
 
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
@@ -2886,21 +2907,27 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 resolve_role_binding(ChannelId::new(dc.channel_id), Some(&dc.channel_name))
                     .map(|binding| binding.role_id);
 
-            super::adk_session::post_adk_session_status(
-                Some(&session_key),
-                Some(&dc.channel_name),
-                None,
-                "idle",
-                &provider,
-                None,
-                None,
-                None,
-                None,
-                thread_channel_id,
-                agent_id.as_deref(),
-                api_port,
-            )
-            .await;
+            if cleanup_plan.report_idle_status {
+                super::adk_session::post_adk_session_status(
+                    Some(&session_key),
+                    Some(&dc.channel_name),
+                    None,
+                    "idle",
+                    &provider,
+                    None,
+                    None,
+                    None,
+                    None,
+                    thread_channel_id,
+                    agent_id.as_deref(),
+                    api_port,
+                )
+                .await;
+            }
+
+            if cleanup_plan.preserve_tmux_session {
+                continue;
+            }
 
             // Kill the dead tmux session
             let sess = dc.session_name.clone();
@@ -2933,9 +2960,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 #[cfg(test)]
 mod tests {
     use super::{
-        PROVIDER_OVERLOAD_RETRY_STATE, ProviderOverloadDecision, RestartHandoffScope,
-        WatcherToolState, clear_provider_overload_retry_state, detect_provider_overload_message,
-        is_auth_error_message, is_prompt_too_long_message, load_restored_provider_session_id,
+        DeadSessionCleanupPlan, PROVIDER_OVERLOAD_RETRY_STATE, ProviderOverloadDecision,
+        RestartHandoffScope, WatcherToolState, clear_provider_overload_retry_state,
+        dead_session_cleanup_plan, detect_provider_overload_message, is_auth_error_message,
+        is_prompt_too_long_message, load_restored_provider_session_id,
         normalized_retry_payload_text, process_watcher_lines, provider_overload_fingerprint,
         provider_overload_retry_delay, record_provider_overload_retry,
         resolve_dispatched_thread_dispatch_from_conn, resolve_restart_handoff_scope,
@@ -3568,6 +3596,32 @@ mod tests {
         assert_eq!(
             tool_state.current_tool_line.as_deref(),
             Some("⚙ Bash: `cargo build`")
+        );
+    }
+
+    #[test]
+    fn dead_session_cleanup_plan_preserves_tmux_but_still_reports_idle() {
+        let plan = dead_session_cleanup_plan(true);
+
+        assert_eq!(
+            plan,
+            DeadSessionCleanupPlan {
+                preserve_tmux_session: true,
+                report_idle_status: true,
+            }
+        );
+    }
+
+    #[test]
+    fn dead_session_cleanup_plan_kills_unprotected_sessions_and_reports_idle() {
+        let plan = dead_session_cleanup_plan(false);
+
+        assert_eq!(
+            plan,
+            DeadSessionCleanupPlan {
+                preserve_tmux_session: false,
+                report_idle_status: true,
+            }
         );
     }
 
