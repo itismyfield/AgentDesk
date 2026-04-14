@@ -594,6 +594,7 @@ pub(super) async fn start_restart_handoff_from_state(
             false,
             false,
             None,
+            false,
         )
         .await
         {
