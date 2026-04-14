@@ -346,6 +346,31 @@ fn review_dispatch_message_without_commit() {
 }
 
 #[test]
+fn review_dispatch_message_includes_manual_lookup_warning_when_branch_is_missing() {
+    let message = format_dispatch_message(
+        "dispatch-manual-review-target",
+        "[Review R1] card-1",
+        None,
+        None,
+        true,
+        None,
+        Some("codex"),
+        None,
+        Some("review"),
+        Some(
+            &serde_json::json!({
+                "review_target_warning": "브랜치 정보 없음 — 직접 확인 필요. 최근 완료 작업 커밋이 현재 카드 이슈와 일치하지 않아 repo HEAD 폴백을 생략했습니다.",
+                "review_target_reject_reason": "latest_work_target_issue_mismatch",
+            })
+            .to_string(),
+        ),
+    );
+
+    assert!(message.contains("리뷰 타겟 안내: 브랜치 정보 없음"));
+    assert!(!message.contains("리뷰 대상 브랜치:"));
+}
+
+#[test]
 fn implementation_dispatch_message_stays_compact() {
     let message = format_dispatch_message(
         "dispatch-2",
