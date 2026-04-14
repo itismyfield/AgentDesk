@@ -144,7 +144,6 @@ fn skill_tool_use_extracts_skill_id_only_from_skill_tool() {
 fn sample_session() -> DiscordSession {
     DiscordSession {
         session_id: Some("session-1".to_string()),
-        assistant_turns: 1,
         memento_context_loaded: true,
         memento_reflected: false,
         current_path: Some("/tmp/project".to_string()),
