@@ -37,6 +37,10 @@ import {
   createChecklistItem,
   formatIso,
   formatTs,
+  getCardDelayBadge,
+  getCardDwellBadge,
+  getCardMetadata,
+  getChecklistSummary,
   hasManualInterventionReason,
   isManualInterventionCard,
   isReviewCard,
@@ -618,6 +622,19 @@ export default function KanbanTab({
     }
     return mapped;
   }, [inProgressCardsByAgentId, liveTurnAgentIds, liveTurnsByAgentId]);
+
+  const selectedCardMetadata = selectedCard ? getCardMetadata(selectedCard) : null;
+  const selectedCardChecklistSummary = selectedCard ? getChecklistSummary(selectedCard) : null;
+  const selectedCardDelayBadge = selectedCard ? getCardDelayBadge(selectedCard, tr) : null;
+  const selectedCardDwellBadge = selectedCard ? getCardDwellBadge(selectedCard, nowMs, tr) : null;
+  const selectedParentCard = selectedCard?.parent_card_id
+    ? repoCardsById.get(selectedCard.parent_card_id) ?? null
+    : null;
+  const selectedChildCards = selectedCard ? childCardsByParentId.get(selectedCard.id) ?? [] : [];
+  const selectedLiveToolState = selectedCard ? liveToolStateByCardId.get(selectedCard.id) ?? null : null;
+  const selectedLatestDispatch = selectedCard?.latest_dispatch_id
+    ? dispatchMap.get(selectedCard.latest_dispatch_id) ?? null
+    : null;
 
   // Agents that have cards in the current repo (for the per-agent dropdown)
   const repoAgentCounts = useMemo(() => {
@@ -2254,6 +2271,186 @@ export default function KanbanTab({
                             ? tr("결정 완료 → 재디스패치", "Decisions Complete → Dispatch Rework")
                             : tr("모든 항목에 결정을 내려주세요", "Decide all items first")}
                       </button>
+                    </div>
+                  );
+                })()}
+
+                {(() => {
+                  const hasSummaryChips = Boolean(
+                    selectedCard.depth > 0
+                    || selectedCardMetadata?.retry_count
+                    || selectedCardMetadata?.failover_count
+                    || selectedCardMetadata?.redispatch_count
+                    || selectedCardChecklistSummary
+                    || selectedCardDwellBadge
+                    || selectedCardDelayBadge,
+                  );
+                  const hasDetailBlocks = Boolean(
+                    selectedParentCard
+                    || selectedChildCards.length > 0
+                    || selectedLiveToolState
+                    || selectedLatestDispatch
+                    || selectedCard.latest_dispatch_status
+                    || selectedCard.latest_dispatch_type
+                    || selectedCardMetadata?.reward,
+                  );
+                  if (!hasSummaryChips && !hasDetailBlocks) return null;
+
+                  return (
+                    <div className="space-y-3 rounded-2xl border p-4" style={{ ...SURFACE_PANEL_STYLE }}>
+                      <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                        {tr("카드 메타", "Card metadata")}
+                      </div>
+
+                      {hasSummaryChips && (
+                        <div className="flex flex-wrap gap-2">
+                          {selectedCard.depth > 0 && (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
+                              {tr("체인", "Chain")} {selectedCard.depth}
+                            </span>
+                          )}
+                          {selectedCardMetadata?.retry_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}>
+                              {tr("재시도", "Retry")} {selectedCardMetadata.retry_count}
+                            </span>
+                          ) : null}
+                          {selectedCardMetadata?.failover_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#fca5a5" }}>
+                              {tr("Failover", "Failover")} {selectedCardMetadata.failover_count}
+                            </span>
+                          ) : null}
+                          {selectedCardMetadata?.redispatch_count ? (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#fbbf24" }}>
+                              {tr("재디스패치", "Redispatch")} {selectedCardMetadata.redispatch_count}
+                            </span>
+                          ) : null}
+                          {selectedCardChecklistSummary && (
+                            <span className="rounded-full border px-2 py-1 text-xs" style={{ ...SURFACE_CHIP_STYLE, color: "#99f6e4" }}>
+                              {tr("체크리스트", "Checklist")} {selectedCardChecklistSummary}
+                            </span>
+                          )}
+                          {selectedCardDwellBadge && (
+                            <span
+                              className="rounded-full border px-2 py-1 text-xs"
+                              style={{
+                                color: selectedCardDwellBadge.textColor,
+                                backgroundColor: selectedCardDwellBadge.backgroundColor,
+                                borderColor: selectedCardDwellBadge.borderColor,
+                              }}
+                            >
+                              {selectedCardDwellBadge.label} {selectedCardDwellBadge.detail}
+                            </span>
+                          )}
+                          {selectedCardDelayBadge && (
+                            <span
+                              className="rounded-full px-2 py-1 text-xs"
+                              style={{ color: "white", backgroundColor: selectedCardDelayBadge.tone }}
+                            >
+                              {selectedCardDelayBadge.label} {selectedCardDelayBadge.detail}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {hasDetailBlocks && (
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          {(selectedLatestDispatch || selectedCard.latest_dispatch_status || selectedCard.latest_dispatch_type) && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("최신 디스패치", "Latest dispatch")}
+                              </div>
+                              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                {selectedCard.latest_dispatch_id ? `#${selectedCard.latest_dispatch_id.slice(0, 8)}` : "-"}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("상태", "Status")}: {selectedCard.latest_dispatch_status ?? selectedLatestDispatch?.status ?? "-"}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("유형", "Type")}: {selectedCard.latest_dispatch_type ?? selectedLatestDispatch?.dispatch_type ?? "-"}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedCardMetadata?.reward && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("완료 보상", "Completion reward")}
+                              </div>
+                              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                +{selectedCardMetadata.reward.xp} XP
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {getAgentLabel(selectedCardMetadata.reward.agent_id)}
+                              </div>
+                              <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                                {tr("완료 작업 수", "Tasks done")}: {selectedCardMetadata.reward.tasks_done}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedLiveToolState && (
+                            <div className="rounded-2xl border p-3 space-y-1.5" style={{ borderColor: "rgba(59,130,246,0.28)", backgroundColor: "rgba(59,130,246,0.08)" }}>
+                              <div className="text-xs" style={{ color: "#bfdbfe" }}>
+                                {tr("실행 중 도구", "Live tool")}
+                              </div>
+                              <div className="text-sm" style={{ color: "#eff6ff" }}>
+                                {selectedLiveToolState.line}
+                              </div>
+                              <div className="text-xs" style={{ color: "rgba(191,219,254,0.84)" }}>
+                                {getAgentLabel(selectedLiveToolState.agentId)}
+                                {selectedLiveToolState.updatedAt ? ` · ${formatIso(selectedLiveToolState.updatedAt, locale)}` : ""}
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedParentCard && (
+                            <div className="rounded-2xl border p-3 space-y-2" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("상위 카드", "Parent card")}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedCardId(selectedParentCard.id)}
+                                className="flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors hover:brightness-110"
+                                style={{ ...SURFACE_CHIP_STYLE }}
+                              >
+                                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                  {selectedParentCard.github_issue_number ? `#${selectedParentCard.github_issue_number}` : `#${selectedParentCard.id.slice(0, 6)}`}
+                                </span>
+                                <span className="min-w-0 truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                  {selectedParentCard.title}
+                                </span>
+                              </button>
+                            </div>
+                          )}
+
+                          {selectedChildCards.length > 0 && (
+                            <div className="rounded-2xl border p-3 space-y-2" style={{ ...SURFACE_PANEL_STYLE }}>
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr("하위 카드", "Child cards")} ({selectedChildCards.length})
+                              </div>
+                              <div className="space-y-2 max-h-48 overflow-y-auto">
+                                {selectedChildCards.map((childCard) => (
+                                  <button
+                                    key={childCard.id}
+                                    type="button"
+                                    onClick={() => setSelectedCardId(childCard.id)}
+                                    className="flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors hover:brightness-110"
+                                    style={{ ...SURFACE_CHIP_STYLE }}
+                                  >
+                                    <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                      {childCard.github_issue_number ? `#${childCard.github_issue_number}` : `#${childCard.id.slice(0, 6)}`}
+                                    </span>
+                                    <span className="min-w-0 truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                      {childCard.title}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
