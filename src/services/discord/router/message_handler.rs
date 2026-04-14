@@ -428,6 +428,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                     worktree: None,
 
                                     born_generation: super::super::runtime_store::load_generation(),
+                                    assistant_turns: 0,
                                 });
                         session.current_path = Some(eff_path.clone());
                         session.channel_name = ch_name;
@@ -1931,6 +1932,7 @@ pub(super) async fn handle_text_command(
                         worktree: None,
 
                         born_generation: runtime_store::load_generation(),
+                        assistant_turns: 0,
                     });
                 session.current_path = Some(effective_path.clone());
                 session.channel_name = ch_name;
@@ -2994,6 +2996,7 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
+            assistant_turns: 0,
         }
     }
 

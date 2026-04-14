@@ -23,6 +23,7 @@ pub(super) struct DiscordSession {
     /// Restart generation at which this session was created/restored.
     #[allow(dead_code)]
     pub(super) born_generation: u64,
+    pub(super) assistant_turns: usize,
 }
 
 pub(super) fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
@@ -503,6 +504,7 @@ pub(super) async fn auto_restore_session(
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
                 born_generation: runtime_store::load_generation(),
+                assistant_turns: 0,
             });
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();
@@ -569,6 +571,7 @@ pub(super) async fn bootstrap_thread_session(
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: runtime_store::load_generation(),
+            assistant_turns: 0,
         });
     // Always create a worktree for thread sessions to isolate concurrent work.
     let effective_path = {
@@ -900,6 +903,7 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
+            assistant_turns: 0,
         };
 
         assert_eq!(session.assistant_turn_count(), 2);
@@ -939,6 +943,7 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
+            assistant_turns: 0,
         };
 
         assert_eq!(
