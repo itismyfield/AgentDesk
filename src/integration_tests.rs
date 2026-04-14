@@ -3326,6 +3326,63 @@ mod tests {
     }
 
     #[test]
+    fn scenario_615_on_review_enter_skips_terminal_card() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-615-terminal", "done");
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-615-terminal",
+            "card-615-terminal",
+            "implementation",
+        );
+        db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing', blocked_reason = 'stale review dispatch' WHERE id = 'card-615-terminal'",
+                [],
+            )
+            .unwrap();
+
+        kanban::fire_enter_hooks(&db, &engine, "card-615-terminal", "review");
+
+        let conn = db.lock().unwrap();
+        let review_dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-615-terminal' AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_dispatch_count, 0,
+            "#615: terminal cards must not spawn new review dispatches on stale OnReviewEnter"
+        );
+
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-615-terminal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            blocked_reason.is_none(),
+            "#615: terminal OnReviewEnter must clear stale blocked_reason"
+        );
+        drop(conn);
+
+        assert_eq!(
+            review_state_value(&db, "card-615-terminal").as_deref(),
+            Some("idle"),
+            "#615: terminal OnReviewEnter must keep canonical review state idle"
+        );
+    }
+
+    #[test]
     fn scenario_335_on_review_enter_reuses_round_without_new_completed_work() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -4380,6 +4437,79 @@ mod tests {
     }
 
     #[test]
+    fn scenario_615_completed_without_changes_skips_review_even_without_explicit_noop_marker() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-615-noop", "in_progress");
+        seed_dispatch(
+            &db,
+            "impl-615-noop",
+            "card-615-noop",
+            "implementation",
+            "pending",
+        );
+        seed_assistant_response_for_dispatch(
+            &db,
+            "impl-615-noop",
+            "verified existing implementation without additional edits",
+        );
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "impl-615-noop",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "completed_without_changes": true,
+                "card_status_target": "done",
+                "notes": "already applied without code change"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            get_card_status(&db, "card-615-noop"),
+            "done",
+            "#615: completed_without_changes must bypass review and respect terminal target"
+        );
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-615-noop", "review"),
+            0,
+            "#615: completed_without_changes must not enqueue a review dispatch"
+        );
+        assert_eq!(
+            review_state_value(&db, "card-615-noop").as_deref(),
+            Some("idle"),
+            "#615: noop completion must leave canonical review state idle"
+        );
+
+        let metadata_json: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-615-noop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(metadata["work_resolution_status"], "noop");
+        assert_eq!(
+            metadata["work_resolution_result"]["completed_without_changes"],
+            true
+        );
+        assert_eq!(
+            metadata["work_resolution_result"]["card_status_target"],
+            "done"
+        );
+    }
+
+    #[test]
     fn scenario_547_implementation_noop_completion_triggers_auto_queue_activate_for_follow_up_entry()
      {
         let policies_dir = setup_auto_queue_activate_spy_policy_dir();
@@ -5429,8 +5559,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
-        let (repo, _env) = setup_test_repo_with_mock_gh(&[
+    fn scenario_208_on_tick_creates_codex_followup_issue_and_dedups_review() {
+        let (repo, env) = setup_test_repo_with_mock_gh(&[
             MockGhReply {
                 key: "pr:list",
                 contains: Some("--state merged"),
@@ -5450,6 +5580,11 @@ mod tests {
                 key: "api:graphql",
                 contains: None,
                 stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-1\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-1\",\"body\":\"P1 force-transition leaves dispatch alive\",\"path\":\"src/server/routes/github.rs\",\"line\":77,\"url\":\"https://example.com/comment-1\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9001\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
+            },
+            MockGhReply {
+                key: "issue:create",
+                contains: Some("--label agent:agent-1"),
+                stdout: "https://github.com/test/repo/issues/900",
             },
         ]);
         run_git(
@@ -5475,29 +5610,64 @@ mod tests {
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(get_card_status(&db, "card-208"), "in_progress");
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
-        let title = latest_dispatch_title(&db, "card-208", "rework").unwrap();
-        assert!(title.contains("src/server/routes/github.rs:77"));
-        assert!(title.contains("P1 force-transition leaves dispatch alive"));
-        assert_eq!(
-            review_state_value(&db, "card-208").as_deref(),
-            Some("rework_pending")
+        assert_eq!(get_card_status(&db, "card-208"), "done");
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
+        assert_eq!(review_state_value(&db, "card-208").as_deref(), None);
+
+        let conn = db.lock().unwrap();
+        let (followup_status, followup_title, followup_description, followup_metadata): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, title, description, metadata \
+                 FROM kanban_cards WHERE repo_id = 'test/repo' AND github_issue_number = 900",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(followup_status, "backlog");
+        assert!(followup_title.contains("PR #323"));
+        assert!(
+            followup_description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("src/server/routes/github.rs:77")
         );
+        let followup_metadata_json: serde_json::Value =
+            serde_json::from_str(followup_metadata.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(followup_metadata_json["labels"], "agent:agent-1");
 
         let messages = message_outbox_rows(&db);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "thread-208");
         assert!(messages[0].1.contains("PR #323"));
-        assert!(messages[0].1.contains("rework dispatch"));
+        assert!(messages[0].1.contains("follow-up issue"));
+        assert!(
+            messages[0]
+                .1
+                .contains("https://github.com/test/repo/issues/900")
+        );
+
+        let log = gh_log(&env._gh);
+        assert!(log.contains("issue create --repo test/repo"));
+        assert!(log.contains("--label agent:agent-1"));
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
         assert_eq!(message_outbox_rows(&db).len(), 1);
+        assert_eq!(
+            gh_log(&env._gh).matches("issue create").count(),
+            1,
+            "Codex follow-up issue creation must dedup per review snapshot"
+        );
     }
 
     #[cfg(unix)]

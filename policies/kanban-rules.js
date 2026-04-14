@@ -364,7 +364,7 @@ var rules = {
     var workResult = {};
     try { workResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
     if ((dispatch.dispatch_type === "implementation" || dispatch.dispatch_type === "rework")
-        && workResult.work_outcome === "noop") {
+        && (workResult.work_outcome === "noop" || workResult.completed_without_changes === true)) {
       var noopMeta = _loadCardMetadata(dispatch.kanban_card_id);
       noopMeta.work_resolution_status = "noop";
       noopMeta.work_resolution_result = workResult;

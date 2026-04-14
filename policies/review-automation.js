@@ -32,6 +32,13 @@ var reviewAutomation = {
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var terminalState = agentdesk.pipeline.terminalState(cfg);
 
+    if (agentdesk.pipeline.isTerminal(card.status, cfg)) {
+      agentdesk.reviewState.sync(card.id, "idle");
+      agentdesk.kanban.setReviewStatus(card.id, null, { blocked_reason: null });
+      agentdesk.log.info("[review] Card " + card.id + " already terminal — skipping review dispatch");
+      return;
+    }
+
     // #128: If card entered review with awaiting_dod (DoD incomplete),
     // skip review dispatch — timeouts.js [D] will escalate to dilemma_pending after 15 min
     if (card.review_status === "awaiting_dod") {
