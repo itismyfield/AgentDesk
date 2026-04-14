@@ -288,6 +288,31 @@ fn git_upstream_base_ref(repo_path: &str) -> String {
     {
         return "origin/main".to_string();
     }
+
+    // origin/main not available locally — attempt a shallow fetch before falling back
+    let fetch = std::process::Command::new("git")
+        .args(["-C", repo_path, "fetch", "origin", "main", "--depth=1"])
+        .output();
+    if let Ok(out) = fetch
+        && out.status.success()
+    {
+        // Re-verify after fetch
+        let recheck = std::process::Command::new("git")
+            .args(["-C", repo_path, "rev-parse", "--verify", "origin/main"])
+            .output();
+        if let Ok(out) = recheck
+            && out.status.success()
+        {
+            tracing::info!(
+                "git fetch origin main --depth=1 succeeded for repo {repo_path}; using origin/main as base ref"
+            );
+            return "origin/main".to_string();
+        }
+    }
+
+    tracing::warn!(
+        "origin/main unavailable for repo {repo_path} even after fetch attempt; falling back to local 'main'"
+    );
     "main".to_string()
 }
 

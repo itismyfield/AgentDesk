@@ -198,10 +198,13 @@ fn resolve_target_repo_path_candidate(raw: &str) -> Option<String> {
 }
 
 fn extract_target_repo_from_description(description: &str) -> Option<String> {
-    let labeled = regex::Regex::new(
-        r"(?i)(?:target_repo|target repo|repo_path|repo path|repo dir|external repo(?: path)?)\s*[:=]\s*([^\s]+)",
-    )
-    .expect("target repo description regex must compile");
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let labeled = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(?:target_repo|target repo|repo_path|repo path|repo dir|external repo(?: path)?)\s*[:=]\s*([^\s]+)",
+        )
+        .expect("target repo description regex must compile")
+    });
     for caps in labeled.captures_iter(description) {
         if let Some(resolved) = caps
             .get(1)

@@ -1043,13 +1043,29 @@ async fn emit_escalation_with_base_url(
                             )
                             .await;
                         }
-                        if let Ok(conn) = state.db.separate_conn() {
-                            if let Err(err) = save_cached_thread_id(&conn, &card_id, &thread_id) {
-                                tracing::warn!(
-                                    "[escalation] failed to cache thread for {card_id}: {err}"
+                        // #587: Optimistic locking — re-read cached_thread_id
+                        // before saving. If another concurrent escalation already
+                        // created and saved a thread, use the existing one instead
+                        // of overwriting it with our newly created thread.
+                        let effective_thread_id = if let Ok(conn) = state.db.separate_conn() {
+                            if let Some(existing) = load_cached_thread_id(&conn, &card_id) {
+                                tracing::info!(
+                                    "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
+                                    existing
                                 );
+                                existing
+                            } else {
+                                if let Err(err) = save_cached_thread_id(&conn, &card_id, &thread_id)
+                                {
+                                    tracing::warn!(
+                                        "[escalation] failed to cache thread for {card_id}: {err}"
+                                    );
+                                }
+                                thread_id
                             }
-                        }
+                        } else {
+                            thread_id
+                        };
                         return (
                             StatusCode::OK,
                             Json(json!({
@@ -1057,7 +1073,7 @@ async fn emit_escalation_with_base_url(
                                 "requested_mode": requested_mode,
                                 "resolved_mode": resolved_mode,
                                 "delivery": "user_thread_created",
-                                "thread_id": thread_id,
+                                "thread_id": effective_thread_id,
                                 "parent_channel_id": parent_channel_id,
                                 "owner_user_id": owner_user_id,
                                 "owner_source": owner_target.source,

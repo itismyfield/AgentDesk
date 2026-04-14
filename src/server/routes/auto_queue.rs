@@ -721,10 +721,7 @@ fn decide_restore_transition(
             return Ok(RestoreEntryDecision::ExistingDispatch { dispatch_id });
         }
     }
-    if matches!(
-        card_state.status.as_str(),
-        "requested" | "in_progress" | "review"
-    ) {
+    if !card_state.is_terminal(conn) {
         return Ok(RestoreEntryDecision::NewDispatch {
             title: card_state.title,
         });
@@ -3341,6 +3338,30 @@ pub(crate) fn activate_with_deps(
             ActivatePreflightOutcome::Skipped => continue,
         }
 
+        // #628: Re-verify entry is still pending before slot allocation to guard
+        // against concurrent activate calls that may have already dispatched this entry.
+        {
+            let conn = deps.db.separate_conn().unwrap();
+            let still_pending: bool = conn
+                .query_row(
+                    "SELECT status = 'pending' FROM auto_queue_entries WHERE entry_id = ?1",
+                    [&entry_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            drop(conn);
+            if !still_pending {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_concurrent_race_detected",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] entry {entry_id} is no longer pending before slot allocation; concurrent activate likely claimed it"
+                );
+                dispatched_groups_this_activate += 1;
+                continue;
+            }
+        }
+
         // Create dispatch
         let conn = deps.db.separate_conn().unwrap();
         let slot_allocation =
@@ -3349,10 +3370,10 @@ pub(crate) fn activate_with_deps(
         let mut reset_slot_thread_before_reuse = false;
         if slot_allocation.is_none() {
             crate::auto_queue_log!(
-                info,
+                warn,
                 "activate_slot_pool_exhausted",
                 entry_log_ctx.clone(),
-                "[auto-queue] Skipping group {group} for {agent_id}: no free slot in pool"
+                "[auto-queue] Skipping group {group} for {agent_id}: no free slot in pool (possible concurrent slot claim)"
             );
             continue;
         }

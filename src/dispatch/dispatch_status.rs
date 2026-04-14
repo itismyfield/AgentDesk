@@ -19,26 +19,41 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
     card_id: &str,
     title: &str,
 ) -> rusqlite::Result<bool> {
-    let dispatch_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if matches!(
-        dispatch_status.as_deref(),
-        Some("completed") | Some("failed") | Some("cancelled")
-    ) {
-        return Ok(false);
-    }
+    conn.execute_batch("SAVEPOINT dispatch_notify_outbox")?;
+    let result = (|| -> rusqlite::Result<bool> {
+        let dispatch_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if matches!(
+            dispatch_status.as_deref(),
+            Some("completed") | Some("failed") | Some("cancelled")
+        ) {
+            return Ok(false);
+        }
 
-    let inserted = conn.execute(
-        "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
-         VALUES (?1, 'notify', ?2, ?3, ?4)",
-        rusqlite::params![dispatch_id, agent_id, card_id, title],
-    )?;
-    Ok(inserted > 0)
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
+             VALUES (?1, 'notify', ?2, ?3, ?4)",
+            rusqlite::params![dispatch_id, agent_id, card_id, title],
+        )?;
+        Ok(inserted > 0)
+    })();
+    match result {
+        Ok(value) => {
+            conn.execute_batch("RELEASE dispatch_notify_outbox")?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO dispatch_notify_outbox; RELEASE dispatch_notify_outbox;",
+            );
+            Err(err)
+        }
+    }
 }
 
 /// Ensure a pending status-reaction outbox row exists for a dispatch.

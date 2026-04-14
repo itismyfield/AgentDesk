@@ -107,7 +107,7 @@ fn enqueue_deploy_gate_escalation(conn: &Connection, card_id: &str, reason: &str
 }
 
 fn poll_deploy_gates(db: &Db) {
-    if DEPLOY_GATE_RUNNING.load(Ordering::Relaxed) {
+    if DEPLOY_GATE_RUNNING.load(Ordering::Acquire) {
         return;
     }
 
@@ -160,72 +160,83 @@ fn poll_deploy_gates(db: &Db) {
 
     let (run_id, phase, anchor_card_id) = gate;
     let db = db.clone();
-    DEPLOY_GATE_RUNNING.store(true, Ordering::Relaxed);
+    DEPLOY_GATE_RUNNING.store(true, Ordering::Release);
 
     std::thread::spawn(move || {
-        tracing::info!(
-            "[deploy-gate] starting deploy for run {} phase {}",
-            &run_id[..8.min(run_id.len())],
-            phase
-        );
+        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::info!(
+                "[deploy-gate] starting deploy for run {} phase {}",
+                &run_id[..8.min(run_id.len())],
+                phase
+            );
 
-        let result = crate::engine::ops::deploy_ops::run_deploy();
-        let success = result
-            .get("ok")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let summary = result
-            .get("summary")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
+            let result = crate::engine::ops::deploy_ops::run_deploy();
+            let success = result
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let summary = result
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
 
-        if let Ok(conn) = db.lock() {
-            if success {
-                tracing::info!(
-                    "[deploy-gate] deploy succeeded for run {} phase {}: {}",
-                    &run_id[..8.min(run_id.len())],
-                    phase,
-                    summary
-                );
-                conn.execute(
-                    "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                    rusqlite::params![run_id, phase],
-                )
-                .ok();
-                conn.execute(
-                    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
-                    rusqlite::params![run_id],
-                )
-                .ok();
-            } else {
-                let error = result
-                    .get("error")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("deploy failed");
-                tracing::warn!(
-                    "[deploy-gate] deploy failed for run {} phase {}: {}",
-                    &run_id[..8.min(run_id.len())],
-                    phase,
-                    error
-                );
-                conn.execute(
-                    "UPDATE auto_queue_phase_gates
-                     SET status = 'failed', failure_reason = ?3
-                     WHERE run_id = ?1 AND phase = ?2",
-                    rusqlite::params![run_id, phase, error],
-                )
-                .ok();
-                if let Some(anchor_card_id) = anchor_card_id.as_deref() {
-                    enqueue_deploy_gate_escalation(
-                        &conn,
-                        anchor_card_id,
-                        &deploy_gate_failure_reason(phase, error),
+            if let Ok(conn) = db.lock() {
+                if success {
+                    tracing::info!(
+                        "[deploy-gate] deploy succeeded for run {} phase {}: {}",
+                        &run_id[..8.min(run_id.len())],
+                        phase,
+                        summary
                     );
+                    conn.execute(
+                        "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
+                        rusqlite::params![run_id, phase],
+                    )
+                    .ok();
+                    conn.execute(
+                        "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
+                        rusqlite::params![run_id],
+                    )
+                    .ok();
+                } else {
+                    let error = result
+                        .get("error")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("deploy failed");
+                    tracing::warn!(
+                        "[deploy-gate] deploy failed for run {} phase {}: {}",
+                        &run_id[..8.min(run_id.len())],
+                        phase,
+                        error
+                    );
+                    conn.execute(
+                        "UPDATE auto_queue_phase_gates
+                         SET status = 'failed', failure_reason = ?3
+                         WHERE run_id = ?1 AND phase = ?2",
+                        rusqlite::params![run_id, phase, error],
+                    )
+                    .ok();
+                    if let Some(anchor_card_id) = anchor_card_id.as_deref() {
+                        enqueue_deploy_gate_escalation(
+                            &conn,
+                            anchor_card_id,
+                            &deploy_gate_failure_reason(phase, error),
+                        );
+                    }
                 }
             }
+        }));
+
+        if let Err(panic) = body {
+            let msg = panic
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!("[deploy-gate] thread panicked: {}", msg);
         }
 
-        DEPLOY_GATE_RUNNING.store(false, Ordering::Relaxed);
+        DEPLOY_GATE_RUNNING.store(false, Ordering::Release);
     });
 }
 
@@ -673,7 +684,7 @@ mod tests {
 
     #[test]
     fn poll_deploy_gates_clears_stale_gate_when_phase_still_has_live_entries() {
-        DEPLOY_GATE_RUNNING.store(false, Ordering::Relaxed);
+        DEPLOY_GATE_RUNNING.store(false, Ordering::Release);
         let db = test_db();
         {
             let conn = db.lock().unwrap();

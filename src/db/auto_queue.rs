@@ -301,7 +301,8 @@ pub fn rebind_slot_for_group_agent(
              assigned_thread_group = ?2,
              updated_at = datetime('now')
          WHERE agent_id = ?3
-           AND slot_index = ?4",
+           AND slot_index = ?4
+           AND (assigned_run_id IS NULL OR assigned_run_id = ?1)",
         rusqlite::params![run_id, thread_group, agent_id, slot_index],
     )?;
     if slot_updated == 0 {

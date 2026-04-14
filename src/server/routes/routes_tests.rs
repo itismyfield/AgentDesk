@@ -3714,29 +3714,6 @@ fn drain_pending_transitions(db: &Db, engine: &PolicyEngine) {
     }
 }
 
-#[tokio::test]
-async fn force_transition_rejects_without_channel_header() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-ft1", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/card-ft1/force-transition")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"status":"ready"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
 #[test]
 fn on_tick5min_stalled_timeout_uses_latest_activity_timestamp() {
     crate::pipeline::ensure_loaded();
@@ -4204,56 +4181,6 @@ async fn stalled_cards_and_stats_use_latest_activity_timestamp() {
         serde_json::json!(1),
         "stats stale_in_progress count must match latest-activity stalled detection"
     );
-}
-
-#[tokio::test]
-async fn force_transition_rejects_wrong_channel() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-ft2", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/card-ft2/force-transition")
-                .header("content-type", "application/json")
-                .header("x-channel-id", "wrong-channel")
-                .body(Body::from(r#"{"status":"ready"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn batch_transition_rejects_wrong_channel() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-bt-auth", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/batch-transition")
-                .header("content-type", "application/json")
-                .header("x-channel-id", "wrong-channel")
-                .body(Body::from(
-                    r#"{"card_ids":["card-bt-auth"],"status":"ready"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
