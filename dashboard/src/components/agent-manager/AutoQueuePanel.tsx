@@ -568,7 +568,7 @@ export default function AutoQueuePanel({
   selectedAgentId,
 }: Props) {
   const [status, setStatus] = useState<AutoQueueStatus | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
