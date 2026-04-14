@@ -77,6 +77,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
          FROM sessions s
          JOIN task_dispatches td
            ON td.id = s.active_dispatch_id
+          AND td.status IN ('pending', 'dispatched')
          WHERE s.active_dispatch_id IS NOT NULL
            AND (
              s.session_key = ?1
@@ -294,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn protects_session_rows_with_completed_dispatch_ids_until_ttl() {
+    fn ignores_session_rows_with_stale_active_dispatch_ids() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -340,13 +341,7 @@ mod tests {
             Some("adk-cdx-t1485506232256168011"),
         );
 
-        assert_eq!(
-            protection,
-            Some(DispatchTmuxProtection::SessionRow {
-                dispatch_id: "dispatch-stale".to_string(),
-                session_status: "idle".to_string(),
-            })
-        );
+        assert_eq!(protection, None);
     }
 
     #[test]
