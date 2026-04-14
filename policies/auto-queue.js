@@ -708,36 +708,42 @@ function remainingRunnableEntryCount(runId) {
 function finalizeRunWithoutPhaseGate(runId) {
   if (!runId) return false;
 
-  var runInfo = loadRunInfo(runId);
-  if (!runInfo) return false;
-  if (runInfo.status !== "active" && runInfo.status !== "paused") return false;
   if (runHasBlockingPhaseGate(runId)) return false;
   if (remainingRunnableEntryCount(runId) > 0) return false;
 
-  agentdesk.db.execute(
-    "UPDATE auto_queue_slots " +
-    "SET assigned_run_id = NULL, assigned_thread_group = NULL, updated_at = datetime('now') " +
-    "WHERE assigned_run_id = ?",
-    [runId]
-  );
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs " +
-    "SET status = 'completed', completed_at = datetime('now') " +
-    "WHERE id = ? AND status IN ('active', 'paused')",
-    [runId]
-  );
+  var completed = false;
+  try {
+    var result = agentdesk.autoQueue.completeRun(
+      runId,
+      "finalize_without_phase_gate",
+      { releaseSlots: true }
+    );
+    completed = !!(result && result.changed);
+  } catch (e) {
+    autoQueueLog("warn", "Failed to finalize run " + runId + ": " + e, {
+      run_id: runId
+    });
+    return false;
+  }
+  if (!completed) return false;
+
   autoQueueLog("info", "Finalized non-phase-gate run " + runId + " and released its slots", {
     run_id: runId
   });
-  notifyRunCompleted(runId, runInfo);
   return true;
 }
 
-function pauseRun(runId) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'paused' WHERE id = ? AND status = 'active'",
-    [runId]
-  );
+function pauseRun(runId, source) {
+  if (!runId) return false;
+  try {
+    var result = agentdesk.autoQueue.pauseRun(runId, source || "policy_pause");
+    return !!(result && result.changed);
+  } catch (e) {
+    autoQueueLog("warn", "Failed to pause run " + runId + ": " + e, {
+      run_id: runId
+    });
+    return false;
+  }
 }
 
 function loadPhaseGateDispatches(dispatchIds) {
@@ -778,16 +784,15 @@ function _phaseGateRequired(runId, phase) {
 }
 
 function completeRunAndNotify(runId) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
-    [runId]
-  );
+  if (!runId) return;
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_complete_resume");
+  } catch (e) {
+    autoQueueLog("warn", "Failed to resume final phase-gate run " + runId + ": " + e, {
+      run_id: runId
+    });
+  }
   activateRun(runId, null);
-  var runInfo = agentdesk.db.query(
-    "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
-    [runId]
-  );
-  notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
 }
 
 function remainingRunnableEntryCount(runId, phase) {
@@ -881,10 +886,14 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
 }
 
 function resumeRunAndActivate(runId, nextPhase) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
-    [runId]
-  );
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_resume");
+  } catch (e) {
+    autoQueueLog("warn", "Failed to resume run " + runId + ": " + e, {
+      run_id: runId,
+      batch_phase: nextPhase !== undefined ? nextPhase : null
+    });
+  }
   if (nextPhase !== null && nextPhase !== undefined) {
     autoQueueLog("info", "Resuming run " + runId + " for phase " + nextPhase, {
       run_id: runId,
@@ -1215,75 +1224,6 @@ function dispatchNextEntry(agentId) {
     });
   } catch (e) {
     agentdesk.log.warn("[auto-queue] legacy activate bridge failed for agent " + agentId + ": " + e);
-  }
-}
-
-function collectRunMainChannels(runId, runInfo) {
-  var targets = {};
-
-  if (runInfo && runInfo.unified_thread_id) {
-    try {
-      var map = JSON.parse(runInfo.unified_thread_id);
-      for (var key in map) {
-        if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
-        var value = map[key];
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          for (var nestedKey in value) {
-            if (!Object.prototype.hasOwnProperty.call(value, nestedKey)) continue;
-            if (/^\d+$/.test(nestedKey)) targets[nestedKey] = true;
-          }
-        } else if (/^\d+$/.test(key)) {
-          targets[key] = true;
-        }
-      }
-    } catch (e) {
-      autoQueueLog("warn", "Failed to parse unified_thread_id for run " + runId + ": " + e, {
-        run_id: runId
-      });
-    }
-  }
-
-  var channelIds = Object.keys(targets);
-  if (channelIds.length > 0) return channelIds;
-
-  // #304: resolve primary channel via centralized resolver instead of legacy column
-  var fallbackAgents = agentdesk.db.query(
-    "SELECT DISTINCT e.agent_id FROM auto_queue_entries e WHERE e.run_id = ?",
-    [runId]
-  );
-  for (var i = 0; i < fallbackAgents.length; i++) {
-    try {
-      var ch = agentdesk.agents && agentdesk.agents.resolvePrimaryChannel
-        ? agentdesk.agents.resolvePrimaryChannel(fallbackAgents[i].agent_id)
-        : null;
-      if (ch) targets[ch] = true;
-    } catch (e) {
-      agentdesk.log.warn("[auto-queue] resolvePrimaryChannel failed for " + fallbackAgents[i].agent_id + ": " + e);
-    }
-  }
-  return Object.keys(targets);
-}
-
-function notifyRunCompleted(runId, runInfo) {
-  var channelIds = collectRunMainChannels(runId, runInfo);
-  if (channelIds.length === 0) {
-    autoQueueLog("info", "Run " + runId + " complete — no main channel found for notify", {
-      run_id: runId
-    });
-    return;
-  }
-
-  var totals = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ?",
-    [runId]
-  );
-  var totalCount = (totals.length > 0) ? totals[0].cnt : 0;
-  var repoLabel = (runInfo && runInfo.repo) ? runInfo.repo : "auto-queue";
-  var shortRun = runId.substring(0, 8);
-  var message = "자동큐 완료: " + repoLabel + " / run " + shortRun + " / " + totalCount + "개";
-
-  for (var i = 0; i < channelIds.length; i++) {
-    agentdesk.message.queue("channel:" + channelIds[i], message, "notify", "system");
   }
 }
 

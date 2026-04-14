@@ -21,13 +21,43 @@ pub(super) fn register_auto_queue_ops<'js>(
         )?,
     )?;
 
-    let db_activate = db;
+    let db_activate = db.clone();
     let bridge_activate = bridge.clone();
     auto_queue_obj.set(
         "__activateRaw",
         Function::new(ctx.clone(), move |body_json: String| -> String {
             activate_raw(&db_activate, &bridge_activate, &body_json)
         })?,
+    )?;
+    let db_pause_run = db.clone();
+    auto_queue_obj.set(
+        "__pauseRunRaw",
+        Function::new(
+            ctx.clone(),
+            move |run_id: String, source: String| -> String {
+                pause_run_raw(&db_pause_run, &run_id, &source)
+            },
+        )?,
+    )?;
+    let db_resume_run = db.clone();
+    auto_queue_obj.set(
+        "__resumeRunRaw",
+        Function::new(
+            ctx.clone(),
+            move |run_id: String, source: String| -> String {
+                resume_run_raw(&db_resume_run, &run_id, &source)
+            },
+        )?,
+    )?;
+    let db_complete_run = db.clone();
+    auto_queue_obj.set(
+        "__completeRunRaw",
+        Function::new(
+            ctx.clone(),
+            move |run_id: String, source: String, opts_json: String| -> String {
+                complete_run_raw(&db_complete_run, &run_id, &source, &opts_json)
+            },
+        )?,
     )?;
     let bridge_should_defer = bridge.clone();
     auto_queue_obj.set(
@@ -87,6 +117,31 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
+            aq.pauseRun = function(runId, source) {
+                var result = JSON.parse(
+                    aq.__pauseRunRaw(runId, source || "")
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            aq.resumeRun = function(runId, source) {
+                var result = JSON.parse(
+                    aq.__resumeRunRaw(runId, source || "")
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            aq.completeRun = function(runId, source, opts) {
+                var result = JSON.parse(
+                    aq.__completeRunRaw(
+                        runId,
+                        source || "",
+                        JSON.stringify(opts || {})
+                    )
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
         })();
         "#,
     )?;
@@ -127,6 +182,95 @@ fn should_defer_activate(bridge: &BridgeHandle) -> bool {
         .upgrade_engine()
         .map(|engine| engine.is_actor_thread())
         .unwrap_or(false)
+}
+
+fn pause_run_raw(db: &Db, run_id: &str, source: &str) -> String {
+    update_run_status_raw(db, source, |conn| {
+        crate::db::auto_queue::pause_run_on_conn(conn, run_id)
+    })
+}
+
+fn resume_run_raw(db: &Db, run_id: &str, source: &str) -> String {
+    update_run_status_raw(db, source, |conn| {
+        crate::db::auto_queue::resume_run_on_conn(conn, run_id)
+    })
+}
+
+fn complete_run_raw(db: &Db, run_id: &str, source: &str, opts_json: &str) -> String {
+    if source.trim().is_empty() {
+        return r#"{"error":"source is required"}"#.to_string();
+    }
+
+    let opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
+        Ok(value) => value,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("invalid opts JSON: {error}")
+            })
+            .to_string();
+        }
+    };
+    let release_slots = opts_value
+        .get("releaseSlots")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    let conn = match db.separate_conn() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("DB: {error}")
+            })
+            .to_string();
+        }
+    };
+
+    if release_slots {
+        crate::db::auto_queue::release_run_slots(&conn, run_id);
+    }
+
+    match crate::db::auto_queue::complete_run_on_conn(&conn, run_id) {
+        Ok(changed) => serde_json::json!({
+            "ok": true,
+            "changed": changed,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
+}
+
+fn update_run_status_raw<F>(db: &Db, source: &str, update: F) -> String
+where
+    F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<bool>,
+{
+    if source.trim().is_empty() {
+        return r#"{"error":"source is required"}"#.to_string();
+    }
+
+    let conn = match db.separate_conn() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("DB: {error}")
+            })
+            .to_string();
+        }
+    };
+
+    match update(&conn) {
+        Ok(changed) => serde_json::json!({
+            "ok": true,
+            "changed": changed,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
 }
 
 fn update_entry_status_raw(
