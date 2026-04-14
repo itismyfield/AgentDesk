@@ -166,7 +166,7 @@
 | `server::ws` | `src/server/ws.rs` | 141 |  |
 | `services` | `src/services/mod.rs` | 36 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 155 |  |
-| `services::api_friction` | `src/services/api_friction.rs` | 1319 | giant-file |
+| `services::api_friction` | `src/services/api_friction.rs` | 1323 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 867 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 235 |  |
 | `services::claude` | `src/services/claude.rs` | 2259 | giant-file |
