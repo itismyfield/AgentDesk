@@ -1345,6 +1345,7 @@ export interface AutoQueueRun {
   completed_at: number | null;
   max_concurrent_threads?: number;
   thread_group_count?: number;
+  deploy_phases?: number[];
 }
 
 export interface AutoQueueThreadLink {
@@ -1390,6 +1391,16 @@ export interface ThreadGroupStatus {
   }[];
 }
 
+export interface PhaseGateInfo {
+  id: number;
+  phase: number;
+  status: "pending" | "passed" | "failed";
+  dispatch_id?: string | null;
+  failure_reason?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface AutoQueueStatus {
   run: AutoQueueRun | null;
   entries: DispatchQueueEntry[];
@@ -1398,6 +1409,7 @@ export interface AutoQueueStatus {
     { pending: number; dispatched: number; done: number; skipped: number }
   >;
   thread_groups?: Record<string, ThreadGroupStatus>;
+  phase_gates?: PhaseGateInfo[];
 }
 
 export interface AutoQueueHistoryRun {
