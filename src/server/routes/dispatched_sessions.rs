@@ -51,36 +51,15 @@ fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     });
 }
 
-fn load_existing_session_active_dispatch_id(
-    conn: &rusqlite::Connection,
-    session_key: &str,
-) -> Option<String> {
-    conn.query_row(
-        "SELECT active_dispatch_id FROM sessions WHERE session_key = ?1",
-        [session_key],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()
-    .filter(|value| !value.trim().is_empty())
-}
-
-fn resolve_hook_active_dispatch_id(
-    conn: &rusqlite::Connection,
-    session_key: &str,
-    status: &str,
-    dispatch_id: Option<&str>,
-) -> Option<String> {
-    let incoming_dispatch_id = dispatch_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
+fn normalize_hook_active_dispatch_id(status: &str, dispatch_id: Option<&str>) -> Option<String> {
     if status.eq_ignore_ascii_case("disconnected") {
         return None;
     }
 
-    incoming_dispatch_id.or_else(|| load_existing_session_active_dispatch_id(conn, session_key))
+    dispatch_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 // ── Query / Body types ────────────────────────────────────────
@@ -323,12 +302,7 @@ pub async fn hook_session(
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
-    let active_dispatch_id = resolve_hook_active_dispatch_id(
-        &conn,
-        &body.session_key,
-        status,
-        body.dispatch_id.as_deref(),
-    );
+    let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
     // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
     // strings are never persisted — prevents invalid --resume attempts after restart.
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
@@ -351,7 +325,11 @@ pub async fn hook_session(
            model = COALESCE(excluded.model, sessions.model),
            tokens = excluded.tokens,
            cwd = COALESCE(excluded.cwd, sessions.cwd),
-           active_dispatch_id = excluded.active_dispatch_id,
+           active_dispatch_id = CASE
+             WHEN lower(excluded.status) = 'disconnected' THEN NULL
+             WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
+             ELSE sessions.active_dispatch_id
+           END,
            agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
@@ -2303,6 +2281,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active_dispatch_id.as_deref(), Some("dispatch-sticky"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_without_dispatch_id_does_not_resurrect_cleared_binding() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, provider, status, active_dispatch_id, last_heartbeat, created_at)
+                 VALUES ('session-cleared', 'codex', 'working', 'dispatch-cleared', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE sessions SET active_dispatch_id = NULL WHERE session_key = 'session-cleared'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "session-cleared".to_string(),
+                agent_id: None,
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(21),
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-cleared'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_dispatch_id, None);
     }
 
     #[test]
