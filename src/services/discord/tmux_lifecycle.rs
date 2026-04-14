@@ -77,7 +77,6 @@ fn resolve_dispatch_tmux_protection_from_conn(
          FROM sessions s
          JOIN task_dispatches td
            ON td.id = s.active_dispatch_id
-          AND td.status IN ('pending', 'dispatched')
          WHERE s.active_dispatch_id IS NOT NULL
            AND (
              s.session_key = ?1
@@ -295,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_session_rows_with_stale_active_dispatch_ids() {
+    fn protects_session_rows_with_completed_dispatch_ids_until_ttl() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -329,6 +328,60 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-stale', datetime('now'), datetime('now'), '1485506232256168011')",
+            rusqlite::params![session_key.as_str(), provider.as_str()],
+        )
+        .unwrap();
+
+        let protection = resolve_dispatch_tmux_protection_from_conn(
+            &conn,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some("adk-cdx-t1485506232256168011"),
+        );
+
+        assert_eq!(
+            protection,
+            Some(DispatchTmuxProtection::SessionRow {
+                dispatch_id: "dispatch-stale".to_string(),
+                session_status: "idle".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_session_rows_with_missing_dispatch_ids() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                session_key TEXT,
+                provider TEXT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            ",
+        )
+        .unwrap();
+
+        let provider = ProviderKind::Codex;
+        let tmux_name = sample_tmux_name();
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz", &provider, &tmux_name,
+        );
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+             VALUES (?1, ?2, 'idle', 'dispatch-missing', datetime('now'), datetime('now'), '1485506232256168011')",
             rusqlite::params![session_key.as_str(), provider.as_str()],
         )
         .unwrap();
