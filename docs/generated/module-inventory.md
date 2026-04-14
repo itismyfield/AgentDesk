@@ -63,7 +63,7 @@
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::schema` | `src/db/schema.rs` | 2633 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 2714 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 3883 | giant-file |
@@ -118,7 +118,7 @@
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 134 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 316 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 164 |  |
-| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3109 | giant-file |
+| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3126 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 2882 | giant-file |
@@ -218,7 +218,7 @@
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 370 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 3610 | giant-file |
-| `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 478 |  |
+| `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 597 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 343 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 1759 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 1114 | giant-file |
