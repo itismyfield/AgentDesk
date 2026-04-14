@@ -113,10 +113,16 @@ pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
-const SESSION_MAX_IDLE: Duration = Duration::from_secs(24 * 60 * 60); // 1 day
+const SESSION_MAX_IDLE: Duration = Duration::from_secs(60 * 60); // 1 hour
+const SESSION_MAX_ASSISTANT_TURNS: usize = 100;
+const SESSION_RECOVERY_CONTEXT_MESSAGES: usize = 10;
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
+    format!("session_retry_context:{}", channel_id.get())
+}
 
 pub(super) fn should_process_allowed_bot_turn_text(_text: &str) -> bool {
     // All announce bot messages trigger turns — dispatches, agent-to-agent
@@ -1560,75 +1566,89 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     *last_guard = tokio::time::Instant::now();
     drop(last_guard);
 
-    let expired: Vec<(ChannelId, Option<String>)> = {
+    struct ExpiredSessionCleanup {
+        channel_id: ChannelId,
+        session_id: Option<String>,
+        session_key: Option<String>,
+        retry_context: Option<String>,
+    }
+
+    let provider = shared.settings.read().await.provider.clone();
+    let expired: Vec<ExpiredSessionCleanup> = {
         let data = shared.core.lock().await;
         let now = tokio::time::Instant::now();
         data.sessions
             .iter()
             .filter(|(_, s)| now.duration_since(s.last_active) > SESSION_MAX_IDLE)
-            .map(|(ch, s)| (*ch, s.session_id.clone()))
+            .map(|(ch, s)| ExpiredSessionCleanup {
+                channel_id: *ch,
+                session_id: s.session_id.clone(),
+                session_key: s.channel_name.as_ref().map(|name| {
+                    let tmux_name = provider.build_tmux_session_name(name);
+                    adk_session::build_namespaced_session_key(
+                        &shared.token_hash,
+                        &provider,
+                        &tmux_name,
+                    )
+                }),
+                retry_context: s.recent_history_context(SESSION_RECOVERY_CONTEXT_MESSAGES),
+            })
             .collect()
     };
     if expired.is_empty() {
         return;
     }
-    let provider = shared.settings.read().await.provider.clone();
-    // Collect session_keys for audit before removing from memory
-    let expired_keys: Vec<(ChannelId, String)> = {
-        let data = shared.core.lock().await;
-        expired
-            .iter()
-            .filter_map(|(ch, _)| {
-                data.sessions.get(ch).and_then(|s| {
-                    s.channel_name.as_ref().map(|name| {
-                        let tmux_name = provider.build_tmux_session_name(name);
-                        (
-                            *ch,
-                            adk_session::build_namespaced_session_key(
-                                &shared.token_hash,
-                                &provider,
-                                &tmux_name,
-                            ),
-                        )
-                    })
-                })
-            })
-            .collect()
-    };
     {
         let mut data = shared.core.lock().await;
-        for (ch, _) in &expired {
+        for expired_session in &expired {
+            let ch = expired_session.channel_id;
             // Clean up worktree if session had one
-            if let Some(session) = data.sessions.get(ch) {
+            if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
                     cleanup_git_worktree(wt);
                 }
             }
-            data.sessions.remove(ch);
+            data.sessions.remove(&ch);
         }
     }
-    for (ch, _) in &expired {
-        let cleared = mailbox_clear_channel(shared, &provider, *ch).await;
+    for expired_session in &expired {
+        if let Some(retry_context) = expired_session.retry_context.as_deref() {
+            let _ = internal_api::set_kv_value(
+                &session_retry_context_key(expired_session.channel_id),
+                retry_context,
+            );
+        }
+        if let Some(session_key) = expired_session.session_key.as_deref() {
+            adk_session::clear_provider_session_id(session_key, shared.api_port).await;
+        }
+        if let Some(session_id) = expired_session.session_id.as_deref() {
+            let _ = internal_api::clear_stale_session_id(session_id).await;
+        }
+    }
+    for expired_session in &expired {
+        let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
         if cleared.removed_token.is_some() {
             shared
                 .global_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
-        shared.api_timestamps.remove(ch);
-        shared.tmux_watchers.remove(ch);
+        shared.api_timestamps.remove(&expired_session.channel_id);
+        shared.tmux_watchers.remove(&expired_session.channel_id);
     }
     // Record termination audit for cleaned-up sessions
-    for (_, session_key) in &expired_keys {
-        crate::services::termination_audit::record_termination(
-            session_key,
-            None,
-            "cleanup",
-            "idle_session_expiry",
-            Some("in-memory session expired due to idle timeout"),
-            None,
-            None,
-            None,
-        );
+    for expired_session in &expired {
+        if let Some(session_key) = expired_session.session_key.as_deref() {
+            crate::services::termination_audit::record_termination(
+                session_key,
+                None,
+                "cleanup",
+                "idle_session_expiry",
+                Some("in-memory session expired due to idle timeout"),
+                None,
+                None,
+                None,
+            );
+        }
     }
     tracing::info!("  [cleanup] Removed {} idle session(s)", expired.len());
 }

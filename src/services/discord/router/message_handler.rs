@@ -19,6 +19,12 @@ struct MemoryInjectionPlan<'a> {
     longterm_catalog_for_system_prompt: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionResetReason {
+    IdleExpired,
+    AssistantTurnCap,
+}
+
 fn build_memory_injection_plan<'a>(
     provider: &ProviderKind,
     has_session_id: bool,
@@ -67,6 +73,47 @@ fn should_skip_memento_recall(
 
 fn should_add_turn_pending_reaction(dispatch_id: Option<&str>) -> bool {
     dispatch_id.is_none()
+}
+
+fn session_reset_reason_for_turn(
+    session: &DiscordSession,
+    now: tokio::time::Instant,
+) -> Option<SessionResetReason> {
+    if now.duration_since(session.last_active) > super::super::SESSION_MAX_IDLE {
+        Some(SessionResetReason::IdleExpired)
+    } else if session.assistant_turn_count() >= super::super::SESSION_MAX_ASSISTANT_TURNS {
+        Some(SessionResetReason::AssistantTurnCap)
+    } else {
+        None
+    }
+}
+
+fn format_session_retry_context(raw_context: &str) -> Option<String> {
+    let raw_context = raw_context.trim();
+    if raw_context.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "[이전 대화 복원 — 새 세션 시작으로 최근 대화를 컨텍스트에 포함합니다]\n\n{raw_context}"
+        ))
+    }
+}
+
+fn merge_reply_contexts(primary: Option<String>, secondary: Option<String>) -> Option<String> {
+    match (primary, secondary) {
+        (Some(primary), Some(secondary)) => Some(format!("{secondary}\n\n{primary}")),
+        (Some(primary), None) => Some(primary),
+        (None, Some(secondary)) => Some(secondary),
+        (None, None) => None,
+    }
+}
+
+fn take_session_retry_context(channel_id: ChannelId) -> Option<String> {
+    let key = super::super::session_retry_context_key(channel_id);
+    super::super::internal_api::take_kv_value(&key)
+        .ok()
+        .flatten()
+        .and_then(|raw| format_session_retry_context(&raw))
 }
 
 async fn send_restore_notification(
@@ -218,9 +265,28 @@ pub(in crate::services::discord) async fn handle_text_message(
     reply_context: Option<String>,
 ) -> Result<(), Error> {
     let original_channel_id = channel_id;
+    let mut session_reset_reason = None;
+    let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
     let (session_info, provider, allowed_tools, pending_uploads) = {
         let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id)
+            && let Some(reason) =
+                session_reset_reason_for_turn(session, tokio::time::Instant::now())
+        {
+            if let Some(retry_context) =
+                session.recent_history_context(super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
+            {
+                let _ = super::super::internal_api::set_kv_value(
+                    &super::super::session_retry_context_key(channel_id),
+                    &retry_context,
+                );
+            }
+            session_reset_reason = Some(reason);
+            reset_session_id_to_clear = session.session_id.clone();
+            session.clear_provider_session();
+            session.history.clear();
+        }
         let info = load_session_runtime_state(&mut data.sessions, channel_id);
         let uploads = data
             .sessions
@@ -714,11 +780,30 @@ pub(in crate::services::discord) async fn handle_text_message(
         (channel_name, tmux_session_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    if session_reset_reason.is_some() {
+        if let Some(ref key) = adk_session_key {
+            super::super::adk_session::clear_provider_session_id(key, shared.api_port).await;
+        }
+        if let Some(ref session_id_to_clear) = reset_session_id_to_clear {
+            let _ = super::super::internal_api::clear_stale_session_id(session_id_to_clear).await;
+        }
+    }
     if session_id.is_none() {
         if dispatch_force_new_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ Skipping DB provider session restore for forced fresh dispatch turn"
+            );
+        } else if let Some(reason) = session_reset_reason {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let reason = match reason {
+                SessionResetReason::IdleExpired => "idle timeout",
+                SessionResetReason::AssistantTurnCap => "assistant turn cap",
+            };
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to {}",
+                channel_id.get(),
+                reason
             );
         } else if let Some(ref key) = adk_session_key {
             let restored = super::super::adk_session::fetch_provider_session_id(
@@ -751,6 +836,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id = restored;
         }
     }
+    let reply_context = merge_reply_contexts(reply_context, take_session_retry_context(channel_id));
 
     // Send placeholder message (after restore notification so restore appears first)
     rate_limit_wait(shared, channel_id).await;
@@ -2869,7 +2955,9 @@ mod tests {
     use super::super::super::DiscordSession;
     use super::*;
     use crate::services::memory::RecallResponse;
+    use crate::ui::ai_screen::{HistoryItem, HistoryType};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::time::Duration;
 
     fn sample_recall() -> RecallResponse {
         RecallResponse {
@@ -3056,6 +3144,46 @@ mod tests {
             &memento,
             session.memento_context_loaded
         ));
+    }
+
+    #[test]
+    fn session_reset_reason_triggers_after_idle_timeout() {
+        let mut session = make_session(Some("/tmp/project".to_string()), None);
+        let now = tokio::time::Instant::now();
+        session.last_active = now - Duration::from_secs(60 * 60) - Duration::from_secs(1);
+
+        assert_eq!(
+            session_reset_reason_for_turn(&session, now),
+            Some(SessionResetReason::IdleExpired)
+        );
+    }
+
+    #[test]
+    fn session_reset_reason_triggers_after_assistant_turn_cap() {
+        let mut session = make_session(Some("/tmp/project".to_string()), None);
+        session.history = (0..100)
+            .map(|idx| HistoryItem {
+                item_type: HistoryType::Assistant,
+                content: format!("assistant-{idx}"),
+            })
+            .collect();
+
+        assert_eq!(
+            session_reset_reason_for_turn(&session, tokio::time::Instant::now()),
+            Some(SessionResetReason::AssistantTurnCap)
+        );
+    }
+
+    #[test]
+    fn merge_reply_contexts_prefers_retry_context_first() {
+        assert_eq!(
+            merge_reply_contexts(
+                Some("reply context".to_string()),
+                Some("retry context".to_string())
+            )
+            .as_deref(),
+            Some("retry context\n\nreply context")
+        );
     }
 
     #[test]

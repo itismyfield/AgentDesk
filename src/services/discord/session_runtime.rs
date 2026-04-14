@@ -66,6 +66,48 @@ impl DiscordSession {
         self.memento_reflected = false;
     }
 
+    pub(super) fn assistant_turn_count(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|item| item.item_type == HistoryType::Assistant)
+            .count()
+    }
+
+    pub(super) fn recent_history_context(&self, max_messages: usize) -> Option<String> {
+        if max_messages == 0 {
+            return None;
+        }
+
+        let mut lines = self
+            .history
+            .iter()
+            .rev()
+            .filter_map(|item| {
+                let speaker = match item.item_type {
+                    HistoryType::User => "User",
+                    HistoryType::Assistant => "Assistant",
+                    _ => return None,
+                };
+                let content = item.content.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                Some(format!(
+                    "{speaker}: {}",
+                    content.chars().take(300).collect::<String>()
+                ))
+            })
+            .take(max_messages)
+            .collect::<Vec<_>>();
+
+        if lines.is_empty() {
+            return None;
+        }
+
+        lines.reverse();
+        Some(lines.join("\n"))
+    }
+
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
@@ -796,6 +838,87 @@ mod tests {
         );
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn assistant_turn_count_only_counts_assistant_messages() {
+        let session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "user".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "assistant-1".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::ToolUse,
+                    content: "tool".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "assistant-2".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        };
+
+        assert_eq!(session.assistant_turn_count(), 2);
+    }
+
+    #[test]
+    fn recent_history_context_returns_latest_user_and_assistant_messages() {
+        let session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "첫 질문".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "첫 답변".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "둘째 질문".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "둘째 답변".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        };
+
+        assert_eq!(
+            session.recent_history_context(3).as_deref(),
+            Some("Assistant: 첫 답변\nUser: 둘째 질문\nAssistant: 둘째 답변")
+        );
     }
 
     #[test]
