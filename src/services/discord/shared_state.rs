@@ -331,6 +331,7 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 1,
+            assistant_turns: 0,
         }
     }
 

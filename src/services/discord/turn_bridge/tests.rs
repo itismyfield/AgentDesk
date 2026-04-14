@@ -170,6 +170,7 @@ fn sample_session() -> DiscordSession {
         last_active: tokio::time::Instant::now(),
         worktree: None,
         born_generation: 0,
+        assistant_turns: 0,
     }
 }
 

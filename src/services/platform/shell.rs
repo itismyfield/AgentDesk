@@ -390,6 +390,89 @@ pub fn git_branch_name(dir: &str) -> Option<String> {
         .filter(|s| s != "HEAD") // detached HEAD → None
 }
 
+fn is_mainlike_branch(branch: &str) -> bool {
+    matches!(branch, "main" | "master" | "origin/main" | "origin/master")
+}
+
+fn git_ref_ahead_count_from_commit(dir: &str, commit: &str, git_ref: &str) -> Option<u64> {
+    let range = format!("{commit}..{git_ref}");
+    Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+}
+
+/// Resolve a branch that actually contains `commit`, instead of assuming the
+/// repo's current checkout branch is the reviewed branch.
+///
+/// Ranking rules:
+/// 1. Branches whose tip is closest to the commit (`commit..branch` shortest)
+/// 2. Branches whose name contains `preferred_substring`
+/// 3. The caller-provided `preferred_branch`
+/// 4. Local branches over `origin/*`
+/// 5. Non-main branches over `main`/`master`
+pub fn git_branch_containing_commit(
+    dir: &str,
+    commit: &str,
+    preferred_branch: Option<&str>,
+    preferred_substring: Option<&str>,
+) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--contains",
+            commit,
+            "refs/heads",
+            "refs/remotes/origin",
+        ])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && *branch != "HEAD" && *branch != "origin/HEAD")
+        .filter(|branch| seen.insert((*branch).to_string()))
+        .filter_map(|branch| {
+            let ahead_count = git_ref_ahead_count_from_commit(dir, commit, branch)?;
+            let preferred_name_match = preferred_substring
+                .filter(|needle| !needle.is_empty())
+                .is_some_and(|needle| branch.contains(needle));
+            let preferred_branch_match = preferred_branch == Some(branch);
+            Some((
+                branch.to_string(),
+                ahead_count,
+                preferred_name_match,
+                preferred_branch_match,
+                branch.starts_with("origin/"),
+                is_mainlike_branch(branch),
+            ))
+        })
+        .min_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| b.3.cmp(&a.3))
+                .then_with(|| a.4.cmp(&b.4))
+                .then_with(|| a.5.cmp(&b.5))
+                .then_with(|| a.0.cmp(&b.0))
+        })
+        .map(|(branch, _, _, _, _, _)| branch)
+}
+
 /// Resolve the merge-base SHA between two refs in a git directory.
 pub fn git_merge_base(dir: &str, base_ref: &str, other_ref: &str) -> Option<String> {
     Command::new("git")
@@ -941,6 +1024,40 @@ mod tests {
         assert_eq!(merge_base, fork_point);
         assert_ne!(merge_base, branch_commit);
         assert_ne!(merge_base, main_commit);
+    }
+
+    #[test]
+    fn git_branch_containing_commit_prefers_issue_branch_over_checked_out_main() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        Command::new("git")
+            .args(["checkout", "-b", "feat/610-review"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "fix: review target (#610)"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let reviewed_commit = git_head_commit(repo_dir).unwrap();
+
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        let branch = git_branch_containing_commit(
+            repo_dir,
+            &reviewed_commit,
+            git_branch_name(repo_dir).as_deref(),
+            Some("610"),
+        )
+        .expect("branch containing reviewed commit must be found");
+
+        assert_eq!(branch, "feat/610-review");
     }
 
     #[test]
