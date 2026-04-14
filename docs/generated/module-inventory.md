@@ -67,13 +67,13 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 3883 | giant-file |
-| `engine` | `src/engine/mod.rs` | 1488 | giant-file |
+| `engine` | `src/engine/mod.rs` | 1492 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
-| `engine::intent` | `src/engine/intent.rs` | 772 |  |
+| `engine::intent` | `src/engine/intent.rs` | 812 |  |
 | `engine::loader` | `src/engine/loader.rs` | 281 |  |
 | `engine::ops` | `src/engine/ops.rs` | 156 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 167 |  |
-| `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 161 |  |
+| `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 187 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 334 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 47 |  |
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 269 |  |
@@ -142,7 +142,7 @@
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 123 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 3415 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 265 |  |
-| `server::routes::meetings` | `src/server/routes/meetings.rs` | 2149 | giant-file |
+| `server::routes::meetings` | `src/server/routes/meetings.rs` | 2210 | giant-file |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 192 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 458 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 1950 | giant-file |
@@ -244,7 +244,7 @@
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 178 |  |
 | `services::process` | `src/services/process.rs` | 638 |  |
 | `services::provider` | `src/services/provider.rs` | 1925 | giant-file |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 299 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 355 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 247 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2185 | giant-file |
