@@ -983,6 +983,66 @@ mod tests {
     use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
     use serde_json::json;
 
+    struct MockGhIssueCreateEnv {
+        _dir: tempfile::TempDir,
+        old_gh_path: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for MockGhIssueCreateEnv {
+        fn drop(&mut self) {
+            if let Some(value) = &self.old_gh_path {
+                unsafe { std::env::set_var("AGENTDESK_GH_PATH", value) };
+            } else {
+                unsafe { std::env::remove_var("AGENTDESK_GH_PATH") };
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_mock_gh_issue_create(url: &str) -> MockGhIssueCreateEnv {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let gh_path = dir.path().join("gh");
+        let script = format!(
+            "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"create\" ]; then\ncat <<'EOF'\n{url}\nEOF\nexit 0\nfi\nexit 1\n"
+        );
+        fs::write(&gh_path, script).unwrap();
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+
+        let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
+        unsafe { std::env::set_var("AGENTDESK_GH_PATH", &gh_path) };
+
+        MockGhIssueCreateEnv {
+            _dir: dir,
+            old_gh_path,
+        }
+    }
+
+    #[cfg(windows)]
+    fn install_mock_gh_issue_create(url: &str) -> MockGhIssueCreateEnv {
+        let dir = tempfile::tempdir().unwrap();
+        let gh_cmd_path = dir.path().join("gh.cmd");
+        let gh_ps1_path = dir.path().join("gh.ps1");
+        let wrapper =
+            "@echo off\r\npwsh -NoProfile -ExecutionPolicy Bypass -File \"%~dp0gh.ps1\" %*\r\n";
+        let script = format!(
+            "$key = if ($args.Count -ge 2) {{ \"$($args[0]):$($args[1])\" }} elseif ($args.Count -eq 1) {{ \"$($args[0]):\" }} else {{ ':' }}\nif ($key -eq 'issue:create') {{\n@'\n{url}\n'@ | Write-Output\nexit 0\n}}\nexit 1\n"
+        );
+        fs::write(&gh_cmd_path, wrapper).unwrap();
+        fs::write(&gh_ps1_path, script).unwrap();
+
+        let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
+        unsafe { std::env::set_var("AGENTDESK_GH_PATH", &gh_cmd_path) };
+
+        MockGhIssueCreateEnv {
+            _dir: dir,
+            old_gh_path,
+        }
+    }
+
     #[test]
     fn extract_api_friction_reports_strips_valid_markers() {
         let input = "검증 완료\nAPI_FRICTION: {\"endpoint\":\"/api/docs/kanban\",\"friction_type\":\"docs-bypass\",\"summary\":\"카테고리를 모르고 시행착오\",\"workaround\":\"sqlite3\",\"keywords\":[\"kanban\"]}\n후속 작업 없음";
@@ -1213,25 +1273,8 @@ mod tests {
     #[tokio::test]
     async fn process_api_friction_patterns_creates_issue_once() {
         let lock = crate::services::discord::runtime_store::lock_test_env();
-        let dir = tempfile::tempdir().unwrap();
-        let gh_path = dir.path().join("gh");
-        fs::write(
-            &gh_path,
-            "#!/usr/bin/env bash\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"create\" ]; then\n  echo \"https://github.com/itismyfield/AgentDesk/issues/999\"\n  exit 0\nfi\nexit 1\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&gh_path, perms).unwrap();
-        }
-
-        let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
-        unsafe {
-            std::env::set_var("AGENTDESK_GH_PATH", &gh_path);
-        }
+        let _mock_gh =
+            install_mock_gh_issue_create("https://github.com/itismyfield/AgentDesk/issues/999");
 
         let db = crate::db::test_db();
         {
@@ -1263,12 +1306,6 @@ mod tests {
         let summary = process_api_friction_patterns(&db, None, None)
             .await
             .unwrap();
-
-        if let Some(value) = old_gh_path {
-            unsafe { std::env::set_var("AGENTDESK_GH_PATH", value) };
-        } else {
-            unsafe { std::env::remove_var("AGENTDESK_GH_PATH") };
-        }
         drop(lock);
 
         assert_eq!(summary.created_issues.len(), 1);
