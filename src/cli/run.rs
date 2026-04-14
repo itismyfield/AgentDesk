@@ -127,12 +127,14 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 run_id,
                 priority,
                 phase,
+                thread_group,
                 agent_id,
             } => super::direct::run_async(super::direct::cmd_auto_queue_add(
                 &card_id,
                 run_id.as_deref(),
                 priority,
                 phase,
+                thread_group,
                 agent_id.as_deref(),
             )),
             AutoQueueAction::Config {

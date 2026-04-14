@@ -386,6 +386,9 @@ pub(crate) enum AutoQueueAction {
         /// Batch phase
         #[arg(long)]
         phase: Option<i64>,
+        /// Thread group
+        #[arg(long = "thread-group")]
+        thread_group: Option<i64>,
         /// Agent override
         #[arg(long = "agent")]
         agent_id: Option<String>,
@@ -538,6 +541,46 @@ pub(crate) fn parse() -> ParseOutcome {
                 std::process::exit(1);
             }
             ParseOutcome::RunServer
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_queue_add_parses_thread_group_flag() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "auto-queue",
+            "add",
+            "--phase",
+            "1",
+            "--thread-group",
+            "2",
+            "610",
+        ])
+        .expect("cli args should parse");
+
+        match cli.command {
+            Some(Commands::AutoQueue {
+                action:
+                    AutoQueueAction::Add {
+                        card_id,
+                        phase,
+                        thread_group,
+                        ..
+                    },
+            }) => {
+                assert_eq!(card_id, "610");
+                assert_eq!(phase, Some(1));
+                assert_eq!(thread_group, Some(2));
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
         }
     }
 }
