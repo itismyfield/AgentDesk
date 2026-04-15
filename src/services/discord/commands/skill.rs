@@ -265,6 +265,7 @@ pub(in crate::services::discord) async fn cmd_cc(
             false,
             None,
             false,
+            None,
         )
         .await?;
         return Ok(());
@@ -327,6 +328,7 @@ pub(in crate::services::discord) async fn cmd_cc(
         false,
         None,
         false,
+        None,
     )
     .await?;
 

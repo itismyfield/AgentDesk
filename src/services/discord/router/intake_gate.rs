@@ -548,7 +548,13 @@ pub(in crate::services::discord) async fn handle_event(
                     new_message.attachments.len()
                 );
                 // Ensure session exists before handling uploads
-                auto_restore_session(&data.shared, channel_id, ctx).await;
+                auto_restore_session_with_dm_hint(
+                    &data.shared,
+                    channel_id,
+                    ctx,
+                    Some(new_message.guild_id.is_none()),
+                )
+                .await;
                 super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?;
             }
 
@@ -577,7 +583,13 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             // Auto-restore session (for threads, fall back to parent channel's session)
-            auto_restore_session(&data.shared, channel_id, ctx).await;
+            auto_restore_session_with_dm_hint(
+                &data.shared,
+                channel_id,
+                ctx,
+                Some(new_message.guild_id.is_none()),
+            )
+            .await;
             if effective_channel_id != channel_id {
                 // Thread: if no session found for thread, try to bootstrap from parent
                 let needs_parent = {
@@ -967,6 +979,7 @@ pub(in crate::services::discord) async fn handle_event(
                 merge_consecutive,
                 reply_context,
                 has_reply_boundary,
+                Some(new_message.guild_id.is_none()),
             )
             .await?;
         }
