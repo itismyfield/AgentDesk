@@ -293,9 +293,17 @@ function patternFillStyle(color: string, pattern: TrendPattern): CSSProperties {
   }
 }
 
-function ChartTooltip({ lines }: { lines: string[] }) {
+function ChartTooltip({
+  lines,
+  placement = "top",
+}: {
+  lines: string[];
+  placement?: "top" | "bottom";
+}) {
   return (
-    <div className="dash-chart-tooltip dash-card-pad-compact">
+    <div
+      className={`dash-chart-tooltip dash-card-pad-compact ${placement === "bottom" ? "dash-chart-tooltip-bottom" : ""}`}
+    >
       <div className="space-y-1 text-[11px] leading-4">
         {lines.map((line, index) => (
           <div key={`${index}-${line}`}>{line}</div>
@@ -669,7 +677,7 @@ export default function TokenAnalyticsSection({
               })}
             </div>
           ) : (
-            <div className="mt-4 overflow-hidden">
+            <div className="mt-4">
               <div className="min-w-0 overflow-x-auto">
                 <div
                   className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]"
@@ -698,7 +706,7 @@ export default function TokenAnalyticsSection({
                   </div>
 
                   <div className="grid min-w-0 grid-flow-col grid-rows-7 gap-1">
-                    {data.heatmap.map((cell) => (
+                    {data.heatmap.map((cell, idx) => (
                       <div
                         key={cell.date}
                         className="group relative h-3 w-3 outline-none"
@@ -712,6 +720,7 @@ export default function TokenAnalyticsSection({
                             `${formatTokens(cell.total_tokens)} tokens`,
                             formatCost(cell.cost),
                           ]}
+                          placement={idx % 7 < 2 ? "bottom" : "top"}
                         />
                         <span
                           className="block h-3 w-3 rounded-[4px] border transition-transform group-hover:scale-110 group-focus-within:scale-110"
@@ -1091,10 +1100,10 @@ function DailyTrendCard({
         </div>
       ) : (
         <div
-          className="mt-4 overflow-hidden"
+          className="mt-4"
           style={{ opacity: loading ? 0.58 : 1 }}
         >
-          <div className="min-w-0 overflow-x-auto">
+          <div className="min-w-0 overflow-x-auto overflow-y-visible">
             <div
               className="flex h-44 items-end gap-px sm:gap-1.5"
               style={{ minWidth: "min-content" }}
@@ -1282,10 +1291,10 @@ function DailyCacheHitTrendCard({
         </div>
       ) : (
         <div
-          className="mt-4 overflow-hidden"
+          className="mt-4"
           style={{ opacity: loading ? 0.58 : 1 }}
         >
-          <div className="min-w-0 overflow-x-auto">
+          <div className="min-w-0 overflow-x-auto overflow-y-visible">
             <div
               className="flex h-44 items-end gap-px sm:gap-1.5"
               style={{ minWidth: "min-content" }}
