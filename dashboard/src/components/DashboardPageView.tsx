@@ -343,15 +343,8 @@ export default function DashboardPageView({
       <DashboardHeroHeader companyName={settings.companyName} t={t} />
 
       <SurfaceSection
-        eyebrow={t({ ko: "Dashboard Layout", en: "Dashboard Layout", ja: "Dashboard Layout", zh: "Dashboard Layout" })}
-        title={t({ ko: "운영 / 토큰 / 자동화 / 업적 / 회의", en: "Operations / Tokens / Automation / Achievements / Meetings", ja: "運用 / トークン / 自動化 / 実績 / 会議", zh: "运营 / Token / 自动化 / 成就 / 会议" })}
-        description={t({
-          ko: "단일 장문 스크롤 대신 탭 전환으로 필요한 표면만 집중해서 봅니다.",
-          en: "Switch surfaces by tab instead of scrolling one long page.",
-          ja: "長い単一ページではなくタブ切り替えで必要な面だけに集中します。",
-          zh: "用标签切换代替超长滚动页面，只看当前需要的面板。",
-        })}
-        className="rounded-[28px] p-4 sm:p-5"
+        title={t({ ko: "대시보드", en: "Dashboard", ja: "ダッシュボード", zh: "仪表盘" })}
+        className="overflow-hidden rounded-[28px] p-4 sm:p-5"
         style={{
           borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
           background:
