@@ -739,6 +739,65 @@ fn js_set_status_resets_started_at_on_in_progress_reentry() {
     );
 }
 
+#[test]
+fn js_set_status_warns_when_bypassing_active_dispatch_gate() {
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('a1', 'Bot', '111', '222')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES ('card-js-warn', 'Warn Test', 'requested', 'a1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                (() => {
+                    var warnings = [];
+                    agentdesk.log.warn = function(msg) { warnings.push(msg); };
+                    var response = agentdesk.kanban.setStatus("card-js-warn", "in_progress");
+                    return JSON.stringify({ response: response, warnings: warnings });
+                })()
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let warning = parsed["response"]["warning"].as_str().unwrap_or("");
+        assert!(
+            warning.contains("has_active_dispatch"),
+            "raw response must surface the missing active dispatch warning: {parsed}"
+        );
+        let logged_warning = parsed["warnings"][0].as_str().unwrap_or("");
+        assert!(
+            logged_warning.contains("has_active_dispatch"),
+            "setStatus wrapper must emit a warn log for missing active dispatch: {parsed}"
+        );
+    });
+
+    let status: String = db
+        .separate_conn()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-js-warn'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "in_progress");
+}
+
 /// Seed a minimal kanban_cards row for FK satisfaction in review state tests.
 fn seed_card_for_review(conn: &rusqlite::Connection, card_id: &str) {
     conn.execute(

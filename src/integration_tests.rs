@@ -776,10 +776,17 @@ mod tests {
 
     fn setup_timeouts_policy_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("policies")
-            .join("timeouts.js");
-        fs::copy(&source, dir.path().join("timeouts.js")).unwrap();
+        let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        fs::copy(
+            source_dir.join("00-escalation.js"),
+            dir.path().join("00-escalation.js"),
+        )
+        .unwrap();
+        fs::copy(
+            source_dir.join("timeouts.js"),
+            dir.path().join("timeouts.js"),
+        )
+        .unwrap();
         fs::write(
             dir.path().join("zz-timeouts-test-overrides.js"),
             r#"
@@ -824,6 +831,15 @@ mod tests {
             "#,
         )
         .unwrap();
+        dir
+    }
+
+    fn setup_triage_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("policies")
+            .join("triage-rules.js");
+        fs::copy(&source, dir.path().join("triage-rules.js")).unwrap();
         dir
     }
 
@@ -1815,6 +1831,52 @@ mod tests {
             .filter_map(|item| item.as_str())
             .collect::<Vec<_>>();
         assert_eq!(reasons, vec!["reason-a", "reason-b"]);
+    }
+
+    #[test]
+    fn on_tick5min_stale_in_progress_skips_cards_already_blocked() {
+        let db = test_db();
+        let policy_dir = setup_timeouts_policy_dir();
+        let engine = test_engine_with_dir(&db, policy_dir.path());
+        seed_agent(&db);
+        seed_card(&db, "card-stale-blocked", "in_progress");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET blocked_reason = 'Stalled: no activity for 120+ min',
+                     started_at = datetime('now', '-3 hours'),
+                     updated_at = datetime('now', '-3 hours')
+                 WHERE id = 'card-stale-blocked'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let blocked_reason: Option<String> = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-stale-blocked'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("Stalled: no activity for 120+ min")
+        );
+        assert!(
+            kv_value(&db, "test_http_count").is_none(),
+            "#653: stale in_progress cards with blocked_reason must not re-escalate"
+        );
     }
 
     #[test]
@@ -4560,6 +4622,21 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET metadata = ?1 WHERE id = 'card-332'",
+            rusqlite::params![
+                serde_json::json!({
+                    "preflight_status": "consult_required",
+                    "preflight_summary": "need clarification",
+                    "preflight_checked_at": "2026-04-15T01:02:03Z",
+                    "consultation_status": "completed",
+                    "consultation_result": {"summary": "stale"},
+                    "keep": "yes"
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
         drop(conn);
 
         let result = dispatch::complete_dispatch(
@@ -4613,11 +4690,11 @@ mod tests {
             "#332: noop completion must close the active auto-queue entry"
         );
 
-        let metadata_json: String = conn
+        let (metadata_json, latest_dispatch_id): (String, Option<String>) = conn
             .query_row(
-                "SELECT metadata FROM kanban_cards WHERE id = 'card-332'",
+                "SELECT metadata, latest_dispatch_id FROM kanban_cards WHERE id = 'card-332'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         drop(conn);
@@ -4633,6 +4710,16 @@ mod tests {
             metadata["work_resolution_result"]["card_status_target"],
             "ready"
         );
+        assert!(
+            latest_dispatch_id.is_none(),
+            "#654: noop -> ready must clear latest_dispatch_id"
+        );
+        assert!(metadata["preflight_status"].is_null());
+        assert!(metadata["preflight_summary"].is_null());
+        assert!(metadata["preflight_checked_at"].is_null());
+        assert!(metadata["consultation_status"].is_null());
+        assert!(metadata["consultation_result"].is_null());
+        assert_eq!(metadata["keep"], "yes");
     }
 
     #[test]
@@ -6562,6 +6649,70 @@ mod tests {
         assert_eq!(metadata["preflight_status"], "consult_required");
         assert!(metadata["preflight_summary"].is_string());
         assert!(metadata["preflight_checked_at"].is_string());
+    }
+
+    #[test]
+    fn triage_requested_key_uses_ttl_and_requeues_after_expiry() {
+        let db = test_db();
+        let policy_dir = setup_triage_policy_dir();
+        let engine = test_engine_with_dir(&db, policy_dir.path());
+        set_config_key(&db, "kanban_manager_channel_id", json!("channel-triage"));
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, metadata, github_issue_url, github_issue_number, created_at, updated_at
+                 ) VALUES (
+                    'card-triage-ttl', 'Needs classification', 'backlog', ?1,
+                    'https://github.com/test/repo/issues/777', 777, datetime('now'), datetime('now')
+                 )",
+                rusqlite::params![serde_json::json!({"labels": ""}).to_string()],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let first_expiry: Option<String> = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT expires_at FROM kv_meta WHERE key = 'triage_requested:card-triage-ttl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            first_expiry.is_some(),
+            "#654: triage dedup key must use TTL"
+        );
+        assert_eq!(message_outbox_rows(&db).len(), 1);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kv_meta
+                 SET expires_at = datetime('now', '-1 minute')
+                 WHERE key = 'triage_requested:card-triage-ttl'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            message_outbox_rows(&db).len(),
+            2,
+            "#654: expired triage dedup key must allow a fresh backlog classification request"
+        );
     }
 
     #[test]

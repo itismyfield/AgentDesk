@@ -526,7 +526,8 @@ var timeouts = {
     var staleInProgress = agentdesk.db.query(
       "SELECT kc.id FROM kanban_cards kc " +
       "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
-      "WHERE kc.status = ? AND " + latestCardActivityExpr("kc", "td") + " < datetime('now', '" + inProgressInterval + "')",
+      "WHERE kc.status = ? AND COALESCE(kc.blocked_reason, '') = '' AND " +
+      latestCardActivityExpr("kc", "td") + " < datetime('now', '" + inProgressInterval + "')",
       [bInProgress]
     );
     for (var j = 0; j < staleInProgress.length; j++) {
