@@ -155,6 +155,7 @@ export default function ControlCenterView({
     },
   ], [activeSessionCount, agents.length, departments.length, offices.length]);
   const activeOrganizationSection = organizationSections.find((section) => section.id === organizationPane);
+  const activeControlSection = sections.find((section) => section.id === controlTab);
   const selectedOfficeLabel = selectedOfficeId
     ? offices.find((office) => office.id === selectedOfficeId)?.name_ko ||
       offices.find((office) => office.id === selectedOfficeId)?.name ||
@@ -163,88 +164,113 @@ export default function ControlCenterView({
 
   const controlHeader = (
     <div className="border-b" style={{ borderColor: "var(--th-border-subtle)" }}>
-      <div className="px-4 py-3 sm:px-6 sm:py-3">
-        <SurfaceSection
-          eyebrow={t("운영 표면", "Operations Surface")}
-          title={t("설정", "Settings")}
-          description={t(
-            "조직 관리와 런타임 설정을 섹션 단위로 분리해 한 화면에서 정리합니다.",
-            "Keep organization management and runtime settings separated into clear sections.",
-          )}
-          badge={t("섹션 기반 편집", "Section-based editing")}
-          className="rounded-[28px] p-3 sm:p-4"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          }}
-        >
-          <div className="sm:hidden">
-            <SurfaceNotice tone="info" compact className="mt-3">
-              <p className="break-words leading-relaxed">
-                {t(
-                  "설정은 조직과 일반 설정 섹션으로 나뉘어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.",
-                  "Settings are split into organization and general sections. Use desktop for bulk editing work.",
-                )}
-              </p>
-            </SurfaceNotice>
-          </div>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            <SurfaceMetricPill
-              tone="info"
-              label={t("선택 오피스", "Selected Office")}
-              value={selectedOfficeLabel}
-              className="flex-1 sm:flex-none"
-            />
-            <SurfaceMetricPill
-              tone="success"
-              label={t("활성 세션", "Live Sessions")}
-              value={activeSessionCount}
-              className="flex-1 sm:flex-none"
-            />
-          </div>
-
-          {recentNotifications.length > 0 && (
-            <div className="mt-3 space-y-2">
-              {recentNotifications.map((notification) => (
-                <SurfaceNotice
-                  key={notification.id}
-                  tone={notificationTone(notification.type)}
-                  compact
-                  action={(
-                    <SurfaceActionButton
-                      onClick={() => onDismissNotification(notification.id)}
-                      tone="neutral"
-                      compact
-                      className="shrink-0"
-                    >
-                      {t("닫기", "Dismiss")}
-                    </SurfaceActionButton>
-                  )}
-                >
-                  <p className="break-words leading-relaxed">{notification.message}</p>
-                </SurfaceNotice>
-              ))}
+      <div className="mx-auto flex w-full max-w-5xl min-w-0 flex-col gap-2 px-4 py-2.5 sm:px-6">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div
+              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {t("운영 표면", "Operations Surface")}
             </div>
-          )}
-        </SurfaceSection>
-      </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <h2
+                className="text-lg font-semibold tracking-tight"
+                style={{ color: "var(--th-text)" }}
+              >
+                {activeControlSection ? (isKo ? activeControlSection.labelKo : activeControlSection.labelEn) : t("설정", "Settings")}
+              </h2>
+              <span
+                className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                  color: "var(--th-text-muted)",
+                  background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+                }}
+              >
+                {t("선택 오피스", "Selected Office")}: {selectedOfficeLabel}
+              </span>
+              <span
+                className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+                  color: "var(--th-text-primary)",
+                  background: "color-mix(in srgb, var(--th-accent-primary-soft) 72%, var(--th-card-bg) 28%)",
+                }}
+              >
+                {t("활성 세션", "Live Sessions")}: {activeSessionCount}
+              </span>
+            </div>
+          </div>
 
-      <div className="grid grid-cols-1 gap-2 px-4 pb-3 sm:px-6 sm:flex sm:overflow-x-auto">
-        {sections.map((section) => (
-          <SurfaceTabCard
-            key={section.id}
-            title={isKo ? section.labelKo : section.labelEn}
-            description={isKo ? section.descriptionKo : section.descriptionEn}
-            count={section.count}
-            active={controlTab === section.id}
-            tone={section.id === "settings" ? "accent" : "neutral"}
-            onClick={() => onControlTabChange(section.id)}
-          />
-        ))}
+          <div className="hidden flex-wrap gap-2 sm:flex">
+            {sections.map((section) => (
+              <SurfaceActionButton
+                key={section.id}
+                onClick={() => onControlTabChange(section.id)}
+                tone={controlTab === section.id ? (section.id === "settings" ? "accent" : "info") : "neutral"}
+                className="gap-2 rounded-full px-3 py-2 text-xs"
+              >
+                <span>{isKo ? section.labelKo : section.labelEn}</span>
+                {section.count !== undefined && (
+                  <span
+                    className="rounded-full px-2 py-0.5 text-[10px]"
+                    style={{
+                      background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                      color: "var(--th-text-muted)",
+                    }}
+                  >
+                    {section.count}
+                  </span>
+                )}
+              </SurfaceActionButton>
+            ))}
+          </div>
+        </div>
+
+        {recentNotifications[0] && (
+          <SurfaceNotice
+            tone={notificationTone(recentNotifications[0].type)}
+            compact
+            action={(
+              <SurfaceActionButton
+                onClick={() => onDismissNotification(recentNotifications[0].id)}
+                tone="neutral"
+                compact
+                className="shrink-0"
+              >
+                {t("닫기", "Dismiss")}
+              </SurfaceActionButton>
+            )}
+          >
+            <p className="break-words leading-relaxed">{recentNotifications[0].message}</p>
+          </SurfaceNotice>
+        )}
       </div>
     </div>
+  );
+
+  const controlTabsGrid = (
+    <div className="grid grid-cols-1 gap-2 px-4 pb-3 sm:px-6 sm:hidden">
+      {sections.map((section) => (
+        <SurfaceTabCard
+          key={section.id}
+          title={isKo ? section.labelKo : section.labelEn}
+          description={isKo ? section.descriptionKo : section.descriptionEn}
+          count={section.count}
+          active={controlTab === section.id}
+          tone={section.id === "settings" ? "accent" : "neutral"}
+          onClick={() => onControlTabChange(section.id)}
+        />
+      ))}
+    </div>
+  );
+
+  const compactControlHeader = (
+    <>
+      {controlHeader}
+      {controlTabsGrid}
+    </>
   );
 
   return (
@@ -258,7 +284,7 @@ export default function ControlCenterView({
               touchAction: "pan-y",
             }}
           >
-            {controlHeader}
+            {compactControlHeader}
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
                 eyebrow={t("인력 운영", "Staff Ops")}
@@ -370,7 +396,7 @@ export default function ControlCenterView({
               touchAction: "pan-y",
             }}
           >
-            {controlHeader}
+            {compactControlHeader}
             <SettingsView settings={settings} onSave={onSaveSettings} isKo={isKo} />
           </div>
         )}
