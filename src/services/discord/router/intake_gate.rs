@@ -214,6 +214,16 @@ async fn handle_reaction_remove(
         return Ok(());
     }
 
+    // Ignore reactions removed by ANY bot — only human users should be able
+    // to cancel turns via reaction removal. Bots (announce/notify) remove
+    // reactions during dispatch status sync, which races with active turns
+    // in the same thread (#670).
+    if let Some(cached_user) = ctx.cache.user(user_id) {
+        if cached_user.bot {
+            return Ok(());
+        }
+    }
+
     let channel_id = removed_reaction.channel_id;
     let settings_snapshot = { data.shared.settings.read().await.clone() };
     if validate_live_channel_routing_with_dm_hint(
