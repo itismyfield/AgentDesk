@@ -37,7 +37,7 @@ var triage = {
         var triageKey = "triage_requested:" + card.id;
         var alreadyRequested = agentdesk.kv.get(triageKey);
         if (alreadyRequested === null) {
-          agentdesk.kv.set(triageKey, new Date().toISOString());
+          agentdesk.kv.set(triageKey, new Date().toISOString(), 86400);
           // Send classification request to PMD via announce bot
           if (card.github_issue_url) {
             var pmdCh = agentdesk.config.get("kanban_manager_channel_id");

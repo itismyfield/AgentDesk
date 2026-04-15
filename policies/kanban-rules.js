@@ -370,14 +370,18 @@ var rules = {
     try { workResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
     if ((dispatch.dispatch_type === "implementation" || dispatch.dispatch_type === "rework")
         && (workResult.work_outcome === "noop" || workResult.completed_without_changes === true)) {
-      var noopMeta = _loadCardMetadata(dispatch.kanban_card_id);
-      noopMeta.work_resolution_status = "noop";
-      noopMeta.work_resolution_result = workResult;
+      var noopMeta = _mergeCardMetadata(dispatch.kanban_card_id, {
+        work_resolution_status: "noop",
+        work_resolution_result: workResult,
+        preflight_status: null,
+        preflight_summary: null,
+        preflight_checked_at: null,
+        consultation_status: null,
+        consultation_result: null
+      });
       var noopCardStatusTarget = workResult.card_status_target || "ready";
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
-        [JSON.stringify(noopMeta), dispatch.kanban_card_id]
-      );
+      agentdesk.db.execute("UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?", [dispatch.kanban_card_id]);
+      agentdesk.kanban.clearLatestDispatch(dispatch.kanban_card_id, dispatch.id);
       var noopEntries = _findAutoQueueEntriesByDispatch(dispatch.id, true);
       for (var ne = 0; ne < noopEntries.length; ne++) {
         agentdesk.autoQueue.updateEntryStatus(
