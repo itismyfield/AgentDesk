@@ -15,8 +15,54 @@ function sendDiscordNotification(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
-function notifyPMD(cardId, reason) {
-  escalate(cardId, reason);
+function _loadCardAlertContext(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT assigned_agent_id, COALESCE(title, id) as title, github_issue_number " +
+    "FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0) return null;
+  return {
+    card_id: cardId,
+    assigned_agent_id: rows[0].assigned_agent_id || null,
+    title: rows[0].title || cardId,
+    github_issue_number: rows[0].github_issue_number || null
+  };
+}
+
+function _formatCardAlertLabel(card) {
+  if (!card) return null;
+  if (card.github_issue_number) {
+    return "#" + card.github_issue_number + " " + (card.title || card.card_id);
+  }
+  return card.title || card.card_id;
+}
+
+function notifyCardOwner(cardId, reason, source) {
+  var card = _loadCardAlertContext(cardId);
+  var src = source || "system";
+  if (!card) {
+    agentdesk.log.warn("[notify] Card not found for owner notification: " + cardId);
+    return notifyHumanAlert("⚠️ 카드 " + cardId + "\n" + reason, src);
+  }
+
+  var message = "⚠️ " + _formatCardAlertLabel(card) + "\n" + reason;
+  if (!card.assigned_agent_id) {
+    agentdesk.log.warn("[notify] Card " + cardId + " has no assigned agent — escalating to human");
+    return notifyHumanAlert(message + "\n담당 에이전트가 없어 사람이 확인해야 합니다.", src);
+  }
+
+  var target = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
+  if (!target) {
+    agentdesk.log.warn(
+      "[notify] No primary channel for assigned agent " + card.assigned_agent_id +
+      " on card " + cardId + " — escalating to human"
+    );
+    return notifyHumanAlert(message + "\n담당 에이전트 채널을 찾지 못해 사람이 확인해야 합니다.", src);
+  }
+
+  agentdesk.message.queue(target, message, "announce", src);
+  return true;
 }
 
 // ── Preflight helpers (#256) ─────────────────────────────────
@@ -460,16 +506,19 @@ var rules = {
     // by auto-queue, which triggers DispatchAttached to advance requested → in_progress.
     if (payload.to === initialState && payload.from !== initialState) {
       var metaBeforePreflight = _loadCardMetadata(payload.card_id);
-      if (metaBeforePreflight.skip_preflight_once === "pmd_reopen") {
+      if (
+        metaBeforePreflight.skip_preflight_once === "api_reopen" ||
+        metaBeforePreflight.skip_preflight_once === "pmd_reopen"
+      ) {
         delete metaBeforePreflight.skip_preflight_once;
         metaBeforePreflight.preflight_status = "skipped";
-        metaBeforePreflight.preflight_summary = "Skipped for PMD reopen";
+        metaBeforePreflight.preflight_summary = "Skipped for API reopen";
         metaBeforePreflight.preflight_checked_at = new Date().toISOString();
         agentdesk.db.execute(
           "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
           [JSON.stringify(metaBeforePreflight), payload.card_id]
         );
-        agentdesk.log.info("[preflight] Skipped for PMD reopen: " + payload.card_id);
+        agentdesk.log.info("[preflight] Skipped for API reopen: " + payload.card_id);
         return;
       }
 

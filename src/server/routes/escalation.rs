@@ -120,7 +120,7 @@ fn escalation_defaults(config: &Config) -> EscalationSettings {
                 .escalation
                 .pm_channel_id
                 .clone()
-                .or_else(|| config.kanban.manager_channel_id.clone()),
+                .or_else(|| config.kanban.human_alert_channel_id.clone()),
         ),
         schedule: EscalationScheduleSettings {
             pm_hours: config

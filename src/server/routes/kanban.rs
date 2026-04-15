@@ -2132,7 +2132,7 @@ pub async fn pm_decision(
     )
 }
 
-// ── PMD-only reopen (done → in_progress) ─────────────────────────
+// ── Administrative review recovery helpers ───────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct RereviewBody {
@@ -2153,6 +2153,72 @@ fn find_active_review_dispatch_id(conn: &rusqlite::Connection, card_id: &str) ->
     .ok()
 }
 
+fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(super) fn require_explicit_bearer_token(
+    headers: &HeaderMap,
+    operation: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let config = crate::config::load_graceful();
+    if let Some(expected_token) = config.server.auth_token.as_deref() {
+        if !expected_token.is_empty() {
+            let provided = trimmed_header_value(headers, "authorization")
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::trim);
+            if provided != Some(expected_token) {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": format!("{operation} requires explicit Bearer token")})),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_agent_id_from_channel_id_on_conn(
+    conn: &rusqlite::Connection,
+    channel_id: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM agents
+         WHERE discord_channel_id = ?1
+            OR discord_channel_alt = ?1
+            OR discord_channel_cc = ?1
+            OR discord_channel_cdx = ?1
+         LIMIT 1",
+        [channel_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+pub(super) fn resolve_requesting_agent_id_on_conn(
+    conn: &rusqlite::Connection,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
+        return conn
+            .query_row(
+                "SELECT id FROM agents WHERE id = ?1 LIMIT 1",
+                [agent_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .or_else(|| Some(agent_id.to_string()));
+    }
+
+    trimmed_header_value(headers, "x-channel-id")
+        .and_then(|channel_id| resolve_agent_id_from_channel_id_on_conn(conn, channel_id))
+}
+
 /// POST /api/kanban-cards/:id/rereview
 ///
 /// Recovery endpoint. Forces a card back through counter-model review
@@ -2163,24 +2229,12 @@ pub async fn rereview_card(
     headers: HeaderMap,
     Json(body): Json<RereviewBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected_token) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "rereview requires explicit Bearer token"})),
-                );
-            }
-        }
+    if let Err(response) = require_explicit_bearer_token(&headers, "rereview") {
+        return response;
     }
 
     let reason = body.reason.as_deref().unwrap_or("manual rereview");
-    let (current_status, assigned_agent_id, card_title, gh_url) = {
+    let (current_status, assigned_agent_id, card_title, gh_url, caller_source) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -2200,6 +2254,8 @@ pub async fn rereview_card(
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    resolve_requesting_agent_id_on_conn(&conn, &headers)
+                        .unwrap_or_else(|| "api".to_string()),
                 ))
             },
         ) {
@@ -2307,7 +2363,7 @@ pub async fn rereview_card(
             &state.engine,
             &id,
             "review",
-            &format!("pmd:rereview({reason})"),
+            &format!("{caller_source}:rereview({reason})"),
             true,
         ) {
             return (
@@ -2404,10 +2460,9 @@ pub async fn rereview_card(
             })
             .unwrap_or_default();
         for entry_id in entry_ids {
-            if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+            if let Err(error) = move_auto_queue_entry_to_dispatched_on_conn(
                 &conn,
                 &entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
                 "rereview_dispatch",
                 &crate::db::auto_queue::EntryStatusUpdateOptions {
                     dispatch_id: Some(review_dispatch_id.clone()),
@@ -2480,21 +2535,8 @@ pub async fn batch_rereview(
     headers: HeaderMap,
     Json(body): Json<BatchRereviewBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // ── Auth: same two-factor check as single rereview ──
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected_token) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "batch rereview requires explicit Bearer token"})),
-                );
-            }
-        }
+    if let Err(response) = require_explicit_bearer_token(&headers, "batch rereview") {
+        return response;
     }
 
     let reason = body.reason.clone();
@@ -2571,7 +2613,7 @@ pub struct BatchTransitionBody {
 
 /// POST /api/kanban-cards/:id/reopen
 ///
-/// PMD-only endpoint. Reopens a done card by transitioning to in_progress,
+/// Administrative endpoint. Reopens a done card by transitioning to in_progress,
 /// clearing completed_at, and optionally resetting recovery fields.
 /// Same explicit Bearer auth as force-transition.
 pub async fn reopen_card(
@@ -2582,25 +2624,12 @@ pub async fn reopen_card(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let reset_full = body.reset_full.unwrap_or(false);
 
-    // ── Auth: same explicit Bearer token check as force-transition ──
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected_token) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "reopen requires explicit Bearer token"})),
-                );
-            }
-        }
+    if let Err(response) = require_explicit_bearer_token(&headers, "reopen") {
+        return response;
     }
 
     // ── Pre-check: card must be in done state ──
-    let current_status: String = {
+    let (current_status, caller_source): (String, String) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -2613,7 +2642,13 @@ pub async fn reopen_card(
         match conn.query_row(
             "SELECT status FROM kanban_cards WHERE id = ?1",
             [&id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    resolve_requesting_agent_id_on_conn(&conn, &headers)
+                        .unwrap_or_else(|| "api".to_string()),
+                ))
+            },
         ) {
             Ok(s) => s,
             Err(_) => {
@@ -2659,10 +2694,10 @@ pub async fn reopen_card(
                 );
             }
         };
-        if let Err(e) = mark_pmd_reopen_skip_preflight_on_conn(&conn, &id) {
+        if let Err(e) = mark_api_reopen_skip_preflight_on_conn(&conn, &id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to stage PMD reopen preflight skip: {e}")})),
+                Json(json!({"error": format!("failed to stage API reopen preflight skip: {e}")})),
             );
         }
     }
@@ -2675,7 +2710,7 @@ pub async fn reopen_card(
             &state.engine,
             &id,
             &reopen_target,
-            &format!("pmd:reopen({})", reason),
+            &format!("{caller_source}:reopen({reason})"),
             true,
         );
         result.map(|result| (result.from, result.to))
@@ -2721,6 +2756,14 @@ pub async fn reopen_card(
                         }
                     }
                 } else {
+                    if let Err(e) = consume_api_reopen_preflight_skip_on_conn(&conn, &id) {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("failed to persist API reopen preflight skip: {e}")}),
+                            ),
+                        );
+                    }
                     (0, 0)
                 };
 
@@ -2743,7 +2786,8 @@ pub async fn reopen_card(
                     .ok();
                 }
 
-                // Reactivate auto_queue_entries that were marked done
+                // Reopen reactivates completed auto-queue entries so the card can be
+                // redispatched after stale live reservations are cleaned up.
                 let entry_ids: Vec<String> = conn
                     .prepare(
                         "SELECT id FROM auto_queue_entries
@@ -2757,11 +2801,10 @@ pub async fn reopen_card(
                     })
                     .unwrap_or_default();
                 for entry_id in entry_ids {
-                    if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+                    if let Err(error) = move_auto_queue_entry_to_dispatched_on_conn(
                         &conn,
                         &entry_id,
-                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                        "pmd_reopen",
+                        "api_reopen",
                         &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
                     ) {
                         return (
@@ -2829,7 +2872,7 @@ pub async fn reopen_card(
         }
         Err(e) => {
             if let Ok(conn) = state.db.lock() {
-                let _ = clear_pmd_reopen_skip_preflight_on_conn(&conn, &id);
+                let _ = clear_api_reopen_skip_preflight_on_conn(&conn, &id);
             }
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2841,7 +2884,7 @@ pub async fn reopen_card(
 
 /// POST /api/kanban-cards/batch-transition
 ///
-/// PMD-only endpoint. Applies the same force semantics as force-transition to
+/// Administrative endpoint. Applies the same force semantics as force-transition to
 /// multiple cards, resolving targets by either explicit card IDs or GitHub
 /// issue numbers. Returns per-card success/failure details.
 pub async fn batch_transition(
@@ -2849,20 +2892,8 @@ pub async fn batch_transition(
     headers: HeaderMap,
     Json(body): Json<BatchTransitionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected_token) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "batch-transition requires explicit Bearer token"})),
-                );
-            }
-        }
+    if let Err(response) = require_explicit_bearer_token(&headers, "batch-transition") {
+        return response;
     }
 
     let has_issue_numbers = body
@@ -2877,6 +2908,19 @@ pub async fn batch_transition(
         );
     }
 
+    let caller_source = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        resolve_requesting_agent_id_on_conn(&conn, &headers).unwrap_or_else(|| "api".to_string())
+    };
+    let batch_transition_source = format!("{caller_source}:batch-transition");
     let mut targets: Vec<(String, Option<i64>)> = Vec::new();
     let mut results = Vec::new();
 
@@ -2934,7 +2978,7 @@ pub async fn batch_transition(
             &state.engine,
             &card_id,
             &body.status,
-            "pmd:batch-transition",
+            &batch_transition_source,
             true,
         ) {
             Ok(result) => {
@@ -2993,7 +3037,7 @@ pub async fn batch_transition(
     (StatusCode::OK, Json(json!({ "results": results })))
 }
 
-// ── PMD-only force transition ────────────────────────────────────
+// ── Administrative force transition ──────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ForceTransitionBody {
@@ -3085,6 +3129,38 @@ fn cleanup_force_transition_revert_on_conn(
     Ok((cancelled_dispatches, skipped_auto_queue_entries))
 }
 
+fn move_auto_queue_entry_to_dispatched_on_conn(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    trigger_source: &str,
+    options: &crate::db::auto_queue::EntryStatusUpdateOptions,
+) -> Result<(), crate::db::auto_queue::EntryStatusUpdateError> {
+    match crate::db::auto_queue::update_entry_status_on_conn(
+        conn,
+        entry_id,
+        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+        options,
+    ) {
+        Err(crate::db::auto_queue::EntryStatusUpdateError::InvalidTransition {
+            from_status,
+            to_status,
+            ..
+        }) if from_status == crate::db::auto_queue::ENTRY_STATUS_DONE
+            && to_status == crate::db::auto_queue::ENTRY_STATUS_DISPATCHED =>
+        {
+            crate::db::auto_queue::reactivate_done_entry_on_conn(
+                conn,
+                entry_id,
+                trigger_source,
+                options,
+            )
+            .map(|_| ())
+        }
+        other => other.map(|_| ()),
+    }
+}
+
 fn load_card_metadata_map_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3123,25 +3199,54 @@ fn save_card_metadata_map_on_conn(
     Ok(())
 }
 
-fn mark_pmd_reopen_skip_preflight_on_conn(
+fn mark_api_reopen_skip_preflight_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
     metadata.insert(
         "skip_preflight_once".to_string(),
-        serde_json::Value::String("pmd_reopen".to_string()),
+        serde_json::Value::String("api_reopen".to_string()),
     );
     save_card_metadata_map_on_conn(conn, card_id, &metadata)
 }
 
-fn clear_pmd_reopen_skip_preflight_on_conn(
+fn clear_api_reopen_skip_preflight_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
     metadata.remove("skip_preflight_once");
     save_card_metadata_map_on_conn(conn, card_id, &metadata)
+}
+
+fn consume_api_reopen_preflight_skip_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    if matches!(
+        metadata
+            .get("skip_preflight_once")
+            .and_then(|value| value.as_str()),
+        Some("api_reopen") | Some("pmd_reopen")
+    ) {
+        metadata.remove("skip_preflight_once");
+        metadata.insert(
+            "preflight_status".to_string(),
+            serde_json::Value::String("skipped".to_string()),
+        );
+        metadata.insert(
+            "preflight_summary".to_string(),
+            serde_json::Value::String("Skipped for API reopen".to_string()),
+        );
+        metadata.insert(
+            "preflight_checked_at".to_string(),
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+        save_card_metadata_map_on_conn(conn, card_id, &metadata)?;
+    }
+    Ok(())
 }
 
 fn clear_reopen_preflight_cache_on_conn(
@@ -3172,27 +3277,14 @@ pub async fn force_transition(
     headers: HeaderMap,
     Json(body): Json<ForceTransitionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // 1. Explicit Bearer token check (bypasses same-origin exemption in auth middleware)
-    let config = crate::config::load_graceful();
-    if let Some(expected_token) = config.server.auth_token.as_deref() {
-        if !expected_token.is_empty() {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "));
-            if provided != Some(expected_token) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "force-transition requires explicit Bearer token"})),
-                );
-            }
-        }
+    if let Err(response) = require_explicit_bearer_token(&headers, "force-transition") {
+        return response;
     }
 
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
     let target_status = body.status;
     let mut cleanup_counts = (0, 0);
-    let terminal_cleanup = {
+    let (terminal_cleanup, caller_source) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -3215,7 +3307,11 @@ pub async fn force_transition(
             card_repo_id.as_deref(),
             card_agent_id.as_deref(),
         );
-        effective.is_terminal(&target_status) && body.cancel_dispatches.unwrap_or(true)
+        (
+            effective.is_terminal(&target_status) && body.cancel_dispatches.unwrap_or(true),
+            resolve_requesting_agent_id_on_conn(&conn, &headers)
+                .unwrap_or_else(|| "api".to_string()),
+        )
     };
 
     let transition_result = if needs_cleanup {
@@ -3224,7 +3320,7 @@ pub async fn force_transition(
             &state.engine,
             &id,
             &target_status,
-            "pmd",
+            &caller_source,
             true,
             |conn| {
                 cleanup_counts =
@@ -3238,7 +3334,7 @@ pub async fn force_transition(
             &state.engine,
             &id,
             &target_status,
-            "pmd",
+            &caller_source,
             true,
             |conn| {
                 cleanup_counts.0 =
@@ -3252,7 +3348,7 @@ pub async fn force_transition(
             &state.engine,
             &id,
             &target_status,
-            "pmd",
+            &caller_source,
             true,
         )
     };
