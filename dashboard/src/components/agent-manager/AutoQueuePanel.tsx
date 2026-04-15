@@ -17,6 +17,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
+import { buildDiscordThreadLinks } from "./discord-routing";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -334,10 +335,11 @@ function EntryRow({
                 );
 
                 if (link.url) {
+                  const { deepLink } = buildDiscordThreadLinks(link);
                   return (
                     <a
                       key={key}
-                      href={link.url}
+                      href={deepLink ?? link.url}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(event) => event.stopPropagation()}
@@ -886,15 +888,12 @@ export default function AutoQueuePanel({
     fromPhase: number,
     toPhase: number,
   ) => {
-    const gates = [
-      ...(gatesByPhase.get(fromPhase) ?? []),
-      ...(gatesByPhase.get(toPhase) ?? []),
-    ];
-    const hasDeploy = deployPhases.has(fromPhase) || deployPhases.has(toPhase);
-    if (gates.length === 0 && !hasDeploy) return null;
+    const gates = gatesByPhase.get(toPhase) ?? [];
+    const hasDeploy = deployPhases.has(toPhase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
+    const isPending = gate != null && gateStatus === "pending";
     const statusColor =
       gateStatus === "passed"
         ? "#4ade80"
@@ -918,7 +917,7 @@ export default function AutoQueuePanel({
           style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
         />
         <div
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border${isPending ? " animate-pulse" : ""}`}
           style={{
             borderColor: `${statusColor}40`,
             backgroundColor: `${statusColor}10`,

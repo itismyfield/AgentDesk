@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "../../api";
 import { localeName } from "../../i18n";
@@ -161,6 +161,16 @@ export default function PipelineVisualEditor({
   const [reloadKey, setReloadKey] = useState(0);
   const [compactGraph, setCompactGraph] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
+
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [dragConnect, setDragConnect] = useState<{
+    fromId: string;
+    fromCx: number;
+    fromCy: number;
+    cursorX: number;
+    cursorY: number;
+    hoverId: string | null;
+  } | null>(null);
 
   useEffect(() => {
     const updateLayoutMode = () => {
@@ -552,6 +562,40 @@ export default function PipelineVisualEditor({
       setSelection({ kind: "transition", index: nextIndex });
     }
   }
+
+  function addTransitionBetween(fromId: string, toId: string) {
+    if (!pipelineDraft || fromId === toId) return;
+    const exists = pipelineDraft.transitions.some(
+      (t) => t.from === fromId && t.to === toId,
+    );
+    if (exists) return;
+    let nextIndex = -1;
+    setPipelineDraft((current) => {
+      if (!current) return current;
+      const next = clonePipelineConfig(current);
+      next.transitions.push({ from: fromId, to: toId, type: "free", gates: [] });
+      nextIndex = next.transitions.length - 1;
+      return next;
+    });
+    if (nextIndex >= 0) {
+      setSelection({ kind: "transition", index: nextIndex });
+    }
+  }
+
+  const svgPointFromEvent = useCallback(
+    (event: React.MouseEvent | MouseEvent): { x: number; y: number } | null => {
+      const svg = svgRef.current;
+      if (!svg) return null;
+      const pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return null;
+      const svgPt = pt.matrixTransform(ctm.inverse());
+      return { x: svgPt.x, y: svgPt.y };
+    },
+    [],
+  );
 
   function updateTransition(
     index: number,
@@ -1024,13 +1068,33 @@ export default function PipelineVisualEditor({
                 }}
               >
                 <svg
+                  ref={svgRef}
                   viewBox={`0 0 ${graph.width} ${graph.height}`}
-                  className="h-auto w-full"
+                  className="h-auto w-full select-none"
                   role="img"
                   aria-label={tr(
                     "파이프라인 상태와 전환 그래프",
                     "Pipeline state and transition graph",
                   )}
+                  onMouseDown={(event) => { if (event.target === svgRef.current) event.preventDefault(); }}
+                  onMouseMove={(event) => {
+                    if (!dragConnect) return;
+                    const pt = svgPointFromEvent(event);
+                    if (!pt) return;
+                    const hovered = graph.nodes.find(
+                      (n) => n.id !== dragConnect.fromId
+                        && pt.x >= n.x && pt.x <= n.x + n.width
+                        && pt.y >= n.y && pt.y <= n.y + n.height,
+                    );
+                    setDragConnect((prev) => prev ? { ...prev, cursorX: pt.x, cursorY: pt.y, hoverId: hovered?.id ?? null } : null);
+                  }}
+                  onMouseUp={() => {
+                    if (dragConnect?.hoverId) {
+                      addTransitionBetween(dragConnect.fromId, dragConnect.hoverId);
+                    }
+                    setDragConnect(null);
+                  }}
+                  onMouseLeave={() => setDragConnect(null)}
                 >
                   <defs>
                     <marker
@@ -1145,21 +1209,38 @@ export default function PipelineVisualEditor({
                   {graph.nodes.map((node) => {
                     const isSelected =
                       selection?.kind === "state" && selection.stateId === node.id;
+                    const isDropTarget = dragConnect?.hoverId === node.id;
+                    const isDragSource = dragConnect?.fromId === node.id;
                     return (
                       <g
                         key={node.id}
                         transform={`translate(${node.x}, ${node.y})`}
-                        onClick={() => setSelection({ kind: "state", stateId: node.id })}
-                        className="cursor-pointer"
+                        onClick={() => { if (!dragConnect) setSelection({ kind: "state", stateId: node.id }); }}
+                        onMouseDown={(event) => {
+                          if (event.button !== 0) return;
+                          event.preventDefault();
+                          const pt = svgPointFromEvent(event);
+                          if (!pt) return;
+                          event.stopPropagation();
+                          setDragConnect({
+                            fromId: node.id,
+                            fromCx: node.x + node.width / 2,
+                            fromCy: node.y + node.height / 2,
+                            cursorX: pt.x,
+                            cursorY: pt.y,
+                            hoverId: null,
+                          });
+                        }}
+                        className={dragConnect ? "cursor-crosshair" : "cursor-pointer"}
                       >
                         <rect
                           width={node.width}
                           height={node.height}
                           rx={18}
-                          fill={node.terminal ? "rgba(22,163,74,0.14)" : "rgba(15,23,42,0.82)"}
-                          stroke={isSelected ? "#c4b5fd" : node.terminal ? "#4ade80" : "#64748b"}
-                          strokeOpacity={isSelected ? 0.95 : 0.55}
-                          strokeWidth={isSelected ? 2.5 : 1.5}
+                          fill={isDropTarget ? "rgba(165,180,252,0.18)" : isDragSource ? "rgba(129,140,248,0.12)" : node.terminal ? "rgba(22,163,74,0.14)" : "rgba(15,23,42,0.82)"}
+                          stroke={isDropTarget ? "#a5b4fc" : isDragSource ? "#818cf8" : isSelected ? "#c4b5fd" : node.terminal ? "#4ade80" : "#64748b"}
+                          strokeOpacity={isDropTarget ? 0.95 : isDragSource ? 0.8 : isSelected ? 0.95 : 0.55}
+                          strokeWidth={isDropTarget ? 3 : isSelected ? 2.5 : 1.5}
                         />
                         <text
                           x="12"
@@ -1191,6 +1272,21 @@ export default function PipelineVisualEditor({
                       </g>
                     );
                   })}
+
+                  {dragConnect && (
+                    <line
+                      x1={dragConnect.fromCx}
+                      y1={dragConnect.fromCy}
+                      x2={dragConnect.cursorX}
+                      y2={dragConnect.cursorY}
+                      stroke={dragConnect.hoverId ? "#a5b4fc" : "#818cf8"}
+                      strokeWidth={2.5}
+                      strokeDasharray={dragConnect.hoverId ? "none" : "6 4"}
+                      strokeOpacity={0.8}
+                      markerEnd="url(#pipeline-arrow)"
+                      style={{ color: dragConnect.hoverId ? "#a5b4fc" : "#818cf8", pointerEvents: "none" }}
+                    />
+                  )}
                 </svg>
               </div>
 
@@ -1543,15 +1639,34 @@ export default function PipelineVisualEditor({
                       <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
                         {tr("게이트 / 조건", "Gates / conditions")}
                       </label>
-                      <input
-                        value={joinCommaSeparated(selectedTransitionGates)}
-                        onChange={(event) =>
-                          updateTransitionGates(selectedTransitionIndex, event.target.value)
-                        }
-                        className={INPUT_CLASS}
-                        style={INPUT_STYLE}
-                        placeholder="review_passed, active_dispatch"
-                      />
+                      <div className="flex flex-wrap gap-1.5">
+                        {Array.from(new Set([
+                          ...Object.keys(pipelineDraft.gates),
+                          ...selectedTransitionGates,
+                        ])).map((name) => {
+                          const active = selectedTransitionGates.includes(name);
+                          return (
+                            <button
+                              key={name}
+                              type="button"
+                              onClick={() => {
+                                const next = active
+                                  ? selectedTransitionGates.filter((g) => g !== name)
+                                  : [...selectedTransitionGates, name];
+                                updateTransitionGates(selectedTransitionIndex, next.join(", "));
+                              }}
+                              className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
+                              style={{
+                                borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
+                                backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
+                                color: active ? "#fbbf24" : "var(--th-text-muted)",
+                              }}
+                            >
+                              {name}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
@@ -1608,21 +1723,28 @@ export default function PipelineVisualEditor({
                               <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
                                 {tr("게이트 타입", "Gate type")}
                               </label>
-                              <input
+                              <select
                                 value={pipelineDraft.gates[gateName]?.type ?? ""}
                                 onChange={(event) =>
                                   updateGate(gateName, { type: event.target.value })
                                 }
                                 className={INPUT_CLASS}
                                 style={INPUT_STYLE}
-                                placeholder="builtin"
-                              />
+                              >
+                                <option value="">-</option>
+                                {Array.from(new Set([
+                                  "builtin",
+                                  ...Object.values(pipelineDraft.gates).map((g) => g?.type).filter(Boolean) as string[],
+                                ])).map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
                             </div>
                             <div>
                               <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
                                 {tr("체크", "Check")}
                               </label>
-                              <input
+                              <select
                                 value={pipelineDraft.gates[gateName]?.check ?? ""}
                                 onChange={(event) =>
                                   updateGate(gateName, {
@@ -1631,8 +1753,17 @@ export default function PipelineVisualEditor({
                                 }
                                 className={INPUT_CLASS}
                                 style={INPUT_STYLE}
-                                placeholder="review_verdict_pass"
-                              />
+                              >
+                                <option value="">-</option>
+                                {Array.from(new Set([
+                                  "has_active_dispatch",
+                                  "review_verdict_pass",
+                                  "review_verdict_rework",
+                                  ...Object.values(pipelineDraft.gates).map((g) => g?.check).filter(Boolean) as string[],
+                                ])).map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
                             </div>
                           </div>
                           <div>
@@ -1723,16 +1854,37 @@ export default function PipelineVisualEditor({
                     <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
                       {tr("checks", "checks")}
                     </label>
-                    <textarea
-                      rows={4}
-                      value={joinCommaSeparated(pipelineDraft.phase_gate.checks)}
-                      onChange={(event) =>
-                        updatePhaseGate({ checks: parseCommaSeparated(event.target.value) })
-                      }
-                      className={TEXTAREA_CLASS}
-                      style={INPUT_STYLE}
-                      placeholder="merge_verified, issue_closed, build_passed"
-                    />
+                    <div className="flex flex-wrap gap-1.5">
+                      {Array.from(new Set([
+                        "merge_verified",
+                        "issue_closed",
+                        "build_passed",
+                        ...(pipelineDraft.phase_gate.checks ?? []),
+                      ])).map((checkName) => {
+                        const active = (pipelineDraft.phase_gate.checks ?? []).includes(checkName);
+                        return (
+                          <button
+                            key={checkName}
+                            type="button"
+                            onClick={() => {
+                              const current = pipelineDraft.phase_gate.checks ?? [];
+                              const next = active
+                                ? current.filter((c) => c !== checkName)
+                                : [...current, checkName];
+                              updatePhaseGate({ checks: next });
+                            }}
+                            className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
+                            style={{
+                              borderColor: active ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.2)",
+                              backgroundColor: active ? "rgba(96,165,250,0.14)" : "transparent",
+                              color: active ? "#60a5fa" : "var(--th-text-muted)",
+                            }}
+                          >
+                            {checkName}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}

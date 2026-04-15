@@ -57,6 +57,7 @@ import {
 import HealthWidget from "./dashboard/HealthWidget";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
 import type { TFunction } from "./dashboard/model";
 import { formatProviderFlow } from "./MeetingProviderFlow";
 
@@ -497,6 +498,7 @@ export default function DashboardPageView({
       </DashboardTabPanel>
 
       <DashboardTabPanel tab="tokens" activeTab={activeTab} t={t}>
+          <ReceiptWidget t={t} />
           <TokenAnalyticsSection
             agents={agents}
             t={t}
@@ -508,13 +510,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
             title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
-            subtitle={t({
-              ko: "크론 실행 흐름과 스킬 호출 지형을 분리된 섹션으로 유지합니다.",
-              en: "Keep cron execution flow and skill usage surfaces together.",
-              ja: "Cron 実行フローとスキル利用面をまとめて保持します。",
-              zh: "把 cron 执行流与技能使用面放在一起查看。",
-            })}
-            badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-warn) 20%, var(--th-border) 80%)",
               background:
@@ -554,13 +551,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
             title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
-            subtitle={t({
-              ko: "랭킹과 실업적만 남기고 보상성 잡음을 제거했습니다.",
-              en: "Keep only ranking and concrete achievements while removing ornamental reward noise.",
-              ja: "ランキングと実績だけを残し、装飾的な報酬ノイズを取り除きました。",
-              zh: "只保留排行与真实成就，去掉装饰性奖励噪音。",
-            })}
-            badge={t({ ko: "Focused", en: "Focused", ja: "Focused", zh: "Focused" })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-primary) 18%, var(--th-border) 82%)",
               background:
@@ -634,13 +626,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Meetings", en: "Meetings", ja: "Meetings", zh: "Meetings" })}
             title={t({ ko: "회의 기록 / 후속 일감", en: "Meeting Records / Follow-ups", ja: "会議記録 / フォローアップ", zh: "会议记录 / 后续事项" })}
-            subtitle={t({
-              ko: "라운드 테이블 결과와 후속 이슈 정리를 대시보드 안에서 바로 이어서 처리합니다.",
-              en: "Continue round-table review and follow-up issue cleanup directly from the dashboard.",
-              ja: "ラウンドテーブル結果と後続イシュー整理をダッシュボード内で続けて処理します。",
-              zh: "在仪表盘内直接继续处理圆桌结果与后续 issue 整理。",
-            })}
-            badge={t({ ko: `${meetings.length}개 기록`, en: `${meetings.length} records`, ja: `${meetings.length}件`, zh: `${meetings.length} 条` })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-success) 18%, var(--th-border) 82%)",
               background:

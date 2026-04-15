@@ -303,13 +303,13 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                 })}
         </SurfaceEmptyState>
       ) : (
-        <div className="mt-4 grid gap-3 xl:grid-cols-3">
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {providers.map((provider) => {
             const accent = getAccent(provider.provider);
             return (
               <SurfaceCard
                 key={provider.provider}
-                className="rounded-3xl p-4"
+                className="rounded-3xl p-5"
                 style={{
                   borderColor: `color-mix(in srgb, ${accent} 22%, var(--th-border) 78%)`,
                   background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -345,7 +345,7 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                   </span>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
                   {provider.buckets.map((bucket) => {
                     const colors = getColors(provider.provider, bucket.level);
                     const remaining = formatTimeRemaining(bucket.resets_at);
