@@ -35,6 +35,24 @@ import type { TFunction } from "./dashboard/model";
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 
 type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
+type DashboardTab = "operations" | "tokens" | "automation" | "achievements";
+
+const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
+const DASHBOARD_TABS: DashboardTab[] = ["operations", "tokens", "automation", "achievements"];
+
+function readDashboardTabFromUrl(): DashboardTab {
+  if (typeof window === "undefined") return "operations";
+  const params = new URLSearchParams(window.location.search);
+  const value = params.get(DASHBOARD_TAB_QUERY_KEY);
+  return DASHBOARD_TABS.includes(value as DashboardTab) ? (value as DashboardTab) : "operations";
+}
+
+function syncDashboardTabToUrl(tab: DashboardTab) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
@@ -60,8 +78,26 @@ export default function DashboardPageView({
   const localeTag = language === "ko" ? "ko-KR" : language === "ja" ? "ja-JP" : language === "zh" ? "zh-CN" : "en-US";
   const numberFormatter = useMemo(() => new Intl.NumberFormat(localeTag), [localeTag]);
   const t: TFunction = useCallback((messages) => messages[language] ?? messages.ko, [language]);
+  const [activeTab, setActiveTab] = useState<DashboardTab>(() => readDashboardTabFromUrl());
+  const [mountedTabs, setMountedTabs] = useState<Record<DashboardTab, boolean>>({
+    operations: activeTab === "operations",
+    tokens: activeTab === "tokens",
+    automation: activeTab === "automation",
+    achievements: activeTab === "achievements",
+  });
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
   const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("7d");
+
+  useEffect(() => {
+    setMountedTabs((prev) => (prev[activeTab] ? prev : { ...prev, [activeTab]: true }));
+    syncDashboardTabToUrl(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const handlePopState = () => setActiveTab(readDashboardTabFromUrl());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -152,119 +188,178 @@ export default function DashboardPageView({
     >
       <DashboardHeroHeader companyName={settings.companyName} t={t} />
 
-      <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <HealthWidget t={t} />
-        <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
-      </div>
-
-      <TokenAnalyticsSection
-        agents={agents}
-        t={t}
-        numberFormatter={numberFormatter}
-      />
-
-      <PulseSectionShell
-        eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
-        title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
-        subtitle={t({
-          ko: "랭킹과 실업적만 남기고 보상성 잡음을 제거했습니다.",
-          en: "Keep only ranking and concrete achievements while removing ornamental reward noise.",
-          ja: "ランキングと実績だけを残し、装飾的な報酬ノイズを取り除きました。",
-          zh: "只保留排行与真实成就，去掉装饰性奖励噪音。",
+      <SurfaceSection
+        eyebrow={t({ ko: "Dashboard Layout", en: "Dashboard Layout", ja: "Dashboard Layout", zh: "Dashboard Layout" })}
+        title={t({ ko: "운영 / 토큰 / 자동화 / 업적", en: "Operations / Tokens / Automation / Achievements", ja: "運用 / トークン / 自動化 / 実績", zh: "运营 / Token / 自动化 / 成就" })}
+        description={t({
+          ko: "단일 장문 스크롤 대신 탭 전환으로 필요한 표면만 집중해서 봅니다.",
+          en: "Switch surfaces by tab instead of scrolling one long page.",
+          ja: "長い単一ページではなくタブ切り替えで必要な面だけに集中します。",
+          zh: "用标签切换代替超长滚动页面，只看当前需要的面板。",
         })}
-        badge={t({ ko: "Focused", en: "Focused", ja: "Focused", zh: "Focused" })}
+        className="rounded-[28px] p-4 sm:p-5"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        }}
       >
-        <DashboardRankingBoard
-          topAgents={topAgents}
-          podiumOrder={podiumOrder}
-          agentMap={agentMap}
-          agents={agents}
-          maxXp={maxXp}
-          numberFormatter={numberFormatter}
-          t={t}
-          onSelectAgent={onSelectAgent}
-        />
-
-        <div className="grid gap-4 lg:grid-cols-2">
-          <AchievementWidget t={t} agents={agents} />
-          <SurfaceSubsection
-            title={t({ ko: "XP 스냅샷", en: "XP Snapshot", ja: "XP スナップショット", zh: "XP 快照" })}
-            description={t({
-              ko: "최상위 랭커의 XP 규모를 간단히 확인합니다.",
-              en: "Quick read on the scale of top-ranked XP.",
-              ja: "上位ランカーの XP 規模を簡単に確認します。",
-              zh: "快速查看头部 XP 规模。",
-            })}
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-accent-primary) 22%, var(--th-border) 78%)",
-              background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, var(--th-accent-primary) 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            }}
-          >
-            <div className="mt-4 grid gap-3 sm:grid-cols-3">
-              {topAgents.slice(0, 3).map((agent, index) => (
-                <div
-                  key={agent.id}
-                  className="rounded-2xl border px-4 py-3"
-                  style={{
-                    borderColor: "rgba(148,163,184,0.16)",
-                    background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                  }}
-                >
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: `${index + 1}위`, en: `Rank ${index + 1}`, ja: `${index + 1}位`, zh: `第 ${index + 1} 名` })}
-                  </div>
-                  <div className="mt-2 truncate text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                    {agent.name}
-                  </div>
-                  <div className="mt-1 text-lg font-black tracking-tight" style={{ color: "var(--th-accent-primary)" }}>
-                    {numberFormatter.format(agent.xp)} XP
-                  </div>
-                  <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: `${numberFormatter.format(agent.tasksDone)}개 완료`, en: `${numberFormatter.format(agent.tasksDone)} completed`, ja: `${numberFormatter.format(agent.tasksDone)} 完了`, zh: `完成 ${numberFormatter.format(agent.tasksDone)} 项` })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </SurfaceSubsection>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <DashboardTabButton
+            active={activeTab === "operations"}
+            label={t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" })}
+            detail={t({ ko: "HEALTH + 프로바이더 상태", en: "HEALTH + provider status", ja: "HEALTH + provider 状態", zh: "HEALTH + provider 状态" })}
+            onClick={() => setActiveTab("operations")}
+          />
+          <DashboardTabButton
+            active={activeTab === "tokens"}
+            label={t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "Token" })}
+            detail={t({ ko: "히트맵 + 비용 + ROI", en: "Heatmap + spend + ROI", ja: "ヒートマップ + コスト + ROI", zh: "热力图 + 成本 + ROI" })}
+            onClick={() => setActiveTab("tokens")}
+          />
+          <DashboardTabButton
+            active={activeTab === "automation"}
+            label={t({ ko: "자동화", en: "Automation", ja: "自動化", zh: "自动化" })}
+            detail={t({ ko: "크론 + 스킬 허브", en: "Cron + skill hub", ja: "Cron + スキルハブ", zh: "Cron + 技能中心" })}
+            onClick={() => setActiveTab("automation")}
+          />
+          <DashboardTabButton
+            active={activeTab === "achievements"}
+            label={t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" })}
+            detail={t({ ko: "랭킹 + 업적", en: "Ranking + achievements", ja: "ランキング + 実績", zh: "排行 + 成就" })}
+            onClick={() => setActiveTab("achievements")}
+          />
         </div>
-      </PulseSectionShell>
+      </SurfaceSection>
 
-      <PulseSectionShell
-        eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
-        title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
-        subtitle={t({
-          ko: "크론 실행 흐름과 스킬 호출 지형을 분리된 섹션으로 유지합니다.",
-          en: "Keep cron execution flow and skill usage surfaces together.",
-          ja: "Cron 実行フローとスキル利用面をまとめて保持します。",
-          zh: "把 cron 执行流与技能使用面放在一起查看。",
-        })}
-        badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
-      >
-        <CronTimelineWidget t={t} />
+      {mountedTabs.operations && (
+        <div className={activeTab === "operations" ? "space-y-5" : "hidden"}>
+          <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <HealthWidget t={t} />
+            <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
+          </div>
+        </div>
+      )}
 
-        <SkillRankingSection
-          skillRanking={skillRanking}
-          skillWindow={skillWindow}
-          onChangeWindow={setSkillWindow}
-          numberFormatter={numberFormatter}
-          t={t}
-        />
+      {mountedTabs.tokens && (
+        <div className={activeTab === "tokens" ? "space-y-5" : "hidden"}>
+          <TokenAnalyticsSection
+            agents={agents}
+            t={t}
+            numberFormatter={numberFormatter}
+          />
+        </div>
+      )}
 
-        <SkillTrendWidget t={t} />
+      {mountedTabs.automation && (
+        <div className={activeTab === "automation" ? "space-y-5" : "hidden"}>
+          <PulseSectionShell
+            eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
+            title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
+            subtitle={t({
+              ko: "크론 실행 흐름과 스킬 호출 지형을 분리된 섹션으로 유지합니다.",
+              en: "Keep cron execution flow and skill usage surfaces together.",
+              ja: "Cron 実行フローとスキル利用面をまとめて保持します。",
+              zh: "把 cron 执行流与技能使用面放在一起查看。",
+            })}
+            badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
+          >
+            <CronTimelineWidget t={t} />
 
-        <Suspense
-          fallback={(
-            <div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "스킬 카탈로그를 불러오는 중입니다", en: "Loading skill catalog", ja: "スキルカタログを読み込み中", zh: "正在加载技能目录" })}
+            <SkillRankingSection
+              skillRanking={skillRanking}
+              skillWindow={skillWindow}
+              onChangeWindow={setSkillWindow}
+              numberFormatter={numberFormatter}
+              t={t}
+            />
+
+            <SkillTrendWidget t={t} />
+
+            <Suspense
+              fallback={(
+                <div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+                  {t({ ko: "스킬 카탈로그를 불러오는 중입니다", en: "Loading skill catalog", ja: "スキルカタログを読み込み中", zh: "正在加载技能目录" })}
+                </div>
+              )}
+            >
+              <SkillCatalogView embedded />
+            </Suspense>
+          </PulseSectionShell>
+        </div>
+      )}
+
+      {mountedTabs.achievements && (
+        <div className={activeTab === "achievements" ? "space-y-5" : "hidden"}>
+          <PulseSectionShell
+            eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
+            title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
+            subtitle={t({
+              ko: "랭킹과 실업적만 남기고 보상성 잡음을 제거했습니다.",
+              en: "Keep only ranking and concrete achievements while removing ornamental reward noise.",
+              ja: "ランキングと実績だけを残し、装飾的な報酬ノイズを取り除きました。",
+              zh: "只保留排行与真实成就，去掉装饰性奖励噪音。",
+            })}
+            badge={t({ ko: "Focused", en: "Focused", ja: "Focused", zh: "Focused" })}
+          >
+            <DashboardRankingBoard
+              topAgents={topAgents}
+              podiumOrder={podiumOrder}
+              agentMap={agentMap}
+              agents={agents}
+              maxXp={maxXp}
+              numberFormatter={numberFormatter}
+              t={t}
+              onSelectAgent={onSelectAgent}
+            />
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <AchievementWidget t={t} agents={agents} />
+              <SurfaceSubsection
+                title={t({ ko: "XP 스냅샷", en: "XP Snapshot", ja: "XP スナップショット", zh: "XP 快照" })}
+                description={t({
+                  ko: "최상위 랭커의 XP 규모를 간단히 확인합니다.",
+                  en: "Quick read on the scale of top-ranked XP.",
+                  ja: "上位ランカーの XP 規模を簡単に確認します。",
+                  zh: "快速查看头部 XP 规模。",
+                })}
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-accent-primary) 22%, var(--th-border) 78%)",
+                  background:
+                    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, var(--th-accent-primary) 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+                }}
+              >
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  {topAgents.slice(0, 3).map((agent, index) => (
+                    <div
+                      key={agent.id}
+                      className="rounded-2xl border px-4 py-3"
+                      style={{
+                        borderColor: "rgba(148,163,184,0.16)",
+                        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                      }}
+                    >
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+                        {t({ ko: `${index + 1}위`, en: `Rank ${index + 1}`, ja: `${index + 1}位`, zh: `第 ${index + 1} 名` })}
+                      </div>
+                      <div className="mt-2 truncate text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+                        {agent.name}
+                      </div>
+                      <div className="mt-1 text-lg font-black tracking-tight" style={{ color: "var(--th-accent-primary)" }}>
+                        {numberFormatter.format(agent.xp)} XP
+                      </div>
+                      <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        {t({ ko: `${numberFormatter.format(agent.tasksDone)}개 완료`, en: `${numberFormatter.format(agent.tasksDone)} completed`, ja: `${numberFormatter.format(agent.tasksDone)} 完了`, zh: `完成 ${numberFormatter.format(agent.tasksDone)} 项` })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </SurfaceSubsection>
             </div>
-          )}
-        >
-          <SkillCatalogView embedded />
-        </Suspense>
-      </PulseSectionShell>
+          </PulseSectionShell>
+        </div>
+      )}
     </div>
   );
 }
@@ -431,5 +526,40 @@ function SkillRankingList({
         {t({ ko: "집계 창을 바꾸면 같은 카드 안에서 즉시 다시 계산됩니다.", en: "Changing the window recalculates in place.", ja: "ウィンドウを変えると同じカード内で再計算されます。", zh: "切换窗口后会在同一卡片内重新计算。" })}
       </div>
     </div>
+  );
+}
+
+function DashboardTabButton({
+  active,
+  label,
+  detail,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  detail: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="min-w-[10rem] flex-1 rounded-2xl border px-4 py-3 text-left transition-colors sm:flex-none"
+      style={{
+        borderColor: active
+          ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
+          : "rgba(148,163,184,0.16)",
+        background: active
+          ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent)"
+          : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
+      }}
+    >
+      <div className="text-sm font-semibold" style={{ color: active ? "var(--th-text-heading)" : "var(--th-text)" }}>
+        {label}
+      </div>
+      <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+        {detail}
+      </div>
+    </button>
   );
 }
