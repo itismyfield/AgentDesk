@@ -165,6 +165,11 @@ function classifyFailure(runId, repo, conclusion) {
     };
   }
 
+  // No failed jobs found — likely gh API issue or non-standard run; treat as transient
+  if (failedJobs.length === 0) {
+    return { type: "retryable_transient", reason: "No failed jobs found (gh API issue or non-standard run)", logExcerpt: logExcerpt };
+  }
+
   // Ambiguous — neither clearly transient nor clearly code
   return {
     type: "ambiguous",
@@ -320,7 +325,7 @@ function processWaitingCard(cardId, blockedReason) {
 
       if (rerunResult && rerunResult.indexOf("ERROR") === 0) {
         agentdesk.log.warn("[ci-recovery] Rerun failed for run " + runId + ": " + rerunResult);
-        upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI rerun failed: " + rerunResult);
+        upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI rerun failed: " + rerunResult);
         escalateToManualDecision(cardId, "CI rerun failed: " + rerunResult);
         return;
       }
@@ -334,7 +339,7 @@ function processWaitingCard(cardId, blockedReason) {
       agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
       agentdesk.log.info("[ci-recovery] Rerunning failed jobs for card " + cardId + " (retry " + (retryCount + 1) + "/" + CI_MAX_RETRIES + ")");
     } else {
-      upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI transient failure — max retries exhausted");
+      upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI transient failure — max retries exhausted");
       escalateToManualDecision(cardId,
         "CI transient failure — max retries (" + CI_MAX_RETRIES + ") exhausted for run " + runId);
     }
@@ -346,6 +351,7 @@ function processWaitingCard(cardId, blockedReason) {
       [cardId]
     );
     if (cards.length === 0 || !cards[0].assigned_agent_id) {
+      upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI code failure but no assigned agent");
       escalateToManualDecision(cardId, "CI code failure but no assigned agent");
       return;
     }
@@ -373,6 +379,7 @@ function processWaitingCard(cardId, blockedReason) {
       agentdesk.log.info("[ci-recovery] Rework dispatch created for card " + cardId);
     } catch (e) {
       agentdesk.log.warn("[ci-recovery] Rework dispatch failed: " + e);
+      upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI rework dispatch failed: " + e);
       escalateToManualDecision(cardId, "CI code failure — rework dispatch failed: " + e);
       return;
     }
@@ -394,8 +401,8 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
 
   } else {
-    // ambiguous
-    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI failure ambiguous: " + classification.reason);
+    // ambiguous — transition to escalated so tick loop stops re-processing
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI failure ambiguous: " + classification.reason);
     escalateToManualDecision(cardId,
       "CI failure — ambiguous classification for run " + runId + ": " + classification.reason);
   }
