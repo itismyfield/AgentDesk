@@ -221,7 +221,19 @@ fn update_entry_status_with_current_on_conn(
             }
 
             if !is_allowed_entry_transition(&latest.status, normalized) {
-                tracing::warn!(
+                let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+                    .run(&latest.run_id)
+                    .entry(entry_id)
+                    .card(&latest.card_id)
+                    .maybe_dispatch(latest.dispatch_id.as_deref())
+                    .agent(&latest.agent_id)
+                    .thread_group(latest.thread_group)
+                    .batch_phase(latest.batch_phase)
+                    .maybe_slot_index(latest.slot_index);
+                crate::auto_queue_log!(
+                    warn,
+                    "entry_status_stale_transition_blocked",
+                    stale_log_ctx,
                     "[auto-queue] stale entry transition blocked {} {} -> {} (source: {})",
                     entry_id,
                     latest.status,
