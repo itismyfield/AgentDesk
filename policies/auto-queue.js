@@ -177,51 +177,6 @@ var autoQueue = {
     try { result = JSON.parse(dispatch.result || "{}"); } catch (e) { result = {}; }
     var gate = context.phase_gate;
     if (!gate || !gate.run_id || !gate.batch_phase) {
-      if (!dispatchCompletedWithoutChanges(dispatch, result) || !dispatch.kanban_card_id) return;
-
-      var cards = agentdesk.db.query(
-        "SELECT id, status, assigned_agent_id FROM kanban_cards WHERE id = ?",
-        [dispatch.kanban_card_id]
-      );
-      if (cards.length === 0) return;
-
-      var card = cards[0];
-      var cfg = agentdesk.pipeline.resolveForCard(card.id);
-      if (agentdesk.pipeline.isTerminal(card.status, cfg)) {
-        return;
-      }
-
-      var aqEntries = agentdesk.db.query(
-        "SELECT e.id, e.run_id, e.agent_id, e.status, COALESCE(e.thread_group, 0) as thread_group, COALESCE(e.batch_phase, 0) as batch_phase " +
-        "FROM auto_queue_entries e " +
-        "JOIN auto_queue_runs r ON e.run_id = r.id " +
-        "WHERE e.dispatch_id = ? AND r.status IN ('active', 'paused') " +
-        "ORDER BY CASE " +
-        "  WHEN e.status = 'done' THEN 0 " +
-        "  WHEN e.status = 'skipped' THEN 1 " +
-        "  ELSE 2 END ASC, e.completed_at DESC LIMIT 1",
-        [dispatch.id]
-      );
-      if (aqEntries.length === 0) return;
-
-      var entry = aqEntries[0];
-      if (entry.status === "pending" || entry.status === "dispatched") {
-        agentdesk.autoQueue.updateEntryStatus(
-          entry.id,
-          "done",
-          "noop_completion"
-        );
-        entry.status = "done";
-      }
-
-      continueRunAfterEntry(
-        entry.run_id,
-        entry.agent_id || card.assigned_agent_id,
-        entry.thread_group,
-        entry.batch_phase,
-        dispatch.kanban_card_id
-      );
-      agentdesk.log.info("[auto-queue] noop completion advanced entry " + entry.id + " in run " + entry.run_id);
       return;
     }
 
@@ -437,14 +392,6 @@ var autoQueue = {
     }
   }
 };
-
-function dispatchCompletedWithoutChanges(dispatch, result) {
-  if (!dispatch) return false;
-  if (dispatch.dispatch_type !== "implementation" && dispatch.dispatch_type !== "rework") {
-    return false;
-  }
-  return (result && result.work_outcome === "noop") || (result && result.completed_without_changes === true);
-}
 
 function _isDispatchableState(state, cfg) {
   if (!cfg || !cfg.transitions) return false;

@@ -562,38 +562,6 @@ fn apply_review_target_warning(
     obj.insert("review_target_warning".to_string(), json!(warning));
 }
 
-fn latest_completed_work_dispatch_is_noop(db: &Db, kanban_card_id: &str) -> bool {
-    let Ok(conn) = db.separate_conn() else {
-        return false;
-    };
-    let result_raw: Option<String> = conn
-        .query_row(
-            "SELECT result
-             FROM task_dispatches
-             WHERE kanban_card_id = ?1
-               AND dispatch_type IN ('implementation', 'rework')
-               AND status = 'completed'
-             ORDER BY updated_at DESC, rowid DESC
-             LIMIT 1",
-            [kanban_card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    let Some(result_json) = result_raw
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-    else {
-        return false;
-    };
-
-    json_string_field(&result_json, "work_outcome") == Some("noop")
-        || result_json
-            .get("completed_without_changes")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-}
-
 pub(crate) const REVIEW_QUALITY_SCOPE_REMINDER: &str =
     "기존 DoD/기능 검증과 함께 아래 품질 항목도 반드시 확인하세요.";
 pub(crate) const REVIEW_VERDICT_IMPROVE_GUIDANCE: &str = "기능이 맞더라도 아래 품질 항목에서 실제 문제가 하나라도 보이면 `VERDICT: improve`로 판정하세요.";
@@ -805,17 +773,6 @@ pub(super) fn build_review_context(
     let ctx_snapshot = ctx_val.clone();
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
-            if latest_completed_work_dispatch_is_noop(db, kanban_card_id) {
-                tracing::warn!(
-                    "[dispatch] Review dispatch for card {}: skipping review context because latest completed work dispatch is explicit noop",
-                    kanban_card_id
-                );
-                anyhow::bail!(
-                    "Cannot create review dispatch for card {}: latest completed work dispatch is noop",
-                    kanban_card_id
-                );
-            }
-
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
             let validated_work_target = latest_work_target.as_ref().filter(|t| {
                 let valid = commit_belongs_to_card_issue(

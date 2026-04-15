@@ -2471,7 +2471,8 @@ mod tests {
     }
 
     #[test]
-    fn review_context_rejects_explicit_noop_latest_work_dispatch() {
+    fn review_context_allows_explicit_noop_latest_work_dispatch_when_review_mode_is_noop_verification()
+     {
         let db = test_db();
         seed_card(&db, "card-review-noop", "review");
 
@@ -2496,13 +2497,20 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let err = build_review_context(&db, "card-review-noop", "agent-1", &json!({}))
-            .expect_err("explicit noop work must not create a review dispatch");
-        assert!(
-            err.to_string()
-                .contains("latest completed work dispatch is noop"),
-            "unexpected error: {err:#}"
-        );
+        let context = build_review_context(
+            &db,
+            "card-review-noop",
+            "agent-1",
+            &json!({
+                "review_mode": "noop_verification",
+                "noop_reason": "spec already satisfied"
+            }),
+        )
+        .expect("explicit noop work should still create a noop_verification review dispatch");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&context).expect("review context must parse");
+        assert_eq!(parsed["review_mode"], "noop_verification");
+        assert_eq!(parsed["noop_reason"], "spec already satisfied");
     }
 
     #[test]

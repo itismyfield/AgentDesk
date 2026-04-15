@@ -346,6 +346,37 @@ fn review_dispatch_message_without_commit() {
 }
 
 #[test]
+fn review_dispatch_message_includes_noop_verification_guidance() {
+    let message = format_dispatch_message(
+        "dispatch-noop-review",
+        "[Review R1] card-655",
+        Some("https://github.com/itismyfield/AgentDesk/issues/655"),
+        Some(655),
+        true,
+        Some("abc12345deadbeef"),
+        Some("codex"),
+        Some("wt/655-noop"),
+        Some("review"),
+        Some(
+            &serde_json::json!({
+                "review_mode": "noop_verification",
+                "noop_reason": "OUTCOME: noop\\nfeature already exists",
+                "review_quality_scope_reminder": crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER,
+                "review_verdict_guidance": crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE,
+                "review_quality_checklist": crate::dispatch::REVIEW_QUALITY_CHECKLIST,
+            })
+            .to_string(),
+        ),
+    );
+
+    assert!(message.contains("리뷰 모드: `noop_verification`"));
+    assert!(message.contains("GitHub 이슈 본문과 현재 코드 상태를 대조"));
+    assert!(message.contains("noop 사유: OUTCOME: noop\\nfeature already exists"));
+    assert!(message.contains("이슈가 요구한 변경이 현재 코드에 이미 존재하는지"));
+    assert!(!message.contains("git diff"));
+}
+
+#[test]
 fn review_dispatch_message_includes_manual_lookup_warning_when_branch_is_missing() {
     let message = format_dispatch_message(
         "dispatch-manual-review-target",

@@ -121,11 +121,21 @@ var reviewAutomation = {
     // #245: Log agent_id for diagnostics — "project-agentdesk-cdx" phantom agent was traced here
     agentdesk.log.info("[review] Creating review dispatch: card=" + card.id + " agent=" + card.assigned_agent_id + " round=" + newRound);
     try {
+      var latestWorkDispatch = loadLatestCompletedWorkDispatch(card.id);
+      var reviewDispatchContext = {};
+      var noopReviewContext = buildNoopReviewContext(latestWorkDispatch);
+      if (noopReviewContext) {
+        reviewDispatchContext = noopReviewContext;
+        agentdesk.log.info(
+          "[review] Card " + card.id + " entering noop_verification mode from " + latestWorkDispatch.id
+        );
+      }
       var reviewDispatchId = agentdesk.dispatch.create(
         card.id,
         card.assigned_agent_id,
         "review",
-        "[Review R" + newRound + "] " + card.id
+        "[Review R" + newRound + "] " + card.id,
+        reviewDispatchContext
       );
       agentdesk.log.info("[review] Counter-model review dispatched: " + reviewDispatchId + " to " + card.assigned_agent_id);
       // Discord notification is handled by the Rust handler (async send_dispatch_to_discord)
@@ -435,9 +445,9 @@ function extractRepoFromIssueUrl(url) {
   return prTracking.extractRepoFromIssueUrl(url);
 }
 
-function loadLatestCompletedWorkTarget(cardId) {
+function loadLatestCompletedWorkDispatch(cardId) {
   var rows = agentdesk.db.query(
-    "SELECT result, context FROM task_dispatches " +
+    "SELECT id, dispatch_type, result, context FROM task_dispatches " +
     "WHERE kanban_card_id = ? " +
     "AND dispatch_type IN ('implementation', 'rework') " +
     "AND status = 'completed' " +
@@ -446,8 +456,46 @@ function loadLatestCompletedWorkTarget(cardId) {
   );
   if (rows.length === 0) return null;
 
-  var result = parseJsonObject(rows[0].result);
-  var context = parseJsonObject(rows[0].context);
+  return {
+    id: rows[0].id,
+    dispatch_type: rows[0].dispatch_type,
+    result: parseJsonObject(rows[0].result),
+    context: parseJsonObject(rows[0].context)
+  };
+}
+
+function buildNoopReviewContext(workDispatch) {
+  if (!workDispatch || !workDispatch.result) return null;
+
+  var result = workDispatch.result;
+  if (result.work_outcome !== "noop" && result.completed_without_changes !== true) {
+    return null;
+  }
+
+  var noopReason = firstPresent(
+    result.noop_reason,
+    result.notes,
+    result.summary,
+    result.feedback
+  );
+  var reviewContext = {
+    review_mode: "noop_verification",
+    noop_reason: noopReason || "noop 사유가 제공되지 않았습니다.",
+    noop_work_outcome: result.work_outcome || "noop",
+    noop_result: result
+  };
+  if (workDispatch.id) {
+    reviewContext.parent_dispatch_id = workDispatch.id;
+  }
+  return reviewContext;
+}
+
+function loadLatestCompletedWorkTarget(cardId) {
+  var latestWork = loadLatestCompletedWorkDispatch(cardId);
+  if (!latestWork) return null;
+
+  var result = latestWork.result || {};
+  var context = latestWork.context || {};
   var worktreePath = firstPresent(
     result.completed_worktree_path,
     result.worktree_path,
@@ -502,6 +550,17 @@ function findOpenPrByTrackedBranch(repoId, branch) {
   return prTracking.findOpenPrByBranch(repoId, branch);
 }
 
+function loadLatestReviewDispatchContext(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT context FROM task_dispatches " +
+    "WHERE kanban_card_id = ? AND dispatch_type = 'review' " +
+    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
+    [cardId]
+  );
+  if (rows.length === 0) return {};
+  return parseJsonObject(rows[0].context);
+}
+
 function processVerdict(cardId, verdict, result) {
   // Guard: skip processing for terminal cards — prevents stale dispatches from
   // re-triggering review state changes after dismiss.
@@ -520,6 +579,9 @@ function processVerdict(cardId, verdict, result) {
     agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already terminal");
     return;
   }
+
+  var latestReviewContext = loadLatestReviewDispatchContext(cardId);
+  var noopVerification = latestReviewContext.review_mode === "noop_verification";
 
   // #116: accept is NOT a counter-model verdict — it's an agent's review-decision action
   // (rework continuation). Only pass/approved route to done/next-stage.
@@ -666,7 +728,7 @@ function processVerdict(cardId, verdict, result) {
       // #198/#211: If the card completed work in a canonical worktree, create
       // a create-pr dispatch and seed pr_tracking before going terminal.
       var prDispatched = false;
-      var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
+      var latestWorkTarget = noopVerification ? null : loadLatestCompletedWorkTarget(cardId);
       var prCardInfo = agentdesk.db.query(
         "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
         [cardId]
@@ -715,6 +777,8 @@ function processVerdict(cardId, verdict, result) {
             agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
           }
         }
+      } else if (noopVerification) {
+        agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
       }
 
       if (!prDispatched) {
@@ -780,6 +844,47 @@ function processVerdict(cardId, verdict, result) {
         "UPDATE kanban_cards SET review_notes = ? WHERE id = ?",
         [newNotes, cardId]
       );
+    }
+
+    if (noopVerification) {
+      var noopCardInfo = agentdesk.db.query(
+        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
+        [cardId]
+      );
+      var noopAssignedAgent = noopCardInfo.length > 0 ? noopCardInfo[0].assigned_agent_id : null;
+      var noopTitle = noopCardInfo.length > 0 ? (noopCardInfo[0].title || cardId) : cardId;
+      var noopIssueNum = noopCardInfo.length > 0 ? (noopCardInfo[0].github_issue_number || "?") : "?";
+      var noopReason = latestReviewContext.noop_reason || "(noop 사유 없음)";
+      var noopReworkPrompt = "[Noop Rework] #" + noopIssueNum + " " + noopTitle +
+        "\n\n기존 noop 판단이 리뷰에서 반려되었습니다. 실제 구현이 필요합니다." +
+        "\n- 리뷰 verdict: " + verdict +
+        "\n- noop 사유: " + summarizeFindingForPrompt(noopReason) +
+        "\n- 리뷰 피드백: " + summarizeFindingForPrompt(newNotes || "(없음)") +
+        "\n\nGitHub 이슈 본문과 리뷰 피드백을 기준으로 필요한 코드를 구현하세요.";
+
+      if (noopAssignedAgent) {
+        try {
+          var noopReworkDispatchId = agentdesk.dispatch.create(
+            cardId,
+            noopAssignedAgent,
+            "rework",
+            noopReworkPrompt,
+            {
+              review_mode: "noop_verification",
+              noop_reason: noopReason
+            }
+          );
+          agentdesk.log.info("[review] noop_verification " + verdict + " → rework dispatch " + noopReworkDispatchId + " for " + cardId);
+          agentdesk.reviewState.sync(cardId, "rework_pending", { last_verdict: verdict });
+          agentdesk.kanban.setReviewStatus(cardId, "rework_pending", {exclude_status: terminalState});
+          agentdesk.kanban.setStatus(cardId, reviewReworkTarget);
+          return;
+        } catch (e) {
+          agentdesk.log.warn("[review] noop_verification rework dispatch failed for " + cardId + ": " + e + " — falling back to suggestion_pending");
+        }
+      } else {
+        agentdesk.log.warn("[review] noop_verification " + verdict + " on " + cardId + " has no assigned agent — falling back to suggestion_pending");
+      }
     }
 
     if (repeatedFindings && assignedAgent) {
