@@ -5,14 +5,19 @@ import type { TFunction } from "./model";
 import AgentAvatar from "../AgentAvatar";
 import { cx, dashboardBadge, dashboardCard } from "./ui";
 import {
+  DEFAULT_BOTTLENECK_THRESHOLDS,
   LONG_BLOCKED_DAYS,
   REVIEW_DELAY_DAYS,
   REWORK_ALERT_THRESHOLD,
   buildBottleneckGroups,
+  type BottleneckThresholds,
   type BottleneckRow,
 } from "./dashboardInsights";
 
 const DEFAULT_CRON_TIMELINE_WINDOW_MS = 60 * 60_000;
+const BOTTLE_NECK_THRESHOLDS_STORAGE_KEY = "agentdesk:dashboard:bottleneck-thresholds";
+const AUTO_QUEUE_HISTORY_LIMIT = 24;
+const AUTO_QUEUE_HISTORY_PREVIEW_COUNT = 8;
 
 export function formatCompactDuration(ms: number): string {
   const safeMs = Math.max(ms, 1_000);
@@ -120,6 +125,46 @@ function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+function sanitizeThreshold(value: number, fallback: number, min = 1, max = 30): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readStoredBottleneckThresholds(): BottleneckThresholds {
+  if (typeof window === "undefined") return DEFAULT_BOTTLENECK_THRESHOLDS;
+  try {
+    const raw = window.localStorage.getItem(BOTTLE_NECK_THRESHOLDS_STORAGE_KEY);
+    if (!raw) return DEFAULT_BOTTLENECK_THRESHOLDS;
+    const parsed = JSON.parse(raw) as Partial<BottleneckThresholds>;
+    return {
+      review_delay_days: sanitizeThreshold(parsed.review_delay_days ?? NaN, REVIEW_DELAY_DAYS),
+      long_blocked_days: sanitizeThreshold(parsed.long_blocked_days ?? NaN, LONG_BLOCKED_DAYS),
+      rework_alert_threshold: sanitizeThreshold(parsed.rework_alert_threshold ?? NaN, REWORK_ALERT_THRESHOLD, 1, 20),
+    };
+  } catch {
+    return DEFAULT_BOTTLENECK_THRESHOLDS;
+  }
+}
+
+function persistBottleneckThresholds(thresholds: BottleneckThresholds) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(BOTTLE_NECK_THRESHOLDS_STORAGE_KEY, JSON.stringify(thresholds));
+  } catch {
+    // Ignore localStorage failures and keep the current in-memory values.
+  }
+}
+
+function buildWeightedSuccessRate(runs: api.AutoQueueHistoryRun[]): number {
+  const totalEntries = runs.reduce((sum, run) => sum + Math.max(run.entry_count, 0), 0);
+  if (totalEntries <= 0) return 0;
+  const successfulEntries = runs.reduce(
+    (sum, run) => sum + Math.max(run.entry_count, 0) * run.success_rate,
+    0,
+  );
+  return successfulEntries / totalEntries;
+}
+
 // ── Bottleneck Widget ──
 
 interface BottleneckWidgetProps {
@@ -129,6 +174,13 @@ interface BottleneckWidgetProps {
 export function BottleneckWidget({ t }: BottleneckWidgetProps) {
   const [cards, setCards] = useState<api.KanbanCard[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showThresholdControls, setShowThresholdControls] = useState(false);
+  const [thresholds, setThresholds] = useState<BottleneckThresholds>(() => readStoredBottleneckThresholds());
+
+  useEffect(() => {
+    persistBottleneckThresholds(thresholds);
+  }, [thresholds]);
 
   useEffect(() => {
     let mounted = true;
@@ -137,9 +189,12 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
       if (mounted) setLoading(true);
       try {
         const next = await api.getKanbanCards();
-        if (mounted) setCards(next);
-      } catch {
-        if (mounted) setCards([]);
+        if (!mounted) return;
+        setCards(next);
+        setError(null);
+      } catch (nextError) {
+        if (!mounted) return;
+        setError(nextError instanceof Error ? nextError.message : String(nextError));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -153,9 +208,27 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
     };
   }, []);
 
-  const groups = useMemo(() => buildBottleneckGroups(cards), [cards]);
-  const totalAlerts =
-    groups.review_delay.length + groups.repeat_rework.length + groups.long_blocked.length;
+  const groups = useMemo(() => buildBottleneckGroups(cards, Date.now(), thresholds), [cards, thresholds]);
+  const totalAlerts = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of groups.review_delay) ids.add(row.id);
+    for (const row of groups.repeat_rework) ids.add(row.id);
+    for (const row of groups.long_blocked) ids.add(row.id);
+    return ids.size;
+  }, [groups]);
+
+  const updateThreshold = (
+    key: keyof BottleneckThresholds,
+    nextValue: number,
+    fallback: number,
+    min = 1,
+    max = 30,
+  ) => {
+    setThresholds((current) => ({
+      ...current,
+      [key]: sanitizeThreshold(nextValue, fallback, min, max),
+    }));
+  };
 
   return (
     <div
@@ -179,13 +252,94 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
             })}
           </p>
         </div>
-        <span
-          className="rounded-full px-3 py-1 text-xs font-semibold"
-          style={{ color: "#fca5a5", background: "rgba(239,68,68,0.14)" }}
-        >
-          {totalAlerts} {t({ ko: "경고", en: "alerts", ja: "警告", zh: "警报" })}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="rounded-full px-3 py-1 text-[11px] font-semibold"
+            style={{
+              color: "var(--th-text)",
+              background: "rgba(148,163,184,0.14)",
+              border: "1px solid rgba(148,163,184,0.2)",
+            }}
+            onClick={() => setShowThresholdControls((current) => !current)}
+          >
+            {showThresholdControls
+              ? t({ ko: "기준 닫기", en: "Hide thresholds", ja: "基準を閉じる", zh: "收起阈值" })
+              : t({ ko: "기준 조정", en: "Tune thresholds", ja: "基準調整", zh: "调整阈值" })}
+          </button>
+          <span
+            className="rounded-full px-3 py-1 text-xs font-semibold"
+            style={{ color: "#fca5a5", background: "rgba(239,68,68,0.14)" }}
+          >
+            {totalAlerts} {t({ ko: "경고", en: "alerts", ja: "警告", zh: "警报" })}
+          </span>
+        </div>
       </div>
+
+      {showThresholdControls ? (
+        <div className="mt-4 grid gap-3 rounded-2xl border p-3 text-[11px] sm:grid-cols-3" style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(15,23,42,0.18)" }}>
+          <label className="flex min-w-0 flex-col gap-1">
+            <span style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "리뷰 지연 일수", en: "Review delay days", ja: "レビュー遅延日数", zh: "审查延迟天数" })}
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={30}
+              value={thresholds.review_delay_days}
+              onChange={(event) => updateThreshold("review_delay_days", Number(event.target.value), REVIEW_DELAY_DAYS)}
+              className="rounded-xl border px-3 py-2 text-sm"
+              style={{ borderColor: "rgba(255,255,255,0.1)", background: "var(--th-bg-surface)", color: "var(--th-text)" }}
+            />
+          </label>
+          <label className="flex min-w-0 flex-col gap-1">
+            <span style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "장기 블록 일수", en: "Blocked days", ja: "長期ブロック日数", zh: "长期阻塞天数" })}
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={30}
+              value={thresholds.long_blocked_days}
+              onChange={(event) => updateThreshold("long_blocked_days", Number(event.target.value), LONG_BLOCKED_DAYS)}
+              className="rounded-xl border px-3 py-2 text-sm"
+              style={{ borderColor: "rgba(255,255,255,0.1)", background: "var(--th-bg-surface)", color: "var(--th-text)" }}
+            />
+          </label>
+          <label className="flex min-w-0 flex-col gap-1">
+            <span style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "리워크 경고 횟수", en: "Rework threshold", ja: "リワーク閾値", zh: "返工阈值" })}
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={thresholds.rework_alert_threshold}
+              onChange={(event) => updateThreshold("rework_alert_threshold", Number(event.target.value), REWORK_ALERT_THRESHOLD, 1, 20)}
+              className="rounded-xl border px-3 py-2 text-sm"
+              style={{ borderColor: "rgba(255,255,255,0.1)", background: "var(--th-bg-surface)", color: "var(--th-text)" }}
+            />
+          </label>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="mt-4 rounded-2xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(251,191,36,0.28)", background: "rgba(251,191,36,0.12)", color: "#fde68a" }}>
+          {cards.length > 0
+            ? t({
+                ko: `최근 카드 스냅샷을 유지 중이며 새 동기화에 실패했습니다. (${error})`,
+                en: `Keeping the last card snapshot because refresh failed. (${error})`,
+                ja: `最新同期に失敗したため、直近のカードスナップショットを維持しています。(${error})`,
+                zh: `最新同步失败，正在保留最近一次卡片快照。(${error})`,
+              })
+            : t({
+                ko: `칸반 카드를 불러오지 못했습니다. (${error})`,
+                en: `Unable to load kanban cards. (${error})`,
+                ja: `kanban カードを読み込めませんでした。(${error})`,
+                zh: `无法加载 kanban 卡片。(${error})`,
+              })}
+        </div>
+      ) : null}
 
       {loading && totalAlerts === 0 ? (
         <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
@@ -196,10 +350,10 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
           <BottleneckColumn
             title={t({ ko: "리뷰 지연", en: "Review Delay", ja: "レビュー遅延", zh: "审查延迟" })}
             hint={t({
-              ko: `${REVIEW_DELAY_DAYS}일 이상 review`,
-              en: `${REVIEW_DELAY_DAYS}+ days in review`,
-              ja: `${REVIEW_DELAY_DAYS}日以上 review`,
-              zh: `review 超过 ${REVIEW_DELAY_DAYS} 天`,
+              ko: `${thresholds.review_delay_days}일 이상 review`,
+              en: `${thresholds.review_delay_days}+ days in review`,
+              ja: `${thresholds.review_delay_days}日以上 review`,
+              zh: `review 超过 ${thresholds.review_delay_days} 天`,
             })}
             rows={groups.review_delay}
             emptyLabel={t({ ko: "지연된 review 카드가 없습니다", en: "No delayed review cards", ja: "遅延レビューカードはありません", zh: "暂无延迟审查卡片" })}
@@ -209,10 +363,10 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
           <BottleneckColumn
             title={t({ ko: "반복 리워크", en: "Repeat Rework", ja: "反復リワーク", zh: "重复返工" })}
             hint={t({
-              ko: `${REWORK_ALERT_THRESHOLD}회 이상 rework`,
-              en: `${REWORK_ALERT_THRESHOLD}+ reworks`,
-              ja: `${REWORK_ALERT_THRESHOLD}回以上リワーク`,
-              zh: `${REWORK_ALERT_THRESHOLD} 次以上返工`,
+              ko: `${thresholds.rework_alert_threshold}회 이상 rework`,
+              en: `${thresholds.rework_alert_threshold}+ reworks`,
+              ja: `${thresholds.rework_alert_threshold}回以上リワーク`,
+              zh: `${thresholds.rework_alert_threshold} 次以上返工`,
             })}
             rows={groups.repeat_rework}
             emptyLabel={t({ ko: "반복 리워크 카드는 없습니다", en: "No repeat rework cards", ja: "反復リワークカードはありません", zh: "暂无重复返工卡片" })}
@@ -222,10 +376,10 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
           <BottleneckColumn
             title={t({ ko: "장기 블로킹", en: "Long Blocked", ja: "長期ブロック", zh: "长期阻塞" })}
             hint={t({
-              ko: `${LONG_BLOCKED_DAYS}일 이상 blocked`,
-              en: `${LONG_BLOCKED_DAYS}+ days blocked`,
-              ja: `${LONG_BLOCKED_DAYS}日以上 blocked`,
-              zh: `blocked 超过 ${LONG_BLOCKED_DAYS} 天`,
+              ko: `${thresholds.long_blocked_days}일 이상 blocked`,
+              en: `${thresholds.long_blocked_days}+ days blocked`,
+              ja: `${thresholds.long_blocked_days}日以上 blocked`,
+              zh: `blocked 超过 ${thresholds.long_blocked_days} 天`,
             })}
             rows={groups.long_blocked}
             emptyLabel={t({ ko: "장기 블로킹 카드는 없습니다", en: "No long blocked cards", ja: "長期ブロックカードはありません", zh: "暂无长期阻塞卡片" })}
@@ -253,6 +407,10 @@ function BottleneckColumn({
   accent: string;
   t: TFunction;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleRows = expanded ? rows : rows.slice(0, 4);
+  const hiddenCount = Math.max(0, rows.length - visibleRows.length);
+
   return (
     <div
       className="rounded-2xl border p-3"
@@ -281,7 +439,7 @@ function BottleneckColumn({
         </div>
       ) : (
         <div className="mt-3 space-y-2">
-          {rows.slice(0, 4).map((row) => (
+          {visibleRows.map((row) => (
             <div
               key={row.id}
               className="rounded-xl border px-3 py-2"
@@ -308,6 +466,35 @@ function BottleneckColumn({
               )}
             </div>
           ))}
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              className="w-full rounded-xl border px-3 py-2 text-xs font-medium"
+              style={{ borderColor: `${accent}33`, color: accent, background: "transparent" }}
+              onClick={() => setExpanded(true)}
+            >
+              {t({
+                ko: `${hiddenCount}건 더 보기`,
+                en: `Show ${hiddenCount} more`,
+                ja: `${hiddenCount}件をさらに表示`,
+                zh: `再显示 ${hiddenCount} 条`,
+              })}
+            </button>
+          ) : rows.length > 4 ? (
+            <button
+              type="button"
+              className="w-full rounded-xl border px-3 py-2 text-xs font-medium"
+              style={{ borderColor: `${accent}33`, color: "var(--th-text-muted)", background: "transparent" }}
+              onClick={() => setExpanded(false)}
+            >
+              {t({
+                ko: "접기",
+                en: "Collapse",
+                ja: "折りたたむ",
+                zh: "收起",
+              })}
+            </button>
+          ) : null}
         </div>
       )}
     </div>
@@ -322,16 +509,25 @@ interface AutoQueueHistoryWidgetProps {
 
 export function AutoQueueHistoryWidget({ t }: AutoQueueHistoryWidgetProps) {
   const [data, setData] = useState<api.AutoQueueHistoryResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let mounted = true;
 
     const load = async () => {
+      if (mounted) setLoading(true);
       try {
-        const next = await api.getAutoQueueHistory(8);
-        if (mounted) setData(next);
-      } catch {
-        if (mounted) setData(null);
+        const next = await api.getAutoQueueHistory(AUTO_QUEUE_HISTORY_LIMIT);
+        if (!mounted) return;
+        setData(next);
+        setError(null);
+      } catch (nextError) {
+        if (!mounted) return;
+        setError(nextError instanceof Error ? nextError.message : String(nextError));
+      } finally {
+        if (mounted) setLoading(false);
       }
     };
 
@@ -343,7 +539,10 @@ export function AutoQueueHistoryWidget({ t }: AutoQueueHistoryWidgetProps) {
     };
   }, []);
 
-  if (!data || data.runs.length === 0) return null;
+  const runs = data?.runs ?? [];
+  const visibleRuns = expanded ? runs : runs.slice(0, AUTO_QUEUE_HISTORY_PREVIEW_COUNT);
+  const weightedSuccessRate = useMemo(() => buildWeightedSuccessRate(runs), [runs]);
+  const hiddenRuns = Math.max(0, runs.length - visibleRuns.length);
 
   return (
     <div
@@ -366,16 +565,58 @@ export function AutoQueueHistoryWidget({ t }: AutoQueueHistoryWidgetProps) {
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
           <span className="rounded-full px-2 py-1" style={{ color: "#86efac", background: "rgba(34,197,94,0.12)" }}>
-            {data.summary.completed_runs}/{data.summary.total_runs} {t({ ko: "완료", en: "completed", ja: "完了", zh: "完成" })}
+            {(data?.summary.completed_runs ?? 0)}/{data?.summary.total_runs ?? 0} {t({ ko: "완료", en: "completed", ja: "完了", zh: "完成" })}
           </span>
           <span className="rounded-full px-2 py-1" style={{ color: "#38bdf8", background: "rgba(56,189,248,0.12)" }}>
-            {formatPercent(data.summary.success_rate)} {t({ ko: "성공", en: "success", ja: "成功", zh: "成功" })}
+            {formatPercent(weightedSuccessRate)} {t({ ko: "성공", en: "success", ja: "成功", zh: "成功" })}
           </span>
+          {runs.length > 0 ? (
+            <span className="rounded-full px-2 py-1" style={{ color: "var(--th-text-muted)", background: "rgba(148,163,184,0.12)" }}>
+              {t({
+                ko: `최근 ${runs.length}건 기준`,
+                en: `Based on ${runs.length} recent runs`,
+                ja: `直近 ${runs.length} 件 기준`,
+                zh: `基于最近 ${runs.length} 次运行`,
+              })}
+            </span>
+          ) : null}
         </div>
       </div>
 
-      <div className="mt-4 space-y-2 max-h-80 overflow-y-auto">
-        {data.runs.map((run) => {
+      {error ? (
+        <div className="mt-4 rounded-2xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(251,191,36,0.28)", background: "rgba(251,191,36,0.12)", color: "#fde68a" }}>
+          {runs.length > 0
+            ? t({
+                ko: `최근 실행 이력은 유지 중이며 새 동기화에 실패했습니다. (${error})`,
+                en: `Keeping the recent history while refresh failed. (${error})`,
+                ja: `最新同期に失敗したため、直近の履歴を維持しています。(${error})`,
+                zh: `最新刷新失败，正在保留最近的历史记录。(${error})`,
+              })
+            : t({
+                ko: `자동큐 이력을 불러오지 못했습니다. (${error})`,
+                en: `Unable to load auto-queue history. (${error})`,
+                ja: `自動キュー履歴を読み込めませんでした。(${error})`,
+                zh: `无法加载自动队列历史。(${error})`,
+              })}
+        </div>
+      ) : null}
+
+      {loading && runs.length === 0 ? (
+        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+          {t({ ko: "자동큐 이력을 불러오는 중입니다", en: "Loading auto-queue history", ja: "自動キュー履歴を読み込み中", zh: "正在加载自动队列历史" })}
+        </div>
+      ) : runs.length === 0 ? (
+        <div className="mt-4 rounded-2xl border border-dashed px-4 py-8 text-center text-sm" style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-muted)" }}>
+          {t({
+            ko: "아직 기록된 자동큐 실행이 없습니다. 실행이 시작되면 최근 성공률과 엔트리 규모가 이곳에 표시됩니다.",
+            en: "No auto-queue runs have been recorded yet. Recent success rates and entry volume will appear here once runs start.",
+            ja: "まだ記録された自動キュー実行はありません。実行が始まると、最近の成功率とエントリ規模がここに表示されます。",
+            zh: "尚无自动队列运行记录。开始运行后，最近的成功率和条目规模会显示在这里。",
+          })}
+        </div>
+      ) : (
+        <div className="mt-4 space-y-2 max-h-80 overflow-y-auto">
+          {visibleRuns.map((run) => {
           const statusColor =
             run.status === "completed"
               ? "#22c55e"
@@ -426,8 +667,39 @@ export function AutoQueueHistoryWidget({ t }: AutoQueueHistoryWidgetProps) {
               </div>
             </div>
           );
-        })}
-      </div>
+          })}
+
+          {hiddenRuns > 0 ? (
+            <button
+              type="button"
+              className="w-full rounded-xl border px-3 py-2 text-xs font-medium"
+              style={{ borderColor: "rgba(56,189,248,0.24)", color: "#38bdf8", background: "transparent" }}
+              onClick={() => setExpanded(true)}
+            >
+              {t({
+                ko: `${hiddenRuns}건 더 보기`,
+                en: `Show ${hiddenRuns} more`,
+                ja: `${hiddenRuns}件をさらに表示`,
+                zh: `再显示 ${hiddenRuns} 条`,
+              })}
+            </button>
+          ) : runs.length > AUTO_QUEUE_HISTORY_PREVIEW_COUNT ? (
+            <button
+              type="button"
+              className="w-full rounded-xl border px-3 py-2 text-xs font-medium"
+              style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-muted)", background: "transparent" }}
+              onClick={() => setExpanded(false)}
+            >
+              {t({
+                ko: "접기",
+                en: "Collapse",
+                ja: "折りたたむ",
+                zh: "收起",
+              })}
+            </button>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

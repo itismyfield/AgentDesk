@@ -10,6 +10,18 @@ export const REVIEW_DELAY_DAYS = 2;
 export const LONG_BLOCKED_DAYS = 3;
 export const REWORK_ALERT_THRESHOLD = 3;
 
+export interface BottleneckThresholds {
+  review_delay_days: number;
+  long_blocked_days: number;
+  rework_alert_threshold: number;
+}
+
+export const DEFAULT_BOTTLENECK_THRESHOLDS: BottleneckThresholds = {
+  review_delay_days: REVIEW_DELAY_DAYS,
+  long_blocked_days: LONG_BLOCKED_DAYS,
+  rework_alert_threshold: REWORK_ALERT_THRESHOLD,
+};
+
 interface AgentIdentity {
   id: string;
   label: string;
@@ -113,9 +125,7 @@ function buildCompletionCounts(
   const counts = new Map<string, number>();
 
   for (const card of cards) {
-    const completedAt =
-      parseDashboardTimestamp(card.completed_at) ??
-      (card.status === "done" ? parseDashboardTimestamp(card.updated_at) : null);
+    const completedAt = parseDashboardTimestamp(card.completed_at);
     if (!completedAt) continue;
     if (periodStart != null && completedAt < periodStart) continue;
     if (periodEnd != null && completedAt > periodEnd) continue;
@@ -202,23 +212,36 @@ function buildBottleneckRow(card: KanbanCard, ageDays: number): BottleneckRow {
   };
 }
 
-export function buildBottleneckGroups(cards: KanbanCard[], now = Date.now()): BottleneckGroups {
+function resolveBottleneckAgeDays(card: KanbanCard, now: number): number {
+  const reviewEnteredAt =
+    card.status === "review"
+      ? parseDashboardTimestamp(card.review_entered_at)
+      : null;
+  const updatedAt = parseDashboardTimestamp(card.updated_at);
+  const reference = reviewEnteredAt ?? updatedAt ?? now;
+  return Math.max(0, Math.floor((now - reference) / DAY_MS));
+}
+
+export function buildBottleneckGroups(
+  cards: KanbanCard[],
+  now = Date.now(),
+  thresholds: BottleneckThresholds = DEFAULT_BOTTLENECK_THRESHOLDS,
+): BottleneckGroups {
   const reviewDelay: BottleneckRow[] = [];
   const repeatRework: BottleneckRow[] = [];
   const longBlocked: BottleneckRow[] = [];
 
   for (const card of cards) {
-    const updatedAt = parseDashboardTimestamp(card.updated_at) ?? now;
-    const ageDays = Math.max(0, Math.floor((now - updatedAt) / DAY_MS));
+    const ageDays = resolveBottleneckAgeDays(card, now);
     const reworkCount = estimateReworkCount(card);
 
-    if (card.status === "review" && ageDays >= REVIEW_DELAY_DAYS) {
+    if (card.status === "review" && ageDays >= thresholds.review_delay_days) {
       reviewDelay.push(buildBottleneckRow(card, ageDays));
     }
-    if (reworkCount >= REWORK_ALERT_THRESHOLD) {
+    if (reworkCount >= thresholds.rework_alert_threshold) {
       repeatRework.push(buildBottleneckRow(card, ageDays));
     }
-    if ((card.status as string) === "blocked" && ageDays >= LONG_BLOCKED_DAYS) {
+    if (card.status === "blocked" && ageDays >= thresholds.long_blocked_days) {
       longBlocked.push(buildBottleneckRow(card, ageDays));
     }
   }

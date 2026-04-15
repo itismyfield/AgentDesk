@@ -431,6 +431,7 @@ export type KanbanCardStatus =
   | "backlog"
   | "ready"
   | "requested"
+  | "blocked"
   | "in_progress"
   | "review"
   | "done"

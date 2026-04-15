@@ -115,6 +115,34 @@ describe("dashboardInsights", () => {
     });
   });
 
+  it("counts ROI only from completed_at without falling back to updated_at", () => {
+    const shares: ReceiptSnapshotAgentShare[] = [
+      { agent: "Alpha", tokens: 100_000, cost: 0.5, percentage: 100 },
+    ];
+    const cards = [
+      makeCard({
+        id: "card-missing-completed-at",
+        assignee_agent_id: "agent-alpha",
+        status: "done",
+        completed_at: null,
+        updated_at: "2026-04-12T00:00:00Z" as unknown as number,
+      }),
+    ];
+
+    const rows = buildAgentRoiRows({
+      cards,
+      agentShares: shares,
+      agents,
+      periodStart: "2026-04-01",
+      periodEnd: "2026-04-30",
+    });
+
+    expect(rows[0]).toMatchObject({
+      id: "agent-alpha",
+      completed_cards: 0,
+    });
+  });
+
   it("estimates rework count from review rounds and metadata", () => {
     expect(
       estimateReworkCount(
@@ -156,5 +184,19 @@ describe("dashboardInsights", () => {
     expect(groups.review_delay.map((row) => row.id)).toContain("card-review");
     expect(groups.repeat_rework.map((row) => row.id)).toContain("card-rework");
     expect(groups.long_blocked.map((row) => row.id)).toContain("card-blocked");
+  });
+
+  it("uses review_entered_at before updated_at for review delay age", () => {
+    const now = new Date("2026-04-13T00:00:00Z").getTime();
+    const groups = buildBottleneckGroups([
+      makeCard({
+        id: "card-review-entered",
+        status: "review",
+        review_entered_at: new Date(now - REVIEW_DELAY_DAYS * 24 * 60 * 60 * 1000).toISOString() as unknown as number,
+        updated_at: new Date(now - 60 * 60 * 1000).toISOString() as unknown as number,
+      }),
+    ], now);
+
+    expect(groups.review_delay.map((row) => row.id)).toContain("card-review-entered");
   });
 });

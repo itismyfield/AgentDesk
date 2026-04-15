@@ -64,6 +64,7 @@ export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = 
   backlog: ["ready"],
   ready: ["backlog"],
   requested: ["backlog"],
+  blocked: ["backlog"],
   in_progress: ["backlog"],
   review: ["backlog"],
   done: ["backlog"],
