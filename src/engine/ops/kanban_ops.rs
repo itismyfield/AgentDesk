@@ -115,7 +115,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 };
                 // Terminal cleanup: clear review-related fields
                 let terminal_cleanup = if pipeline.is_terminal(&new_status) {
-                    ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL"
+                    ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, review_round = NULL, deferred_dod_json = NULL"
                 } else {
                     ""
                 };

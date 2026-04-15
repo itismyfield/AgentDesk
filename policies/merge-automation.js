@@ -1342,7 +1342,7 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
         tracking.branch,
         tracking.pr_number,
         currentSha || tracking.head_sha,
-        tracking.state || "merge",
+        "escalated",
         readiness.reason
       );
       agentdesk.kv.set("merge_failed:" + trackingId, JSON.stringify({
@@ -1350,6 +1350,7 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
         error: readiness.reason,
         timestamp: new Date().toISOString()
       }), 86400);
+      notifyMergeFailure(tracking.card_id, prNumber, repo, readiness.reason);
       return false;
     }
   }
@@ -1430,10 +1431,11 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
         tracking.branch,
         tracking.pr_number,
         currentSha || tracking.head_sha,
-        tracking.state || "merge",
+        "escalated",
         result
       );
     }
+    notifyMergeFailure(tracking ? tracking.card_id : null, prNumber, repo, result);
     return false;
   }
 
@@ -1452,6 +1454,42 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
     );
   }
   return true;
+}
+
+function notifyMergeFailure(cardId, prNumber, repo, reason) {
+  if (!cardId) return;
+
+  var dedupKey = "merge_failure_notified:" + cardId + ":" + prNumber;
+  if (agentdesk.kv.get(dedupKey)) return;
+
+  var card = loadCardContext(cardId);
+  if (!card) return;
+
+  var target = card.active_thread_id;
+  if (!target && card.assigned_agent_id) {
+    target = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
+  }
+  if (!target) {
+    var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
+    if (pmdChannel) {
+      target = "channel:" + pmdChannel;
+    }
+  }
+  if (!target) return;
+
+  var titleRef = card.github_issue_number
+    ? ("#" + card.github_issue_number + " " + (card.title || card.id))
+    : (card.title || card.id);
+  agentdesk.message.queue(
+    target,
+    "⚠️ " + titleRef + "\n" +
+      "PR #" + prNumber + " auto-merge failed in `" + repo + "`.\n" +
+      "Reason: " + summarizeInlineText(reason) + "\n" +
+      "수동 확인이 필요합니다.",
+    "announce",
+    "merge-automation"
+  );
+  agentdesk.kv.set(dedupKey, "true", 7200);
 }
 
 /**

@@ -277,7 +277,7 @@ fn execute_transition(
 
     // Terminal cleanup
     let terminal_cleanup = if pipeline.is_terminal(to) {
-        ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL"
+        ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, review_round = NULL, deferred_dod_json = NULL"
     } else {
         ""
     };

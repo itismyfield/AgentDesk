@@ -367,7 +367,7 @@ fn sync_terminal_card_state(db: &Db, card_id: &str) {
     let pending_followups: Vec<String> = conn
         .prepare(
             "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review-decision', 'rework') \
+             WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'review-decision', 'rework') \
              AND status IN ('pending', 'dispatched')",
         )
         .ok()
@@ -617,7 +617,11 @@ fn github_sync_on_transition(
     let Some(num) = issue_number else { return };
 
     if is_terminal {
-        let _ = crate::github::close_issue(&repo, num);
+        if let Err(error) = crate::github::close_issue(&repo, num) {
+            tracing::warn!(
+                "[kanban] failed to close issue {repo}#{num} for terminal card {card_id}: {error}"
+            );
+        }
     } else if is_review_enter {
         let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
         let _ = crate::github::comment_issue(&repo, num, comment);
@@ -1136,6 +1140,33 @@ mod tests {
         let result =
             transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
+    }
+
+    #[test]
+    fn sync_terminal_card_state_cancels_pending_implementation_dispatch() {
+        let db = test_db();
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-terminal-sync", "done");
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-card-terminal-sync-pending",
+            "card-terminal-sync",
+            "implementation",
+            "pending",
+        );
+
+        sync_terminal_card_state(&db, "card-terminal-sync");
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-card-terminal-sync-pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
     }
 
     #[test]
