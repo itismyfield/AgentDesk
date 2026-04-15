@@ -1613,6 +1613,53 @@ mod tests {
     }
 
     #[test]
+    fn dedup_same_review_card_returns_existing_dispatch() {
+        let (_repo, _override_guard) = setup_test_repo();
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-review-dup", "review");
+
+        let d1 = create_dispatch(
+            &db,
+            &engine,
+            "card-review-dup",
+            "agent-1",
+            "review",
+            "First review",
+            &json!({}),
+        )
+        .unwrap();
+        let id1 = d1["id"].as_str().unwrap();
+
+        let d2 = create_dispatch(
+            &db,
+            &engine,
+            "card-review-dup",
+            "agent-1",
+            "review",
+            "Second review",
+            &json!({}),
+        )
+        .unwrap();
+        let id2 = d2["id"].as_str().unwrap();
+
+        assert_eq!(id1, id2, "review dedup must return existing dispatch_id");
+        assert_eq!(d2["status"], "pending");
+
+        let conn = db.separate_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-review-dup' AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "only one active review dispatch must exist");
+    }
+
+    #[test]
     fn dedup_same_card_different_type_allows_creation() {
         let (_repo, _override_guard) = setup_test_repo();
         let db = test_db();

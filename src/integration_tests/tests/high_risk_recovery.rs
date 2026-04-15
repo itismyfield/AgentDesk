@@ -96,6 +96,92 @@ mod failure_recovery {
     }
 
     #[test]
+    fn scenario_667_restart_recovery_reconciles_duplicate_review_dispatches() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-s667", "review");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-loser', 'card-s667', 'agent-1', 'review', 'pending', 'Review Loser', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-winner', 'card-s667', 'agent-1', 'review', 'pending', 'Review Winner', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = 'review-loser' WHERE id = 'card-s667'",
+                [],
+            )
+            .unwrap();
+        }
+
+        {
+            let conn = db.lock().unwrap();
+            db::schema::migrate(&conn).unwrap();
+        }
+
+        {
+            let conn = db.lock().unwrap();
+            let active_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM task_dispatches \
+                     WHERE kanban_card_id = 'card-s667' AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                active_count, 1,
+                "reconciliation must leave exactly 1 active review dispatch"
+            );
+
+            let loser_status: String = conn
+                .query_row(
+                    "SELECT status FROM task_dispatches WHERE id = 'review-loser'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                loser_status, "cancelled",
+                "legacy duplicate review dispatch must be cancelled before the index is added"
+            );
+
+            let latest: String = conn
+                .query_row(
+                    "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-s667'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                latest, "review-winner",
+                "latest_dispatch_id must be re-pointed to the surviving active review dispatch"
+            );
+
+            let unique_violation = conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-blocked', 'card-s667', 'agent-1', 'review', 'pending', 'Review Blocked', datetime('now'), datetime('now'))",
+                [],
+            );
+            assert!(
+                unique_violation.is_err(),
+                "idx_single_active_review must block a second active review dispatch"
+            );
+        }
+    }
+
+    #[test]
     fn scenario_251_boot_reconcile_backfills_missing_notify_outbox() {
         let db = test_db();
         let engine = test_engine(&db);

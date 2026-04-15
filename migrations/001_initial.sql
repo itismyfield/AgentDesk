@@ -166,3 +166,11 @@ CREATE TABLE IF NOT EXISTS rate_limit_cache (
     data                TEXT,
     fetched_at          INTEGER
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review
+ON task_dispatches (kanban_card_id)
+WHERE dispatch_type = 'review' AND status IN ('pending', 'dispatched');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review_decision
+ON task_dispatches (kanban_card_id)
+WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched');
