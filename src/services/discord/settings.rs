@@ -1164,6 +1164,50 @@ agents:
         });
     }
 
+    struct TestLogWriter {
+        buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestLogWriter {
+        type Writer = TestLogWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            TestLogWriter {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    fn capture_logs<F>(f: F) -> String
+    where
+        F: FnOnce(),
+    {
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::prelude::*;
+
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = TestLogWriter {
+            buffer: buffer.clone(),
+        };
+        let layer = fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false)
+            .with_level(true);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
+
     #[test]
     fn test_load_bot_settings_falls_back_to_legacy_same_token_entry() {
         with_temp_home(|temp_home: &TempDir| {
@@ -1184,10 +1228,66 @@ agents:
             )
             .unwrap();
 
-            let settings = load_bot_settings(token);
-            assert_eq!(settings.owner_user_id, Some(42));
-            assert_eq!(settings.allowed_user_ids, vec![7]);
-            assert!(settings.allow_all_users);
+            let log_output = capture_logs(|| {
+                let settings = load_bot_settings(token);
+                assert_eq!(settings.owner_user_id, Some(42));
+                assert_eq!(settings.allowed_user_ids, vec![7]);
+                assert!(settings.allow_all_users);
+            });
+            assert!(
+                log_output.contains("falling back to legacy bot_settings.json"),
+                "expected legacy fallback warning in log output, got: {log_output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_does_not_warn_when_yaml_has_fields() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  owner_id: "99"
+  bots:
+    command:
+      token: "yaml-token"
+      provider: "claude"
+      agent: "AgentDesk"
+      auth:
+        allowed_user_ids:
+          - "7"
+        allow_all_users: false
+        allowed_bot_ids:
+          - "9"
+        allowed_channel_ids:
+          - "123"
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "123"
+        name: "adk-cc"
+"#,
+            );
+
+            let log_output = capture_logs(|| {
+                let settings = load_bot_settings("yaml-token");
+                assert_eq!(settings.provider, ProviderKind::Claude);
+                assert_eq!(settings.owner_user_id, Some(99));
+                assert_eq!(settings.allowed_user_ids, vec![7]);
+                assert!(!settings.allow_all_users);
+                assert_eq!(settings.allowed_bot_ids, vec![9]);
+                assert_eq!(settings.allowed_channel_ids, vec![123]);
+            });
+            assert!(
+                !log_output.contains("falling back to legacy bot_settings.json"),
+                "should not warn when all fields come from YAML, got: {log_output}"
+            );
         });
     }
 

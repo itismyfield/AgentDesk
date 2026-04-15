@@ -91,6 +91,41 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
     }
 }
 
+fn warn_legacy_bot_setting_fallback(field_name: &str) {
+    tracing::warn!(
+        field = %field_name,
+        "bot setting missing from YAML, falling back to legacy bot_settings.json"
+    );
+}
+
+fn fallback_legacy_option<T>(
+    configured: Option<T>,
+    legacy: Option<T>,
+    field_name: &'static str,
+) -> Option<T> {
+    configured.or_else(|| {
+        legacy.map(|value| {
+            warn_legacy_bot_setting_fallback(field_name);
+            value
+        })
+    })
+}
+
+fn fallback_legacy_vec<T>(
+    configured: Option<Vec<T>>,
+    legacy: Vec<T>,
+    field_name: &'static str,
+) -> Vec<T> {
+    match configured {
+        Some(values) => values,
+        None if !legacy.is_empty() => {
+            warn_legacy_bot_setting_fallback(field_name);
+            legacy
+        }
+        None => Vec::new(),
+    }
+}
+
 fn load_kv_meta_value(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
     let db = db?;
     let conn = db.read_conn().ok()?;
@@ -187,11 +222,12 @@ pub(crate) fn load_narrate_progress(db: Option<&crate::db::Db>) -> bool {
 pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let configured = agentdesk_config::find_discord_bot_by_token(token);
     let legacy = load_legacy_bot_settings_entry(token);
-    let provider = configured
-        .as_ref()
-        .and_then(|bot| bot.provider.clone())
-        .or(legacy.provider.clone())
-        .unwrap_or(ProviderKind::Claude);
+    let provider = fallback_legacy_option(
+        configured.as_ref().and_then(|bot| bot.provider.clone()),
+        legacy.provider.clone(),
+        "provider",
+    )
+    .unwrap_or(ProviderKind::Claude);
     let allowed_tools = configured
         .as_ref()
         .and_then(|bot| bot.auth.allowed_tools.as_ref().cloned())
@@ -200,34 +236,46 @@ pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         .unwrap_or_else(|| default_allowed_tools_for_provider(&provider));
 
     DiscordBotSettings {
-        agent: configured
-            .as_ref()
-            .and_then(|bot| bot.agent.clone())
-            .or(legacy.agent),
+        agent: fallback_legacy_option(
+            configured.as_ref().and_then(|bot| bot.agent.clone()),
+            legacy.agent,
+            "agent",
+        ),
         provider,
         allowed_tools,
-        allowed_channel_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_channel_ids.clone())
-            .unwrap_or(legacy.allowed_channel_ids),
+        allowed_channel_ids: fallback_legacy_vec(
+            configured
+                .as_ref()
+                .and_then(|bot| bot.auth.allowed_channel_ids.clone()),
+            legacy.allowed_channel_ids,
+            "allowed_channel_ids",
+        ),
         channel_model_overrides: legacy.channel_model_overrides,
-        owner_user_id: configured
-            .as_ref()
-            .and_then(|bot| bot.owner_id)
-            .or(legacy.owner_user_id),
-        allowed_user_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_user_ids.clone())
-            .unwrap_or(legacy.allowed_user_ids),
-        allow_all_users: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allow_all_users)
-            .or(legacy.allow_all_users)
-            .unwrap_or(false),
-        allowed_bot_ids: configured
-            .as_ref()
-            .and_then(|bot| bot.auth.allowed_bot_ids.clone())
-            .unwrap_or(legacy.allowed_bot_ids),
+        owner_user_id: fallback_legacy_option(
+            configured.as_ref().and_then(|bot| bot.owner_id),
+            legacy.owner_user_id,
+            "owner_user_id",
+        ),
+        allowed_user_ids: fallback_legacy_vec(
+            configured
+                .as_ref()
+                .and_then(|bot| bot.auth.allowed_user_ids.clone()),
+            legacy.allowed_user_ids,
+            "allowed_user_ids",
+        ),
+        allow_all_users: fallback_legacy_option(
+            configured.as_ref().and_then(|bot| bot.auth.allow_all_users),
+            legacy.allow_all_users,
+            "allow_all_users",
+        )
+        .unwrap_or(false),
+        allowed_bot_ids: fallback_legacy_vec(
+            configured
+                .as_ref()
+                .and_then(|bot| bot.auth.allowed_bot_ids.clone()),
+            legacy.allowed_bot_ids,
+            "allowed_bot_ids",
+        ),
     }
 }
 
