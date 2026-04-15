@@ -886,24 +886,28 @@ export default function AutoQueuePanel({
 
   const renderPhaseGateIndicator = (phase: number) => {
     const gates = gatesByPhase.get(phase) ?? [];
-    const hasDeploy = deployPhases.has(phase);
+    const isDeploy = deployPhases.has(phase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
     const isPassed = gateStatus === "passed";
     const isFailed = gateStatus === "failed";
     const isPending = !isPassed && !isFailed;
-    const statusColor = isPassed
-      ? "#4ade80"
-      : isFailed
-        ? "#ef4444"
-        : "#f59e0b";
-    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : "⏳";
+
+    const baseColor = isDeploy && !isFailed
+      ? "#60a5fa"
+      : isPassed
+        ? "#4ade80"
+        : isFailed
+          ? "#ef4444"
+          : "#f59e0b";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isDeploy ? "🚀" : "⏳";
     const statusLabel = isPassed
       ? tr("통과", "Passed")
       : isFailed
         ? tr("실패", "Failed")
         : tr("대기", "Pending");
+    const gateLabel = isDeploy ? tr("배포 게이트", "Deploy Gate") : tr("게이트", "Gate");
 
     return (
       <div
@@ -912,44 +916,33 @@ export default function AutoQueuePanel({
       >
         <div
           className="flex-1 h-px"
-          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+          style={{ backgroundColor: `${baseColor}40` }}
         />
         <div
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border${isPending ? " animate-pulse" : ""}`}
           style={{
-            borderColor: `${statusColor}40`,
-            backgroundColor: `${statusColor}10`,
+            borderColor: `${baseColor}40`,
+            backgroundColor: `${baseColor}10`,
           }}
         >
-          <span style={{ color: statusColor, fontSize: 14 }}>
+          <span style={{ color: baseColor, fontSize: 14 }}>
             {statusIcon}
           </span>
           <span
             className="text-xs font-mono font-semibold"
-            style={{ color: statusColor }}
+            style={{ color: baseColor }}
           >
-            {tr("게이트", "Gate")}
+            {gateLabel}
           </span>
           {gate && (
             <span
               className="text-xs px-1.5 py-0.5 rounded"
               style={{
-                backgroundColor: `${statusColor}18`,
-                color: statusColor,
+                backgroundColor: `${baseColor}18`,
+                color: baseColor,
               }}
             >
               {statusLabel}
-            </span>
-          )}
-          {hasDeploy && (
-            <span
-              className="text-xs px-1.5 py-0.5 rounded"
-              style={{
-                backgroundColor: "rgba(96,165,250,0.18)",
-                color: "#60a5fa",
-              }}
-            >
-              🚀 {tr("배포", "Deploy")}
             </span>
           )}
           {gate?.failure_reason && (
@@ -964,7 +957,7 @@ export default function AutoQueuePanel({
         </div>
         <div
           className="flex-1 h-px"
-          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+          style={{ backgroundColor: `${baseColor}40` }}
         />
       </div>
     );
