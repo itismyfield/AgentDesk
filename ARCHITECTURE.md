@@ -47,6 +47,10 @@ src/
 │   ├── session_transcripts.rs
 │   └── turns.rs
 ├── dispatch/
+│   ├── dispatch_channel.rs
+│   ├── dispatch_context.rs
+│   ├── dispatch_create.rs
+│   ├── dispatch_status.rs
 │   └── mod.rs
 ├── engine/
 │   ├── ops/
@@ -173,7 +177,8 @@ src/
 │   │   │   ├── model_ui.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── session.rs
-│   │   │   └── skill.rs
+│   │   │   ├── skill.rs
+│   │   │   └── text_commands.rs
 │   │   ├── router/
 │   │   │   ├── control_intent.rs
 │   │   │   ├── intake_gate.rs
@@ -181,6 +186,12 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tests.rs
 │   │   │   └── thread_binding.rs
+│   │   ├── settings/
+│   │   │   ├── content.rs
+│   │   │   ├── memory.rs
+│   │   │   ├── read.rs
+│   │   │   ├── validation.rs
+│   │   │   └── write.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
@@ -224,8 +235,11 @@ src/
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
 │   │   ├── tmux.rs
+│   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_lifecycle.rs
-│   │   └── tmux_reaper.rs
+│   │   ├── tmux_overload_retry.rs
+│   │   ├── tmux_reaper.rs
+│   │   └── tmux_restart_handoff.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── mem0.rs

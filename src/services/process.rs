@@ -703,5 +703,4 @@ mod tests {
         assert_eq!(cloned.user, info.user);
         assert_eq!(cloned.command, info.command);
     }
-
 }

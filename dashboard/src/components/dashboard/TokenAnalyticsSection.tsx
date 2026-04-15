@@ -74,6 +74,7 @@ const MODEL_PALETTES: Record<string, string[]> = {
   Claude: ["#f59e0b", "#fbbf24", "#fb7185", "#f97316"],
   Codex: ["#22c55e", "#14b8a6", "#06b6d4", "#0ea5e9"],
   Gemini: ["#60a5fa", "#818cf8", "#a855f7", "#38bdf8"],
+  Qwen: ["#8b5cf6", "#a78bfa", "#c084fc", "#7c3aed"],
   default: ["#94a3b8", "#c084fc", "#fb7185", "#2dd4bf"],
 };
 const HEATMAP_COLORS = [
@@ -168,12 +169,28 @@ export function buildDailyCacheHitPoints(
   }));
 }
 
+export function normalizeModelProviderLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  switch (normalized) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "gemini":
+      return "Gemini";
+    case "qwen":
+      return "Qwen";
+    default:
+      return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : provider;
+  }
+}
+
 function modelColor(provider: string, index: number): string {
-  const palette = MODEL_PALETTES[provider] ?? MODEL_PALETTES.default;
+  const palette = MODEL_PALETTES[normalizeModelProviderLabel(provider)] ?? MODEL_PALETTES.default;
   return palette[index % palette.length];
 }
 
-function buildModelSegments(
+export function buildModelSegments(
   models: ReceiptSnapshotModelLine[],
 ): ModelSegment[] {
   const totalTokens = models.reduce(
@@ -188,7 +205,7 @@ function buildModelSegments(
   const segments = visible.map((model, index) => ({
     id: `${model.provider}-${model.model}`,
     label: model.display_name,
-    provider: model.provider,
+    provider: normalizeModelProviderLabel(model.provider),
     tokens: model.total_tokens,
     percentage: (model.total_tokens / totalTokens) * 100,
     color: modelColor(model.provider, index),
@@ -1407,10 +1424,10 @@ function ModelDistributionCard({
           </h3>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {t({
-              ko: "Claude/Codex 모델이 토큰을 어떻게 나눠 쓰는지 확인합니다",
-              en: "See how Claude and Codex models split token volume",
-              ja: "Claude/Codex モデルのトークン構成を確認します",
-              zh: "查看 Claude/Codex 模型如何分摊 Token 量",
+              ko: "Claude/Codex/Gemini/Qwen 모델이 토큰을 어떻게 나눠 쓰는지 확인합니다",
+              en: "See how Claude, Codex, Gemini, and Qwen models split token volume",
+              ja: "Claude/Codex/Gemini/Qwen モデルのトークン構成を確認します",
+              zh: "查看 Claude/Codex/Gemini/Qwen 模型如何分摊 Token 量",
             })}
           </p>
         </div>

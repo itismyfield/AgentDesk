@@ -762,7 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_option_specs_include_default_first_for_all_supported_providers() {
+    fn model_picker_option_specs_exclude_default_sentinel_for_all_supported_providers() {
+        // The 기본값 reset affordance lives in the action row button, not the select menu.
         for provider in [
             ProviderKind::Claude,
             ProviderKind::Codex,
@@ -776,17 +777,15 @@ mod tests {
                 PROVIDER_DEFAULT_SOURCE,
                 None,
             );
-            assert_eq!(options[0].value, DEFAULT_PICKER_VALUE);
-            assert_eq!(options[0].label, "기본값");
-            let expected = match provider {
-                ProviderKind::Claude => "오버라이드 해제 -> default (Claude default alias)",
-                ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen => {
-                    "오버라이드 해제 -> provider default"
-                }
-                ProviderKind::Unsupported(_) => unreachable!(),
-            };
-            assert_eq!(options[0].description, expected);
-            assert!(options[0].selected);
+            assert!(
+                !options.iter().any(|e| e.value == DEFAULT_PICKER_VALUE),
+                "{provider:?}: default sentinel must not appear as a dropdown option"
+            );
+            // No override, no pending → nothing is selected in the dropdown
+            assert!(
+                options.iter().all(|e| !e.selected),
+                "{provider:?}: no option should be selected when there is no active override"
+            );
         }
     }
 
@@ -800,13 +799,21 @@ mod tests {
             ROLE_MAP_SOURCE,
             None,
         );
-        assert_eq!(options[0].label, "기본값");
-        assert_eq!(
-            options[0].description,
-            "오버라이드 해제 -> claude-opus-4-6 (role-map)"
+        assert!(
+            !options.iter().any(|e| e.value == DEFAULT_PICKER_VALUE),
+            "default sentinel must not appear as a dropdown option"
         );
-        assert!(!options[0].selected);
-        assert_eq!(options[1].value, "sonnet");
+        // sonnet entry should be visible in the catalog
+        assert!(
+            options.iter().any(|e| e.value == "sonnet"),
+            "sonnet entry missing from catalog"
+        );
+        // claude-sonnet-4-6 override appears as selected (stale override, not a catalog alias)
+        let override_entry = options
+            .iter()
+            .find(|e| e.value == "claude-sonnet-4-6")
+            .expect("override entry missing");
+        assert!(override_entry.selected);
     }
 
     #[test]
@@ -975,10 +982,9 @@ mod tests {
             ROLE_MAP_SOURCE,
             None,
         );
-        assert_eq!(options[0].label, "기본값");
-        assert_eq!(
-            options[0].description,
-            "오버라이드 해제 -> gpt-5.4 (role-map)"
+        assert!(
+            !options.iter().any(|e| e.value == DEFAULT_PICKER_VALUE),
+            "default sentinel must not appear as a dropdown option"
         );
         let gpt_54 = options
             .iter()
@@ -1007,10 +1013,9 @@ mod tests {
             PROVIDER_DEFAULT_SOURCE,
             None,
         );
-        assert_eq!(options[0].label, "기본값");
-        assert_eq!(
-            options[0].description,
-            "오버라이드 해제 -> provider default"
+        assert!(
+            !options.iter().any(|e| e.value == DEFAULT_PICKER_VALUE),
+            "default sentinel must not appear as a dropdown option"
         );
         assert!(options.iter().any(|entry| entry.label == "Auto (Gemini 3)"
             && entry.description == "Preview auto routing | Pro/Flash preview"));
@@ -1065,10 +1070,9 @@ mod tests {
             PROVIDER_DEFAULT_SOURCE,
             None,
         );
-        assert_eq!(options[0].label, "기본값");
-        assert_eq!(
-            options[0].description,
-            "오버라이드 해제 -> default (Claude default alias)"
+        assert!(
+            !options.iter().any(|e| e.value == DEFAULT_PICKER_VALUE),
+            "default sentinel must not appear as a dropdown option"
         );
     }
 

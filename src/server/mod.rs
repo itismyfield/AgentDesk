@@ -550,6 +550,28 @@ async fn rate_limit_sync_loop(db: Db) {
                 tracing::warn!("[rate-limit-sync] Codex rate_limit fetch failed: {e}");
             }
         }
+
+        // --- Gemini rate limits ---
+        // Uses OAuth2 creds from ~/.gemini/oauth_creds.json.
+        // Returns RPM/RPD buckets with known quota limits; usage fields are -1 (unavailable).
+        match fetch_gemini_rate_limits().await {
+            Ok(buckets) => {
+                let n = buckets.len();
+                let data = serde_json::json!({ "buckets": buckets }).to_string();
+                let now = chrono::Utc::now().timestamp();
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
+                        rusqlite::params!["gemini", data, now],
+                    )
+                    .ok();
+                }
+                tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
+            }
+            Err(e) => {
+                tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
+            }
+        }
     }
 }
 
@@ -1217,6 +1239,290 @@ async fn fetch_codex_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, 
     }
 
     Ok(buckets)
+}
+
+// ── Gemini rate-limit helpers ─────────────────────────────────────────────────
+
+/// Extract OAuth2 app credentials (client_id, client_secret) for the Gemini CLI
+/// "installed app" flow.  These are public client credentials distributed inside
+/// the Gemini CLI npm bundle — not server secrets.  The refresh_token in
+/// ~/.gemini/oauth_creds.json is the actual per-user secret.
+///
+/// Resolution order:
+///   1. env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET
+///   2. parse from the installed Gemini CLI bundle (e.g. Homebrew path)
+fn load_gemini_oauth_app_creds() -> Result<(String, String), anyhow::Error> {
+    // 1. Environment variables take precedence (CI / custom installs)
+    if let (Ok(id), Ok(secret)) = (
+        std::env::var("GEMINI_CLIENT_ID"),
+        std::env::var("GEMINI_CLIENT_SECRET"),
+    ) {
+        return Ok((id, secret));
+    }
+
+    // 2. Parse from the Gemini CLI bundle on disk.
+    //    Support both Homebrew Cellar installs and npm-global installs.
+    let candidate_globs = [
+        "/opt/homebrew/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
+        "/usr/local/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
+        "/opt/homebrew/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
+        "/usr/local/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
+        "/usr/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
+    ];
+
+    for pattern in &candidate_globs {
+        let Ok(paths) = glob::glob(pattern) else {
+            continue;
+        };
+        for entry in paths.flatten() {
+            let Ok(content) = std::fs::read_to_string(&entry) else {
+                continue;
+            };
+            // Gemini CLI 0.38.x bundles export OAuth constants like:
+            //   var OAUTH_CLIENT_ID = "<id>";
+            //   var OAUTH_CLIENT_SECRET = "<secret>";
+            // Older bundles also inline:
+            //   clientId:"<id>",clientSecret:"<secret>"
+            let id = extract_assigned_string(&content, "OAUTH_CLIENT_ID")
+                .or_else(|| extract_quoted_value(&content, "clientId"));
+            let secret = extract_assigned_string(&content, "OAUTH_CLIENT_SECRET")
+                .or_else(|| extract_quoted_value(&content, "clientSecret"));
+            if let (Some(id), Some(secret)) = (id, secret) {
+                return Ok((id, secret));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Gemini OAuth app credentials not found. \
+         Set GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET env vars or install gemini-cli."
+    ))
+}
+
+/// Extract the value of a key from a JS bundle snippet like `key:"value"`.
+fn extract_quoted_value(src: &str, key: &str) -> Option<String> {
+    // Match:  clientId:"<value>"  or  clientId:'<value>'
+    let needle = format!("{key}:\"");
+    if let Some(start) = src.find(&needle) {
+        let rest = &src[start + needle.len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    let needle_sq = format!("{key}:'");
+    if let Some(start) = src.find(&needle_sq) {
+        let rest = &src[start + needle_sq.len()..];
+        if let Some(end) = rest.find('\'') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Extract the value of a JS assignment like `var KEY = "value";`.
+fn extract_assigned_string(src: &str, key: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{key} = {quote}");
+        if let Some(start) = src.find(&needle) {
+            let rest = &src[start + needle.len()..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read (and refresh if expired) the Gemini OAuth2 access token from
+/// `~/.gemini/oauth_creds.json`.  Writes back the new token on refresh.
+async fn load_gemini_access_token() -> Result<String, anyhow::Error> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let creds_path = home.join(".gemini").join("oauth_creds.json");
+    let raw = std::fs::read_to_string(&creds_path)
+        .map_err(|e| anyhow::anyhow!("cannot read ~/.gemini/oauth_creds.json: {e}"))?;
+    let mut creds: serde_json::Value = serde_json::from_str(&raw)?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expiry_ms = creds
+        .get("expiry_date")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    // 30-second buffer to avoid using a token that expires mid-request
+    if expiry_ms > now_ms + 30_000 {
+        return creds
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("no access_token in oauth_creds.json"));
+    }
+
+    // Token expired — refresh via Google token endpoint
+    let refresh_token = creds
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no refresh_token in oauth_creds.json"))?
+        .to_string();
+
+    let (client_id, client_secret) = load_gemini_oauth_app_creds()?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("refresh_token", refresh_token.as_str()),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Gemini token refresh returned {}",
+            resp.status()
+        ));
+    }
+
+    let new_data: serde_json::Value = resp.json().await?;
+    let new_access_token = new_data
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no access_token in refresh response"))?
+        .to_string();
+    let expires_in = new_data
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
+
+    // Persist refreshed token so the next call doesn't need to refresh again
+    creds["access_token"] = serde_json::json!(new_access_token.clone());
+    creds["expiry_date"] = serde_json::json!(now_ms + expires_in * 1000);
+    if let Ok(updated) = serde_json::to_string_pretty(&creds) {
+        let _ = std::fs::write(&creds_path, updated);
+    }
+
+    Ok(new_access_token)
+}
+
+/// Discover the "Default Gemini Project" ID via the Cloud Resource Manager API.
+/// The Gemini CLI creates this project automatically during OAuth setup.
+async fn discover_gemini_project_id(token: &str) -> Result<String, anyhow::Error> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://cloudresourcemanager.googleapis.com/v1/projects?filter=name:Default%20Gemini%20Project")
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Cloud Resource Manager returned {}",
+            resp.status()
+        ));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    data.get("projects")
+        .and_then(|p| p.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|proj| proj.get("projectId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Default Gemini Project not found via Cloud Resource Manager")
+        })
+}
+
+/// Fetch Gemini free-tier quota limits via the Google Cloud ServiceUsage API.
+///
+/// Returns RPM and RPD buckets sourced from `generate_content_free_tier_requests`
+/// quota metrics.  The `used` / `remaining` fields are -1 because the ServiceUsage
+/// API only exposes quota *limits*, not real-time consumption counters.
+async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Error> {
+    let token = load_gemini_access_token().await?;
+    let project_id = discover_gemini_project_id(&token).await?;
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://serviceusage.googleapis.com/v1beta1/projects/{}/services/\
+         generativelanguage.googleapis.com/consumerQuotaMetrics\
+         ?fields=metrics.metric,metrics.consumerQuotaLimits",
+        project_id
+    );
+    let resp = client
+        .get(&url)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Gemini ServiceUsage API returned {}",
+            resp.status()
+        ));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+
+    // Defaults match the documented free-tier limits for gemini-2.5-pro / gemini-3.1-pro-preview
+    let mut rpm_limit: i64 = 15;
+    let mut rpd_limit: i64 = 1500;
+
+    if let Some(metrics) = data.get("metrics").and_then(|m| m.as_array()) {
+        for metric in metrics {
+            let metric_name = metric.get("metric").and_then(|m| m.as_str()).unwrap_or("");
+            if metric_name
+                != "generativelanguage.googleapis.com/generate_content_free_tier_requests"
+            {
+                continue;
+            }
+
+            if let Some(limits) = metric.get("consumerQuotaLimits").and_then(|l| l.as_array()) {
+                for limit in limits {
+                    let unit = limit.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+                    let is_per_minute = unit.contains("/min/");
+                    let is_per_day = unit.starts_with("1/d/");
+
+                    if let Some(buckets) = limit.get("quotaBuckets").and_then(|b| b.as_array()) {
+                        // Take the minimum positive limit across all model buckets —
+                        // this reflects the tightest constraint a user is likely to hit.
+                        let min_positive = buckets
+                            .iter()
+                            .filter_map(|b| b.get("effectiveLimit").and_then(|v| v.as_i64()))
+                            .filter(|&v| v > 0)
+                            .min();
+
+                        if let Some(min_val) = min_positive {
+                            if is_per_minute {
+                                rpm_limit = rpm_limit.min(min_val);
+                            } else if is_per_day {
+                                rpd_limit = rpd_limit.min(min_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(vec![
+        serde_json::json!({
+            "name": "rpm",
+            "limit": rpm_limit,
+            "used": -1_i64,
+            "remaining": -1_i64,
+            "reset": 0_i64,
+        }),
+        serde_json::json!({
+            "name": "rpd",
+            "limit": rpd_limit,
+            "used": -1_i64,
+            "remaining": -1_i64,
+            "reset": 0_i64,
+        }),
+    ])
 }
 
 /// Background task that periodically syncs GitHub issues for all registered repos.
