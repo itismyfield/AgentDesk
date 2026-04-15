@@ -76,6 +76,31 @@ fn load_existing_thread_for_channel(
         .ok())
 }
 
+fn lookup_active_dispatch_id(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    dispatch_type: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM task_dispatches \
+         WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
+         AND status IN ('pending', 'dispatched') \
+         ORDER BY rowid DESC LIMIT 1",
+        rusqlite::params![card_id, dispatch_type],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn is_single_active_dispatch_violation(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.contains("UNIQUE constraint failed")
+                && message.contains("task_dispatches.kanban_card_id")
+    )
+}
+
 fn validate_dispatch_target_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -185,15 +210,7 @@ fn create_dispatch_core_internal(
     }
 
     if dispatch_type != "review-decision" {
-        let existing_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM task_dispatches \
-                 WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
-                 AND status IN ('pending', 'dispatched') LIMIT 1",
-                rusqlite::params![kanban_card_id, dispatch_type],
-                |row| row.get(0),
-            )
-            .ok();
+        let existing_id = lookup_active_dispatch_id(&conn, kanban_card_id, dispatch_type);
         if let Some(eid) = existing_id {
             tracing::info!(
                 "DEDUP: reusing existing dispatch {} for card {} type {}",
@@ -290,7 +307,7 @@ fn create_dispatch_core_internal(
         }
     }
 
-    apply_dispatch_attached_intents(
+    let attach_result = apply_dispatch_attached_intents(
         &conn,
         kanban_card_id,
         to_agent_id,
@@ -304,7 +321,27 @@ fn create_dispatch_core_internal(
         parent_dispatch_id.as_deref(),
         chain_depth,
         options,
-    )?;
+    );
+
+    if let Err(e) = attach_result {
+        if matches!(dispatch_type, "review" | "review-decision")
+            && e.to_string()
+                .contains("concurrent race prevented by DB constraint")
+        {
+            if let Some(existing_id) =
+                lookup_active_dispatch_id(&conn, kanban_card_id, dispatch_type)
+            {
+                tracing::info!(
+                    "DEDUP: reusing existing dispatch {} for card {} type {} after UNIQUE race",
+                    existing_id,
+                    kanban_card_id,
+                    dispatch_type
+                );
+                return Ok((existing_id, old_status, true));
+            }
+        }
+        return Err(e);
+    }
 
     Ok((dispatch_id.to_string(), old_status, false))
 }
@@ -552,11 +589,12 @@ fn apply_dispatch_attached_intents(
                 chain_depth
             ],
         ) {
-            if dispatch_type == "review-decision"
-                && e.to_string().contains("UNIQUE constraint failed")
+            if matches!(dispatch_type, "review" | "review-decision")
+                && is_single_active_dispatch_violation(&e)
             {
                 return Err(anyhow::anyhow!(
-                    "review-decision already exists for card {} (concurrent race prevented by DB constraint)",
+                    "{} already exists for card {} (concurrent race prevented by DB constraint)",
+                    dispatch_type,
                     card_id
                 ));
             }
