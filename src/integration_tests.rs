@@ -2691,6 +2691,18 @@ mod tests {
             )
             .unwrap();
             conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-655-pass', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank, created_at, dispatched_at) \
+                 VALUES ('entry-655-pass', 'run-655-pass', 'card-655-pass', 'agent-1', 'dispatched', 'impl-655-pass', 1, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, context, completed_at, created_at, updated_at) \
                  VALUES ('impl-655-pass', 'card-655-pass', 'agent-1', 'implementation', 'completed', '[Impl noop]', ?1, ?2, datetime('now', '-2 minutes'), datetime('now', '-5 minutes'), datetime('now', '-2 minutes'))",
                 rusqlite::params![
@@ -2708,6 +2720,16 @@ mod tests {
                         "target_repo": "test/repo"
                     }).to_string()
                 ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
+                 VALUES ('review-655-pass-stale', 'card-655-pass', 'agent-1', 'review', 'completed', '[Review stale]', ?1, datetime('now', '+1 minute'), datetime('now', '-10 minutes'), datetime('now', '+1 minute'))",
+                rusqlite::params![serde_json::json!({
+                    "review_mode": "regular_review",
+                    "parent_dispatch_id": "impl-655-pass"
+                })
+                .to_string()],
             )
             .unwrap();
             conn.execute(
@@ -2760,12 +2782,34 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-655-pass'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-655-pass'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(conn);
 
         assert_eq!(card_status, "done");
         assert_eq!(
             create_pr_count, 0,
             "#655: noop verification pass must not create a create-pr dispatch"
+        );
+        assert_eq!(
+            entry_status, "done",
+            "#655: noop verification pass must still close the active auto-queue entry"
+        );
+        assert_eq!(
+            run_status, "completed",
+            "#655: noop verification pass must still complete the auto-queue run via terminal review flow"
         );
 
         let log = gh_log(&gh);
@@ -4798,6 +4842,69 @@ mod tests {
         assert_eq!(
             review_count, 1,
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
+        );
+    }
+
+    #[test]
+    fn scenario_655_rework_noop_completion_uses_noop_verification_review_context() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-655-rework-noop", "in_progress");
+        seed_dispatch(
+            &db,
+            "rw-655-noop",
+            "card-655-rework-noop",
+            "rework",
+            "pending",
+        );
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "rw-655-noop",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "work_outcome": "noop",
+                "completed_without_changes": true,
+                "notes": "rework turned out already implemented"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(get_card_status(&db, "card-655-rework-noop"), "review");
+
+        let conn = db.lock().unwrap();
+        let latest_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-655-rework-noop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let latest_dispatch_id = latest_dispatch_id
+            .expect("#655: latest_dispatch_id must point at the follow-up review dispatch");
+        let latest_dispatch_context: serde_json::Value = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&latest_dispatch_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+            .as_deref()
+            .map(|raw| serde_json::from_str(raw).unwrap())
+            .unwrap_or_else(|| serde_json::json!({}));
+        drop(conn);
+
+        assert_eq!(latest_dispatch_context["review_mode"], "noop_verification");
+        assert_eq!(latest_dispatch_context["parent_dispatch_id"], "rw-655-noop");
+        assert_eq!(
+            latest_dispatch_context["noop_reason"],
+            "rework turned out already implemented"
         );
     }
 

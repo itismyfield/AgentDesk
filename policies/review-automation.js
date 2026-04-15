@@ -316,13 +316,17 @@ var reviewAutomation = {
     }
 
     agentdesk.log.info("[review-debug] CALLING processVerdict: card=" + dispatch.kanban_card_id + " verdict=" + verdict);
-    processVerdict(dispatch.kanban_card_id, verdict, result);
+    processVerdict(dispatch.kanban_card_id, verdict, result, {
+      review_dispatch_id: dispatch.dispatch_type === "review" ? dispatch.id : null
+    });
   },
 
   // ── Review Verdict — from /api/review-verdict ─────────────
   onReviewVerdict: function(payload) {
     if (!payload.card_id || !payload.verdict) return;
-    processVerdict(payload.card_id, payload.verdict, payload);
+    processVerdict(payload.card_id, payload.verdict, payload, {
+      review_dispatch_id: payload.dispatch_id || null
+    });
   }
 };
 
@@ -550,18 +554,31 @@ function findOpenPrByTrackedBranch(repoId, branch) {
   return prTracking.findOpenPrByBranch(repoId, branch);
 }
 
-function loadLatestReviewDispatchContext(cardId) {
+function loadLatestReviewDispatchContext(cardId, dispatchId) {
+  if (dispatchId) {
+    var exactRows = agentdesk.db.query(
+      "SELECT context FROM task_dispatches " +
+      "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+      [dispatchId, cardId]
+    );
+    if (exactRows.length > 0) {
+      return parseJsonObject(exactRows[0].context);
+    }
+  }
+
   var rows = agentdesk.db.query(
     "SELECT context FROM task_dispatches " +
     "WHERE kanban_card_id = ? AND dispatch_type = 'review' " +
-    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
+    "ORDER BY CASE WHEN status IN ('pending', 'dispatched') THEN 0 ELSE 1 END ASC, " +
+    "COALESCE(dispatched_at, completed_at, updated_at, created_at) DESC, rowid DESC LIMIT 1",
     [cardId]
   );
   if (rows.length === 0) return {};
   return parseJsonObject(rows[0].context);
 }
 
-function processVerdict(cardId, verdict, result) {
+function processVerdict(cardId, verdict, result, options) {
+  var opts = options || {};
   // Guard: skip processing for terminal cards — prevents stale dispatches from
   // re-triggering review state changes after dismiss.
   var cfg = agentdesk.pipeline.resolveForCard(cardId);
@@ -580,7 +597,7 @@ function processVerdict(cardId, verdict, result) {
     return;
   }
 
-  var latestReviewContext = loadLatestReviewDispatchContext(cardId);
+  var latestReviewContext = loadLatestReviewDispatchContext(cardId, opts.review_dispatch_id);
   var noopVerification = latestReviewContext.review_mode === "noop_verification";
 
   // #116: accept is NOT a counter-model verdict — it's an agent's review-decision action
