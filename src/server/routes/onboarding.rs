@@ -504,12 +504,33 @@ fn load_onboarding_completion_state(
             path.display()
         )
     })?;
-    let state = serde_json::from_str::<OnboardingCompletionState>(&content).map_err(|e| {
-        format!(
-            "failed to parse onboarding completion state {}: {e}",
-            path.display()
-        )
-    })?;
+    let state = match serde_json::from_str::<OnboardingCompletionState>(&content) {
+        Ok(state) => state,
+        Err(error) => {
+            let corrupt_path = path.with_file_name(format!(
+                "{}.corrupt-{}",
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("state"),
+                now_unix_ms()
+            ));
+            match std::fs::rename(&path, &corrupt_path) {
+                Ok(()) => tracing::warn!(
+                    "ignored corrupt onboarding completion state {}; moved to {}: {}",
+                    path.display(),
+                    corrupt_path.display(),
+                    error
+                ),
+                Err(rename_error) => tracing::warn!(
+                    "ignored corrupt onboarding completion state {}; failed to move aside: {}; parse error: {}",
+                    path.display(),
+                    rename_error,
+                    error
+                ),
+            }
+            return Ok(None);
+        }
+    };
     Ok(Some(state))
 }
 
@@ -528,7 +549,7 @@ fn save_onboarding_completion_state(
     }
     let content = serde_json::to_string_pretty(state)
         .map_err(|e| format!("failed to serialize onboarding completion state: {e}"))?;
-    std::fs::write(&path, content).map_err(|e| {
+    crate::services::discord::runtime_store::atomic_write(&path, &content).map_err(|e| {
         format!(
             "failed to write onboarding completion state {}: {e}",
             path.display()
@@ -643,7 +664,7 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-fn requested_channel_fingerprint(body: &CompleteBody) -> Result<String, String> {
+fn requested_channel_fingerprint(body: &CompleteBody, provider: &str) -> Result<String, String> {
     let mut channels = body
         .channels
         .iter()
@@ -661,6 +682,7 @@ fn requested_channel_fingerprint(body: &CompleteBody) -> Result<String, String> 
 
     let payload = json!({
         "guild_id": body.guild_id.trim(),
+        "provider": provider.trim(),
         "channels": channels,
     });
     let mut hasher = Sha256::new();
@@ -1716,6 +1738,19 @@ async fn complete_with_options(
     options: &CompleteExecutionOptions,
 ) -> (StatusCode, serde_json::Value) {
     let provider = body.provider.as_deref().unwrap_or("claude");
+    if body.guild_id.trim().is_empty() {
+        return completion_response(
+            StatusCode::BAD_REQUEST,
+            false,
+            provider,
+            OnboardingRerunPolicy::ReuseExisting,
+            false,
+            None,
+            Some("guild_id is required for onboarding completion".to_string()),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
     let explicit_rerun_policy = body
         .rerun_policy
         .as_deref()
@@ -1738,7 +1773,7 @@ async fn complete_with_options(
             );
         }
     };
-    let request_fingerprint = match requested_channel_fingerprint(body) {
+    let request_fingerprint = match requested_channel_fingerprint(body, provider) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
             return completion_response(
@@ -3033,6 +3068,105 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_channel, "1001");
+    }
+
+    #[tokio::test]
+    async fn complete_retries_from_channels_resolved_partial_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let (discord_api_base, post_count) = spawn_mock_discord_server().await;
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
+
+        let failure_options = CompleteExecutionOptions {
+            discord_api_base: discord_api_base.clone(),
+            fail_after_stage: Some(OnboardingCompletionStage::ChannelsResolved),
+        };
+        let (failed_status, failed_body) =
+            complete_with_options(&state, &body, &failure_options).await;
+        assert_eq!(failed_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failed_body["partial_apply"], json!(true));
+        assert_eq!(
+            failed_body["completion_state"]["stage"],
+            json!("channels_resolved")
+        );
+        assert_eq!(post_count.load(Ordering::SeqCst), 1);
+        assert!(!onboarding_config_path(temp.path()).is_file());
+
+        let success_options = CompleteExecutionOptions {
+            discord_api_base,
+            fail_after_stage: None,
+        };
+        let (success_status, success_body) =
+            complete_with_options(&state, &body, &success_options).await;
+        assert_eq!(success_status, StatusCode::OK);
+        assert_eq!(success_body["ok"], json!(true));
+        assert_eq!(success_body["partial_apply"], json!(false));
+        assert_eq!(post_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            success_body["artifacts"]["channel_mappings"][0]["resolution"],
+            json!("checkpoint")
+        );
+        assert!(onboarding_config_path(temp.path()).is_file());
+    }
+
+    #[test]
+    fn requested_channel_fingerprint_includes_provider() {
+        let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
+        let claude = requested_channel_fingerprint(&body, "claude").unwrap();
+        let codex = requested_channel_fingerprint(&body, "codex").unwrap();
+        assert_ne!(claude, codex);
+    }
+
+    #[test]
+    fn load_onboarding_completion_state_ignores_corrupt_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = onboarding_completion_state_path(temp.path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, "{not-json").unwrap();
+
+        let state = load_onboarding_completion_state(temp.path()).unwrap();
+        assert!(state.is_none());
+        assert!(!path.exists());
+        let archived = path
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("onboarding_completion_state.json.corrupt-")
+            });
+        assert!(archived);
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_empty_guild_id_even_with_numeric_channels() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let mut body = sample_complete_body("9001", "agentdesk-cdx", Some("reuse_existing"));
+        body.guild_id = "   ".to_string();
+
+        let (status, response) =
+            complete_with_options(&state, &body, &CompleteExecutionOptions::default()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response["error"],
+            json!("guild_id is required for onboarding completion")
+        );
+        assert!(
+            load_onboarding_completion_state(temp.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
