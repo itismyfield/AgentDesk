@@ -190,8 +190,6 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     if (!exists) setSelectedProvider("all");
   }, [providerOptions, selectedProvider]);
 
-  if (!viewData || viewData.models.length === 0) return null;
-
   const periods: { id: Period; label: string }[] = [
     { id: "today", label: t({ ko: "오늘", en: "Today", ja: "今日", zh: "今天" }) },
     { id: "week", label: t({ ko: "이번 주", en: "This Week", ja: "今週", zh: "本周" }) },
@@ -199,16 +197,29 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     { id: "all", label: t({ ko: "전체", en: "All", ja: "全期間", zh: "全部" }) },
   ];
 
+  if (!viewData) {
+    return (
+      <SurfaceSection
+        title={t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" })}
+        className="relative overflow-hidden"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-amber-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)",
+        }}
+      >
+        <div className="mt-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+          {loading
+            ? t({ ko: "영수증 데이터를 불러오는 중...", en: "Loading receipt data...", ja: "レシートデータ読み込み中...", zh: "加载收据数据中..." })
+            : t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
+        </div>
+      </SurfaceSection>
+    );
+  }
+
   return (
     <SurfaceSection
-      eyebrow={t({ ko: "Receipt", en: "Receipt", ja: "Receipt", zh: "Receipt" })}
       title={t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" })}
-      description={t({
-        ko: `${viewData.period_start} ~ ${viewData.period_end} 사용량과 비용 흐름을 빠르게 훑어봅니다.`,
-        en: `Quick read of usage and cost from ${viewData.period_start} to ${viewData.period_end}.`,
-        ja: `${viewData.period_start} から ${viewData.period_end} までの使用量とコストを確認します。`,
-        zh: `快速查看 ${viewData.period_start} 到 ${viewData.period_end} 的用量与成本。`,
-      })}
       badge={viewData.period_label}
       actions={(
         <div className="flex items-center gap-2">
