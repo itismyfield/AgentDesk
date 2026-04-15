@@ -1067,7 +1067,15 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
                 r#"
                 JSON.stringify((function() {
                     var paused = agentdesk.autoQueue.pauseRun("aq-run-status", "test_pause");
+                    var slotAfterPauseRows = agentdesk.db.query(
+                        "SELECT assigned_run_id FROM auto_queue_slots " +
+                        "WHERE agent_id = 'aq-run-agent' AND slot_index = 0"
+                    );
                     var resumed = agentdesk.autoQueue.resumeRun("aq-run-status", "test_resume");
+                    var slotAfterResumeRows = agentdesk.db.query(
+                        "SELECT assigned_run_id FROM auto_queue_slots " +
+                        "WHERE agent_id = 'aq-run-agent' AND slot_index = 0"
+                    );
                     var completed = agentdesk.autoQueue.completeRun(
                         "aq-run-status",
                         "test_complete",
@@ -1075,7 +1083,13 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
                     );
                     return {
                         paused: paused.changed,
+                        slotAfterPause: slotAfterPauseRows.length > 0
+                            ? slotAfterPauseRows[0].assigned_run_id
+                            : "__missing__",
                         resumed: resumed.changed,
+                        slotAfterResume: slotAfterResumeRows.length > 0
+                            ? slotAfterResumeRows[0].assigned_run_id
+                            : "__missing__",
                         completed: completed.changed
                     };
                 })())
@@ -1084,7 +1098,15 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["paused"], true);
+        assert!(
+            parsed["slotAfterPause"].is_null(),
+            "pauseRun must release the slot immediately"
+        );
         assert_eq!(parsed["resumed"], true);
+        assert!(
+            parsed["slotAfterResume"].is_null(),
+            "resumeRun must not silently keep the old slot binding"
+        );
         assert_eq!(parsed["completed"], true);
     });
 

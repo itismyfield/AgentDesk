@@ -1541,6 +1541,9 @@ pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bo
          WHERE id = ?1 AND status = 'active'",
         [run_id],
     )?;
+    if updated > 0 {
+        release_run_slots(conn, run_id);
+    }
     Ok(updated > 0)
 }
 
