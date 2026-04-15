@@ -535,152 +535,162 @@ pub(in crate::services::discord) async fn handle_text_message(
             dispatch_effective_path
         );
     }
+    let dispatch_uses_thread_routing =
+        crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
-        // Use cached dispatch metadata for thread reuse and cross-channel role override
-        let dispatch_info = &dispatch_info_cached;
-        let is_counter_model_dispatch =
-            crate::server::routes::dispatches::use_counter_model_channel(
-                dispatch_type_str.as_deref(),
-            );
-        let alt_channel_id = dispatch_info
-            .as_ref()
-            .and_then(|i| i.discord_channel_alt.as_deref())
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(ChannelId::new);
-
-        if is_already_thread {
-            // Ensure thread is accessible (unarchive if needed) before proceeding
-            if !super::verify_thread_accessible(ctx, channel_id).await {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
-                );
-                return Ok(());
-            }
+        if !dispatch_uses_thread_routing {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
+                "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
             );
-            // For review dispatches in reused threads, set role override
-            // so this turn uses the counter-model channel's role/model.
-            if is_counter_model_dispatch {
-                if let Some(alt_ch) = alt_channel_id {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
-                        alt_ch
-                    );
-                    shared.dispatch_role_overrides.insert(channel_id, alt_ch);
-                }
-            }
             channel_id
         } else {
-            // Check if card already has an active thread via internal API
-            let existing_thread = dispatch_info
+            // Use cached dispatch metadata for thread reuse and cross-channel role override
+            let dispatch_info = &dispatch_info_cached;
+            let is_counter_model_dispatch =
+                crate::server::routes::dispatches::use_counter_model_channel(
+                    dispatch_type_str.as_deref(),
+                );
+            let alt_channel_id = dispatch_info
                 .as_ref()
-                .and_then(|i| i.active_thread_id.clone());
-            let reuse_tid = existing_thread.as_ref().and_then(|t| {
-                let id = t.parse::<u64>().unwrap_or(0);
-                if id != 0 {
-                    Some(ChannelId::new(id))
-                } else {
-                    None
-                }
-            });
+                .and_then(|i| i.discord_channel_alt.as_deref())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(ChannelId::new);
 
-            let reused = if let Some(tid) = reuse_tid {
-                if super::verify_thread_accessible(ctx, tid).await {
+            if is_already_thread {
+                // Ensure thread is accessible (unarchive if needed) before proceeding
+                if !super::verify_thread_accessible(ctx, channel_id).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
-                        tid,
-                        did
+                    tracing::warn!(
+                        "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
                     );
-                    super::super::bootstrap_thread_session(
-                        shared,
-                        tid,
-                        &dispatch_effective_path,
-                        ctx,
-                    )
-                    .await;
-                    shared.dispatch_thread_parents.insert(channel_id, tid);
-                    // For review dispatches reusing an implementation thread,
-                    // override role/model to use the counter-model channel.
-                    if is_counter_model_dispatch {
-                        if let Some(alt_ch) = alt_channel_id {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
-                                alt_ch
-                            );
-                            shared.dispatch_role_overrides.insert(tid, alt_ch);
-                        }
-                    }
-                    Some(tid)
-                } else {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
-                        tid,
-                        did
-                    );
-                    None
+                    return Ok(());
                 }
-            } else {
-                None
-            };
-
-            if let Some(tid) = reused {
-                tid
-            } else {
-                // No existing usable thread — create new
-                let thread_title = user_text
-                    .find(" - ")
-                    .map(|idx| &user_text[idx + 3..])
-                    .unwrap_or("dispatch")
-                    .chars()
-                    .take(90)
-                    .collect::<String>();
-
-                match channel_id
-                    .create_thread(
-                        &ctx.http,
-                        poise::serenity_prelude::builder::CreateThread::new(thread_title)
-                            .kind(poise::serenity_prelude::ChannelType::PublicThread)
-                            .auto_archive_duration(
-                                poise::serenity_prelude::AutoArchiveDuration::OneDay,
-                            ),
-                    )
-                    .await
-                {
-                    Ok(thread) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
+                );
+                // For review dispatches in reused threads, set role override
+                // so this turn uses the counter-model channel's role/model.
+                if is_counter_model_dispatch {
+                    if let Some(alt_ch) = alt_channel_id {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
-                            "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
-                            thread.id,
+                            "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
+                            alt_ch
+                        );
+                        shared.dispatch_role_overrides.insert(channel_id, alt_ch);
+                    }
+                }
+                channel_id
+            } else {
+                // Check if card already has an active thread via internal API
+                let existing_thread = dispatch_info
+                    .as_ref()
+                    .and_then(|i| i.active_thread_id.clone());
+                let reuse_tid = existing_thread.as_ref().and_then(|t| {
+                    let id = t.parse::<u64>().unwrap_or(0);
+                    if id != 0 {
+                        Some(ChannelId::new(id))
+                    } else {
+                        None
+                    }
+                });
+
+                let reused = if let Some(tid) = reuse_tid {
+                    if super::verify_thread_accessible(ctx, tid).await {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
+                            tid,
                             did
                         );
                         super::super::bootstrap_thread_session(
                             shared,
-                            thread.id,
+                            tid,
                             &dispatch_effective_path,
                             ctx,
                         )
                         .await;
-                        shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        super::link_dispatch_thread(
-                            shared.api_port,
-                            did,
-                            thread.id.get(),
-                            channel_id.get(),
-                        )
-                        .await;
-                        thread.id
-                    }
-                    Err(e) => {
+                        shared.dispatch_thread_parents.insert(channel_id, tid);
+                        // For review dispatches reusing an implementation thread,
+                        // override role/model to use the counter-model channel.
+                        if is_counter_model_dispatch {
+                            if let Some(alt_ch) = alt_channel_id {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
+                                    alt_ch
+                                );
+                                shared.dispatch_role_overrides.insert(tid, alt_ch);
+                            }
+                        }
+                        Some(tid)
+                    } else {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
-                        channel_id // fallback to main channel
+                        tracing::info!(
+                            "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
+                            tid,
+                            did
+                        );
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(tid) = reused {
+                    tid
+                } else {
+                    // No existing usable thread — create new
+                    let thread_title = user_text
+                        .find(" - ")
+                        .map(|idx| &user_text[idx + 3..])
+                        .unwrap_or("dispatch")
+                        .chars()
+                        .take(90)
+                        .collect::<String>();
+
+                    match channel_id
+                        .create_thread(
+                            &ctx.http,
+                            poise::serenity_prelude::builder::CreateThread::new(thread_title)
+                                .kind(poise::serenity_prelude::ChannelType::PublicThread)
+                                .auto_archive_duration(
+                                    poise::serenity_prelude::AutoArchiveDuration::OneDay,
+                                ),
+                        )
+                        .await
+                    {
+                        Ok(thread) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
+                                thread.id,
+                                did
+                            );
+                            super::super::bootstrap_thread_session(
+                                shared,
+                                thread.id,
+                                &dispatch_effective_path,
+                                ctx,
+                            )
+                            .await;
+                            shared.dispatch_thread_parents.insert(channel_id, thread.id);
+                            super::link_dispatch_thread(
+                                shared.api_port,
+                                did,
+                                thread.id.get(),
+                                channel_id.get(),
+                            )
+                            .await;
+                            thread.id
+                        }
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
+                            channel_id // fallback to main channel
+                        }
                     }
                 }
             }

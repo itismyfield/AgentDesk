@@ -16,7 +16,8 @@ use dispatch_channel::provider_from_channel_suffix;
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
     REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER, REVIEW_VERDICT_IMPROVE_GUIDANCE,
-    commit_belongs_to_card_issue, dispatch_type_force_new_session_default, resolve_card_worktree,
+    commit_belongs_to_card_issue, dispatch_type_force_new_session_default,
+    dispatch_type_uses_thread_routing, resolve_card_worktree,
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]
@@ -968,6 +969,16 @@ mod tests {
             None
         );
         assert_eq!(dispatch_type_force_new_session_default(None), None);
+    }
+
+    #[test]
+    fn dispatch_type_thread_routing_keeps_phase_gate_in_primary_channel() {
+        assert!(dispatch_type_uses_thread_routing(Some("implementation")));
+        assert!(dispatch_type_uses_thread_routing(Some("review")));
+        assert!(dispatch_type_uses_thread_routing(Some("rework")));
+        assert!(!dispatch_type_uses_thread_routing(Some("phase-gate")));
+        assert!(dispatch_type_uses_thread_routing(Some("review-decision")));
+        assert!(dispatch_type_uses_thread_routing(None));
     }
 
     #[test]

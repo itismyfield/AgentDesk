@@ -59,6 +59,10 @@ pub(crate) fn dispatch_type_force_new_session_default(dispatch_type: Option<&str
     }
 }
 
+pub(crate) fn dispatch_type_uses_thread_routing(dispatch_type: Option<&str>) -> bool {
+    !matches!(dispatch_type, Some("phase-gate"))
+}
+
 pub(super) fn dispatch_context_with_session_strategy(
     dispatch_type: &str,
     context: &serde_json::Value,

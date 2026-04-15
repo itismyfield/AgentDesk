@@ -1434,6 +1434,31 @@ async fn send_dispatch_to_discord_inner_with_context(
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
     let message = prefix_dispatch_message(dispatch_type_label, &message);
+    if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type.as_deref()) {
+        let channel_id_text = channel_id_num.to_string();
+        let message_id = post_dispatch_message_to_channel(
+            &client,
+            token,
+            &discord_api_base,
+            &channel_id_text,
+            &message,
+        )
+        .await?;
+        persist_dispatch_message_target_and_add_pending_reaction(
+            db,
+            &client,
+            token,
+            &discord_api_base,
+            dispatch_id,
+            &channel_id_text,
+            &message_id,
+        )
+        .await?;
+        tracing::info!(
+            "[dispatch] Sent primary-channel dispatch {dispatch_id} to {agent_id} (channel {channel_id_text})"
+        );
+        return Ok(());
+    }
     let mut slot_binding = {
         let conn = match db.lock() {
             Ok(c) => c,
@@ -2486,6 +2511,93 @@ mod tests {
         let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
         assert_eq!(context["discord_message_channel_id"], "thread-created");
         assert_eq!(context["discord_message_id"], "message-thread-created");
+    }
+
+    #[tokio::test]
+    async fn send_phase_gate_dispatch_to_discord_posts_to_primary_channel_without_thread() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, active_thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-phase', 'Phase gate', 'review', 'agent-1', 'dispatch-phase', 'thread-existing',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-phase', 'card-phase', 'agent-1', 'phase-gate', 'pending', '[phase-gate P2] Final',
+                    '{\"phase_gate\":{\"run_id\":\"run-1\",\"batch_phase\":1}}',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "[phase-gate P2] Final",
+            "card-phase",
+            "dispatch-phase",
+            "announce-token",
+            &base_url,
+            Some(343742347365974026),
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "POST /channels/123/messages",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
+                "PUT /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+            ]
+        );
+        assert!(
+            !state.calls.iter().any(|call| call.contains("/threads")),
+            "phase-gate dispatch must not create or reuse a Discord thread"
+        );
+
+        let conn = db.lock().unwrap();
+        let thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-phase'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_id, None);
+        let context: Option<String> = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = 'dispatch-phase'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
+        assert_eq!(context["discord_message_channel_id"], "123");
+        assert_eq!(context["discord_message_id"], "message-123");
     }
 
     #[tokio::test]
