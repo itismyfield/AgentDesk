@@ -7388,6 +7388,80 @@ async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_run_id_does_not_dispatch_restoring_runs() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restoring-activate");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-restoring-activate",
+        1700,
+        "ready",
+        "agent-restoring-activate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-restoring-activate', 'test-repo', 'agent-restoring-activate', 'restoring', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-restoring-activate', 'run-restoring-activate', 'card-restoring-activate', 'agent-restoring-activate', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-restoring-activate",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["message"], "Run is restoring");
+
+    let conn = db.lock().unwrap();
+    let entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-restoring-activate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_status, "pending");
+
+    let dispatch_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM task_dispatches", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
@@ -11397,6 +11471,119 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_includes_restoring_runs() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-restoring");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-restoring-pending",
+        4598,
+        "ready",
+        "agent-cancel-restoring",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-restoring-skipped",
+        4599,
+        "ready",
+        "agent-cancel-restoring",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-restoring', 'test-repo', 'agent-cancel-restoring', 'restoring', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-restoring-pending', 'run-cancel-restoring', 'card-cancel-restoring-pending',
+                'agent-cancel-restoring', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-restoring-skipped', 'run-cancel-restoring', 'card-cancel-restoring-skipped',
+                'agent-cancel-restoring', 'skipped', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-restoring'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE run_id = 'run-cancel-restoring'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            (
+                "entry-cancel-restoring-pending".to_string(),
+                "skipped".to_string(),
+            ),
+            (
+                "entry-cancel-restoring-skipped".to_string(),
+                "skipped".to_string(),
+            ),
+        ]
+    );
 }
 
 #[tokio::test]

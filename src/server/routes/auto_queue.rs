@@ -473,7 +473,9 @@ pub(crate) fn cancel_with_conn(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     conn: &rusqlite::Connection,
 ) -> serde_json::Value {
-    let target_run_ids = load_run_ids_with_status(conn, &["active", "paused"]).unwrap_or_default();
+    let target_run_ids =
+        load_run_ids_with_status(conn, &["active", "paused", RUN_STATUS_RESTORING])
+            .unwrap_or_default();
     cancel_selected_runs_with_conn(health_registry, conn, &target_run_ids, "auto_queue_cancel")
 }
 
@@ -496,7 +498,7 @@ fn cancel_selected_runs_with_conn(
         let sql = format!(
             "UPDATE auto_queue_runs
              SET status = 'cancelled', completed_at = datetime('now')
-             WHERE id IN ({placeholders}) AND status IN ('active', 'paused')"
+             WHERE id IN ({placeholders}) AND status IN ('active', 'paused', '{RUN_STATUS_RESTORING}')"
         );
         conn.execute(&sql, rusqlite::params_from_iter(target_run_ids.iter()))
             .unwrap_or(0)
@@ -2709,6 +2711,12 @@ pub(crate) fn activate_with_deps(
                 return (
                     StatusCode::OK,
                     Json(json!({ "dispatched": [], "count": 0, "message": message })),
+                );
+            }
+            Some(RUN_STATUS_RESTORING) => {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "dispatched": [], "count": 0, "message": "Run is restoring" })),
                 );
             }
             Some(status) if active_only && status != "active" => {
@@ -5558,7 +5566,7 @@ pub async fn cancel(
             )
             .ok();
         match run_status.as_deref() {
-            Some("active") | Some("paused") => {
+            Some("active") | Some("paused") | Some(RUN_STATUS_RESTORING) => {
                 let payload = cancel_selected_runs_with_conn(
                     state.health_registry.clone(),
                     &conn,
