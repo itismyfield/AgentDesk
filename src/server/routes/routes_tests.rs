@@ -8276,6 +8276,121 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_dispatch_create_failure_releases_reserved_slot() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-dispatch-fail");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-fail",
+        4170,
+        "ready",
+        "agent-dispatch-fail",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-dispatch-fail', 'test-repo', 'agent-dispatch-fail', 'active', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-fail', 'run-dispatch-fail', 'card-dispatch-fail',
+                'agent-dispatch-fail', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_task_dispatch_insert
+             BEFORE INSERT ON task_dispatches
+             BEGIN
+                 SELECT RAISE(ABORT, 'dispatch insert blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-dispatch-fail",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 0,
+        "failed create_dispatch must not report a dispatched group"
+    );
+
+    let conn = db.lock().unwrap();
+    let entry_row: (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-dispatch-fail'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(entry_row.0, "pending");
+    assert!(entry_row.1.is_none());
+    assert!(entry_row.2.is_none());
+
+    let slot_row: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-dispatch-fail' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        slot_row,
+        (None, None),
+        "failed create_dispatch must release the reserved slot"
+    );
+
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-dispatch-fail'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
@@ -11218,6 +11333,133 @@ async fn auto_queue_cancel_targets_only_requested_run() {
             ("entry-cancel-target-b".to_string(), "skipped".to_string()),
         ]
     );
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_surfaces_warning_when_slot_release_fails() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-warn");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-warn-dispatched",
+        4603,
+        "in_progress",
+        "agent-cancel-warn",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-warn-pending",
+        4604,
+        "ready",
+        "agent-cancel-warn",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-cancel-warn', 'test-repo', 'agent-cancel-warn', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-cancel-warn', 0, 'run-cancel-warn', 0, ?1
+            )",
+            [json!({"111": "222000000000004603"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-warn', 'card-cancel-warn-dispatched', 'agent-cancel-warn',
+                'implementation', 'dispatched', 'Cancel warning dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-cancel-warn-dispatched', 'run-cancel-warn', 'card-cancel-warn-dispatched',
+                'agent-cancel-warn', 'dispatched', 'dispatch-cancel-warn', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-warn-pending', 'run-cancel-warn', 'card-cancel-warn-pending',
+                'agent-cancel-warn', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_cancel_initial_slot_release
+             BEFORE UPDATE OF assigned_run_id ON auto_queue_slots
+             WHEN OLD.assigned_run_id = 'run-cancel-warn'
+               AND NEW.assigned_run_id IS NULL
+               AND (
+                   SELECT COUNT(*)
+                   FROM auto_queue_entries
+                   WHERE run_id = 'run-cancel-warn'
+                     AND status IN ('pending', 'dispatched')
+               ) > 1
+             BEGIN
+                 SELECT RAISE(ABORT, 'cancel slot release blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["released_slots"], 0);
+    assert!(
+        json["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to release slots for run run-cancel-warn"),
+        "cancel response must surface slot release failures"
+    );
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-warn'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
 }
 
 #[tokio::test]

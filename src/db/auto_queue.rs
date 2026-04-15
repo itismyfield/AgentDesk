@@ -56,6 +56,23 @@ pub enum ConsultationDispatchRecordError {
     Sql(#[from] rusqlite::Error),
 }
 
+const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
+
+#[derive(Debug, Error)]
+pub enum SlotAllocationError {
+    #[error(
+        "slot allocation retry limit exceeded for run {run_id} agent {agent_id} group {thread_group} after {attempts} attempts"
+    )]
+    RetryLimitExceeded {
+        run_id: String,
+        agent_id: String,
+        thread_group: i64,
+        attempts: usize,
+    },
+    #[error(transparent)]
+    Sql(#[from] rusqlite::Error),
+}
+
 #[derive(Debug, Clone)]
 struct EntryStatusRow {
     run_id: String,
@@ -379,6 +396,26 @@ pub fn rebind_slot_for_group_agent(
            AND status = 'dispatched'
            AND COALESCE(slot_index, -1) != ?1",
         rusqlite::params![slot_index, run_id, agent_id, thread_group],
+    )
+}
+
+pub fn release_slot_for_group_agent(
+    conn: &Connection,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+    slot_index: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = NULL,
+             assigned_thread_group = NULL,
+             updated_at = datetime('now')
+         WHERE agent_id = ?1
+           AND slot_index = ?2
+           AND assigned_run_id = ?3
+           AND COALESCE(assigned_thread_group, 0) = ?4",
+        rusqlite::params![agent_id, slot_index, run_id, thread_group],
     )
 }
 
@@ -1314,10 +1351,22 @@ pub fn allocate_slot_for_group_agent(
     run_id: &str,
     thread_group: i64,
     agent_id: &str,
-) -> Option<(i64, bool)> {
-    ensure_agent_slot_rows(conn, run_id, agent_id).ok()?;
+) -> Result<Option<(i64, bool)>, SlotAllocationError> {
+    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+        .run(run_id)
+        .agent(agent_id)
+        .thread_group(thread_group);
+    ensure_agent_slot_rows(conn, run_id, agent_id).map_err(|error| {
+        crate::auto_queue_log!(
+            warn,
+            "slot_allocate_prepare_failed",
+            log_ctx.clone(),
+            "[auto-queue] failed to prepare slot rows for run {run_id} agent {agent_id} group {thread_group}: {error}"
+        );
+        SlotAllocationError::Sql(error)
+    })?;
 
-    loop {
+    for attempt in 1..=SLOT_ALLOCATION_MAX_RETRIES {
         let existing: Option<i64> = conn
             .query_row(
                 "SELECT slot_index
@@ -1329,7 +1378,16 @@ pub fn allocate_slot_for_group_agent(
                 rusqlite::params![agent_id, run_id, thread_group],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(|error| {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_existing_lookup_failed",
+                    log_ctx.clone(),
+                    "[auto-queue] failed to inspect existing slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                );
+                SlotAllocationError::Sql(error)
+            })?;
         if let Some(slot_index) = existing {
             conn.execute(
                 "UPDATE auto_queue_entries
@@ -1340,8 +1398,16 @@ pub fn allocate_slot_for_group_agent(
                    AND slot_index IS NULL",
                 rusqlite::params![slot_index, run_id, agent_id, thread_group],
             )
-            .ok();
-            return Some((slot_index, false));
+            .map_err(|error| {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_existing_bind_failed",
+                    log_ctx.clone().slot_index(slot_index),
+                    "[auto-queue] failed to bind existing slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                );
+                SlotAllocationError::Sql(error)
+            })?;
+            return Ok(Some((slot_index, false)));
         }
 
         let free_slot: Option<i64> = conn
@@ -1355,9 +1421,18 @@ pub fn allocate_slot_for_group_agent(
                 [agent_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(|error| {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_free_lookup_failed",
+                    log_ctx.clone(),
+                    "[auto-queue] failed to inspect free slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                );
+                SlotAllocationError::Sql(error)
+            })?;
         let Some(slot_index) = free_slot else {
-            return None;
+            return Ok(None);
         };
 
         let claimed = conn
@@ -1371,8 +1446,30 @@ pub fn allocate_slot_for_group_agent(
                    AND assigned_run_id IS NULL",
                 rusqlite::params![run_id, thread_group, agent_id, slot_index],
             )
-            .ok()?;
+            .map_err(|error| {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_claim_failed",
+                    log_ctx.clone().slot_index(slot_index),
+                    "[auto-queue] failed to claim slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                );
+                SlotAllocationError::Sql(error)
+            })?;
         if claimed == 0 {
+            if attempt == SLOT_ALLOCATION_MAX_RETRIES {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_retry_limit_reached",
+                    log_ctx.clone().slot_index(slot_index),
+                    "[auto-queue] slot allocation CAS retry limit reached for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
+                );
+                return Err(SlotAllocationError::RetryLimitExceeded {
+                    run_id: run_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    thread_group,
+                    attempts: attempt,
+                });
+            }
             continue;
         }
 
@@ -1385,9 +1482,19 @@ pub fn allocate_slot_for_group_agent(
                AND slot_index IS NULL",
             rusqlite::params![slot_index, run_id, agent_id, thread_group],
         )
-        .ok();
-        return Some((slot_index, true));
+        .map_err(|error| {
+            crate::auto_queue_log!(
+                warn,
+                "slot_allocate_bind_failed",
+                log_ctx.clone().slot_index(slot_index),
+                "[auto-queue] failed to bind claimed slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            );
+            SlotAllocationError::Sql(error)
+        })?;
+        return Ok(Some((slot_index, true)));
     }
+
+    unreachable!("slot allocation loop must return within bounded retries");
 }
 
 pub fn slot_has_active_dispatch(conn: &Connection, agent_id: &str, slot_index: i64) -> bool {
@@ -1828,11 +1935,13 @@ mod tests {
     use super::{
         ConsultationDispatchRecordError, ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE,
         ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
-        EntryStatusUpdateOptions, PhaseGateStateWrite, clear_phase_gate_state_on_conn,
-        list_entry_dispatch_history, record_consultation_dispatch_on_conn,
+        EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocationError,
+        allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
+        record_consultation_dispatch_on_conn, release_slot_for_group_agent,
         save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
+    use std::sync::{Arc, Barrier};
 
     fn setup_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");
@@ -1941,6 +2050,78 @@ mod tests {
         conn
     }
 
+    fn setup_shared_slot_conn() -> (tempfile::TempDir, String) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("auto-queue-slot-test.sqlite");
+        let path_str = path.to_string_lossy().to_string();
+        let conn = Connection::open(&path_str).expect("slot db");
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE auto_queue_runs (
+                id TEXT PRIMARY KEY,
+                repo TEXT,
+                agent_id TEXT,
+                status TEXT,
+                completed_at DATETIME,
+                max_concurrent_threads INTEGER DEFAULT 1
+             );
+             CREATE TABLE auto_queue_entries (
+                id TEXT PRIMARY KEY,
+                run_id TEXT,
+                kanban_card_id TEXT,
+                agent_id TEXT,
+                status TEXT,
+                dispatch_id TEXT,
+                slot_index INTEGER,
+                thread_group INTEGER DEFAULT 0,
+                batch_phase INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at DATETIME,
+                completed_at DATETIME
+             );
+             CREATE TABLE auto_queue_slots (
+                agent_id TEXT NOT NULL,
+                slot_index INTEGER NOT NULL,
+                assigned_run_id TEXT,
+                assigned_thread_group INTEGER,
+                thread_id_map TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (agent_id, slot_index)
+             );",
+        )
+        .expect("shared schema");
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads
+            ) VALUES (
+                'run-shared', 'repo-1', 'agent-1', 'active', 1
+            )",
+            [],
+        )
+        .expect("seed shared run");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, thread_group
+            ) VALUES (
+                'entry-shared-0', 'run-shared', 'card-shared-0', 'agent-1', 'pending', 0
+            )",
+            [],
+        )
+        .expect("seed shared entry 0");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, thread_group
+            ) VALUES (
+                'entry-shared-1', 'run-shared', 'card-shared-1', 'agent-1', 'pending', 1
+            )",
+            [],
+        )
+        .expect("seed shared entry 1");
+        drop(conn);
+        (tempdir, path_str)
+    }
+
     #[test]
     fn entry_transition_done_releases_slots_and_completes_run() {
         let conn = setup_conn();
@@ -2023,6 +2204,71 @@ mod tests {
         assert_eq!(target, "channel:123");
         assert_eq!(bot, "notify");
         assert!(content.contains("자동큐 완료: repo-1 / run run-1 / 1개"));
+    }
+
+    #[test]
+    fn entry_transition_done_is_idempotent_without_duplicate_side_effects() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES ('entry-idempotent', 'run-1', 'card-idempotent', 'agent-1', 'dispatched', 'dispatch-idempotent', 0, 0)",
+            [],
+        )
+        .expect("seed entry");
+
+        let first = update_entry_status_on_conn(
+            &conn,
+            "entry-idempotent",
+            ENTRY_STATUS_DONE,
+            "test_done_first",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("first completion");
+        assert!(first.changed);
+
+        let transition_count_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = 'entry-idempotent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("transition count before");
+        let outbox_count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+            .expect("outbox count before");
+
+        let second = update_entry_status_on_conn(
+            &conn,
+            "entry-idempotent",
+            ENTRY_STATUS_DONE,
+            "test_done_second",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("second completion");
+        assert!(
+            !second.changed,
+            "repeated terminal completion must become a no-op"
+        );
+
+        let transition_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = 'entry-idempotent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("transition count after");
+        let outbox_count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+            .expect("outbox count after");
+        assert_eq!(
+            transition_count_after, transition_count_before,
+            "repeated completion must not append duplicate transition audit rows"
+        );
+        assert_eq!(
+            outbox_count_after, outbox_count_before,
+            "repeated completion must not emit duplicate completion notifications"
+        );
     }
 
     #[test]
@@ -2261,6 +2507,165 @@ mod tests {
             error,
             EntryStatusUpdateError::InvalidTransition { .. }
         ));
+    }
+
+    #[test]
+    fn entry_transition_blocks_invalid_done_to_skipped_restore() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-4c', 'run-1', 'card-4c', 'agent-1', 'done', 0)",
+            [],
+        )
+        .expect("seed done entry");
+
+        let error = update_entry_status_on_conn(
+            &conn,
+            "entry-4c",
+            ENTRY_STATUS_SKIPPED,
+            "test_invalid_done_skip",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect_err("done -> skipped transition must fail");
+        assert!(matches!(
+            error,
+            EntryStatusUpdateError::InvalidTransition { .. }
+        ));
+    }
+
+    #[test]
+    fn allocate_slot_for_group_agent_never_double_assigns_single_slot_under_concurrency() {
+        let (_tempdir, path) = setup_shared_slot_conn();
+        let barrier = Arc::new(Barrier::new(2));
+        let make_worker = |group: i64| {
+            let barrier = barrier.clone();
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let conn = Connection::open_with_flags(
+                    &path,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+                )
+                .expect("open shared db");
+                conn.busy_timeout(std::time::Duration::from_secs(2))
+                    .expect("busy timeout");
+                barrier.wait();
+                allocate_slot_for_group_agent(&conn, "run-shared", group, "agent-1")
+            })
+        };
+
+        let first_handle = make_worker(0);
+        let second_handle = make_worker(1);
+        let first = first_handle.join().unwrap().expect("first allocation");
+        let second = second_handle.join().unwrap().expect("second allocation");
+
+        let successful = [first, second].into_iter().flatten().collect::<Vec<_>>();
+        assert_eq!(
+            successful.len(),
+            1,
+            "single-slot pool must allow only one concurrent group allocation"
+        );
+
+        let conn = Connection::open(&path).expect("verify db");
+        let slot_assignments: Vec<(Option<String>, Option<i64>)> = conn
+            .prepare(
+                "SELECT assigned_run_id, assigned_thread_group
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1'
+                 ORDER BY slot_index ASC",
+            )
+            .expect("slot stmt")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("slot rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect slot rows");
+        assert_eq!(slot_assignments.len(), 1);
+        assert_eq!(
+            slot_assignments[0].0.as_deref(),
+            Some("run-shared"),
+            "the slot must remain assigned to exactly one run"
+        );
+
+        let slotted_entries: Vec<(String, Option<i64>)> = conn
+            .prepare(
+                "SELECT id, slot_index
+                 FROM auto_queue_entries
+                 ORDER BY id ASC",
+            )
+            .expect("entry stmt")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("entry rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect entry rows");
+        assert_eq!(
+            slotted_entries
+                .iter()
+                .filter(|(_, slot_index)| slot_index.is_some())
+                .count(),
+            1,
+            "only one group entry must receive the single slot"
+        );
+    }
+
+    #[test]
+    fn allocate_slot_for_group_agent_fails_after_bounded_cas_retries() {
+        let conn = setup_conn();
+        conn.execute(
+            "UPDATE auto_queue_slots
+             SET assigned_run_id = NULL,
+                 assigned_thread_group = NULL
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+            [],
+        )
+        .expect("free seed slot");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-cas-retry', 'run-1', 'card-cas-retry', 'agent-1', 'pending', 1)",
+            [],
+        )
+        .expect("seed retry entry");
+        conn.execute_batch(
+            "CREATE TRIGGER ignore_slot_claim
+             BEFORE UPDATE OF assigned_run_id ON auto_queue_slots
+             WHEN NEW.assigned_run_id = 'run-1' AND OLD.assigned_run_id IS NULL
+             BEGIN
+                 SELECT RAISE(IGNORE);
+             END;",
+        )
+        .expect("create trigger");
+
+        let error = allocate_slot_for_group_agent(&conn, "run-1", 1, "agent-1")
+            .expect_err("forced claim race must terminate with bounded retry error");
+        assert!(matches!(
+            error,
+            SlotAllocationError::RetryLimitExceeded { attempts, .. }
+                if attempts == super::SLOT_ALLOCATION_MAX_RETRIES
+        ));
+    }
+
+    #[test]
+    fn release_slot_for_group_agent_clears_only_matching_assignment() {
+        let conn = setup_conn();
+
+        let released = release_slot_for_group_agent(&conn, "run-1", 0, "agent-1", 0)
+            .expect("release matching slot");
+        assert_eq!(released, 1);
+
+        let slot: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("slot row");
+        assert_eq!(slot, (None, None));
+
+        let released_again = release_slot_for_group_agent(&conn, "run-1", 0, "agent-1", 0)
+            .expect("release already cleared slot");
+        assert_eq!(released_again, 0);
     }
 
     #[test]

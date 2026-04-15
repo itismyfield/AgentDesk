@@ -181,7 +181,7 @@ fn load_run_ids_with_status(
 fn load_slot_bindings_for_runs(
     conn: &rusqlite::Connection,
     run_ids: &[String],
-) -> rusqlite::Result<Vec<(String, i64)>> {
+) -> rusqlite::Result<Vec<(String, String, i64)>> {
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -191,13 +191,14 @@ fn load_slot_bindings_for_runs(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT DISTINCT agent_id, slot_index
+        "SELECT DISTINCT assigned_run_id, agent_id, slot_index
          FROM auto_queue_slots
-         WHERE assigned_run_id IN ({placeholders})"
+         WHERE assigned_run_id IN ({placeholders})
+           AND assigned_run_id IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
     stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| {
-        Ok((row.get(0)?, row.get(1)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })?
     .collect::<Result<Vec<_>, _>>()
 }
@@ -389,26 +390,83 @@ fn clear_and_release_slots_for_runs(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     conn: &rusqlite::Connection,
     run_ids: &[String],
-) -> (usize, usize) {
+) -> SlotCleanupResult {
     let mut released_slots: HashSet<(String, i64)> = HashSet::new();
+    let mut run_release_candidates: HashMap<String, usize> = HashMap::new();
     let mut cleared_sessions = 0usize;
+    let mut warnings = Vec::new();
+    let base_log_ctx = run_ids
+        .first()
+        .map(|run_id| AutoQueueLogContext::new().run(run_id))
+        .unwrap_or_default();
 
-    for (agent_id, slot_index) in load_slot_bindings_for_runs(conn, run_ids).unwrap_or_default() {
-        if released_slots.insert((agent_id.clone(), slot_index)) {
-            cleared_sessions += crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
-                health_registry.clone(),
-                conn,
-                &agent_id,
-                slot_index,
+    match load_slot_bindings_for_runs(conn, run_ids) {
+        Ok(bindings) => {
+            for (bound_run_id, agent_id, slot_index) in bindings {
+                *run_release_candidates.entry(bound_run_id).or_default() += 1;
+                if released_slots.insert((agent_id.clone(), slot_index)) {
+                    cleared_sessions +=
+                        crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
+                            health_registry.clone(),
+                            conn,
+                            &agent_id,
+                            slot_index,
+                        );
+                }
+            }
+        }
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "clear_slot_bindings_load_failed",
+                base_log_ctx.clone(),
+                "[auto-queue] failed to load slot bindings for runs {:?}: {}",
+                run_ids,
+                error
             );
+            warnings.push(format!(
+                "failed to load slot bindings for runs {:?}: {}",
+                run_ids, error
+            ));
         }
     }
 
+    let mut released_slot_count = 0usize;
     for run_id in run_ids {
-        let _ = crate::db::auto_queue::release_run_slots(conn, run_id);
+        match crate::db::auto_queue::release_run_slots(conn, run_id) {
+            Ok(()) => {
+                released_slot_count += run_release_candidates.get(run_id).copied().unwrap_or(0);
+            }
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "clear_slot_release_failed",
+                    AutoQueueLogContext::new().run(run_id),
+                    "[auto-queue] failed to release slots while clearing run {}: {}",
+                    run_id,
+                    error
+                );
+                warnings.push(format!("failed to release slots for run {run_id}: {error}"));
+            }
+        }
     }
 
-    (released_slots.len(), cleared_sessions)
+    SlotCleanupResult {
+        released_slots: released_slot_count,
+        cleared_slot_sessions: cleared_sessions,
+        warnings,
+    }
+}
+
+#[derive(Debug, Default)]
+struct SlotCleanupResult {
+    released_slots: usize,
+    cleared_slot_sessions: usize,
+    warnings: Vec<String>,
+}
+
+fn slot_cleanup_warning(warnings: &[String]) -> Option<String> {
+    (!warnings.is_empty()).then(|| warnings.join("; "))
 }
 
 pub(crate) fn cancel_with_conn(
@@ -427,8 +485,7 @@ fn cancel_selected_runs_with_conn(
 ) -> serde_json::Value {
     let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, target_run_ids, reason);
     let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, target_run_ids);
-    let (released_slots, cleared_slot_sessions) =
-        clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
+    let slot_cleanup = clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
     let cancelled_runs = if target_run_ids.is_empty() {
         0
     } else {
@@ -502,16 +559,20 @@ fn cancel_selected_runs_with_conn(
         );
     }
 
-    json!({
+    let mut response = json!({
         "ok": true,
         "cancelled_entries": cancelled_entries,
         "cancelled_runs": cancelled_runs,
         "cancelled_dispatches": cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
         "remaining_live_dispatches": remaining_live_dispatches,
-        "released_slots": released_slots,
-        "cleared_slot_sessions": cleared_slot_sessions,
-    })
+        "released_slots": slot_cleanup.released_slots,
+        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+    });
+    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+        response["warning"] = json!(warning);
+    }
+    response
 }
 
 #[derive(Debug, Serialize)]
@@ -3444,8 +3505,26 @@ pub(crate) fn activate_with_deps(
 
         // Create dispatch
         let conn = deps.db.separate_conn().unwrap();
-        let slot_allocation =
-            crate::db::auto_queue::allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
+        let slot_allocation = match crate::db::auto_queue::allocate_slot_for_group_agent(
+            &conn, &run_id, *group, &agent_id,
+        ) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_slot_allocation_failed",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to allocate slot for entry {} run {} agent {} group {}: {}",
+                    entry_id,
+                    run_id,
+                    agent_id,
+                    group,
+                    error
+                );
+                drop(conn);
+                continue;
+            }
+        };
         let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
         let mut reset_slot_thread_before_reuse = false;
         if slot_allocation.is_none() {
@@ -3619,6 +3698,24 @@ pub(crate) fn activate_with_deps(
                     entry_id,
                     error
                 );
+            } else if let Some(assigned_slot) = slot_index {
+                if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
+                    &conn,
+                    &run_id,
+                    *group,
+                    &agent_id,
+                    assigned_slot,
+                ) {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_dispatch_revert_slot_release_failed",
+                        entry_log_ctx.clone().slot_index(assigned_slot),
+                        "[auto-queue] failed to release slot {} for entry {} after create_dispatch error: {}",
+                        assigned_slot,
+                        entry_id,
+                        error
+                    );
+                }
             }
             drop(conn);
             crate::auto_queue_log!(
@@ -4585,12 +4682,21 @@ pub async fn restore_run(
                         continue;
                     }
                 };
-                let slot_allocation = crate::db::auto_queue::allocate_slot_for_group_agent(
+                let slot_allocation = match crate::db::auto_queue::allocate_slot_for_group_agent(
                     &conn,
                     &run_id,
                     entry.thread_group,
                     &entry.agent_id,
-                );
+                ) {
+                    Ok(allocation) => allocation,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: attach existing dispatch slot allocation failed: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
                 let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
                 if let Some((_, newly_assigned)) = slot_allocation {
                     if newly_assigned {
@@ -4628,12 +4734,21 @@ pub async fn restore_run(
                         continue;
                     }
                 };
-                let slot_allocation = crate::db::auto_queue::allocate_slot_for_group_agent(
+                let slot_allocation = match crate::db::auto_queue::allocate_slot_for_group_agent(
                     &conn,
                     &run_id,
                     entry.thread_group,
                     &entry.agent_id,
-                );
+                ) {
+                    Ok(allocation) => allocation,
+                    Err(error) => {
+                        errors.push(format!(
+                            "{}: restore dispatch slot allocation failed: {error}",
+                            entry.entry_id
+                        ));
+                        continue;
+                    }
+                };
                 let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
                 let mut reset_slot_thread_before_reuse = false;
                 if let Some((_, newly_assigned)) = slot_allocation {
@@ -4790,6 +4905,20 @@ pub async fn restore_run(
                             "{}: restore fallback pending failed: {error}",
                             entry.entry_id
                         )),
+                    }
+                    if let Some(assigned_slot) = slot_index {
+                        if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
+                            &conn,
+                            &run_id,
+                            entry.thread_group,
+                            &entry.agent_id,
+                            assigned_slot,
+                        ) {
+                            errors.push(format!(
+                                "{}: restore dispatch slot release failed for slot {}: {}",
+                                entry.entry_id, assigned_slot, error
+                            ));
+                        }
                     }
                 }
             }
@@ -5264,7 +5393,7 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
     let active_run_ids = load_run_ids_with_status(&conn, &["active"]).unwrap_or_default();
     let cancelled_dispatches =
         cancel_live_dispatches_for_runs(&conn, &active_run_ids, "auto_queue_pause");
-    let (released_slots, cleared_slot_sessions) =
+    let slot_cleanup =
         clear_and_release_slots_for_runs(state.health_registry.clone(), &conn, &active_run_ids);
     let paused = conn
         .execute(
@@ -5275,16 +5404,17 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             [],
         )
         .unwrap_or(0);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "paused_runs": paused,
-            "cancelled_dispatches": cancelled_dispatches,
-            "released_slots": released_slots,
-            "cleared_slot_sessions": cleared_slot_sessions,
-        })),
-    )
+    let mut response = json!({
+        "ok": true,
+        "paused_runs": paused,
+        "cancelled_dispatches": cancelled_dispatches,
+        "released_slots": slot_cleanup.released_slots,
+        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+    });
+    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+        response["warning"] = json!(warning);
+    }
+    (StatusCode::OK, Json(response))
 }
 
 /// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
