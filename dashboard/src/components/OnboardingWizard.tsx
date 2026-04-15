@@ -370,6 +370,50 @@ function ChecklistPanel({ title, items }: { title: string; items: ChecklistItem[
   );
 }
 
+interface StepStatusItem {
+  step: number;
+  label: string;
+  ok: boolean;
+  active: boolean;
+}
+
+function StepStatusRail({ items }: { items: StepStatusItem[] }) {
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1">
+      {items.map((item) => (
+        <div
+          key={item.step}
+          className="min-w-[8.5rem] rounded-xl border px-3 py-2"
+          style={{
+            borderColor: item.active
+              ? "rgba(99,102,241,0.34)"
+              : item.ok
+                ? "rgba(16,185,129,0.24)"
+                : "rgba(148,163,184,0.18)",
+            backgroundColor: item.active
+              ? "rgba(99,102,241,0.12)"
+              : item.ok
+                ? "rgba(16,185,129,0.08)"
+                : "rgba(15,23,42,0.32)",
+          }}
+        >
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+            Step {item.step}
+          </div>
+          <div className="mt-1 flex items-center gap-2">
+            <span style={{ color: item.ok ? "#86efac" : item.active ? "#c4b5fd" : "var(--th-text-muted)" }}>
+              {item.ok ? "✓" : item.active ? "•" : "!"}
+            </span>
+            <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+              {item.label}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Main Component ────────────────────────────────────
 
 export default function OnboardingWizard({ isKo, onComplete }: Props) {
@@ -898,6 +942,57 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         : tr("이전 단계의 실패 항목이 남아 있어 아직 완료를 실행할 수 없습니다.", "A previous step is still failing, so completion is blocked."),
     },
   ];
+  const stepStatusItems: StepStatusItem[] = [
+    { step: 1, label: tr("봇", "Bots"), ok: step1Checklist.every((item) => item.ok), active: step === 1 },
+    { step: 2, label: tr("프로바이더", "Providers"), ok: step2Checklist.every((item) => item.ok), active: step === 2 },
+    { step: 3, label: tr("에이전트", "Agents"), ok: step3Checklist.every((item) => item.ok), active: step === 3 },
+    { step: 4, label: tr("채널", "Channels"), ok: step4Checklist.every((item) => item.ok), active: step === 4 },
+    {
+      step: 5,
+      label: tr("적용", "Apply"),
+      ok: (completionChecklist ?? step5Checklist).every((item) => item.ok),
+      active: step === 5,
+    },
+  ];
+  const applySummary = [
+    {
+      key: "channels",
+      label: tr("Discord 채널", "Discord channels"),
+      detail: hasSelectedGuild
+        ? tr(
+            `${channelAssignments.length}개 에이전트 채널 매핑을 적용하고, 새 채널 ${newChannelCount}개는 완료 시 실제 생성합니다.`,
+            `Applies ${channelAssignments.length} agent channel mappings and creates ${newChannelCount} new channels on completion.`,
+          )
+        : tr(
+            "서버를 선택해야 실제 채널 생성과 기존 채널 연결을 확정할 수 있습니다.",
+            "Select a server before real channel creation and existing-channel reuse can be finalized.",
+          ),
+    },
+    {
+      key: "settings",
+      label: tr("설정 저장", "Settings write"),
+      detail: tr(
+        "owner ID, command/communication bot, provider 조합을 서버에 실제로 기록합니다.",
+        "Writes the owner ID, command/communication bot, and provider wiring to the server.",
+      ),
+    },
+    {
+      key: "pipeline",
+      label: tr("기본 운영 파이프라인", "Default operating pipeline"),
+      detail: tr(
+        "기본 채널/카테고리와 함께 초기 파이프라인/설정 재생성을 같은 완료 작업에서 처리합니다.",
+        "Rebuilds the initial pipeline and baseline settings alongside the default channels and categories.",
+      ),
+    },
+    {
+      key: "verification",
+      label: tr("완료 후 검증", "Post-apply verification"),
+      detail: tr(
+        "완료 응답의 체크리스트로 실제 생성/저장 결과를 다시 확인합니다.",
+        "The completion response checklist confirms what was actually created and saved.",
+      ),
+    },
+  ];
 
   // ── Render ──────────────────────────────────────────
 
@@ -924,6 +1019,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           ))}
         </div>
       </div>
+
+      <StepStatusRail items={stepStatusItems} />
 
       {/* Error banner */}
       {error && (
@@ -1718,6 +1815,28 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl p-4 border space-y-3" style={{ borderColor: borderLight }}>
+            <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+              {tr("완료 시 실제로 적용되는 항목", "What completion actually applies")}
+            </div>
+            <div className="space-y-2">
+              {applySummary.map((item) => (
+                <div
+                  key={item.key}
+                  className="rounded-lg border px-3 py-2"
+                  style={{ borderColor: "rgba(148,163,184,0.16)", backgroundColor: "rgba(15,23,42,0.28)" }}
+                >
+                  <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                    {item.label}
+                  </div>
+                  <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+                    {item.detail}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
