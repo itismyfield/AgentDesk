@@ -1,5 +1,7 @@
 use super::{
-    discord_delivery::{discord_api_base_url, discord_api_url},
+    discord_delivery::{
+        DispatchTransport, HttpDispatchTransport, discord_api_base_url, discord_api_url,
+    },
     thread_reuse::clear_all_threads,
 };
 use rusqlite::OptionalExtension;
@@ -709,10 +711,12 @@ pub(crate) async fn handle_completed_dispatch_followups(
     db: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    handle_completed_dispatch_followups_with_config(
+    let transport = HttpDispatchTransport::from_runtime(db);
+    handle_completed_dispatch_followups_with_config_and_transport(
         db,
         dispatch_id,
         &DispatchFollowupConfig::from_runtime(),
+        &transport,
     )
     .await
 }
@@ -721,6 +725,24 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config(
     db: &crate::db::Db,
     dispatch_id: &str,
     config: &DispatchFollowupConfig,
+) -> Result<(), String> {
+    let transport = HttpDispatchTransport::from_runtime(db);
+    handle_completed_dispatch_followups_with_config_and_transport(
+        db,
+        dispatch_id,
+        config,
+        &transport,
+    )
+    .await
+}
+
+pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transport<
+    T: DispatchTransport,
+>(
+    db: &crate::db::Db,
+    dispatch_id: &str,
+    config: &DispatchFollowupConfig,
+    transport: &T,
 ) -> Result<(), String> {
     let info: Option<CompletedDispatchInfo> = {
         let conn = match db.lock() {
@@ -770,11 +792,12 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config(
         // Only send_review_result_to_primary for explicit verdicts (pass/improve/reject)
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
-            super::discord_delivery::send_review_result_to_primary(
+            super::discord_delivery::send_review_result_to_primary_with_transport(
                 db,
                 &info.card_id,
                 dispatch_id,
                 &verdict,
+                transport,
             )
             .await?;
         } else {

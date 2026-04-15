@@ -81,6 +81,125 @@ pub(crate) enum DispatchStatusReactionState {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewFollowupKind {
+    Pass,
+    Unknown,
+}
+
+/// Discord delivery side-effects boundary.
+/// Keep business rules local and swap transport behavior in tests.
+pub(crate) trait DispatchTransport: Send + Sync {
+    fn send_dispatch(
+        &self,
+        db: crate::db::Db,
+        agent_id: String,
+        title: String,
+        card_id: String,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    fn send_review_followup(
+        &self,
+        db: crate::db::Db,
+        card_id: String,
+        channel_id_num: u64,
+        message: String,
+        kind: ReviewFollowupKind,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HttpDispatchTransport {
+    announce_bot_token: Option<String>,
+    discord_api_base: String,
+    thread_owner_user_id: Option<u64>,
+}
+
+impl HttpDispatchTransport {
+    pub(crate) fn from_runtime(db: &crate::db::Db) -> Self {
+        Self {
+            announce_bot_token: crate::credential::read_bot_token("announce"),
+            discord_api_base: discord_api_base_url(),
+            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db),
+        }
+    }
+
+    fn with_context(
+        announce_bot_token: Option<&str>,
+        discord_api_base: &str,
+        thread_owner_user_id: Option<u64>,
+    ) -> Self {
+        Self {
+            announce_bot_token: announce_bot_token.map(str::to_string),
+            discord_api_base: discord_api_base.to_string(),
+            thread_owner_user_id,
+        }
+    }
+}
+
+impl DispatchTransport for HttpDispatchTransport {
+    fn send_dispatch(
+        &self,
+        db: crate::db::Db,
+        agent_id: String,
+        title: String,
+        card_id: String,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let transport = self.clone();
+        async move {
+            let token = match transport.announce_bot_token.as_deref() {
+                Some(token) => token,
+                None => {
+                    tracing::warn!(
+                        "[dispatch] No announce bot token (missing credential/announce_bot_token)"
+                    );
+                    return Err("no announce bot token".into());
+                }
+            };
+            send_dispatch_to_discord_inner_with_context(
+                &db,
+                &agent_id,
+                &title,
+                &card_id,
+                &dispatch_id,
+                token,
+                &transport.discord_api_base,
+                transport.thread_owner_user_id,
+            )
+            .await
+        }
+    }
+
+    fn send_review_followup(
+        &self,
+        db: crate::db::Db,
+        card_id: String,
+        channel_id_num: u64,
+        message: String,
+        kind: ReviewFollowupKind,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let transport = self.clone();
+        async move {
+            let token = transport
+                .announce_bot_token
+                .as_deref()
+                .ok_or_else(|| "no announce bot token".to_string())?;
+            send_review_result_message_via_http(
+                &db,
+                &card_id,
+                channel_id_num,
+                &message,
+                kind,
+                token,
+                &transport.discord_api_base,
+            )
+            .await
+        }
+    }
+}
+
 fn dispatch_reaction_emoji_path(emoji: char) -> Option<&'static str> {
     match emoji {
         '⏳' => Some("%E2%8F%B3"),
@@ -1087,6 +1206,19 @@ pub(crate) async fn send_dispatch_to_discord(
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<(), String> {
+    let transport = HttpDispatchTransport::from_runtime(db);
+    send_dispatch_to_discord_with_transport(db, agent_id, title, card_id, dispatch_id, &transport)
+        .await
+}
+
+pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport>(
+    db: &crate::db::Db,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    transport: &T,
+) -> Result<(), String> {
     // Two-phase delivery guard (prevents duplicates across all callers):
     // 1. Check dispatch_notified (confirmed prior delivery) → skip if present
     // 2. Claim dispatch_reserving (atomic lock) → skip if another path holds it
@@ -1124,8 +1256,15 @@ pub(crate) async fn send_dispatch_to_discord(
     }
 
     // Wrap the actual send so we can always release the reservation
-    let send_result =
-        send_dispatch_to_discord_inner(db, agent_id, title, card_id, dispatch_id).await;
+    let send_result = transport
+        .send_dispatch(
+            db.clone(),
+            agent_id.to_string(),
+            title.to_string(),
+            card_id.to_string(),
+            dispatch_id.to_string(),
+        )
+        .await;
 
     // Release reservation and commit notified marker on success
     if let Ok(conn) = db.lock() {
@@ -1144,38 +1283,6 @@ pub(crate) async fn send_dispatch_to_discord(
     }
 
     send_result
-}
-
-/// Inner function: performs the actual Discord send without reservation logic.
-async fn send_dispatch_to_discord_inner(
-    db: &crate::db::Db,
-    agent_id: &str,
-    title: &str,
-    card_id: &str,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    let token = match crate::credential::read_bot_token("announce") {
-        Some(t) => t,
-        None => {
-            tracing::warn!(
-                "[dispatch] No announce bot token (missing credential/announce_bot_token)"
-            );
-            return Err("no announce bot token".into());
-        }
-    };
-    let discord_api_base = discord_api_base_url();
-    let thread_owner_user_id = resolve_dispatch_thread_owner_user_id(db);
-    send_dispatch_to_discord_inner_with_context(
-        db,
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        &token,
-        &discord_api_base,
-        thread_owner_user_id,
-    )
-    .await
 }
 
 async fn send_dispatch_to_discord_inner_with_context(
@@ -1725,13 +1832,30 @@ pub(super) async fn send_review_result_to_primary(
 ) -> Result<(), String> {
     let discord_api_base = discord_api_base_url();
     let token = crate::credential::read_bot_token("announce");
-    send_review_result_to_primary_with_context(
+    let transport = HttpDispatchTransport::with_context(token.as_deref(), &discord_api_base, None);
+    send_review_result_to_primary_with_transport(
         db,
         card_id,
         review_dispatch_id,
         verdict,
-        token.as_deref(),
-        &discord_api_base,
+        &transport,
+    )
+    .await
+}
+
+pub(super) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
+    db: &crate::db::Db,
+    card_id: &str,
+    review_dispatch_id: &str,
+    verdict: &str,
+    transport: &T,
+) -> Result<(), String> {
+    send_review_result_to_primary_with_context_and_transport(
+        db,
+        card_id,
+        review_dispatch_id,
+        verdict,
+        transport,
     )
     .await
 }
@@ -1743,6 +1867,24 @@ async fn send_review_result_to_primary_with_context(
     verdict: &str,
     token: Option<&str>,
     discord_api_base: &str,
+) -> Result<(), String> {
+    let transport = HttpDispatchTransport::with_context(token, discord_api_base, None);
+    send_review_result_to_primary_with_context_and_transport(
+        db,
+        card_id,
+        review_dispatch_id,
+        verdict,
+        &transport,
+    )
+    .await
+}
+
+async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTransport>(
+    db: &crate::db::Db,
+    card_id: &str,
+    review_dispatch_id: &str,
+    verdict: &str,
+    transport: &T,
 ) -> Result<(), String> {
     // Look up card info
     let (agent_id, title, issue_url): (String, String, Option<String>) = {
@@ -1884,7 +2026,48 @@ async fn send_review_result_to_primary_with_context(
         },
     };
 
-    let token = token.ok_or_else(|| "no announce bot token".to_string())?;
+    let (kind, message) = if verdict == "pass" || verdict == "approved" {
+        let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+        (
+            ReviewFollowupKind::Pass,
+            format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}"),
+        )
+    } else {
+        let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+        (
+            ReviewFollowupKind::Unknown,
+            prefix_dispatch_message(
+                "review-decision",
+                &format!(
+                    "⚠️ [리뷰 verdict 미제출] {title}\n\
+                     ⛔ 코드 리뷰 금지 — 이것은 리뷰 결과 확인 요청입니다\n\
+                     카운터모델이 verdict를 제출하지 않고 세션이 종료됐습니다.\n\
+                     GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{url_line}"
+                ),
+            ),
+        )
+    };
+
+    transport
+        .send_review_followup(
+            db.clone(),
+            card_id.to_string(),
+            channel_id_num,
+            message,
+            kind,
+        )
+        .await
+}
+
+async fn send_review_result_message_via_http(
+    db: &crate::db::Db,
+    card_id: &str,
+    channel_id_num: u64,
+    message: &str,
+    kind: ReviewFollowupKind,
+    token: &str,
+    discord_api_base: &str,
+) -> Result<(), String> {
     let client = reqwest::Client::new();
     let target_channel = resolve_review_followup_target_channel(
         db,
@@ -1895,70 +2078,38 @@ async fn send_review_result_to_primary_with_context(
         channel_id_num,
     )
     .await?;
+    let url = discord_api_url(
+        discord_api_base,
+        &format!("/channels/{target_channel}/messages"),
+    );
 
-    if verdict == "pass" || verdict == "approved" {
-        let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
-        let message = format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}");
-        let url = discord_api_url(
-            discord_api_base,
-            &format!("/channels/{target_channel}/messages"),
-        );
-
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": message}))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => return Ok(()),
-            Ok(r) => {
-                return Err(format!(
-                    "discord API error {} for pass notification",
-                    r.status()
-                ));
-            }
-            Err(e) => return Err(format!("discord request failed for pass notification: {e}")),
-        }
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => match kind {
+            ReviewFollowupKind::Pass => Err(format!(
+                "discord API error {} for pass notification",
+                response.status()
+            )),
+            ReviewFollowupKind::Unknown => Err(format!(
+                "discord API error {} for unknown-verdict notification",
+                response.status()
+            )),
+        },
+        Err(error) => match kind {
+            ReviewFollowupKind::Pass => Err(format!(
+                "discord request failed for pass notification: {error}"
+            )),
+            ReviewFollowupKind::Unknown => Err(format!(
+                "discord request failed for unknown-verdict notification: {error}"
+            )),
+        },
     }
-
-    if verdict == "unknown" {
-        let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
-        let message = format!(
-            "⚠️ [리뷰 verdict 미제출] {title}\n\
-             ⛔ 코드 리뷰 금지 — 이것은 리뷰 결과 확인 요청입니다\n\
-             카운터모델이 verdict를 제출하지 않고 세션이 종료됐습니다.\n\
-             GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{url_line}"
-        );
-        let message = prefix_dispatch_message("review-decision", &message);
-        let url = discord_api_url(
-            discord_api_base,
-            &format!("/channels/{target_channel}/messages"),
-        );
-
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": message}))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => return Ok(()),
-            Ok(r) => {
-                return Err(format!(
-                    "discord API error {} for unknown-verdict notification",
-                    r.status()
-                ));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "discord request failed for unknown-verdict notification: {e}"
-                ));
-            }
-        }
-    }
-
-    unreachable!("explicit review verdicts should return earlier");
 }
 
 #[cfg(test)]
