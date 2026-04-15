@@ -140,6 +140,27 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+pub(crate) fn looks_like_explicit_repo_path(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.starts_with('/')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+    {
+        return true;
+    }
+
+    let bytes = trimmed.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
 fn load_repo_resolution_config() -> Option<(crate::config::Config, std::path::PathBuf)> {
     let explicit = std::env::var_os("AGENTDESK_CONFIG")
         .filter(|value| !value.is_empty())
@@ -267,6 +288,31 @@ pub fn resolve_repo_dir_for_id(repo_id: Option<&str>) -> Result<Option<String>, 
         "No local repo mapping for '{}'; configure github.repo_dirs.{} in agentdesk config",
         requested, requested
     ))
+}
+
+pub fn resolve_repo_dir_for_target(target_repo: Option<&str>) -> Result<Option<String>, String> {
+    let requested = target_repo.map(str::trim).filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return Ok(resolve_repo_dir());
+    };
+
+    if looks_like_explicit_repo_path(requested) {
+        let expanded = expand_tilde(requested);
+        let path = std::path::PathBuf::from(expanded);
+        let resolved = if path.is_relative() {
+            std::env::current_dir()
+                .map_err(|e| format!("cannot resolve repo path '{}': {}", requested, e))?
+                .join(path)
+        } else {
+            path
+        };
+        let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        ensure_git_worktree(&canonical_str)?;
+        return Ok(Some(canonical_str));
+    }
+
+    resolve_repo_dir_for_id(Some(requested))
 }
 
 /// Get the current HEAD commit hash from a git repo directory.

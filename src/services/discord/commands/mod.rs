@@ -8,6 +8,7 @@ mod model_ui;
 mod receipt;
 mod session;
 mod skill;
+mod text_commands;
 
 pub(in crate::services::discord) use super::model_catalog::{
     provider_supports_model_override, validate_model_input,
@@ -36,3 +37,4 @@ pub(super) use receipt::cmd_receipt;
 pub(super) use session::{cmd_pwd, cmd_start};
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::cmd_cc;
+pub(in crate::services::discord) use text_commands::handle_text_command;

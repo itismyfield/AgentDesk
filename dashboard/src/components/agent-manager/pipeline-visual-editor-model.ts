@@ -302,7 +302,6 @@ export function buildPipelineGraph(
 
   const upwardEdgeInfos: { transIdx: number; fi: number; ti: number }[] = [];
   pipeline.transitions.forEach((t, transIdx) => {
-    if (compact && t.type === "force_only") return;
     const fi = pipeline.states.findIndex((s) => s.id === t.from);
     const ti = pipeline.states.findIndex((s) => s.id === t.to);
     if (fi >= 0 && ti >= 0) {
@@ -363,9 +362,7 @@ export function buildPipelineGraph(
 
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
 
-  const visibleTransitions = compact
-    ? pipeline.transitions.filter((t) => t.type !== "force_only")
-    : pipeline.transitions;
+  const visibleTransitions = pipeline.transitions;
 
   const pairCount = new Map<string, number>();
   const pairIndex = new Map<number, number>();

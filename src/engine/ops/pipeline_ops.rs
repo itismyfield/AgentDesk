@@ -179,17 +179,6 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 return null;
             };
 
-            agentdesk.pipeline.forceOnlyTargets = function(from, config) {
-                var cfg = config || agentdesk.pipeline.getConfig();
-                if (!cfg || !cfg.transitions) return [];
-                var targets = [];
-                for (var i = 0; i < cfg.transitions.length; i++) {
-                    var t = cfg.transitions[i];
-                    if (t.from === from && t.type === "force_only") targets.push(t.to);
-                }
-                return targets;
-            };
-
             agentdesk.pipeline.getTimeout = function(state, config) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 if (!cfg || !cfg.timeouts) return null;

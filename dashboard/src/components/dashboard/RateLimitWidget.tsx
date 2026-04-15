@@ -191,19 +191,28 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
 
   return (
     <SurfaceSection
-      eyebrow={t({ ko: "운영 Weather", en: "OPERATING WEATHER", ja: "運用 WEATHER", zh: "运营 WEATHER" })}
-      title={t({ ko: "Provider 한도 현황", en: "Provider Rate Limit Health", ja: "Provider 制限状況", zh: "Provider 限额状态" })}
+      eyebrow={t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" })}
+      title={title}
       description={t({
-        ko: "Provider 버킷 사용량과 stale 캐시 상태를 한눈에 확인합니다.",
-        en: "Track provider bucket utilization and stale cache state at a glance.",
-        ja: "Provider バケット使用量と stale キャッシュ状態をひと目で確認します。",
-        zh: "一眼查看 Provider bucket 使用率与 stale cache 状态。",
+        ko: "Claude/Codex/Gemini 버킷 사용량과 stale 캐시 상태를 한눈에 확인합니다.",
+        en: "Track Claude/Codex/Gemini bucket utilization and stale cache state at a glance.",
+        ja: "Claude/Codex/Gemini バケット使用量と stale キャッシュ状態をひと目で確認します。",
+        zh: "一眼查看 Claude/Codex/Gemini bucket 使用率与 stale cache 状态。",
       })}
-      actions={onOpenSettings ? (
-        <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
-          {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
-        </SurfaceActionButton>
-      ) : undefined}
+      actions={(
+        <>
+          <TooltipLabel
+            text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
+            tooltip={tooltip}
+            className="max-w-fit text-sm"
+          />
+          {onOpenSettings ? (
+            <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
+              {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+            </SurfaceActionButton>
+          ) : undefined}
+        </>
+      )}
     >
       <div className="mt-4 grid gap-3 xl:grid-cols-3">
         {data.providers.map((provider) => {

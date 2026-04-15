@@ -14,6 +14,11 @@ const ESCALATION_THREAD_KEY_PREFIX: &str = "escalation_thread:";
 const DEFAULT_PM_HOURS: &str = "00:00-08:00";
 const DEFAULT_TIMEZONE: &str = "Asia/Seoul";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+const DISCORD_MESSAGE_CHAR_LIMIT: usize = 2000;
+const ESCALATION_ISSUE_SUMMARY_LINE_LIMIT: usize = 3;
+const ESCALATION_SECTION_CHAR_LIMIT: usize = 320;
+const ESCALATION_REASON_CHAR_LIMIT: usize = 240;
+const ESCALATION_RECENT_RESULT_LIMIT: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -69,6 +74,20 @@ struct CardEscalationSummary {
     title: String,
     issue_number: Option<i64>,
     assigned_agent_id: Option<String>,
+    description: Option<String>,
+    status: String,
+    review_status: Option<String>,
+    blocked_reason: Option<String>,
+    dispatch_count: i64,
+    last_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CardContext {
+    issue_summary: Option<String>,
+    progress_summary: Option<String>,
+    recent_results: Vec<String>,
+    blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,7 +229,28 @@ fn load_card_summary(
     card_id: &str,
 ) -> Result<CardEscalationSummary, String> {
     conn.query_row(
-        "SELECT title, github_issue_number, assigned_agent_id
+        "SELECT
+             title,
+             github_issue_number,
+             assigned_agent_id,
+             description,
+             status,
+             review_status,
+             blocked_reason,
+             (
+                 SELECT COUNT(*)
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+             ) AS dispatch_count,
+             (
+                 SELECT to_agent_id
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+                   AND to_agent_id IS NOT NULL
+                   AND TRIM(to_agent_id) != ''
+                 ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC
+                 LIMIT 1
+             ) AS last_agent_id
          FROM kanban_cards
          WHERE id = ?1",
         [card_id],
@@ -219,6 +259,12 @@ fn load_card_summary(
                 title: row.get(0)?,
                 issue_number: row.get(1)?,
                 assigned_agent_id: row.get(2)?,
+                description: row.get(3)?,
+                status: row.get(4)?,
+                review_status: row.get(5)?,
+                blocked_reason: row.get(6)?,
+                dispatch_count: row.get(7)?,
+                last_agent_id: row.get(8)?,
             })
         },
     )
@@ -370,21 +416,289 @@ fn format_reason_lines(reasons: &[String]) -> String {
         .join("\n")
 }
 
+fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    if max_chars <= 3 {
+        return trimmed.chars().take(max_chars).collect();
+    }
+    let mut shortened = trimmed.chars().take(max_chars - 3).collect::<String>();
+    shortened.push_str("...");
+    shortened
+}
+
+fn summarize_issue_description(description: Option<&str>) -> Option<String> {
+    let lines = description
+        .into_iter()
+        .flat_map(|raw| raw.lines())
+        .map(normalize_whitespace)
+        .filter(|line| !line.is_empty())
+        .take(ESCALATION_ISSUE_SUMMARY_LINE_LIMIT)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(
+            &lines.join(" "),
+            ESCALATION_SECTION_CHAR_LIMIT,
+        ))
+    }
+}
+
+fn format_phase(status: &str, review_status: Option<&str>) -> Option<String> {
+    let status = normalize_whitespace(status);
+    if status.is_empty() {
+        return None;
+    }
+    let review_status = review_status
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty());
+    Some(match review_status {
+        Some(review_status) => format!("{status}/{review_status}"),
+        None => status,
+    })
+}
+
+fn format_progress_summary(summary: &CardEscalationSummary) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(phase) = format_phase(&summary.status, summary.review_status.as_deref()) {
+        parts.push(phase);
+    }
+    if summary.dispatch_count > 0 {
+        parts.push(format!("{}회 디스패치", summary.dispatch_count));
+    }
+    if let Some(agent_id) = summary
+        .last_agent_id
+        .as_deref()
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("마지막 에이전트: {agent_id}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(
+            &parts.join(" · "),
+            ESCALATION_SECTION_CHAR_LIMIT,
+        ))
+    }
+}
+
+fn extract_dispatch_result_summary(value: &serde_json::Value) -> Option<String> {
+    const PREFERRED_KEYS: &[&str] = &[
+        "summary",
+        "work_summary",
+        "result_summary",
+        "task_summary",
+        "completion_summary",
+        "outcome",
+        "message",
+        "final_message",
+        "notes",
+        "content",
+    ];
+
+    match value {
+        serde_json::Value::String(text) => {
+            let normalized = normalize_whitespace(text);
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(truncate_chars(&normalized, ESCALATION_SECTION_CHAR_LIMIT))
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in PREFERRED_KEYS {
+                if let Some(summary) = map.get(*key).and_then(extract_dispatch_result_summary) {
+                    return Some(summary);
+                }
+            }
+            map.values().find_map(extract_dispatch_result_summary)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(extract_dispatch_result_summary),
+        _ => None,
+    }
+}
+
+fn summarize_dispatch_result_text(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| extract_dispatch_result_summary(&value))
+        .or_else(|| {
+            let normalized = normalize_whitespace(trimmed);
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(truncate_chars(&normalized, ESCALATION_SECTION_CHAR_LIMIT))
+            }
+        })
+}
+
+fn load_recent_dispatch_results(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT dispatch_type, result
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND status IN ('completed', 'failed')
+             ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC
+             LIMIT ?2",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![card_id, ESCALATION_RECENT_RESULT_LIMIT as i64],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .map_err(|err| err.to_string())?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let (dispatch_type, result) = row.map_err(|err| err.to_string())?;
+        let Some(summary) = result
+            .as_deref()
+            .and_then(summarize_dispatch_result_text)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let label = dispatch_type
+            .as_deref()
+            .map(normalize_whitespace)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "dispatch".to_string());
+        results.push(format!("{label}: {summary}"));
+    }
+    Ok(results)
+}
+
+fn load_card_context(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    summary: &CardEscalationSummary,
+) -> Result<Option<CardContext>, String> {
+    let issue_summary = summarize_issue_description(summary.description.as_deref());
+    let progress_summary = format_progress_summary(summary);
+    let recent_results = load_recent_dispatch_results(conn, card_id)?;
+    let blocked_reason = summary
+        .blocked_reason
+        .as_deref()
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(&value, ESCALATION_REASON_CHAR_LIMIT));
+
+    let context = CardContext {
+        issue_summary,
+        progress_summary,
+        recent_results,
+        blocked_reason,
+    };
+
+    if context.issue_summary.is_none()
+        && context.progress_summary.is_none()
+        && context.recent_results.is_empty()
+        && context.blocked_reason.is_none()
+    {
+        Ok(None)
+    } else {
+        Ok(Some(context))
+    }
+}
+
+fn render_context_sections(context: Option<&CardContext>) -> Vec<String> {
+    let Some(context) = context else {
+        return Vec::new();
+    };
+
+    let mut sections = Vec::new();
+    if let Some(issue_summary) = context.issue_summary.as_deref() {
+        sections.push(format!("📋 이슈: {issue_summary}"));
+    }
+    if let Some(progress_summary) = context.progress_summary.as_deref() {
+        sections.push(format!("📊 진행: {progress_summary}"));
+    }
+    if !context.recent_results.is_empty() {
+        sections.push(format!(
+            "📝 최근 결과:\n{}",
+            context
+                .recent_results
+                .iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if let Some(blocked_reason) = context.blocked_reason.as_deref() {
+        sections.push(format!("⛔ 기존 차단 사유: {blocked_reason}"));
+    }
+    sections
+}
+
+fn compose_escalation_message(
+    prefix_lines: Vec<String>,
+    context: Option<&CardContext>,
+    suffix_lines: Vec<String>,
+) -> String {
+    let mut context_sections = render_context_sections(context);
+
+    loop {
+        let mut lines = prefix_lines.clone();
+        lines.extend(context_sections.iter().cloned());
+        lines.append(&mut suffix_lines.clone());
+        let message = lines.join("\n");
+        if message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT {
+            return message;
+        }
+        if context_sections.is_empty() {
+            return truncate_chars(&message, DISCORD_MESSAGE_CHAR_LIMIT);
+        }
+        context_sections.pop();
+    }
+}
+
 fn build_user_message(
     summary: &CardEscalationSummary,
+    context: Option<&CardContext>,
     owner_user_id: u64,
     reasons: &[String],
 ) -> String {
-    format!(
-        "⚠️ [에스컬레이션] {}\n<@{}> 수동 판단이 필요합니다.\n사유:\n{}\n선택지: `resume`, `rework`, `dismiss`, `requeue`\n결정 API: `POST /api/pm-decision`",
-        format_card_label(summary),
-        owner_user_id,
-        format_reason_lines(reasons)
+    compose_escalation_message(
+        vec![
+            format!("⚠️ [에스컬레이션] {}", format_card_label(summary)),
+            format!("<@{owner_user_id}> 수동 판단이 필요합니다."),
+        ],
+        context,
+        vec![
+            "사유:".to_string(),
+            format_reason_lines(reasons),
+            "선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string(),
+            "결정 API: `POST /api/pm-decision`".to_string(),
+        ],
     )
 }
 
 fn build_pm_message(
     summary: &CardEscalationSummary,
+    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: Option<&str>,
 ) -> String {
@@ -393,11 +707,16 @@ fn build_pm_message(
         lines.push(format!("fallback: {note}"));
     }
     lines.push("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요.".to_string());
-    lines.push("사유:".to_string());
-    lines.push(format_reason_lines(reasons));
-    lines.push("선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string());
-    lines.push("결정 API: `POST /api/pm-decision`".to_string());
-    lines.join("\n")
+    compose_escalation_message(
+        lines,
+        context,
+        vec![
+            "사유:".to_string(),
+            format_reason_lines(reasons),
+            "선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string(),
+            "결정 API: `POST /api/pm-decision`".to_string(),
+        ],
+    )
 }
 
 async fn discord_get(
@@ -582,7 +901,7 @@ async fn emit_escalation_with_base_url(
         );
     }
 
-    let (settings, summary, parent_channels, cached_thread_id) = {
+    let (settings, summary, context, parent_channels, cached_thread_id) = {
         let conn = match state.db.separate_conn() {
             Ok(conn) => conn,
             Err(err) => {
@@ -597,10 +916,23 @@ async fn emit_escalation_with_base_url(
             Ok(summary) => summary,
             Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
         };
+        let context = match load_card_context(&conn, &card_id, &summary) {
+            Ok(context) => context,
+            Err(err) => {
+                tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
+                None
+            }
+        };
         let parent_channels =
             candidate_parent_channels(&conn, &card_id, summary.assigned_agent_id.as_deref());
         let cached_thread_id = load_cached_thread_id(&conn, &card_id);
-        (settings, summary, parent_channels, cached_thread_id)
+        (
+            settings,
+            summary,
+            context,
+            parent_channels,
+            cached_thread_id,
+        )
     };
 
     let client = reqwest::Client::new();
@@ -631,7 +963,7 @@ async fn emit_escalation_with_base_url(
             resolve_owner_target(state, &parent_channels, settings.owner_user_id).await;
         if let Some(owner_user_id) = owner_target.user_id {
             let thread_name = build_user_thread_name(&summary);
-            let message = build_user_message(&summary, owner_user_id, &reasons);
+            let message = build_user_message(&summary, context.as_ref(), owner_user_id, &reasons);
 
             if let Some(thread_id) = cached_thread_id {
                 match try_reuse_escalation_thread(
@@ -703,6 +1035,7 @@ async fn emit_escalation_with_base_url(
                                 &announce_token,
                                 &settings,
                                 &summary,
+                                context.as_ref(),
                                 &reasons,
                                 fallback_note,
                                 requested_mode,
@@ -710,13 +1043,29 @@ async fn emit_escalation_with_base_url(
                             )
                             .await;
                         }
-                        if let Ok(conn) = state.db.separate_conn() {
-                            if let Err(err) = save_cached_thread_id(&conn, &card_id, &thread_id) {
-                                tracing::warn!(
-                                    "[escalation] failed to cache thread for {card_id}: {err}"
+                        // #587: Optimistic locking — re-read cached_thread_id
+                        // before saving. If another concurrent escalation already
+                        // created and saved a thread, use the existing one instead
+                        // of overwriting it with our newly created thread.
+                        let effective_thread_id = if let Ok(conn) = state.db.separate_conn() {
+                            if let Some(existing) = load_cached_thread_id(&conn, &card_id) {
+                                tracing::info!(
+                                    "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
+                                    existing
                                 );
+                                existing
+                            } else {
+                                if let Err(err) = save_cached_thread_id(&conn, &card_id, &thread_id)
+                                {
+                                    tracing::warn!(
+                                        "[escalation] failed to cache thread for {card_id}: {err}"
+                                    );
+                                }
+                                thread_id
                             }
-                        }
+                        } else {
+                            thread_id
+                        };
                         return (
                             StatusCode::OK,
                             Json(json!({
@@ -724,7 +1073,7 @@ async fn emit_escalation_with_base_url(
                                 "requested_mode": requested_mode,
                                 "resolved_mode": resolved_mode,
                                 "delivery": "user_thread_created",
-                                "thread_id": thread_id,
+                                "thread_id": effective_thread_id,
                                 "parent_channel_id": parent_channel_id,
                                 "owner_user_id": owner_user_id,
                                 "owner_source": owner_target.source,
@@ -744,6 +1093,7 @@ async fn emit_escalation_with_base_url(
             &announce_token,
             &settings,
             &summary,
+            context.as_ref(),
             &reasons,
             "owner routing unavailable",
             requested_mode,
@@ -758,6 +1108,7 @@ async fn emit_escalation_with_base_url(
         &announce_token,
         &settings,
         &summary,
+        context.as_ref(),
         &reasons,
         None,
         requested_mode,
@@ -772,6 +1123,7 @@ async fn deliver_pm_fallback(
     announce_token: &str,
     settings: &EscalationSettings,
     summary: &CardEscalationSummary,
+    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: impl Into<Option<&'static str>>,
     requested_mode: EscalationMode,
@@ -790,7 +1142,7 @@ async fn deliver_pm_fallback(
     };
     let pm_channel_id = pm_channel_id.to_string();
 
-    let message = build_pm_message(summary, reasons, fallback_note);
+    let message = build_pm_message(summary, context, reasons, fallback_note);
     match send_channel_message(client, base_url, announce_token, &pm_channel_id, &message).await {
         Ok(()) => (
             StatusCode::OK,
@@ -989,6 +1341,47 @@ mod tests {
         assert_eq!(resolve_mode_at(&settings, user_time), EscalationMode::User);
     }
 
+    #[test]
+    fn build_pm_message_drops_low_priority_context_sections_to_fit_discord_limit() {
+        let summary = CardEscalationSummary {
+            title: "Long card".to_string(),
+            issue_number: Some(587),
+            assigned_agent_id: Some("project-agentdesk".to_string()),
+            description: Some("desc".to_string()),
+            status: "review".to_string(),
+            review_status: Some("dilemma_pending".to_string()),
+            blocked_reason: Some("blocked".to_string()),
+            dispatch_count: 4,
+            last_agent_id: Some("project-agentdesk".to_string()),
+        };
+        let context = CardContext {
+            issue_summary: Some("이슈 요약 ".repeat(80)),
+            progress_summary: Some(
+                "review/dilemma_pending · 4회 디스패치 · 마지막 에이전트: project-agentdesk"
+                    .to_string(),
+            ),
+            recent_results: vec![
+                "review: finding ".repeat(40),
+                "implementation: notes ".repeat(40),
+            ],
+            blocked_reason: Some("blocked ".repeat(60)),
+        };
+
+        let message = build_pm_message(
+            &summary,
+            Some(&context),
+            &["manual escalation".to_string()],
+            Some("owner routing unavailable"),
+        );
+
+        assert!(message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT);
+        assert!(message.contains("📋 이슈:"));
+        assert!(
+            !message.contains("⛔ 기존 차단 사유:"),
+            "lowest-priority section should be dropped first"
+        );
+    }
+
     #[tokio::test]
     async fn put_and_get_escalation_settings_round_trip() {
         let db = test_db();
@@ -1102,6 +1495,30 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET description = ?1,
+                     blocked_reason = ?2
+                 WHERE id = 'card-1'",
+                rusqlite::params![
+                    "리뷰 루프가 반복되고 있습니다.\n브랜치 상태를 직접 확인해야 합니다.\n이전 결과를 요약합니다.",
+                    "rework 디스패치가 terminal card 에서 취소됨",
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at, completed_at
+                 ) VALUES (
+                    'dispatch-escalation-1', 'card-1', 'project-agentdesk', 'review', 'completed', 'Review finished', ?1,
+                    datetime('now', '-10 minutes'), datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+                 )",
+                rusqlite::params![serde_json::json!({
+                    "summary": "Codex review에서 P1 1건과 P2 2건이 남았습니다."
+                })
+                .to_string()],
+            )
+            .unwrap();
         }
 
         let mut config = crate::config::Config::default();
@@ -1129,6 +1546,11 @@ mod tests {
 
         assert_eq!(*mock.created_threads.lock().unwrap(), 1);
         assert_eq!(mock.sent_messages.lock().unwrap().len(), 2);
+        let first_message = &mock.sent_messages.lock().unwrap()[0];
+        assert!(first_message.contains("📋 이슈: 리뷰 루프가 반복되고 있습니다."));
+        assert!(first_message.contains("📊 진행: review/dilemma_pending"));
+        assert!(first_message.contains("📝 최근 결과:"));
+        assert!(first_message.contains("⛔ 기존 차단 사유:"));
 
         server.abort();
     }
@@ -1140,17 +1562,30 @@ mod tests {
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
         write_test_bot_tokens(runtime_root.path());
 
+        #[derive(Clone, Default)]
+        struct MockPm {
+            sent_messages: Arc<Mutex<Vec<String>>>,
+        }
+
         async fn send_message(
+            State(mock): State<MockPm>,
             Path(channel_id): Path<String>,
             Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
+            mock.sent_messages.lock().unwrap().push(format!(
+                "{channel_id}:{}",
+                body["content"].as_str().unwrap_or("")
+            ));
             (
                 StatusCode::OK,
                 Json(json!({"channel_id": channel_id, "content": body["content"]})),
             )
         }
 
-        let app = Router::new().route("/channels/{channel_id}/messages", post(send_message));
+        let mock = MockPm::default();
+        let app = Router::new()
+            .route("/channels/{channel_id}/messages", post(send_message))
+            .with_state(mock.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1172,6 +1607,30 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET description = ?1,
+                     blocked_reason = ?2
+                 WHERE id = 'card-2'",
+                rusqlite::params![
+                    "오너 라우팅이 불가한 카드입니다.\nPM 채널 폴백이 필요합니다.",
+                    "owner routing unavailable",
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at, completed_at
+                 ) VALUES (
+                    'dispatch-escalation-2', 'card-2', 'agent-2', 'implementation', 'failed', 'Implement failed', ?1,
+                    datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
+                 )",
+                rusqlite::params![serde_json::json!({
+                    "notes": "CI failure after implementation dispatch"
+                })
+                .to_string()],
+            )
+            .unwrap();
         }
 
         let mut config = crate::config::Config::default();
@@ -1191,6 +1650,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["delivery"], json!("pm_channel"));
         assert_eq!(body["fallback_note"], json!("owner routing unavailable"));
+        let sent = &mock.sent_messages.lock().unwrap()[0];
+        assert!(sent.contains("📋 이슈: 오너 라우팅이 불가한 카드입니다."));
+        assert!(sent.contains("📊 진행: review/dilemma_pending"));
+        assert!(sent.contains("📝 최근 결과:"));
+        assert!(sent.contains("⛔ 기존 차단 사유: owner routing unavailable"));
 
         server.abort();
     }

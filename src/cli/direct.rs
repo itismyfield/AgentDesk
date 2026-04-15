@@ -918,8 +918,15 @@ pub(crate) async fn cmd_auto_queue_add(
     run_id: Option<&str>,
     priority: Option<i64>,
     phase: Option<i64>,
+    thread_group: Option<i64>,
     agent_id: Option<&str>,
 ) -> Result<(), String> {
+    if let Some(thread_group) = thread_group {
+        if thread_group < 0 {
+            return Err("--thread-group must be >= 0".to_string());
+        }
+    }
+
     run_command(false, true, |state| async move {
         let card_id = resolve_card_id(&state.db, card_ref, None)?;
         let conn = state
@@ -927,11 +934,18 @@ pub(crate) async fn cmd_auto_queue_add(
             .separate_conn()
             .map_err(|e| format!("open db: {e}"))?;
 
-        let (repo_id, card_agent_id, card_status): (Option<String>, Option<String>, String) = conn
+        let (repo_id, card_agent_id, card_status, issue_number): (
+            Option<String>,
+            Option<String>,
+            String,
+            Option<i64>,
+        ) = conn
             .query_row(
-                "SELECT repo_id, assigned_agent_id, status FROM kanban_cards WHERE id = ?1",
+                "SELECT repo_id, assigned_agent_id, status, github_issue_number
+                 FROM kanban_cards
+                 WHERE id = ?1",
                 [&card_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|_| format!("card '{card_id}' not found"))?;
 
@@ -941,25 +955,67 @@ pub(crate) async fn cmd_auto_queue_add(
             .map(str::to_string)
             .or(card_agent_id)
             .unwrap_or_default();
-        let run_id = match resolve_auto_queue_run(
+        let existing_run_id = match resolve_auto_queue_run(
             &conn,
             run_id,
             repo_id.as_deref(),
             (!effective_agent.is_empty()).then_some(effective_agent.as_str()),
         ) {
-            Ok(existing) => existing,
-            Err(_) => {
-                let created_run_id = uuid::Uuid::new_v4().to_string();
-                conn.execute(
-                    "INSERT INTO auto_queue_runs (
-                         id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, thread_group_count
-                     )
-                     VALUES (?1, ?2, ?3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
-                    rusqlite::params![created_run_id, repo_id, effective_agent],
+            Ok(existing_run_id) => Some(existing_run_id),
+            Err(err) if run_id.is_some() => return Err(err),
+            Err(_) => None,
+        };
+
+        if let Some(existing_run_id) = existing_run_id {
+            let run_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM auto_queue_runs WHERE id = ?1",
+                    [&existing_run_id],
+                    |row| row.get(0),
                 )
-                .map_err(|e| format!("create auto-queue run: {e}"))?;
-                created_run_id
+                .ok();
+            if run_id.is_some() || matches!(run_status.as_deref(), Some("active")) {
+                let issue_number = issue_number.ok_or_else(|| {
+                    format!("card '{card_id}' has no linked GitHub issue number")
+                })?;
+                drop(conn);
+                let mut value = crate::cli::client::post_json_value(
+                    &format!("/api/auto-queue/runs/{existing_run_id}/entries"),
+                    json!({
+                        "issue_number": issue_number,
+                        "batch_phase": phase.unwrap_or(0),
+                        "thread_group": thread_group,
+                    }),
+                );
+                if let (Ok(created), Some(priority_rank)) = (value.as_ref(), priority) {
+                    if let Some(entry_id) = created
+                        .get("entry")
+                        .and_then(|entry| entry.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        value = crate::cli::client::patch_json_value(
+                            &format!("/api/auto-queue/entries/{entry_id}"),
+                            json!({
+                                "priority_rank": priority_rank,
+                            }),
+                        );
+                    }
+                }
+                return value;
             }
+        }
+
+        let run_id = {
+            let created_run_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (
+                     id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, thread_group_count
+                 )
+                 VALUES (?1, ?2, ?3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
+                rusqlite::params![created_run_id, repo_id, effective_agent],
+            )
+            .map_err(|e| format!("create auto-queue run: {e}"))?;
+            created_run_id
         };
 
         let already_queued: bool = conn
@@ -993,10 +1049,14 @@ pub(crate) async fn cmd_auto_queue_add(
             ));
         }
 
+        let effective_thread_group = thread_group.unwrap_or(0);
         let next_rank = priority.unwrap_or_else(|| {
             conn.query_row(
-                "SELECT COALESCE(MAX(priority_rank), -1) + 1 FROM auto_queue_entries WHERE run_id = ?1",
-                [&run_id],
+                "SELECT COALESCE(MAX(priority_rank), -1) + 1
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1
+                   AND COALESCE(thread_group, 0) = ?2",
+                rusqlite::params![&run_id, effective_thread_group],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0)
@@ -1004,15 +1064,16 @@ pub(crate) async fn cmd_auto_queue_add(
         let entry_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, priority_rank, batch_phase, reason
+                 id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, reason
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 entry_id,
                 run_id,
                 card_id,
                 effective_agent,
                 next_rank,
+                effective_thread_group,
                 phase.unwrap_or(0),
                 format!("manual CLI add from status {card_status}"),
             ],
@@ -1025,6 +1086,7 @@ pub(crate) async fn cmd_auto_queue_add(
             "entry_id": entry_id,
             "card_id": card_id,
             "priority_rank": next_rank,
+            "thread_group": effective_thread_group,
             "batch_phase": phase.unwrap_or(0),
         }))
     })

@@ -68,8 +68,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
                 // #228: Enforce review_verdict_pass gate on transitions to terminal states.
                 // Only this specific gate is checked — other gates (has_active_dispatch,
-                // review_rework) and force_only transitions are used legitimately by
-                // policies and must not be blocked here. PMD bypasses via force-transition API.
+                // review_rework) are used legitimately by policies and must not be blocked here.
                 if pipeline.is_terminal(&new_status)
                     && !force
                     && let Some(t) = pipeline.find_transition(&old_status, &new_status)

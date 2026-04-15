@@ -2155,7 +2155,7 @@ fn find_active_review_dispatch_id(conn: &rusqlite::Connection, card_id: &str) ->
 
 /// POST /api/kanban-cards/:id/rereview
 ///
-/// PMD-only recovery endpoint. Forces a card back through counter-model review
+/// Recovery endpoint. Forces a card back through counter-model review
 /// using the best available execution target for that card's implementation.
 pub async fn rereview_card(
     State(state): State<AppState>,
@@ -2177,50 +2177,6 @@ pub async fn rereview_card(
                 );
             }
         }
-    }
-
-    let caller_channel = headers
-        .get("x-channel-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let pmd_channel: String = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default()
-    };
-
-    if pmd_channel.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "kanban_manager_channel_id not configured"})),
-        );
-    }
-
-    if caller_channel != pmd_channel {
-        tracing::warn!(
-            "[kanban] rereview rejected: X-Channel-Id '{}' != PMD channel '{}'",
-            caller_channel,
-            pmd_channel
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                json!({"error": "rereview requires X-Channel-Id matching kanban_manager_channel_id"}),
-            ),
-        );
     }
 
     let reason = body.reason.as_deref().unwrap_or("manual rereview");
@@ -2516,7 +2472,7 @@ pub struct BatchRereviewBody {
 
 /// POST /api/re-review
 ///
-/// PMD-only batch endpoint. Accepts a list of GitHub issue numbers,
+/// Batch endpoint. Accepts a list of GitHub issue numbers,
 /// looks up each card, and calls the rereview logic for each.
 /// Per-item error handling: one failure does not stop others.
 pub async fn batch_rereview(
@@ -2539,46 +2495,6 @@ pub async fn batch_rereview(
                 );
             }
         }
-    }
-
-    let caller_channel = headers
-        .get("x-channel-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let pmd_channel: String = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default()
-    };
-
-    if pmd_channel.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "kanban_manager_channel_id not configured"})),
-        );
-    }
-
-    if caller_channel != pmd_channel {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                json!({"error": "batch rereview requires X-Channel-Id matching kanban_manager_channel_id"}),
-            ),
-        );
     }
 
     let reason = body.reason.clone();
@@ -2657,7 +2573,7 @@ pub struct BatchTransitionBody {
 ///
 /// PMD-only endpoint. Reopens a done card by transitioning to in_progress,
 /// clearing completed_at, and optionally resetting recovery fields.
-/// Same two-factor auth as force-transition.
+/// Same explicit Bearer auth as force-transition.
 pub async fn reopen_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2666,7 +2582,7 @@ pub async fn reopen_card(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let reset_full = body.reset_full.unwrap_or(false);
 
-    // ── Auth: same two-factor check as force-transition ──
+    // ── Auth: same explicit Bearer token check as force-transition ──
     let config = crate::config::load_graceful();
     if let Some(expected_token) = config.server.auth_token.as_deref() {
         if !expected_token.is_empty() {
@@ -2681,50 +2597,6 @@ pub async fn reopen_card(
                 );
             }
         }
-    }
-
-    let caller_channel = headers
-        .get("x-channel-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let pmd_channel: String = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default()
-    };
-
-    if pmd_channel.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "kanban_manager_channel_id not configured"})),
-        );
-    }
-
-    if caller_channel != pmd_channel {
-        tracing::warn!(
-            "[kanban] reopen rejected: X-Channel-Id '{}' != PMD channel '{}'",
-            caller_channel,
-            pmd_channel
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                json!({"error": "reopen requires X-Channel-Id matching kanban_manager_channel_id"}),
-            ),
-        );
     }
 
     // ── Pre-check: card must be in done state ──
@@ -2991,45 +2863,6 @@ pub async fn batch_transition(
                 );
             }
         }
-    }
-
-    let caller_channel = headers
-        .get("x-channel-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let pmd_channel: String = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default()
-    };
-
-    if pmd_channel.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "kanban_manager_channel_id not configured"})),
-        );
-    }
-
-    if caller_channel != pmd_channel {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                json!({"error": "batch-transition requires X-Channel-Id matching kanban_manager_channel_id"}),
-            ),
-        );
     }
 
     let has_issue_numbers = body
@@ -3331,9 +3164,8 @@ fn clear_reopen_preflight_cache_on_conn(
 
 /// POST /api/kanban-cards/:id/force-transition
 ///
-/// PMD-only endpoint. Bypasses dispatch validation.
-/// Two-factor auth: Bearer token (no same-origin bypass) + X-Channel-Id must match
-/// the configured `kanban_manager_channel_id`.
+/// Administrative endpoint. Bypasses dispatch validation.
+/// Requires an explicit Bearer token (no same-origin bypass).
 pub async fn force_transition(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3355,51 +3187,6 @@ pub async fn force_transition(
                 );
             }
         }
-    }
-
-    // 2. Verify caller is the kanban manager (PMD) via channel identity
-    let caller_channel = headers
-        .get("x-channel-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let pmd_channel: String = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default()
-    };
-
-    if pmd_channel.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "kanban_manager_channel_id not configured"})),
-        );
-    }
-
-    if caller_channel != pmd_channel {
-        tracing::warn!(
-            "[kanban] force-transition rejected: X-Channel-Id '{}' != PMD channel '{}'",
-            caller_channel,
-            pmd_channel
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                json!({"error": "force-transition requires X-Channel-Id matching kanban_manager_channel_id"}),
-            ),
-        );
     }
 
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);

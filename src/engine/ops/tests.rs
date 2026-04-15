@@ -1004,6 +1004,383 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
 }
 
 #[test]
+fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-run-agent', 'AQ Run Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'aq-run-card', 'AQ Run Card', 'ready', 'medium', 'aq-run-agent',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('aq-run-status', 'repo-1', 'aq-run-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'aq-run-entry', 'aq-run-status', 'aq-run-card',
+                'aq-run-agent', 'done', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group
+            ) VALUES (
+                'aq-run-agent', 0, 'aq-run-status', 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let raw: String = ctx
+            .eval(
+                r#"
+                JSON.stringify((function() {
+                    var paused = agentdesk.autoQueue.pauseRun("aq-run-status", "test_pause");
+                    var slotAfterPauseRows = agentdesk.db.query(
+                        "SELECT assigned_run_id FROM auto_queue_slots " +
+                        "WHERE agent_id = 'aq-run-agent' AND slot_index = 0"
+                    );
+                    var resumed = agentdesk.autoQueue.resumeRun("aq-run-status", "test_resume");
+                    var slotAfterResumeRows = agentdesk.db.query(
+                        "SELECT assigned_run_id FROM auto_queue_slots " +
+                        "WHERE agent_id = 'aq-run-agent' AND slot_index = 0"
+                    );
+                    var completed = agentdesk.autoQueue.completeRun(
+                        "aq-run-status",
+                        "test_complete",
+                        { releaseSlots: true }
+                    );
+                    return {
+                        paused: paused.changed,
+                        slotAfterPause: slotAfterPauseRows.length > 0
+                            ? slotAfterPauseRows[0].assigned_run_id
+                            : "__missing__",
+                        resumed: resumed.changed,
+                        slotAfterResume: slotAfterResumeRows.length > 0
+                            ? slotAfterResumeRows[0].assigned_run_id
+                            : "__missing__",
+                        completed: completed.changed
+                    };
+                })())
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["paused"], true);
+        assert!(
+            parsed["slotAfterPause"].is_null(),
+            "pauseRun must release the slot immediately"
+        );
+        assert_eq!(parsed["resumed"], true);
+        assert!(
+            parsed["slotAfterResume"].is_null(),
+            "resumeRun must not silently keep the old slot binding"
+        );
+        assert_eq!(parsed["completed"], true);
+    });
+
+    let conn = db.separate_conn().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'aq-run-status'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let slot_run: Option<String> = conn
+        .query_row(
+            "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'aq-run-agent' AND slot_index = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let message_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(run_status, "completed");
+    assert!(slot_run.is_none());
+    assert_eq!(message_count, 1);
+}
+
+#[test]
+fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-consult-agent', 'AQ Consult Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, metadata, created_at, updated_at
+            ) VALUES (
+                'aq-consult-card', 'AQ Consult Card', 'requested', 'medium', 'aq-consult-agent',
+                ?1, datetime('now'), datetime('now')
+            )",
+            [serde_json::json!({
+                "keep": "yes",
+                "preflight_status": "consult_required"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('aq-consult-run', 'repo-1', 'aq-consult-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'aq-consult-entry', 'aq-consult-run', 'aq-consult-card',
+                'aq-consult-agent', 'pending', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('dispatch-consult-1', 'aq-consult-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let wrapper_type: String = ctx
+            .eval(r#"typeof agentdesk.autoQueue.recordConsultationDispatch"#)
+            .unwrap();
+        assert_eq!(wrapper_type, "function");
+        let raw: String = ctx
+            .eval(
+                r#"
+                (function() {
+                    return agentdesk.autoQueue.__recordConsultationDispatchRaw(
+                        "aq-consult-entry",
+                        "aq-consult-card",
+                        "dispatch-consult-1",
+                        "test_consultation_bridge",
+                        JSON.stringify({
+                            keep: "yes",
+                            preflight_status: "consult_required"
+                        })
+                    );
+                })()
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            parsed.get("error").is_none(),
+            "raw consultation bridge error: {raw}"
+        );
+        assert_eq!(parsed["changed"], true);
+        assert_eq!(parsed["metadata"]["keep"], "yes");
+        assert_eq!(parsed["metadata"]["consultation_status"], "pending");
+        assert_eq!(
+            parsed["metadata"]["consultation_dispatch_id"],
+            "dispatch-consult-1"
+        );
+    });
+
+    let conn = db.separate_conn().unwrap();
+    let metadata_raw: String = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = 'aq-consult-card'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_raw).unwrap();
+    let (entry_status, dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'aq-consult-entry'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(metadata["keep"], "yes");
+    assert_eq!(metadata["preflight_status"], "consult_required");
+    assert_eq!(metadata["consultation_status"], "pending");
+    assert_eq!(metadata["consultation_dispatch_id"], "dispatch-consult-1");
+    assert_eq!(entry_status, "dispatched");
+    assert_eq!(dispatch_id.as_deref(), Some("dispatch-consult-1"));
+}
+
+#[test]
+fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-phase-agent', 'AQ Phase Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'aq-phase-card', 'AQ Phase Card', 'ready', 'medium', 'aq-phase-agent',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('aq-phase-run', 'repo-1', 'aq-phase-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-valid-1', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-valid-2', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
+             VALUES ('aq-phase-stale', 'aq-phase-agent', 'dispatched', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict
+            ) VALUES (
+                'aq-phase-run', 2, 'pending', 'aq-phase-stale', 'phase_gate_passed'
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let raw: String = ctx
+            .eval(
+                r#"
+                JSON.stringify((function() {
+                    var saved = agentdesk.autoQueue.savePhaseGateState("aq-phase-run", 2, {
+                        status: "failed",
+                        verdict: "deploy_failed",
+                        dispatch_ids: [
+                            "aq-phase-valid-1",
+                            "aq-phase-valid-1",
+                            "aq-phase-missing",
+                            "aq-phase-valid-2"
+                        ],
+                        pass_verdict: "phase_gate_passed",
+                        next_phase: 3,
+                        final_phase: true,
+                        anchor_card_id: "aq-phase-card",
+                        failure_reason: "deploy-dev failed",
+                        created_at: "2026-04-15 00:00:00"
+                    });
+                    var rows = agentdesk.db.query(
+                        "SELECT dispatch_id, status, verdict, next_phase, final_phase, anchor_card_id, failure_reason " +
+                        "FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ? ORDER BY COALESCE(dispatch_id, '')",
+                        ["aq-phase-run", 2]
+                    );
+                    var cleared = agentdesk.autoQueue.clearPhaseGateState("aq-phase-run", 2);
+                    var remaining = agentdesk.db.query(
+                        "SELECT COUNT(*) AS cnt FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
+                        ["aq-phase-run", 2]
+                    )[0].cnt;
+                    return {
+                        saved: saved,
+                        rows: rows,
+                        cleared: cleared.changed,
+                        remaining: remaining
+                    };
+                })())
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["saved"]["dispatch_ids"],
+            serde_json::json!(["aq-phase-valid-1", "aq-phase-valid-2"])
+        );
+        assert_eq!(parsed["saved"]["removed_stale_rows"], 1);
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["rows"][0]["dispatch_id"], "aq-phase-valid-1");
+        assert_eq!(parsed["rows"][1]["dispatch_id"], "aq-phase-valid-2");
+        assert_eq!(parsed["rows"][0]["status"], "failed");
+        assert_eq!(parsed["rows"][0]["verdict"], "deploy_failed");
+        assert_eq!(parsed["rows"][0]["next_phase"], 3);
+        assert_eq!(parsed["rows"][0]["final_phase"], 1);
+        assert_eq!(parsed["rows"][0]["anchor_card_id"], "aq-phase-card");
+        assert_eq!(parsed["rows"][0]["failure_reason"], "deploy-dev failed");
+        assert_eq!(parsed["cleared"], true);
+        assert_eq!(parsed["remaining"], 0);
+    });
+}
+
+#[test]
 fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
     crate::pipeline::ensure_loaded();
 

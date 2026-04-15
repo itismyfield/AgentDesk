@@ -30,7 +30,6 @@ import {
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, {
   getProviderMeta,
-  providerFlowCaption,
 } from "./MeetingProviderFlow";
 import {
   formatMeetingReferenceHash,
@@ -170,6 +169,18 @@ function parseStoredFixedParticipants(): string[] {
   } catch {
     return [];
   }
+}
+
+function getDefaultReviewerProvider(
+  primaryProvider: string,
+  ownerProvider?: string | null,
+): string {
+  return (
+    MEETING_PROVIDERS.find(
+      (provider) =>
+        provider !== primaryProvider && provider !== (ownerProvider ?? null),
+    ) ?? ""
+  );
 }
 
 export function filterMeetingExpertsByQuery(
@@ -339,11 +350,28 @@ export default function MeetingMinutesView({
   const [showStartForm, setShowStartForm] = useState(initialShowStartForm);
   const [agenda, setAgenda] = useState("");
   const [channelId, setChannelId] = useState(
-    () => initialChannelId ?? (localStorage.getItem(STORAGE_KEY) || ""),
+    () =>
+      initialChannelId ??
+      (typeof localStorage !== "undefined"
+        ? localStorage.getItem(STORAGE_KEY)
+        : null) ??
+      "",
   );
   const [showChannelEdit, setShowChannelEdit] = useState(false);
   const [primaryProvider, setPrimaryProvider] = useState<string>("claude");
-  const [reviewerProvider, setReviewerProvider] = useState<string>("");
+  const [reviewerProvider, setReviewerProvider] = useState<string>(() => {
+    const storedChannelId =
+      initialChannelId ??
+      (typeof localStorage !== "undefined"
+        ? localStorage.getItem(STORAGE_KEY)
+        : null) ??
+      "";
+    const seededChannel =
+      initialMeetingChannels.find(
+        (channel) => channel.channel_id === storedChannelId,
+      ) ?? null;
+    return getDefaultReviewerProvider("claude", seededChannel?.owner_provider);
+  });
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [meetingChannels, setMeetingChannels] = useState<
@@ -864,16 +892,24 @@ export default function MeetingMinutesView({
 
   return (
     <div
-      className="mx-auto w-full max-w-4xl min-w-0 space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className={
+        embedded
+          ? "w-full min-w-0 space-y-5 overflow-x-hidden"
+          : "mx-auto w-full max-w-4xl min-w-0 space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
+      }
+      style={embedded ? undefined : { paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <SurfaceSection
         eyebrow={t({ ko: "Round Table", en: "Round Table" })}
         title={t({ ko: "회의 기록", en: "Meeting Records" })}
-        description={t({
-          ko: "라운드 테이블 상세, 교차검증 흐름, 후속 일감 상태를 한 화면에서 관리합니다.",
-          en: "Manage round-table detail, cross-review flow, and follow-up issue state in one place.",
-        })}
+        description={
+          embedded
+            ? undefined
+            : t({
+                ko: "라운드 테이블 상세, 교차검증 흐름, 후속 일감 상태를 한 화면에서 관리합니다.",
+                en: "Manage round-table detail, cross-review flow, and follow-up issue state in one place.",
+              })
+        }
         badge={t({ ko: `${meetings.length}개 기록`, en: `${meetings.length} records` })}
         actions={(
           <SurfaceActionButton
@@ -907,22 +943,24 @@ export default function MeetingMinutesView({
           />
         </div>
 
-        <SurfaceNotice
-          className="mt-4"
-          tone={unresolvedIssueCount > 0 ? "warn" : "info"}
-        >
-          <div className="text-sm leading-6">
-            {unresolvedIssueCount > 0
-              ? t({
-                  ko: `생성 대기 또는 실패한 후속 일감 ${unresolvedIssueCount}건을 이 화면에서 바로 정리할 수 있습니다.`,
-                  en: `You can resolve ${unresolvedIssueCount} pending or failed follow-up issues directly from this screen.`,
-                })
-              : t({
-                  ko: "현재 미해결 후속 일감이 없습니다. 새 라운드 테이블을 시작하거나 최근 회의 흐름을 검토하세요.",
-                  en: "There are no unresolved follow-up issues. Start a new round table or review recent meeting flow.",
-                })}
-          </div>
-        </SurfaceNotice>
+        {!embedded && (
+          <SurfaceNotice
+            className="mt-4"
+            tone={unresolvedIssueCount > 0 ? "warn" : "info"}
+          >
+            <div className="text-sm leading-6">
+              {unresolvedIssueCount > 0
+                ? t({
+                    ko: `생성 대기 또는 실패한 후속 일감 ${unresolvedIssueCount}건을 이 화면에서 바로 정리할 수 있습니다.`,
+                    en: `You can resolve ${unresolvedIssueCount} pending or failed follow-up issues directly from this screen.`,
+                  })
+                : t({
+                    ko: "현재 미해결 후속 일감이 없습니다. 새 라운드 테이블을 시작하거나 최근 회의 흐름을 검토하세요.",
+                    en: "There are no unresolved follow-up issues. Start a new round table or review recent meeting flow.",
+                  })}
+            </div>
+          </SurfaceNotice>
+        )}
       </SurfaceSection>
 
       {/* Start meeting form */}
@@ -983,12 +1021,12 @@ export default function MeetingMinutesView({
                 <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
                   {t({ ko: "안건", en: "Agenda" })}
                 </label>
-                <input
-                  type="text"
+                <textarea
                   value={agenda}
                   onChange={(e) => setAgenda(e.target.value)}
                   placeholder={t({ ko: "회의 안건을 입력하세요", en: "Enter meeting agenda" })}
-                  className="flex-1 px-3 py-1.5 rounded-lg text-sm"
+                  rows={3}
+                  className="flex-1 resize-y px-3 py-2 rounded-lg text-sm"
                   style={inputStyle}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
                 />
@@ -996,25 +1034,91 @@ export default function MeetingMinutesView({
             </SurfaceCard>
 
             <SurfaceCard className="rounded-2xl p-4" style={{ background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
-              <div className="flex flex-col gap-3">
-                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-                  <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "진행 모델", en: "Model" })}
-                  </label>
-                  <select
-                    value={primaryProvider}
-                    onChange={(e) => setPrimaryProvider(e.target.value)}
-                    className="px-3 py-1.5 rounded-lg text-xs"
-                    style={inputStyle}
-                  >
-                    {MEETING_PROVIDERS.map((p) => (
-                      <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
-                    ))}
-                  </select>
+              <div className="flex flex-col gap-4">
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                      {t({ ko: "진행 프로바이더", en: "Primary Provider" })}
+                    </label>
+                    <select
+                      value={primaryProvider}
+                      onChange={(e) => setPrimaryProvider(e.target.value)}
+                      className="px-3 py-2 rounded-lg text-xs"
+                      style={inputStyle}
+                    >
+                      {MEETING_PROVIDERS.map((p) => (
+                        <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                      {t({ ko: "리뷰 프로바이더", en: "Reviewer Provider" })}
+                    </label>
+                    <select
+                      value={reviewerProvider}
+                      onChange={(e) => setReviewerProvider(e.target.value)}
+                      className="px-3 py-2 rounded-lg text-xs"
+                      style={inputStyle}
+                    >
+                      {reviewerOptions.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <SurfaceNotice tone="info" compact>
                   {t({ ko: "반대 모델이 자동 교차검증", en: "Counter model auto cross-review" })}
                 </SurfaceNotice>
+                <div className="flex flex-col gap-3 rounded-2xl border p-3" style={{ borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)", background: "color-mix(in srgb, var(--th-bg-surface) 70%, transparent)" }}>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                      {t({ ko: "고정 전문 에이전트", en: "Fixed Expert Agents" })}
+                    </label>
+                    <input
+                      type="text"
+                      value={expertQuery}
+                      onChange={(event) => setExpertQuery(event.target.value)}
+                      placeholder={t({ ko: "전문 에이전트 검색 후 여러 명 선택", en: "Search experts and select multiple" })}
+                      className="px-3 py-2 rounded-lg text-xs"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {filteredExperts.map((expert) => {
+                      const selected = fixedParticipants.includes(expert.role_id);
+                      return (
+                        <button
+                          key={expert.role_id}
+                          type="button"
+                          onClick={() => toggleFixedParticipant(expert)}
+                          className="rounded-full border px-3 py-1.5 text-left text-xs transition-colors"
+                          style={{
+                            borderColor: selected
+                              ? "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)"
+                              : "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                            background: selected
+                              ? "color-mix(in srgb, var(--th-accent-primary-soft) 72%, transparent)"
+                              : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                            color: "var(--th-text)",
+                          }}
+                        >
+                          <span className="font-semibold">{expert.display_name}</span>
+                          <span className="ml-1.5" style={{ color: "var(--th-text-muted)" }}>
+                            #{expert.role_id}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {filteredExperts.length === 0 && (
+                      <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        {t({ ko: "선택 가능한 전문 에이전트가 없습니다", en: "No available experts" })}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </SurfaceCard>
 
@@ -1252,11 +1356,6 @@ export default function MeetingMinutesView({
                   <div className="min-w-0">
                     <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                       <div className="text-xs font-semibold" style={{ color: "var(--th-text-primary)" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
-                      {(m.primary_provider || m.reviewer_provider) && (
-                        <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                          {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
-                        </div>
-                      )}
                     </div>
                     <div className="text-sm" style={{ color: "var(--th-text)" }}>
                       <MarkdownContent content={m.summary} />

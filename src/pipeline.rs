@@ -207,7 +207,6 @@ pub struct TransitionConfig {
 pub enum TransitionType {
     Free,
     Gated,
-    ForceOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,9 +401,7 @@ impl PipelineConfig {
                     && self.transitions.iter().any(|t| {
                         t.from == s.id && t.transition_type == TransitionType::Gated
                     })
-                    // Must not have gated inbound transitions (free and force_only are ok).
-                    // force_only inbound recovery transitions don't make the state
-                    // "dispatch-gated" — those are admin/manual-intervention paths.
+                    // Must not have gated inbound transitions (free is ok).
                     && !self.transitions.iter().any(|t| {
                         t.to == s.id && t.transition_type == TransitionType::Gated
                     })
@@ -572,16 +569,6 @@ impl PipelineConfig {
                 && t.transition_type == TransitionType::Gated
                 && dispatchable.contains(&t.from.as_str())
         })
-    }
-
-    /// Check if a state is a force-only target (only reachable via force=true).
-    pub fn is_force_only_state(&self, state: &str) -> bool {
-        let has_inbound = self.transitions.iter().any(|t| t.to == state);
-        has_inbound
-            && self
-                .transitions
-                .iter()
-                .all(|t| t.to != state || t.transition_type == TransitionType::ForceOnly)
     }
 
     /// Validate internal consistency.

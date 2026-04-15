@@ -391,8 +391,7 @@ var timeouts = {
       var rInitial = agentdesk.pipeline.kickoffState(rCfg);
       var rInProgress = agentdesk.pipeline.nextGatedTarget(rInitial, rCfg);
       var rReview = agentdesk.pipeline.nextGatedTarget(rInProgress, rCfg);
-      var rForce = agentdesk.pipeline.forceOnlyTargets(rInProgress, rCfg);
-      var rPending = rForce[0];
+      var rPending = rInitial;
       if (agentdesk.pipeline.isTerminal(card.status, rCfg)) continue;
       if (di.dispatch_type === "review" || di.dispatch_type === "review-decision") continue;
       if (di.dispatch_type === "rework") {
@@ -749,7 +748,6 @@ var timeouts = {
     var jCfg = agentdesk.pipeline.getConfig();
     var jInitial = agentdesk.pipeline.kickoffState(jCfg);
     var jInProgress = agentdesk.pipeline.nextGatedTarget(jInitial, jCfg);
-    var jBlocked = agentdesk.pipeline.forceOnlyTargets(jInProgress, jCfg)[0];
     var failedForRetry = agentdesk.db.query(
       "SELECT td.id, td.kanban_card_id, td.to_agent_id, td.dispatch_type, td.title, " +
       "COALESCE(td.retry_count, 0) as retry_count, kc.github_issue_url, kc.github_issue_number " +
@@ -816,8 +814,6 @@ var timeouts = {
     var iCfg = agentdesk.pipeline.getConfig();
     var iInitial = agentdesk.pipeline.kickoffState(iCfg);
     var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
-    var iForce = agentdesk.pipeline.forceOnlyTargets(iInProgress, iCfg);
-    var iPending = iForce[0];
 
     // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
     var freshSessions = agentdesk.db.query(

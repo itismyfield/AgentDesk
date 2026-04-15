@@ -1537,7 +1537,6 @@ export default function PipelineVisualEditor({
                       >
                         <option value="free">free</option>
                         <option value="gated">gated</option>
-                        <option value="force_only">force_only</option>
                       </select>
                     </div>
                     <div>

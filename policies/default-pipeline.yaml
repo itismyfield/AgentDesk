@@ -27,7 +27,6 @@ states:
 # type:
 #   free          — no dispatch required, manual transition
 #   gated         — requires all listed gates to pass
-#   force_only    — only allowed with force=true (policy/timeout/PMD)
 #
 # Gates are evaluated in order; first failure stops the chain.
 
@@ -69,27 +68,6 @@ transitions:
     type: gated
     gates: [review_rework]
 
-  # Force-only transitions (timeouts, PMD overrides)
-  # Revert to backlog (force-only, for cancellation/requeue)
-  - from: requested
-    to: backlog
-    type: force_only
-
-  - from: requested
-    to: done
-    type: force_only
-
-  - from: in_progress
-    to: requested
-    type: force_only
-
-  - from: in_progress
-    to: done
-    type: force_only
-
-  - from: review
-    to: requested
-    type: force_only
 
 # ── Gates ─────────────────────────────────────────────────────────
 #

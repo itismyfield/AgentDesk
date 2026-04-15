@@ -2855,7 +2855,7 @@ async fn kanban_terminal_status_fires_hook() {
             ).unwrap();
     }
 
-    // Use force transition: requested → done (force_only in YAML pipeline)
+    // Use force transition: requested → done (no rule, force bypasses)
     let result =
         crate::kanban::transition_status_with_opts(&db, &engine, "c1", "done", "pmd", true);
     assert!(
@@ -3714,29 +3714,6 @@ fn drain_pending_transitions(db: &Db, engine: &PolicyEngine) {
     }
 }
 
-#[tokio::test]
-async fn force_transition_rejects_without_channel_header() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-ft1", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/card-ft1/force-transition")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"status":"ready"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
 #[test]
 fn on_tick5min_stalled_timeout_uses_latest_activity_timestamp() {
     crate::pipeline::ensure_loaded();
@@ -4204,56 +4181,6 @@ async fn stalled_cards_and_stats_use_latest_activity_timestamp() {
         serde_json::json!(1),
         "stats stale_in_progress count must match latest-activity stalled detection"
     );
-}
-
-#[tokio::test]
-async fn force_transition_rejects_wrong_channel() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-ft2", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/card-ft2/force-transition")
-                .header("content-type", "application/json")
-                .header("x-channel-id", "wrong-channel")
-                .body(Body::from(r#"{"status":"ready"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn batch_transition_rejects_wrong_channel() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-bt-auth", "backlog");
-    set_pmd_channel(&db, "pmd-chan-123");
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-cards/batch-transition")
-                .header("content-type", "application/json")
-                .header("x-channel-id", "wrong-channel")
-                .body(Body::from(
-                    r#"{"card_ids":["card-bt-auth"],"status":"ready"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -6230,7 +6157,7 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
-async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
+async fn auto_queue_dispatch_rejects_when_live_run_exists_without_force() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -6305,14 +6232,20 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["run"]["id"], "run-dispatch-active");
-    assert_eq!(json["run"]["status"], "active");
-    assert_eq!(json["activated"], false);
+    assert_eq!(json["existing_run_id"], "run-dispatch-active");
+    assert_eq!(json["existing_run_status"], "active");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("run_id=run-dispatch-active"),
+        "conflict response must include the existing run id: {json}"
+    );
 
     let conn = db.lock().unwrap();
     let total_runs: i64 = conn
@@ -6325,10 +6258,10 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(total_runs, 1, "dispatch must reuse the existing active run");
+    assert_eq!(total_runs, 1, "dispatch conflict must not create a new run");
     assert_eq!(
         active_runs, 1,
-        "dispatch must not create a second active run"
+        "dispatch conflict must leave the original live run untouched"
     );
 
     let backlog_status: String = conn
@@ -6338,7 +6271,10 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(backlog_status, "ready");
+    assert_eq!(
+        backlog_status, "backlog",
+        "409 conflict must happen before backlog auto-promotion"
+    );
 
     let entry_layout: Vec<(i64, i64, i64, i64)> = {
         let mut stmt = conn
@@ -6364,7 +6300,8 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
     };
     assert_eq!(
         entry_layout,
-        vec![(4901, 0, 0, 0), (4902, 7, 0, 3), (4903, 0, 1, 1)]
+        vec![(4901, 0, 0, 0)],
+        "dispatch conflict must not enqueue new entries into the existing run"
     );
 
     let run_meta: (i64, i64) = conn
@@ -6376,7 +6313,354 @@ async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    assert_eq!(run_meta, (1, 1));
+}
+
+#[tokio::test]
+async fn auto_queue_dispatch_force_cancels_live_run_and_creates_new_run() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-force-existing",
+        4911,
+        "ready",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-force-backlog",
+        4912,
+        "backlog",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at
+            ) VALUES (
+                'run-dispatch-force-old', 'test-repo', 'project-agentdesk', 'active', 1, 1, datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-force-existing', 'run-dispatch-force-old', 'card-dispatch-force-existing', 'project-agentdesk', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [
+                            {"issues": [4912], "thread_group": 2, "batch_phase": 3}
+                        ],
+                        "activate": false,
+                        "force": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_run_id = json["run"]["id"].as_str().unwrap_or("");
+    assert!(
+        !new_run_id.is_empty() && new_run_id != "run-dispatch-force-old",
+        "force dispatch must create a replacement run: {json}"
+    );
+    assert_eq!(json["run"]["status"], "generated");
+
+    let conn = db.lock().unwrap();
+    let old_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-dispatch-force-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_run_status, "cancelled");
+
+    let old_entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-dispatch-force-existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_entry_status, "skipped");
+
+    let new_entry_layout: Vec<(i64, i64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, e.thread_group, COALESCE(e.batch_phase, 0)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = ?1
+                 ORDER BY e.priority_rank ASC, kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([new_run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(new_entry_layout, vec![(4912, 2, 3)]);
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-dispatch-force-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog_status, "ready");
+}
+
+#[tokio::test]
+async fn auto_queue_add_run_entry_creates_pending_entry_for_active_run() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-run-entry-existing",
+        4921,
+        "ready",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-run-entry-new",
+        4922,
+        "ready",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at
+            ) VALUES (
+                'run-add-entry-active', 'test-repo', 'project-agentdesk', 'active', 1, 1, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+            ) VALUES (
+                'entry-run-entry-existing', 'run-add-entry-active', 'card-run-entry-existing',
+                'project-agentdesk', 'pending', 0, 0, 1
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-add-entry-active/entries")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "issue_number": 4922,
+                        "batch_phase": 4,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["run_id"], "run-add-entry-active");
+    assert_eq!(json["thread_group"], 1);
+    assert_eq!(json["priority_rank"], 0);
+
+    let conn = db.lock().unwrap();
+    let inserted: (i64, i64, i64, String) = conn
+        .query_row(
+            "SELECT priority_rank, thread_group, batch_phase, status
+             FROM auto_queue_entries
+             WHERE run_id = 'run-add-entry-active'
+               AND kanban_card_id = 'card-run-entry-new'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(inserted, (0, 1, 4, "pending".to_string()));
+
+    let run_meta: (i64, i64) = conn
+        .query_row(
+            "SELECT thread_group_count, max_concurrent_threads
+             FROM auto_queue_runs
+             WHERE id = 'run-add-entry-active'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(run_meta, (2, 2));
+}
+
+#[tokio::test]
+async fn auto_queue_add_run_entry_rejects_non_active_runs() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-run-entry-cancelled",
+        4923,
+        "ready",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-add-entry-cancelled', 'test-repo', 'project-agentdesk', 'cancelled', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-add-entry-cancelled/entries")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "issue_number": 4923,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("status=cancelled"),
+        "inactive runs must be rejected with status details: {json}"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_add_run_entry_rejects_non_ready_cards() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-run-entry-backlog",
+        4924,
+        "backlog",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-add-entry-ready-only', 'test-repo', 'project-agentdesk', 'active', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-add-entry-ready-only/entries")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "issue_number": 4924,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("must be in ready status"),
+        "run-entry add must reject non-ready cards: {json}"
+    );
 }
 
 #[tokio::test]
@@ -6458,6 +6742,452 @@ async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
         )
         .unwrap();
     assert_eq!(run_meta, (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_update_entry_restores_skipped_entry_to_pending() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-update");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-update-restore", 1699, "ready", "agent-update");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-update-entry-restore', 'test-repo', 'agent-update', 'cancelled', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank,
+                thread_group, dispatch_id, slot_index, completed_at
+            ) VALUES (
+                'entry-update-restore', 'run-update-entry-restore', 'card-update-restore',
+                'agent-update', 'skipped', 5, 0, 'dispatch-old', 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/auto-queue/entries/entry-update-restore")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "pending",
+                        "thread_group": 2,
+                        "priority_rank": 0
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["entry"]["status"], "pending");
+    assert_eq!(json["entry"]["thread_group"], 2);
+    assert_eq!(json["entry"]["priority_rank"], 0);
+
+    let conn = db.lock().unwrap();
+    let (status, dispatch_id, slot_index, completed_at, thread_group, priority_rank): (
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        i64,
+        i64,
+    ) = conn
+        .query_row(
+            "SELECT status, dispatch_id, slot_index, completed_at, thread_group, priority_rank
+             FROM auto_queue_entries
+             WHERE id = 'entry-update-restore'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+    assert!(dispatch_id.is_none());
+    assert!(slot_index.is_none());
+    assert!(completed_at.is_none());
+    assert_eq!(thread_group, 2);
+    assert_eq!(priority_rank, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_rebind_slot_assigns_run_and_updates_dispatched_entry_slot() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-rebind");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-rebind", 1700, "in_progress", "agent-rebind");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-rebind', 'test-repo', 'agent-rebind', 'active', 2, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, thread_group
+            ) VALUES (
+                'entry-rebind', 'run-rebind', 'card-rebind', 'agent-rebind',
+                'dispatched', 'dispatch-rebind', 3
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/slots/agent-rebind/1/rebind")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-rebind",
+                        "thread_group": 3
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["updated_entries"], 1);
+
+    let conn = db.lock().unwrap();
+    let slot_binding: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-rebind'
+               AND slot_index = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot_binding.0.as_deref(), Some("run-rebind"));
+    assert_eq!(slot_binding.1, Some(3));
+
+    let entry_slot: Option<i64> = conn
+        .query_row(
+            "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-rebind'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_slot, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_restore_run_restores_skipped_entries_by_card_state() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restore");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-restore-pending", 1801, "ready", "agent-restore");
+    seed_auto_queue_card(&db, "card-restore-done", 1802, "done", "agent-restore");
+    seed_auto_queue_card(&db, "card-restore-live", 1803, "requested", "agent-restore");
+    seed_auto_queue_card(
+        &db,
+        "card-restore-new",
+        1804,
+        "in_progress",
+        "agent-restore",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-restore', 'test-repo', 'agent-restore', 'cancelled', 4, 4
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-pending', 'run-restore', 'card-restore-pending', 'agent-restore', 'skipped', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-done', 'run-restore', 'card-restore-done', 'agent-restore', 'skipped', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-live', 'run-restore', 'card-restore-live', 'agent-restore', 'skipped', 2, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-new', 'run-restore', 'card-restore-new', 'agent-restore', 'skipped', 3, 3
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-restore-old-done', 'card-restore-done', 'agent-restore',
+                'cancelled', 'Old Done Dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-restore-live', 'card-restore-live', 'agent-restore',
+                'dispatched', 'Live Dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-restore-old-new', 'card-restore-new', 'agent-restore',
+                'cancelled', 'Old New Dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'dispatch-restore-live'
+             WHERE id = 'card-restore-live'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'dispatch-restore-old-new'
+             WHERE id = 'card-restore-new'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id, trigger_source)
+             VALUES ('entry-restore-done', 'dispatch-restore-old-done', 'seed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id, trigger_source)
+             VALUES ('entry-restore-live', 'dispatch-restore-live', 'seed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id, trigger_source)
+             VALUES ('entry-restore-new', 'dispatch-restore-old-new', 'seed')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["run_status"], "active");
+    assert_eq!(json["restored_pending"], 1);
+    assert_eq!(json["restored_done"], 1);
+    assert_eq!(json["restored_dispatched"], 2);
+    assert_eq!(json["created_dispatches"], 1);
+    assert_eq!(json["rebound_slots"], 2);
+    assert_eq!(json["unbound_dispatches"], 0);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-restore'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "active");
+
+    let pending_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "pending");
+
+    let done_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-done'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(done_status, "done");
+
+    let live_entry: (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-restore-live'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(live_entry.0, "dispatched");
+    assert_eq!(live_entry.1.as_deref(), Some("dispatch-restore-live"));
+    assert!(live_entry.2.is_some());
+
+    let new_entry: (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-restore-new'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(new_entry.0, "dispatched");
+    assert!(new_entry.1.is_some());
+    assert_ne!(new_entry.1.as_deref(), Some("dispatch-restore-old-new"));
+    assert!(new_entry.2.is_some());
+
+    let rebound_slots: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM auto_queue_slots
+             WHERE assigned_run_id = 'run-restore'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rebound_slots, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_restore_run_rejects_active_run() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restore-reject");
+    ensure_auto_queue_tables(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-restore-active', 'test-repo', 'agent-restore-reject', 'active')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-active/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already active")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6951,6 +7681,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         conn.execute(
             "UPDATE kanban_cards SET metadata = ?1 WHERE id = 'card-consult'",
             [serde_json::json!({
+                "keep": "yes",
                 "preflight_status": "consult_required",
                 "preflight_summary": "need counter review"
             })
@@ -7011,15 +7742,23 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
     assert_eq!(entry_status, "dispatched");
     let dispatch_id = dispatch_id.expect("consultation dispatch id must be stored");
 
-    let (dispatch_type, to_agent_id): (String, String) = conn
+    let (dispatch_type, to_agent_id, dispatch_context_raw): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT dispatch_type, to_agent_id FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, to_agent_id, context FROM task_dispatches WHERE id = ?1",
             [&dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(dispatch_type, "consultation");
     assert_eq!(to_agent_id, "agent-consult");
+    let dispatch_context: serde_json::Value =
+        serde_json::from_str(dispatch_context_raw.as_deref().unwrap_or("{}")).unwrap();
+    assert_eq!(dispatch_context["auto_queue"], true);
+    assert_eq!(dispatch_context["entry_id"], "entry-consult");
+    assert_eq!(dispatch_context["thread_group"], 0);
+    assert_eq!(dispatch_context["slot_index"], serde_json::Value::Null);
+    assert_eq!(dispatch_context["run_id"], "run-consult");
+    assert_eq!(dispatch_context["batch_phase"], 0);
 
     let metadata_raw: String = conn
         .query_row(
@@ -7029,6 +7768,8 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         )
         .unwrap();
     let metadata: serde_json::Value = serde_json::from_str(&metadata_raw).unwrap();
+    assert_eq!(metadata["keep"], "yes");
+    assert_eq!(metadata["preflight_status"], "consult_required");
     assert_eq!(metadata["consultation_status"], "pending");
     assert_eq!(metadata["consultation_dispatch_id"], dispatch_id);
 }
@@ -7451,6 +8192,23 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         Some(0),
         "completed group slot must be reused for the next group"
     );
+    let recycled_dispatch_context: Option<String> = conn
+        .query_row(
+            "SELECT td.context
+             FROM task_dispatches td
+             JOIN auto_queue_entries e ON e.dispatch_id = td.id
+             WHERE e.id = 'entry-slot-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recycled_dispatch_context =
+        serde_json::from_str::<serde_json::Value>(&recycled_dispatch_context.unwrap()).unwrap();
+    assert_eq!(
+        recycled_dispatch_context["reset_slot_thread_before_reuse"].as_bool(),
+        Some(true),
+        "independent group reuse must force a fresh slot-thread reset"
+    );
 
     let slot_zero_group: Option<i64> = conn
         .query_row(
@@ -7668,6 +8426,24 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         continued_session,
         ("idle".to_string(), None, 0, None),
         "same-group continuation must keep the slot assignment but start from a fresh session"
+    );
+    let continued_dispatch_context: Option<String> = conn
+        .query_row(
+            "SELECT td.context
+             FROM task_dispatches td
+             JOIN auto_queue_entries e ON e.dispatch_id = td.id
+             WHERE e.id = 'entry-same-group-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let continued_dispatch_context =
+        serde_json::from_str::<serde_json::Value>(&continued_dispatch_context.unwrap()).unwrap();
+    assert!(
+        continued_dispatch_context
+            .get("reset_slot_thread_before_reuse")
+            .is_none(),
+        "same-group continuation must not force an independent slot-thread reset"
     );
     assert_eq!(
         slot_group,
@@ -8477,6 +9253,72 @@ async fn smart_generate_creates_correct_thread_groups_and_batch_phases() {
 }
 
 #[tokio::test]
+async fn auto_queue_generate_rolls_back_when_entry_insert_fails() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let _card_ids = seed_parallel_test_cards(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_auto_queue_entry_insert
+             BEFORE INSERT ON auto_queue_entries
+             BEGIN
+                 SELECT RAISE(ABORT, 'entry insert blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "max_concurrent_threads": 3,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("create auto-queue entry"),
+        "generate must expose entry insert failure instead of silently succeeding"
+    );
+
+    let conn = db.lock().unwrap();
+    let run_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_runs", [], |row| row.get(0))
+        .unwrap();
+    let entry_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(run_count, 0, "failed generate must roll back run creation");
+    assert_eq!(
+        entry_count, 0,
+        "failed generate must not leave partial entries"
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_status_exposes_explicit_thread_links_from_configured_channels() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -8943,6 +9785,84 @@ async fn auto_queue_generate_issue_numbers_filters_cards_and_promotes_backlog() 
     assert_eq!(
         backlog_status, "ready",
         "selected backlog card must be promoted before queue generation"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_generate_rejects_when_live_run_exists_without_force() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-generate-conflict");
+    seed_repo(&db, "test-repo");
+    seed_auto_queue_card(
+        &db,
+        "card-gen-conflict-backlog",
+        3281,
+        "backlog",
+        "agent-generate-conflict",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-generate-conflict', 'test-repo', 'agent-generate-conflict', 'active', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-generate-conflict",
+                        "issue_numbers": [3281],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["existing_run_id"], "run-generate-conflict");
+    assert_eq!(json["existing_run_status"], "active");
+
+    let conn = db.lock().unwrap();
+    let run_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        run_count, 1,
+        "generate conflict must not create a second run"
+    );
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-gen-conflict-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        backlog_status, "backlog",
+        "generate conflict must happen before backlog auto-promotion"
     );
 }
 
@@ -10165,6 +11085,135 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_targets_only_requested_run() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-target");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-target-a",
+        4601,
+        "ready",
+        "agent-cancel-target",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-target-b",
+        4602,
+        "ready",
+        "agent-cancel-target",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-target-a', 'test-repo', 'agent-cancel-target', 'active', datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-target-b', 'test-repo', 'agent-cancel-target', 'paused', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-target-a', 'run-cancel-target-a', 'card-cancel-target-a',
+                'agent-cancel-target', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-target-b', 'run-cancel-target-b', 'card-cancel-target-b',
+                'agent-cancel-target', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel?run_id=run-cancel-target-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_runs
+                 WHERE id IN ('run-cancel-target-a', 'run-cancel-target-b')
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        run_states,
+        vec![
+            ("run-cancel-target-a".to_string(), "active".to_string()),
+            ("run-cancel-target-b".to_string(), "cancelled".to_string()),
+        ]
+    );
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE id IN ('entry-cancel-target-a', 'entry-cancel-target-b')
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            ("entry-cancel-target-a".to_string(), "pending".to_string()),
+            ("entry-cancel-target-b".to_string(), "skipped".to_string()),
+        ]
+    );
 }
 
 #[tokio::test]

@@ -206,6 +206,7 @@ fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
             session_end_reason: None,
             clear_provider_session: false,
             persist_transcript: true,
+            analyze_recall_feedback: true,
             spawn_capture: true,
         })
     );
@@ -227,6 +228,7 @@ fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
             session_end_reason: Some(SessionEndReason::LocalSessionReset),
             clear_provider_session: true,
             persist_transcript: true,
+            analyze_recall_feedback: true,
             spawn_capture: false,
         })
     );
@@ -241,6 +243,7 @@ fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_captur
             session_end_reason: None,
             clear_provider_session: true,
             persist_transcript: false,
+            analyze_recall_feedback: false,
             spawn_capture: false,
         })
     );
@@ -262,6 +265,7 @@ fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
             session_end_reason: None,
             clear_provider_session: false,
             persist_transcript: true,
+            analyze_recall_feedback: true,
             spawn_capture: false,
         })
     );
@@ -291,8 +295,30 @@ fn turn_end_memory_plan_clears_provider_session_at_turn_cap() {
             session_end_reason: Some(SessionEndReason::TurnCapReached),
             clear_provider_session: true,
             persist_transcript: true,
+            analyze_recall_feedback: true,
             spawn_capture: true,
         })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_keeps_recall_feedback_analysis_for_normal_memento_turns() {
+    let session = sample_session();
+    let plan = plan_turn_end_memory(
+        &session,
+        MemoryBackendKind::Memento,
+        false,
+        false,
+        false,
+        true,
+    )
+    .expect("memento turns should still produce a memory plan");
+
+    assert!(plan.persist_transcript);
+    assert!(plan.analyze_recall_feedback);
+    assert!(
+        !plan.spawn_capture,
+        "memento turns should skip background capture while still analyzing recall feedback"
     );
 }
 

@@ -36,6 +36,7 @@ interface ControlCenterViewProps {
   agents: Agent[];
   departments: Department[];
   sessions: DispatchedSession[];
+  meetings: RoundTableMeeting[];
   onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
@@ -92,6 +93,7 @@ export default function ControlCenterView({
   agents,
   departments,
   sessions,
+  meetings,
   onAssign,
   onAgentsChange,
   onDepartmentsChange,
@@ -136,6 +138,10 @@ export default function ControlCenterView({
     () => sessions.filter((session) => session.status !== "disconnected").length,
     [sessions],
   );
+  const unresolvedMeetingCount = useMemo(
+    () => meetings.filter(hasUnresolvedMeetingIssues).length,
+    [meetings],
+  );
 
   const organizationSections = useMemo(() => [
     {
@@ -171,6 +177,7 @@ export default function ControlCenterView({
       count: activeSessionCount,
     },
   ], [activeSessionCount, agents.length, departments.length, offices.length]);
+  const activeOrganizationSection = organizationSections.find((section) => section.id === organizationPane);
 
   return (
     <div className="flex min-h-full flex-col sm:h-full sm:min-h-0">
@@ -178,10 +185,10 @@ export default function ControlCenterView({
         <div className="px-4 py-4">
           <SurfaceSection
             eyebrow={t("운영 표면", "Operations Surface")}
-            title={t("컨트롤", "Control")}
+            title={t("설정", "Settings")}
             description={t(
-              "운영 구조를 섹션 단위로 분리해 junk drawer를 막습니다.",
-              "Administrative surfaces are split by section to avoid a junk drawer.",
+              "조직 관리와 런타임 설정을 섹션 단위로 분리해 한 화면에서 정리합니다.",
+              "Keep organization management and runtime settings separated into clear sections.",
             )}
             badge={t("섹션 기반 편집", "Section-based editing")}
             className="rounded-[30px] p-4 sm:p-5"
@@ -195,8 +202,8 @@ export default function ControlCenterView({
               <SurfaceNotice tone="info" compact className="mt-4">
                 <p className="break-words leading-relaxed">
                   {t(
-                    "Control은 서브섹션별로 나뉘어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.",
-                    "Control is split by section. Use desktop for bulk editing work.",
+                    "설정은 조직과 일반 설정 섹션으로 나뉘어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.",
+                    "Settings are split into organization and general sections. Use desktop for bulk editing work.",
                   )}
                 </p>
               </SurfaceNotice>
@@ -223,8 +230,8 @@ export default function ControlCenterView({
               />
               <SurfaceMetricPill
                 tone="warn"
-                label={t("미해결 회의", "Open Meetings")}
-                value={0}
+                label={t("정리 필요한 회의", "Meetings Needing Cleanup")}
+                value={unresolvedMeetingCount}
                 className="flex-1 sm:flex-none"
               />
             </div>
@@ -282,28 +289,24 @@ export default function ControlCenterView({
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
                 eyebrow={t("인력 운영", "Staff Ops")}
-                title={t("에이전트 운영 표면", "Agent Operations Surface")}
+                title={t("조직 운영 표면", "Organization Operations Surface")}
                 description={t(
-                  "디렉터리 편집과 파견 세션 운영을 같은 흐름 안에서 전환합니다.",
-                  "Switch between directory editing and dispatch session operations within one workflow.",
+                  "에이전트, 부서, 오피스, 파견 세션을 같은 조직 표면 안에서 전환합니다.",
+                  "Switch between agents, departments, offices, and dispatch sessions within one organization surface.",
                 )}
-                badge={organizationPane === "dispatch" ? t("파견 세션", "Dispatch") : t("디렉터리", "Directory")}
+                badge={activeOrganizationSection ? (isKo ? activeOrganizationSection.labelKo : activeOrganizationSection.labelEn) : undefined}
                 actions={(
                   <>
-                    <SurfaceSegmentButton
-                      onClick={() => onOrganizationPaneChange("agents")}
-                      active={organizationPane === "agents"}
-                      tone="info"
-                    >
-                      {t("에이전트 디렉터리", "Agent Directory")}
-                    </SurfaceSegmentButton>
-                    <SurfaceSegmentButton
-                      onClick={() => onOrganizationPaneChange("dispatch")}
-                      active={organizationPane === "dispatch"}
-                      tone="success"
-                    >
-                      {t("파견 세션", "Dispatch Sessions")}
-                    </SurfaceSegmentButton>
+                    {organizationSections.map((section) => (
+                      <SurfaceSegmentButton
+                        key={section.id}
+                        onClick={() => onOrganizationPaneChange(section.id)}
+                        active={organizationPane === section.id}
+                        tone={section.id === "dispatch" ? "success" : "info"}
+                      >
+                        {isKo ? section.labelKo : section.labelEn}
+                      </SurfaceSegmentButton>
+                    ))}
                   </>
                 )}
                 className="rounded-[28px] p-4 sm:p-5"

@@ -2119,6 +2119,107 @@ mod tests {
     }
 
     #[test]
+    fn auto_queue_activate_agent_scope_uses_free_slot_for_additional_group() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+                 VALUES ('card-aq-live', 'AQ Live', 'in_progress', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+                 VALUES ('card-aq-next', 'AQ Next', 'ready', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at) \
+                 VALUES ('run-aq-slot-scale', 'repo-1', 'agent-1', 'active', 2, 2, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-aq-live', 'run-aq-slot-scale', 'card-aq-live', 'agent-1', 'dispatched', 'dispatch-aq-live', 0, 0, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, priority_rank, created_at) \
+                 VALUES ('entry-aq-next', 'run-aq-slot-scale', 'card-aq-next', 'agent-1', 'pending', 1, 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+                 VALUES ('agent-1', 0, 'run-aq-slot-scale', 0, '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+                 VALUES ('agent-1', 1, NULL, NULL, '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        seed_dispatch(
+            &db,
+            "dispatch-aq-live",
+            "card-aq-live",
+            "implementation",
+            "dispatched",
+        );
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            db.clone(),
+            engine.clone(),
+        );
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-slot-scale".to_string()),
+                repo: Some("repo-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        );
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(
+            body.0["count"].as_u64(),
+            Some(1),
+            "agent-scoped activate should dispatch another group when a free slot exists"
+        );
+
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (entry_status, slot_index, dispatch_id): (String, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT status, slot_index, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-next'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(entry_status, "dispatched");
+        assert_eq!(slot_index, Some(1));
+        assert!(
+            dispatch_id.is_some(),
+            "newly dispatched group must persist dispatch_id"
+        );
+    }
+
+    #[test]
     fn auto_queue_on_tick_recovers_orphan_dispatched_entry_to_pending() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -2776,12 +2877,7 @@ mod tests {
                 {"from": "in_progress", "to": "review", "type": "gated", "gates": ["active_dispatch"]},
                 {"from": "review", "to": "qa_test", "type": "gated", "gates": ["review_passed"]},
                 {"from": "review", "to": "in_progress", "type": "gated", "gates": ["review_rework"]},
-                {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]},
-                {"from": "qa_test", "to": "in_progress", "type": "force_only"},
-                {"from": "requested", "to": "done", "type": "force_only"},
-                {"from": "in_progress", "to": "requested", "type": "force_only"},
-                {"from": "review", "to": "requested", "type": "force_only"},
-                {"from": "qa_test", "to": "requested", "type": "force_only"}
+                {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]}
             ],
             "gates": {
                 "active_dispatch": {"type": "builtin", "check": "has_active_dispatch"},
@@ -2833,11 +2929,11 @@ mod tests {
         let qa_done = effective.find_transition("qa_test", "done");
         assert!(qa_done.is_some(), "qa_test → done must exist");
 
-        // qa_test → in_progress force transition
+        // qa_test → in_progress has no explicit rule (force bypass only)
         let qa_rework = effective.find_transition("qa_test", "in_progress");
         assert!(
-            qa_rework.is_some(),
-            "qa_test → in_progress (force) must exist"
+            qa_rework.is_none(),
+            "qa_test → in_progress should not have explicit rule"
         );
 
         // Verify custom state has hooks
@@ -3372,6 +3468,33 @@ mod tests {
     }
 
     #[test]
+    fn scenario_615_on_review_enter_skips_terminal_card() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-615-terminal", "done");
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-615-terminal",
+            "card-615-terminal",
+            "implementation",
+        );
+
+        kanban::fire_enter_hooks(&db, &engine, "card-615-terminal", "review");
+
+        assert_eq!(get_card_status(&db, "card-615-terminal"), "done");
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-615-terminal", "review"),
+            0,
+            "#615: terminal card must not create a stale review dispatch"
+        );
+        assert!(
+            get_review_state(&db, "card-615-terminal").is_none(),
+            "#615: terminal card must not recreate canonical review state"
+        );
+    }
+
+    #[test]
     fn scenario_335_on_review_enter_reuses_round_without_new_completed_work() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -3684,6 +3807,57 @@ mod tests {
         assert_eq!(phase_gate_json["status"], "pending");
         assert_eq!(phase_gate_json["batch_phase"], 1);
         assert_eq!(phase_gate_json["next_phase"], 2);
+    }
+
+    #[test]
+    fn deploy_gate_creation_skips_when_phase_still_has_live_entries() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-deploy-anchor", "done");
+        seed_card(&db, "card-deploy-live", "ready");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, deploy_phases, created_at) \
+                 VALUES ('run-deploy-live-phase', 'test/repo', 'agent-1', 'active', '[1]', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at) \
+                 VALUES ('entry-deploy-live', 'run-deploy-live-phase', 'card-deploy-live', 'agent-1', 'pending', 1, 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    _createDeployGateDispatch("run-deploy-live-phase", 1, 2, false, "card-deploy-anchor");
+                    return "ok";
+                })()"#,
+            )
+            .expect("deploy gate helper should evaluate");
+
+        let run_status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-deploy-live-phase'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(run_status, "active");
+        assert!(
+            phase_gate_state(&db, "run-deploy-live-phase", 1).is_none(),
+            "deploy gate must not persist while the phase still has live entries"
+        );
     }
 
     #[tokio::test]
@@ -4622,6 +4796,81 @@ mod tests {
         assert_eq!(phase_gate_json["status"], "pending");
         assert_eq!(phase_gate_json["batch_phase"], 1);
         assert_eq!(phase_gate_json["next_phase"], 2);
+    }
+
+    #[test]
+    fn scenario_494_implementation_noop_completion_final_entry_queues_single_completion_notify() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-494-noop-final", "in_progress");
+        seed_dispatch(
+            &db,
+            "impl-494-noop-final",
+            "card-494-noop-final",
+            "implementation",
+            "pending",
+        );
+
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-494-noop-final', 'test/repo', 'agent-1', 'active', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at, batch_phase, created_at) \
+             VALUES ('entry-494-noop-final', 'run-494-noop-final', 'card-494-noop-final', 'agent-1', 'dispatched', 'impl-494-noop-final', datetime('now'), 0, datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "impl-494-noop-final",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "work_outcome": "noop",
+                "completed_without_changes": true,
+                "card_status_target": "ready",
+                "notes": "already implemented"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-494-noop-final'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(
+            run_status, "completed",
+            "#494: noop completion on the final entry must complete the run"
+        );
+        assert_eq!(
+            messages.len(),
+            1,
+            "#494: noop completion on the final entry must queue exactly one completion notify"
+        );
+        assert!(
+            messages[0]
+                .1
+                .contains("자동큐 완료: test/repo / run run-494- / 1개"),
+            "#494: completion notify should describe the completed run"
+        );
     }
 
     #[test]
@@ -5657,8 +5906,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
-        let (repo, _env) = setup_test_repo_with_mock_gh(&[
+    fn scenario_208_on_tick_creates_codex_follow_up_issue_and_dedups_review() {
+        let (repo, gh) = setup_test_repo_with_mock_gh(&[
             MockGhReply {
                 key: "pr:list",
                 contains: Some("--state merged"),
@@ -5678,6 +5927,16 @@ mod tests {
                 key: "api:graphql",
                 contains: None,
                 stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-1\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-1\",\"body\":\"P1 force-transition leaves dispatch alive\",\"path\":\"src/server/routes/github.rs\",\"line\":77,\"url\":\"https://example.com/comment-1\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9001\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
+            },
+            MockGhReply {
+                key: "label:create",
+                contains: Some("agent:agent-1"),
+                stdout: "label ok",
+            },
+            MockGhReply {
+                key: "issue:create",
+                contains: Some("--label agent:agent-1"),
+                stdout: "https://github.com/test/repo/issues/400",
             },
         ]);
         run_git(
@@ -5703,12 +5962,9 @@ mod tests {
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(get_card_status(&db, "card-208"), "in_progress");
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
-        let title = latest_dispatch_title(&db, "card-208", "rework").unwrap();
-        assert!(title.contains("src/server/routes/github.rs:77"));
-        assert!(title.contains("P1 force-transition leaves dispatch alive"));
-        assert_eq!(
+        assert_eq!(get_card_status(&db, "card-208"), "done");
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
+        assert_ne!(
             review_state_value(&db, "card-208").as_deref(),
             Some("rework_pending")
         );
@@ -5717,15 +5973,28 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "thread-208");
         assert!(messages[0].1.contains("PR #323"));
-        assert!(messages[0].1.contains("rework dispatch"));
+        assert!(messages[0].1.contains("follow-up 이슈를 생성했습니다"));
+        assert!(messages[0].1.contains("#400"));
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 0);
         assert_eq!(message_outbox_rows(&db).len(), 1);
+
+        let log = gh_log(&gh._gh);
+        assert_eq!(
+            log.matches("label create agent:agent-1").count(),
+            1,
+            "Codex follow-up flow must ensure the agent label only once"
+        );
+        assert_eq!(
+            log.matches("issue create --repo test/repo").count(),
+            1,
+            "Codex follow-up flow must create exactly one follow-up issue per review"
+        );
     }
 
     #[cfg(unix)]

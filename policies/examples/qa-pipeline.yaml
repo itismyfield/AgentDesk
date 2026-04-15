@@ -60,23 +60,6 @@ transitions:
     to: done
     type: gated
     gates: [active_dispatch]
-  - from: qa_test
-    to: in_progress
-    type: force_only
-
-  # Force-only transitions
-  - from: requested
-    to: done
-    type: force_only
-  - from: in_progress
-    to: requested
-    type: force_only
-  - from: review
-    to: requested
-    type: force_only
-  - from: qa_test
-    to: requested
-    type: force_only
 
 gates:
   active_dispatch:
