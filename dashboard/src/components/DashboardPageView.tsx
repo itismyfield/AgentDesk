@@ -16,6 +16,8 @@ import { getSkillRanking, type SkillRankingResponse } from "../api";
 import { getStaleLinkedSessions } from "../agent-insights";
 import {
   DASHBOARD_TABS,
+  DASHBOARD_TAB_STORAGE_KEY,
+  readDashboardTabFromStorage,
   readDashboardTabFromUrl,
   syncDashboardTabToUrl,
   type DashboardTab,
@@ -192,6 +194,17 @@ export default function DashboardPageView({
     const handlePopState = () => setActiveTab(readDashboardTabFromUrl());
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== DASHBOARD_TAB_STORAGE_KEY) return;
+      const nextTab = readDashboardTabFromStorage() ?? "operations";
+      setActiveTab((currentTab) => (currentTab === nextTab ? currentTab : nextTab));
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   useEffect(() => {
