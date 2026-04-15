@@ -155,108 +155,110 @@ export default function ControlCenterView({
     },
   ], [activeSessionCount, agents.length, departments.length, offices.length]);
   const activeOrganizationSection = organizationSections.find((section) => section.id === organizationPane);
+  const selectedOfficeLabel = selectedOfficeId
+    ? offices.find((office) => office.id === selectedOfficeId)?.name_ko ||
+      offices.find((office) => office.id === selectedOfficeId)?.name ||
+      selectedOfficeId
+    : t("전체", "All");
+
+  const controlHeader = (
+    <div className="border-b" style={{ borderColor: "var(--th-border-subtle)" }}>
+      <div className="px-4 py-3 sm:px-6 sm:py-3">
+        <SurfaceSection
+          eyebrow={t("운영 표면", "Operations Surface")}
+          title={t("설정", "Settings")}
+          description={t(
+            "조직 관리와 런타임 설정을 섹션 단위로 분리해 한 화면에서 정리합니다.",
+            "Keep organization management and runtime settings separated into clear sections.",
+          )}
+          badge={t("섹션 기반 편집", "Section-based editing")}
+          className="rounded-[28px] p-3 sm:p-4"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+          }}
+        >
+          <div className="sm:hidden">
+            <SurfaceNotice tone="info" compact className="mt-3">
+              <p className="break-words leading-relaxed">
+                {t(
+                  "설정은 조직과 일반 설정 섹션으로 나뉘어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.",
+                  "Settings are split into organization and general sections. Use desktop for bulk editing work.",
+                )}
+              </p>
+            </SurfaceNotice>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <SurfaceMetricPill
+              tone="info"
+              label={t("선택 오피스", "Selected Office")}
+              value={selectedOfficeLabel}
+              className="flex-1 sm:flex-none"
+            />
+            <SurfaceMetricPill
+              tone="success"
+              label={t("활성 세션", "Live Sessions")}
+              value={activeSessionCount}
+              className="flex-1 sm:flex-none"
+            />
+          </div>
+
+          {recentNotifications.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {recentNotifications.map((notification) => (
+                <SurfaceNotice
+                  key={notification.id}
+                  tone={notificationTone(notification.type)}
+                  compact
+                  action={(
+                    <SurfaceActionButton
+                      onClick={() => onDismissNotification(notification.id)}
+                      tone="neutral"
+                      compact
+                      className="shrink-0"
+                    >
+                      {t("닫기", "Dismiss")}
+                    </SurfaceActionButton>
+                  )}
+                >
+                  <p className="break-words leading-relaxed">{notification.message}</p>
+                </SurfaceNotice>
+              ))}
+            </div>
+          )}
+        </SurfaceSection>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 px-4 pb-3 sm:px-6 sm:flex sm:overflow-x-auto">
+        {sections.map((section) => (
+          <SurfaceTabCard
+            key={section.id}
+            title={isKo ? section.labelKo : section.labelEn}
+            description={isKo ? section.descriptionKo : section.descriptionEn}
+            count={section.count}
+            active={controlTab === section.id}
+            tone={section.id === "settings" ? "accent" : "neutral"}
+            onClick={() => onControlTabChange(section.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex min-h-full flex-col sm:h-full sm:min-h-0">
-      <div className="border-b" style={{ borderColor: "var(--th-border-subtle)" }}>
-        <div className="px-4 py-4">
-          <SurfaceSection
-            eyebrow={t("운영 표면", "Operations Surface")}
-            title={t("설정", "Settings")}
-            description={t(
-              "조직 관리와 런타임 설정을 섹션 단위로 분리해 한 화면에서 정리합니다.",
-              "Keep organization management and runtime settings separated into clear sections.",
-            )}
-            badge={t("섹션 기반 편집", "Section-based editing")}
-            className="rounded-[30px] p-4 sm:p-5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
-              background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            }}
-          >
-            <div className="sm:hidden">
-              <SurfaceNotice tone="info" compact className="mt-4">
-                <p className="break-words leading-relaxed">
-                  {t(
-                    "설정은 조직과 일반 설정 섹션으로 나뉘어 있습니다. 대량 편집은 데스크톱 사용을 권장합니다.",
-                    "Settings are split into organization and general sections. Use desktop for bulk editing work.",
-                  )}
-                </p>
-              </SurfaceNotice>
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              <SurfaceMetricPill
-                tone="info"
-                label={t("선택 오피스", "Selected Office")}
-                value={
-                  selectedOfficeId
-                    ? offices.find((office) => office.id === selectedOfficeId)?.name_ko ||
-                      offices.find((office) => office.id === selectedOfficeId)?.name ||
-                      selectedOfficeId
-                    : t("전체", "All")
-                }
-                className="flex-1 sm:flex-none"
-              />
-              <SurfaceMetricPill
-                tone="success"
-                label={t("활성 세션", "Live Sessions")}
-                value={sessions.filter((session) => session.status !== "disconnected").length}
-                className="flex-1 sm:flex-none"
-              />
-            </div>
-
-            {recentNotifications.length > 0 && (
-              <div className="mt-4 space-y-2">
-                {recentNotifications.map((notification) => (
-                  <SurfaceNotice
-                    key={notification.id}
-                    tone={notificationTone(notification.type)}
-                    compact
-                    action={(
-                      <SurfaceActionButton
-                        onClick={() => onDismissNotification(notification.id)}
-                        tone="neutral"
-                        compact
-                        className="shrink-0"
-                      >
-                        {t("닫기", "Dismiss")}
-                      </SurfaceActionButton>
-                    )}
-                  >
-                    <p className="break-words leading-relaxed">{notification.message}</p>
-                  </SurfaceNotice>
-                ))}
-              </div>
-            )}
-          </SurfaceSection>
-        </div>
-
-        <div className="grid grid-cols-1 gap-2 px-4 pb-4 sm:flex sm:overflow-x-auto">
-          {sections.map((section) => (
-            <SurfaceTabCard
-              key={section.id}
-              title={isKo ? section.labelKo : section.labelEn}
-              description={isKo ? section.descriptionKo : section.descriptionEn}
-              count={section.count}
-              active={controlTab === section.id}
-              tone={section.id === "settings" ? "accent" : "neutral"}
-              onClick={() => onControlTabChange(section.id)}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div className="sm:min-h-0 sm:flex-1 sm:overflow-hidden">
+      <div className="sm:min-h-0 sm:flex-1">
         {controlTab === "organization" && (
           <div
-            className="sm:h-full sm:overflow-x-hidden sm:overflow-y-auto"
+            className="flex min-h-full flex-col overflow-x-hidden overflow-y-auto sm:h-full"
             style={{
               WebkitOverflowScrolling: "touch",
               touchAction: "pan-y",
             }}
           >
+            {controlHeader}
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
                 eyebrow={t("인력 운영", "Staff Ops")}
@@ -361,7 +363,16 @@ export default function ControlCenterView({
         )}
 
         {controlTab === "settings" && (
-          <SettingsView settings={settings} onSave={onSaveSettings} isKo={isKo} />
+          <div
+            className="flex min-h-full flex-col overflow-x-hidden overflow-y-auto sm:h-full"
+            style={{
+              WebkitOverflowScrolling: "touch",
+              touchAction: "pan-y",
+            }}
+          >
+            {controlHeader}
+            <SettingsView settings={settings} onSave={onSaveSettings} isKo={isKo} />
+          </div>
         )}
       </div>
     </div>

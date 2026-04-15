@@ -1716,7 +1716,7 @@ export default function SettingsView({
 
   return (
     <div
-      className="mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
+      className="mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <a
@@ -1730,7 +1730,7 @@ export default function SettingsView({
       >
         {tr("설정 본문으로 건너뛰기", "Skip to settings content")}
       </a>
-      <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
+      <div className="flex min-h-0 flex-col gap-4 lg:flex-row">
         <aside
           className="hidden lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-2rem)] lg:w-56 lg:self-start lg:shrink-0 lg:flex-col lg:gap-2 lg:rounded-[28px] lg:border lg:p-3"
           style={{
@@ -1746,7 +1746,7 @@ export default function SettingsView({
               {tr("운영 설정 카탈로그", "Operations settings catalog")}
             </div>
             <div className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-              {tr("큰 화면에서는 왼쪽에서 섹션을 고정하고, 오른쪽 내용만 스크롤합니다.", "Keep the section picker fixed on large screens and scroll only the content pane.")}
+              {tr("큰 화면에서는 왼쪽에서 섹션 선택기를 고정하고, 본문은 한 흐름으로 이어서 탐색합니다.", "Keep the section picker fixed on large screens while the content flows as one continuous page.")}
             </div>
           </div>
 
@@ -1766,7 +1766,7 @@ export default function SettingsView({
         </aside>
 
         <div className="min-w-0 flex-1 lg:min-h-0">
-          <div className="flex flex-col gap-4 lg:h-full">
+          <div className="flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3 lg:hidden">
               <div className="min-w-0">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
@@ -1813,7 +1813,7 @@ export default function SettingsView({
               role="tabpanel"
               aria-labelledby={`settings-tab-${activePanel}`}
               tabIndex={-1}
-              className="min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1"
+              className="min-w-0 lg:pr-1"
             >
               {renderActivePanel()}
             </div>
