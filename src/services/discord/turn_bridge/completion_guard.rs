@@ -351,6 +351,36 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
     changed > 0
 }
 
+fn reset_linked_auto_queue_entries_on_conn(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE auto_queue_entries
+         SET status = 'pending',
+             dispatch_id = NULL,
+             slot_index = NULL,
+             dispatched_at = NULL,
+             completed_at = NULL
+         WHERE dispatch_id = ?1
+           AND status IN ('pending', 'dispatched')",
+        [dispatch_id],
+    )
+}
+
+fn runtime_db_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return false;
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+        return false;
+    };
+    reset_linked_auto_queue_entries_on_conn(&conn, dispatch_id)
+        .map(|changed| changed > 0)
+        .unwrap_or(false)
+}
+
 #[allow(dead_code)]
 pub(in crate::services::discord) fn runtime_db_fallback_complete(
     dispatch_id: &str,
@@ -689,6 +719,9 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
         {
             Ok(_) => {
                 tracing::warn!("marked dispatch as failed after transport error");
+                if !runtime_db_reset_linked_auto_queue_entries(dispatch_id) {
+                    tracing::warn!("failed dispatch auto-queue reset skipped or affected no rows");
+                }
                 return;
             }
             _ => {
@@ -711,9 +744,12 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
                 "failed",
                 Some(&fallback_result),
                 "turn_bridge_patch_failure_fallback",
-                Some(&["pending"]),
+                Some(&["pending", "dispatched"]),
                 false,
             );
+            if let Err(error) = reset_linked_auto_queue_entries_on_conn(&conn, dispatch_id) {
+                tracing::warn!(%error, "failed to reset linked auto-queue entries after dispatch failure fallback");
+            }
             // Leave reconciliation marker for onTick to pick up and run hook chain
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
@@ -1208,5 +1244,127 @@ mod tests {
         assert_eq!(result["completed_without_changes"], true);
         assert_eq!(result["card_status_target"], "ready");
         assert_eq!(result["notes"], "OUTCOME: noop\nalready satisfied");
+    }
+
+    #[test]
+    fn reset_linked_auto_queue_entries_on_conn_resets_pending_and_dispatched_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE auto_queue_entries (
+                id TEXT PRIMARY KEY,
+                run_id TEXT,
+                kanban_card_id TEXT,
+                agent_id TEXT,
+                status TEXT,
+                dispatch_id TEXT,
+                slot_index INTEGER,
+                thread_group INTEGER DEFAULT 0,
+                batch_phase INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at DATETIME,
+                completed_at DATETIME
+            );",
+        )
+        .expect("schema");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, batch_phase, dispatched_at, completed_at
+             ) VALUES
+                ('entry-pending', 'run-1', 'card-1', 'agent-1', 'pending', 'dispatch-1', 7, 0, 0, datetime('now'), datetime('now')),
+                ('entry-dispatched', 'run-1', 'card-2', 'agent-1', 'dispatched', 'dispatch-1', 8, 0, 0, datetime('now'), NULL),
+                ('entry-done', 'run-1', 'card-3', 'agent-1', 'done', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed entries");
+
+        let changed = reset_linked_auto_queue_entries_on_conn(&conn, "dispatch-1").expect("reset");
+        assert_eq!(changed, 2);
+
+        let pending: (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-pending'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("pending row");
+        assert_eq!(pending.0, "pending");
+        assert!(pending.1.is_none());
+        assert!(pending.2.is_none());
+        assert!(pending.3.is_none());
+        assert!(pending.4.is_none());
+
+        let dispatched: (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-dispatched'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("dispatched row");
+        assert_eq!(dispatched.0, "pending");
+        assert!(dispatched.1.is_none());
+        assert!(dispatched.2.is_none());
+        assert!(dispatched.3.is_none());
+        assert!(dispatched.4.is_none());
+
+        let done: (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-done'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("done row");
+        assert_eq!(done.0, "done");
+        assert_eq!(done.1.as_deref(), Some("dispatch-1"));
+        assert_eq!(done.2, Some(9));
+        assert!(done.3.is_some());
+        assert!(done.4.is_some());
     }
 }

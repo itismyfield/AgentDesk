@@ -1140,6 +1140,31 @@ pub(super) fn spawn_turn_bridge(
                 crate::services::process::kill_pid_tree(pid);
             }
 
+            if let (Some(db), Some(dispatch_id)) =
+                (shared_owned.db.as_ref(), dispatch_id.as_deref())
+            {
+                if let Ok(conn) = db.lock() {
+                    if let Err(error) =
+                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                            &conn,
+                            dispatch_id,
+                            Some("turn_bridge_cancelled"),
+                        )
+                    {
+                        tracing::warn!(
+                            "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
+                            dispatch_id,
+                            error
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
+                        dispatch_id
+                    );
+                }
+            }
+
             let remaining_response =
                 response_portion_after_offset(&full_response, response_sent_offset);
             let terminal_response = if remaining_response.trim().is_empty() {
