@@ -7742,15 +7742,23 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
     assert_eq!(entry_status, "dispatched");
     let dispatch_id = dispatch_id.expect("consultation dispatch id must be stored");
 
-    let (dispatch_type, to_agent_id): (String, String) = conn
+    let (dispatch_type, to_agent_id, dispatch_context_raw): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT dispatch_type, to_agent_id FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, to_agent_id, context FROM task_dispatches WHERE id = ?1",
             [&dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(dispatch_type, "consultation");
     assert_eq!(to_agent_id, "agent-consult");
+    let dispatch_context: serde_json::Value =
+        serde_json::from_str(dispatch_context_raw.as_deref().unwrap_or("{}")).unwrap();
+    assert_eq!(dispatch_context["auto_queue"], true);
+    assert_eq!(dispatch_context["entry_id"], "entry-consult");
+    assert_eq!(dispatch_context["thread_group"], 0);
+    assert_eq!(dispatch_context["slot_index"], serde_json::Value::Null);
+    assert_eq!(dispatch_context["run_id"], "run-consult");
+    assert_eq!(dispatch_context["batch_phase"], 0);
 
     let metadata_raw: String = conn
         .query_row(

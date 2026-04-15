@@ -33,12 +33,16 @@ function _loadAutoQueueDispatchLogContext(dispatchId) {
   if (!_autoQueueHasValue(dispatchId)) return null;
   var rows = agentdesk.db.query(
     "SELECT " +
-    "COALESCE(e.run_id, json_extract(COALESCE(td.context, '{}'), '$.phase_gate.run_id')) as run_id, " +
+    "COALESCE(e.run_id, " +
+    "json_extract(COALESCE(td.context, '{}'), '$.run_id'), " +
+    "json_extract(COALESCE(td.context, '{}'), '$.phase_gate.run_id')) as run_id, " +
     "COALESCE(e.id, json_extract(COALESCE(td.context, '{}'), '$.entry_id')) as entry_id, " +
     "COALESCE(e.kanban_card_id, td.kanban_card_id, json_extract(COALESCE(td.context, '{}'), '$.phase_gate.anchor_card_id')) as card_id, " +
     "td.id as dispatch_id, " +
     "COALESCE(e.thread_group, CAST(json_extract(COALESCE(td.context, '{}'), '$.thread_group') AS INTEGER)) as thread_group, " +
-    "COALESCE(e.batch_phase, CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
+    "COALESCE(e.batch_phase, " +
+    "CAST(json_extract(COALESCE(td.context, '{}'), '$.batch_phase') AS INTEGER), " +
+    "CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
     "COALESCE(e.slot_index, CAST(json_extract(COALESCE(td.context, '{}'), '$.slot_index') AS INTEGER)) as slot_index, " +
     "COALESCE(e.agent_id, json_extract(COALESCE(td.context, '{}'), '$.agent_id'), " +
     "json_extract(COALESCE(td.context, '{}'), '$.target_agent_id'), " +

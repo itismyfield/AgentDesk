@@ -787,10 +787,12 @@ where
 
 fn handle_activate_preflight_metadata(
     deps: &AutoQueueActivateDeps,
+    run_id: &str,
     entry_id: &str,
     card_id: &str,
     agent_id: &str,
     group: i64,
+    batch_phase: i64,
     title: &str,
     metadata: Option<&str>,
 ) -> ActivatePreflightOutcome {
@@ -801,10 +803,12 @@ fn handle_activate_preflight_metadata(
         return ActivatePreflightOutcome::Continue;
     };
     let log_ctx = AutoQueueLogContext::new()
+        .run(run_id)
         .entry(entry_id)
         .card(card_id)
         .agent(agent_id)
-        .thread_group(group);
+        .thread_group(group)
+        .batch_phase(batch_phase);
 
     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
         Some("consult_required") => {
@@ -856,6 +860,16 @@ fn handle_activate_preflight_metadata(
             };
 
             let dispatch_result = run_activate_blocking(|| {
+                let dispatch_context = build_auto_queue_dispatch_context(
+                    entry_id,
+                    group,
+                    None,
+                    false,
+                    [
+                        ("run_id", json!(run_id)),
+                        ("batch_phase", json!(batch_phase)),
+                    ],
+                );
                 crate::dispatch::create_dispatch(
                     &deps.db,
                     &deps.engine,
@@ -863,11 +877,7 @@ fn handle_activate_preflight_metadata(
                     &consult_agent_id,
                     "consultation",
                     &format!("[Consultation] {title}"),
-                    &json!({
-                        "auto_queue": true,
-                        "entry_id": entry_id,
-                        "thread_group": group,
-                    }),
+                    &dispatch_context,
                 )
             });
             if dispatch_result.is_err() {
@@ -2942,10 +2952,12 @@ pub(crate) fn activate_with_deps(
         if walk_path.is_none() {
             match handle_activate_preflight_metadata(
                 deps,
+                &run_id,
                 &entry_id,
                 &card_id,
                 &agent_id,
                 *group,
+                batch_phase,
                 &initial_state.title,
                 initial_state.metadata.as_deref(),
             ) {
@@ -3059,6 +3071,16 @@ pub(crate) fn activate_with_deps(
                             };
 
                             let dispatch_result = run_activate_blocking(|| {
+                                let dispatch_context = build_auto_queue_dispatch_context(
+                                    &entry_id,
+                                    *group,
+                                    None,
+                                    false,
+                                    [
+                                        ("run_id", json!(run_id)),
+                                        ("batch_phase", json!(batch_phase)),
+                                    ],
+                                );
                                 crate::dispatch::create_dispatch(
                                     &deps.db,
                                     &deps.engine,
@@ -3066,11 +3088,7 @@ pub(crate) fn activate_with_deps(
                                     &consult_agent_id,
                                     "consultation",
                                     &format!("[Consultation] {title}"),
-                                    &json!({
-                                        "auto_queue": true,
-                                        "entry_id": entry_id,
-                                        "thread_group": group,
-                                    }),
+                                    &dispatch_context,
                                 )
                             });
                             if dispatch_result.is_err() {
@@ -3296,10 +3314,12 @@ pub(crate) fn activate_with_deps(
 
         match handle_activate_preflight_metadata(
             deps,
+            &run_id,
             &entry_id,
             &card_id,
             &agent_id,
             *group,
+            batch_phase,
             &post_walk.title,
             post_walk.metadata.as_deref(),
         ) {
