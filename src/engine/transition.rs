@@ -185,6 +185,12 @@ fn decide_operator_override(ctx: &TransitionContext, target: &str) -> Transition
         state: target.to_string(),
         clock: ctx.pipeline.clock_for_state(target).cloned(),
     });
+    if !ctx.pipeline.is_terminal(target) {
+        intents.push(TransitionIntent::SetReviewStatus {
+            card_id: card.id.clone(),
+            review_status: review_status_for(target, &ctx.pipeline),
+        });
+    }
     if ctx.pipeline.is_terminal(target) {
         intents.push(TransitionIntent::ClearTerminalFields {
             card_id: card.id.clone(),
@@ -585,6 +591,13 @@ fn review_state_for(status: &str, pipeline: &PipelineConfig) -> String {
     }
 }
 
+fn review_status_for(status: &str, pipeline: &PipelineConfig) -> Option<String> {
+    match review_state_for(status, pipeline).as_str() {
+        "reviewing" => Some("reviewing".to_string()),
+        _ => None,
+    }
+}
+
 // ── Executor ─────────────────────────────────────────────────
 
 /// Execute a `TransitionDecision` against the database.
@@ -692,7 +705,8 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
         TransitionIntent::ClearTerminalFields { card_id } => {
             conn.execute(
                 "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL, \
-                 review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') WHERE id = ?1",
+                 review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
+                 review_round = NULL, deferred_dod_json = NULL, updated_at = datetime('now') WHERE id = ?1",
                 [card_id],
             )?;
         }
@@ -1033,6 +1047,43 @@ mod tests {
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
     }
 
+    #[test]
+    fn operator_override_clears_stale_review_status_on_non_review_target() {
+        let mut ctx = test_ctx("review", false);
+        ctx.card.review_status = Some("reviewing".to_string());
+        let decision = decide_transition(
+            &ctx,
+            &TransitionEvent::OperatorOverride {
+                target_status: "requested".to_string(),
+            },
+        );
+        assert!(decision.intents.iter().any(|intent| matches!(
+            intent,
+            TransitionIntent::SetReviewStatus {
+                review_status: None,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn operator_override_primes_review_status_on_review_target() {
+        let ctx = test_ctx("done", false);
+        let decision = decide_transition(
+            &ctx,
+            &TransitionEvent::OperatorOverride {
+                target_status: "review".to_string(),
+            },
+        );
+        assert!(decision.intents.iter().any(|intent| matches!(
+            intent,
+            TransitionIntent::SetReviewStatus {
+                review_status: Some(status),
+                ..
+            } if status == "reviewing"
+        )));
+    }
+
     // ── DispatchAttached ─────────────────────────────────────
 
     #[test]
@@ -1260,6 +1311,64 @@ mod tests {
             verdict.is_none(),
             "clear_verdict must set last_verdict to NULL"
         );
+    }
+
+    #[test]
+    fn execute_clear_terminal_fields_clears_extended_terminal_columns() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-exec-terminal");
+        conn.execute(
+            "UPDATE kanban_cards
+             SET review_status = 'reviewing',
+                 suggestion_pending_at = datetime('now'),
+                 review_entered_at = datetime('now'),
+                 awaiting_dod_at = datetime('now'),
+                 blocked_reason = 'needs merge follow-up',
+                 review_round = 3,
+                 deferred_dod_json = '{\"missing\":[\"tests\"]}'
+             WHERE id = 'card-exec-terminal'",
+            [],
+        )
+        .unwrap();
+
+        execute_intent(
+            &conn,
+            &TransitionIntent::ClearTerminalFields {
+                card_id: "card-exec-terminal".to_string(),
+            },
+        )
+        .unwrap();
+
+        let cleared: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT review_status, suggestion_pending_at, review_entered_at, awaiting_dod_at, \
+                        blocked_reason, review_round, deferred_dod_json
+                 FROM kanban_cards WHERE id = 'card-exec-terminal'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(cleared, (None, None, None, None, None, None, None));
     }
 
     #[test]

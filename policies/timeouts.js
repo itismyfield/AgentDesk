@@ -547,7 +547,7 @@ var timeouts = {
       "SELECT kc.id as card_id " +
       "FROM kanban_cards kc " +
       "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
-      "WHERE kc.status = ? AND kc.review_status = 'reviewing' " +
+      "WHERE kc.status = ? AND COALESCE(kc.review_status, 'reviewing') = 'reviewing' " +
       "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
       "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes') " +
       "AND NOT EXISTS (SELECT 1 FROM task_dispatches td2 WHERE td2.kanban_card_id = kc.id " +
@@ -591,8 +591,9 @@ var timeouts = {
     var eReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(eReview, "review_rework", eCfg) || eInProgress;
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
-      "WHERE review_status = 'suggestion_pending' " +
-      "AND suggestion_pending_at IS NOT NULL AND suggestion_pending_at < datetime('now', '-15 minutes')"
+      "WHERE status = ? AND review_status = 'suggestion_pending' " +
+      "AND suggestion_pending_at IS NOT NULL AND suggestion_pending_at < datetime('now', '-15 minutes')",
+      [eReview]
     );
     for (var s = 0; s < staleSuggestions.length; s++) {
       var sc = staleSuggestions[s];
@@ -1318,6 +1319,7 @@ var timeouts = {
       "SELECT kc.id, kc.title, kc.github_issue_number, kc.assigned_agent_id " +
       "FROM kanban_cards kc " +
       "WHERE kc.status = ? " +
+      "AND COALESCE(kc.review_status, 'reviewing') = 'reviewing' " +
       "AND kc.review_entered_at IS NOT NULL " +
       "AND kc.review_entered_at < datetime('now', '-5 minutes') " +
       "AND NOT EXISTS (" +

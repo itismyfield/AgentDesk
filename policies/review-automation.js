@@ -262,18 +262,17 @@ var reviewAutomation = {
 
     agentdesk.log.info("[review-debug] onDispatchCompleted: dispatch=" + dispatch.id + " type=" + dispatch.dispatch_type + " verdict=" + verdict + " auto_completed=" + result.auto_completed + " result=" + JSON.stringify(result).substring(0, 200));
 
-    // When a review-decision dispatch is auto-completed, do NOT create another
-    // review-decision — that causes an infinite loop.  Only "review" type
-    // dispatches should spawn review-decision followups.
-    if (!verdict && result.auto_completed && dispatch.dispatch_type === "review-decision") {
-      agentdesk.log.info("[review] review-decision auto-completed without verdict — skipping (no infinite loop). dispatch=" + dispatch.id);
+    // review-decision dispatches must never spawn another review-decision followup.
+    // If they finish without an explicit verdict, leave resolution to manual/API paths.
+    if (dispatch.dispatch_type === "review-decision" && !verdict) {
+      agentdesk.log.info("[review] review-decision completed without explicit verdict — skipping follow-up dispatch. dispatch=" + dispatch.id);
       return;
     }
 
     // Legacy fallback: if a review dispatch somehow arrives completed without an
     // explicit verdict, create a review-decision dispatch so the original agent
     // can inspect the review comments and decide the outcome.
-    if (!verdict && result.auto_completed) {
+    if (!verdict && result.auto_completed && dispatch.dispatch_type === "review") {
       var cards = agentdesk.db.query(
         "SELECT assigned_agent_id, title, github_issue_number, status FROM kanban_cards WHERE id = ?",
         [dispatch.kanban_card_id]
