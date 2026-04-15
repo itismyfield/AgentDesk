@@ -1,6 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
 import { getStaleLinkedSessions } from "../agent-insights";
+import {
+  readDashboardTabFromUrl,
+  syncDashboardTabToUrl,
+  type DashboardTab,
+} from "../app/dashboardTabs";
 import type {
   Agent,
   CompanySettings,
@@ -37,33 +42,12 @@ import HealthWidget from "./dashboard/HealthWidget";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
 import type { TFunction } from "./dashboard/model";
+import { formatProviderFlow } from "./MeetingProviderFlow";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
 
 type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
-type DashboardTab = "operations" | "tokens" | "automation" | "achievements" | "meetings";
-
-const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
-const DASHBOARD_TAB_STORAGE_KEY = "agentdesk.dashboard.active-tab";
-const DASHBOARD_TABS: DashboardTab[] = ["operations", "tokens", "automation", "achievements", "meetings"];
-
-function readDashboardTabFromUrl(): DashboardTab {
-  if (typeof window === "undefined") return "operations";
-  const params = new URLSearchParams(window.location.search);
-  const value = params.get(DASHBOARD_TAB_QUERY_KEY);
-  if (DASHBOARD_TABS.includes(value as DashboardTab)) return value as DashboardTab;
-  const stored = window.localStorage.getItem(DASHBOARD_TAB_STORAGE_KEY);
-  return DASHBOARD_TABS.includes(stored as DashboardTab) ? (stored as DashboardTab) : "operations";
-}
-
-function syncDashboardTabToUrl(tab: DashboardTab) {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
-  window.localStorage.setItem(DASHBOARD_TAB_STORAGE_KEY, tab);
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-}
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
@@ -71,11 +55,13 @@ interface DashboardPageViewProps {
   sessions: DispatchedSession[];
   meetings: RoundTableMeeting[];
   settings: CompanySettings;
+  requestedTab?: DashboardTab | null;
   onSelectAgent?: (agent: Agent) => void;
   onOpenKanbanSignal?: (signal: PulseKanbanSignal) => void;
   onOpenDispatchSessions?: () => void;
   onOpenSettings?: () => void;
   onRefreshMeetings?: () => void;
+  onRequestedTabHandled?: () => void;
 }
 
 export default function DashboardPageView({
@@ -84,11 +70,13 @@ export default function DashboardPageView({
   sessions,
   meetings,
   settings,
+  requestedTab,
   onSelectAgent,
   onOpenKanbanSignal,
   onOpenDispatchSessions,
   onOpenSettings,
   onRefreshMeetings,
+  onRequestedTabHandled,
 }: DashboardPageViewProps) {
   const language = settings.language;
   const localeTag = language === "ko" ? "ko-KR" : language === "ja" ? "ja-JP" : language === "zh" ? "zh-CN" : "en-US";
@@ -103,10 +91,10 @@ export default function DashboardPageView({
   }, [activeTab]);
 
   useEffect(() => {
-    const handlePopState = () => setActiveTab(readDashboardTabFromUrl());
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+    if (!requestedTab) return;
+    setActiveTab(requestedTab);
+    onRequestedTabHandled?.();
+  }, [requestedTab, onRequestedTabHandled]);
 
   useEffect(() => {
     let mounted = true;
@@ -726,7 +714,9 @@ function MeetingTimelineCard({
                 trailing={(
                   <div className="text-right">
                     <div className="text-xs font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                      {meeting.primary_provider ? meeting.primary_provider.toUpperCase() : "RT"}
+                      {meeting.primary_provider || meeting.reviewer_provider
+                        ? formatProviderFlow(meeting.primary_provider, meeting.reviewer_provider)
+                        : "RT"}
                     </div>
                     <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                       {t({

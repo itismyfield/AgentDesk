@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import type { Agent, CompanySettings, Department, DispatchedSession, Office, RoundTableMeeting } from "../types";
+import type { Agent, CompanySettings, Department, DispatchedSession, Office } from "../types";
 import {
   NOTIFICATION_TYPE_COLORS,
   type Notification,
@@ -36,7 +36,6 @@ interface ControlCenterViewProps {
   agents: Agent[];
   departments: Department[];
   sessions: DispatchedSession[];
-  meetings: RoundTableMeeting[];
   onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
@@ -45,23 +44,6 @@ interface ControlCenterViewProps {
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   notifications: Notification[];
   onDismissNotification: (id: string) => void;
-}
-
-function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
-  const totalIssues = meeting.proposed_issues?.length ?? 0;
-  if (meeting.status !== "completed" || totalIssues === 0) return false;
-
-  const results = meeting.issue_creation_results ?? [];
-  if (results.length === 0) {
-    return meeting.issues_created < totalIssues;
-  }
-
-  const created = results.filter((result) => result.ok && result.discarded !== true).length;
-  const failed = results.filter((result) => !result.ok && result.discarded !== true).length;
-  const discarded = results.filter((result) => result.discarded === true).length;
-  const pending = Math.max(totalIssues - created - failed - discarded, 0);
-
-  return pending > 0 || failed > 0;
 }
 
 function notificationTone(type: Notification["type"]): SurfaceTone {
@@ -93,7 +75,6 @@ export default function ControlCenterView({
   agents,
   departments,
   sessions,
-  meetings,
   onAssign,
   onAgentsChange,
   onDepartmentsChange,
@@ -137,10 +118,6 @@ export default function ControlCenterView({
   const activeSessionCount = useMemo(
     () => sessions.filter((session) => session.status !== "disconnected").length,
     [sessions],
-  );
-  const unresolvedMeetingCount = useMemo(
-    () => meetings.filter(hasUnresolvedMeetingIssues).length,
-    [meetings],
   );
 
   const organizationSections = useMemo(() => [
@@ -226,12 +203,6 @@ export default function ControlCenterView({
                 tone="success"
                 label={t("활성 세션", "Live Sessions")}
                 value={sessions.filter((session) => session.status !== "disconnected").length}
-                className="flex-1 sm:flex-none"
-              />
-              <SurfaceMetricPill
-                tone="warn"
-                label={t("정리 필요한 회의", "Meetings Needing Cleanup")}
-                value={unresolvedMeetingCount}
                 className="flex-1 sm:flex-none"
               />
             </div>

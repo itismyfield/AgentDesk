@@ -943,7 +943,7 @@ export default function MeetingMinutesView({
           />
         </div>
 
-        {!embedded && (
+        {(!embedded || unresolvedIssueCount > 0) && (
           <SurfaceNotice
             className="mt-4"
             tone={unresolvedIssueCount > 0 ? "warn" : "info"}
@@ -1028,8 +1028,16 @@ export default function MeetingMinutesView({
                   rows={3}
                   className="flex-1 resize-y px-3 py-2 rounded-lg text-sm"
                   style={inputStyle}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      handleStartMeeting();
+                    }
+                  }}
                 />
+              </div>
+              <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                {t({ ko: "시작: Ctrl/⌘ + Enter", en: "Start: Ctrl/⌘ + Enter" })}
               </div>
             </SurfaceCard>
 
@@ -1094,7 +1102,7 @@ export default function MeetingMinutesView({
                           key={expert.role_id}
                           type="button"
                           onClick={() => toggleFixedParticipant(expert)}
-                          className="rounded-full border px-3 py-1.5 text-left text-xs transition-colors"
+                          className="min-h-11 rounded-2xl border px-3 py-2.5 text-left text-sm transition-colors"
                           style={{
                             borderColor: selected
                               ? "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)"

@@ -33,6 +33,7 @@ import {
   useNotifications,
 } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
+import type { DashboardTab } from "./app/dashboardTabs";
 import {
   Building2,
   KanbanSquare,
@@ -47,17 +48,6 @@ type ViewMode = "office" | "dashboard" | "kanban" | "settings";
 type ControlTab = "organization" | "settings";
 type OrganizationPane = "agents" | "departments" | "offices" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
-type DashboardTab = "operations" | "tokens" | "automation" | "achievements" | "meetings";
-
-const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
-
-function focusDashboardTab(tab: DashboardTab) {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
 
 interface ShellRoute {
   id: ViewMode;
@@ -254,6 +244,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   const [controlTab, setControlTab] = useState<ControlTab>("organization");
   const [organizationPane, setOrganizationPane] = useState<OrganizationPane>("agents");
   const [kanbanSignalFocus, setKanbanSignalFocus] = useState<KanbanSignalFocus | null>(null);
+  const [dashboardRequestedTab, setDashboardRequestedTab] = useState<DashboardTab | null>(null);
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
@@ -322,7 +313,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
       }
 
       if (routeId === "dashboard_meetings") {
-        focusDashboardTab("meetings");
+        setDashboardRequestedTab("meetings");
         handleNavigate("dashboard");
         return;
       }
@@ -360,6 +351,10 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   const openSettingsView = useCallback(() => {
     setControlTab("settings");
     setView("settings");
+  }, []);
+
+  const clearRequestedDashboardTab = useCallback(() => {
+    setDashboardRequestedTab(null);
   }, []);
 
   useEffect(() => {
@@ -473,6 +468,8 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 sessions={visibleDispatchedSessions}
                 meetings={roundTableMeetings}
                 settings={settings}
+                requestedTab={dashboardRequestedTab}
+                onRequestedTabHandled={clearRequestedDashboardTab}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                 onOpenKanbanSignal={openKanbanSignalFocus}
                 onOpenDispatchSessions={openDispatchSessions}
@@ -542,7 +539,6 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 agents={agents}
                 departments={departments}
                 sessions={visibleDispatchedSessions}
-                meetings={roundTableMeetings}
                 onAssign={async (id, patch) => {
                   const updated = await api.assignDispatchedSession(id, patch);
                   setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
