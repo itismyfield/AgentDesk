@@ -478,16 +478,24 @@ fn cancel_selected_runs_with_conn(
         ) {
             Ok(result) if result.changed => cancelled_entries += 1,
             Ok(_) => {}
-            Err(error) => tracing::warn!(
-                "[auto-queue] failed to cancel entry {} during run cancel: {}",
-                entry_id,
-                error
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "run_cancel_entry_failed",
+                AutoQueueLogContext::new().entry(&entry_id),
+                "[auto-queue] failed to cancel entry {entry_id} during run cancel: {error}"
             ),
         }
     }
     let remaining_live_dispatches = count_live_dispatches_for_runs(conn, &target_run_ids);
     if remaining_live_dispatches > 0 {
-        tracing::warn!(
+        let log_ctx = target_run_ids
+            .first()
+            .map(|run_id| AutoQueueLogContext::new().run(run_id))
+            .unwrap_or_default();
+        crate::auto_queue_log!(
+            warn,
+            "run_cancel_remaining_live_dispatches",
+            log_ctx,
             "[auto-queue] cancel left {} non-terminal dispatches for runs {:?}",
             remaining_live_dispatches,
             target_run_ids

@@ -60,6 +60,7 @@ pub enum ConsultationDispatchRecordError {
 struct EntryStatusRow {
     run_id: String,
     card_id: String,
+    agent_id: String,
     status: String,
     dispatch_id: Option<String>,
     slot_index: Option<i64>,
@@ -101,6 +102,7 @@ fn update_entry_status_with_current_on_conn(
             .entry(entry_id)
             .card(&current.card_id)
             .maybe_dispatch(current.dispatch_id.as_deref())
+            .agent(&current.agent_id)
             .thread_group(current.thread_group)
             .batch_phase(current.batch_phase)
             .maybe_slot_index(current.slot_index);
@@ -1412,6 +1414,7 @@ fn load_entry_status_row(
     conn.query_row(
         "SELECT run_id,
                 kanban_card_id,
+                agent_id,
                 status,
                 dispatch_id,
                 slot_index,
@@ -1425,12 +1428,13 @@ fn load_entry_status_row(
             Ok(EntryStatusRow {
                 run_id: row.get(0)?,
                 card_id: row.get(1)?,
-                status: row.get(2)?,
-                dispatch_id: row.get(3)?,
-                slot_index: row.get(4)?,
-                thread_group: row.get(5)?,
-                batch_phase: row.get(6)?,
-                completed_at: row.get(7)?,
+                agent_id: row.get(2)?,
+                status: row.get(3)?,
+                dispatch_id: row.get(4)?,
+                slot_index: row.get(5)?,
+                thread_group: row.get(6)?,
+                batch_phase: row.get(7)?,
+                completed_at: row.get(8)?,
             })
         },
     )
