@@ -3271,10 +3271,11 @@ pub(crate) fn activate_with_deps(
                 "activate_done_skip",
                 &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
             ) {
-                tracing::warn!(
-                    "[auto-queue] failed to skip done card entry {} during activate: {}",
-                    entry_id,
-                    error
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_done_skip_failed",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to skip done card entry {entry_id} during activate: {error}"
                 );
             }
             drop(conn);
@@ -3298,11 +3299,11 @@ pub(crate) fn activate_with_deps(
                 },
             ) {
                 Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    "[auto-queue] failed to attach existing dispatch {} to entry {}: {}",
-                    dispatch_id,
-                    entry_id,
-                    error
+                Err(error) => crate::auto_queue_log!(
+                    warn,
+                    "activate_attach_existing_dispatch_failed",
+                    entry_log_ctx.clone().dispatch(dispatch_id),
+                    "[auto-queue] failed to attach existing dispatch {dispatch_id} to entry {entry_id}: {error}"
                 ),
             }
             drop(conn);
@@ -3484,28 +3485,35 @@ pub(crate) fn activate_with_deps(
                         drop(conn);
                         continue;
                     }
-                    Err(error) => tracing::warn!(
-                        "[auto-queue] failed to recover entry {} after create_dispatch error: {}",
-                        entry_id,
-                        error
+                    Err(error) => crate::auto_queue_log!(
+                        warn,
+                        "activate_create_dispatch_recover_failed",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] failed to recover entry {entry_id} after create_dispatch error: {error}"
                     ),
                 }
                 drop(conn);
             }
 
+            let recovered_dispatch_id = recovered_state
+                .as_ref()
+                .and_then(|state| state.latest_dispatch_id.as_deref());
             if recovered_state.as_ref().is_some_and(|state| {
                 state.latest_dispatch_id.is_some() || state.status != post_walk.status
             }) {
-                tracing::warn!(
-                    "[auto-queue] create_dispatch errored for entry {} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
-                    entry_id,
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_create_dispatch_error_kept_reservation",
+                    entry_log_ctx
+                        .clone()
+                        .maybe_slot_index(slot_index)
+                        .maybe_dispatch(recovered_dispatch_id),
+                    "[auto-queue] create_dispatch errored for entry {entry_id} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
                     recovered_state
                         .as_ref()
                         .map(|state| state.status.as_str())
                         .unwrap_or("unknown"),
-                    recovered_state
-                        .as_ref()
-                        .and_then(|state| state.latest_dispatch_id.as_ref())
+                    recovered_dispatch_id
                 );
                 continue;
             }
@@ -4393,6 +4401,12 @@ pub async fn restore_run(
     let mut errors = Vec::new();
 
     for entry in entries {
+        let entry_log_ctx = AutoQueueLogContext::new()
+            .run(&run_id)
+            .entry(&entry.entry_id)
+            .card(&entry.card_id)
+            .agent(&entry.agent_id)
+            .thread_group(entry.thread_group);
         let conn = match deps.db.separate_conn() {
             Ok(c) => c,
             Err(error) => {
@@ -4602,7 +4616,10 @@ pub async fn restore_run(
                         .and_then(|value| value.as_str())
                         .map(ToOwned::to_owned),
                     Err(error) => {
-                        tracing::warn!(
+                        crate::auto_queue_log!(
+                            warn,
+                            "restore_run_create_dispatch_failed",
+                            entry_log_ctx.clone().maybe_slot_index(slot_index),
                             "[auto-queue] restore_run create_dispatch failed for entry {}: {}",
                             entry.entry_id,
                             error
