@@ -40,19 +40,23 @@ type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
 type DashboardTab = "operations" | "tokens" | "automation" | "achievements";
 
 const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
+const DASHBOARD_TAB_STORAGE_KEY = "agentdesk.dashboard.active-tab";
 const DASHBOARD_TABS: DashboardTab[] = ["operations", "tokens", "automation", "achievements"];
 
 function readDashboardTabFromUrl(): DashboardTab {
   if (typeof window === "undefined") return "operations";
   const params = new URLSearchParams(window.location.search);
   const value = params.get(DASHBOARD_TAB_QUERY_KEY);
-  return DASHBOARD_TABS.includes(value as DashboardTab) ? (value as DashboardTab) : "operations";
+  if (DASHBOARD_TABS.includes(value as DashboardTab)) return value as DashboardTab;
+  const stored = window.localStorage.getItem(DASHBOARD_TAB_STORAGE_KEY);
+  return DASHBOARD_TABS.includes(stored as DashboardTab) ? (stored as DashboardTab) : "operations";
 }
 
 function syncDashboardTabToUrl(tab: DashboardTab) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
+  window.localStorage.setItem(DASHBOARD_TAB_STORAGE_KEY, tab);
   window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
@@ -81,17 +85,10 @@ export default function DashboardPageView({
   const numberFormatter = useMemo(() => new Intl.NumberFormat(localeTag), [localeTag]);
   const t: TFunction = useCallback((messages) => messages[language] ?? messages.ko, [language]);
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => readDashboardTabFromUrl());
-  const [mountedTabs, setMountedTabs] = useState<Record<DashboardTab, boolean>>({
-    operations: activeTab === "operations",
-    tokens: activeTab === "tokens",
-    automation: activeTab === "automation",
-    achievements: activeTab === "achievements",
-  });
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
   const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("all");
 
   useEffect(() => {
-    setMountedTabs((prev) => (prev[activeTab] ? prev : { ...prev, [activeTab]: true }));
     syncDashboardTabToUrl(activeTab);
   }, [activeTab]);
 
@@ -234,8 +231,8 @@ export default function DashboardPageView({
         </div>
       </SurfaceSection>
 
-      {mountedTabs.operations && (
-        <div className={activeTab === "operations" ? "space-y-5" : "hidden"}>
+      {activeTab === "operations" && (
+        <div className="space-y-5">
           <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <HealthWidget t={t} />
@@ -245,8 +242,8 @@ export default function DashboardPageView({
         </div>
       )}
 
-      {mountedTabs.tokens && (
-        <div className={activeTab === "tokens" ? "space-y-5" : "hidden"}>
+      {activeTab === "tokens" && (
+        <div className="space-y-5">
           <TokenAnalyticsSection
             agents={agents}
             t={t}
@@ -255,8 +252,8 @@ export default function DashboardPageView({
         </div>
       )}
 
-      {mountedTabs.automation && (
-        <div className={activeTab === "automation" ? "space-y-5" : "hidden"}>
+      {activeTab === "automation" && (
+        <div className="space-y-5">
           <PulseSectionShell
             eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
             title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
@@ -295,8 +292,8 @@ export default function DashboardPageView({
         </div>
       )}
 
-      {mountedTabs.achievements && (
-        <div className={activeTab === "achievements" ? "space-y-5" : "hidden"}>
+      {activeTab === "achievements" && (
+        <div className="space-y-5">
           <PulseSectionShell
             eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
             title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
