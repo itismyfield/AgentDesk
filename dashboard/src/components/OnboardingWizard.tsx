@@ -123,6 +123,13 @@ interface ProviderStatus {
   version?: string;
 }
 
+interface OnboardingCompletionState {
+  stage?: string;
+  partial_apply?: boolean;
+  retry_recommended?: boolean;
+  last_error?: string | null;
+}
+
 interface OnboardingStatusResponse {
   owner_id?: string;
   guild_id?: string;
@@ -136,6 +143,9 @@ interface OnboardingStatusResponse {
     command?: CommandBotEntry["provider"];
     command2?: CommandBotEntry["provider"];
   };
+  completion_state?: OnboardingCompletionState;
+  partial_apply?: boolean;
+  retry_recommended?: boolean;
 }
 
 interface OnboardingDraft {
@@ -1014,6 +1024,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           owner_id: ownerId || null,
           provider: primaryProvider,
           template: selectedTemplate || null,
+          rerun_policy: hasExistingSetup && confirmRerunOverwrite ? "replace_existing" : "reuse_existing",
           channels: channelAssignments.map((ca) => ({
             channel_id: ca.channelId || ca.channelName,
             channel_name: ca.channelName,
@@ -1034,7 +1045,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           onComplete();
         }
       } else {
-        setError(d.error || tr("설정 저장 실패", "Failed to save"));
+        const retryHint = d.partial_apply || d.completion_state?.partial_apply
+          ? tr(
+              "일부 적용이 남았습니다. 같은 payload로 다시 실행하면 기존 Discord 채널을 재사용합니다.",
+              "Setup was partially applied. Retrying with the same payload will reuse the existing Discord channels.",
+            )
+          : "";
+        setError([d.error || tr("설정 저장 실패", "Failed to save"), retryHint].filter(Boolean).join(" "));
       }
     } catch {
       setError(tr("완료 실패", "Failed to complete"));

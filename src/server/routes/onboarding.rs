@@ -1,8 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{Json, extract::State, http::StatusCode};
-use serde::Deserialize;
+use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::AppState;
 use crate::services::provider::ProviderKind;
@@ -111,6 +116,8 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         .ok();
 
     let completed = has_bots && agent_count > 0;
+    let completion_state = crate::cli::agentdesk_runtime_root()
+        .and_then(|root| load_onboarding_completion_state(&root).ok().flatten());
 
     // Mask tokens after onboarding is complete to prevent unauthenticated leakage.
     // Only show full tokens during initial setup (before completion).
@@ -145,6 +152,19 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             "guild_id": guild_id,
             "owner_id": owner_id,
             "agents": agents,
+            "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
+            "partial_apply": completion_state
+                .as_ref()
+                .map(|state| state.partial_apply)
+                .unwrap_or(false),
+            "retry_recommended": completion_state
+                .as_ref()
+                .map(|state| state.retry_recommended)
+                .unwrap_or(false),
+            "rerun_policy": onboarding_rerun_policy_value(
+                OnboardingRerunPolicy::ReuseExisting,
+                false,
+            ),
         })),
     )
 }
@@ -313,7 +333,7 @@ pub async fn channels_post(
     load_channels(state, body.token).await
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CompleteBody {
     pub token: String,
     pub announce_token: Option<String>,
@@ -325,9 +345,10 @@ pub struct CompleteBody {
     pub provider: Option<String>,
     pub channels: Vec<ChannelMapping>,
     pub template: Option<String>,
+    pub rerun_policy: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ChannelMapping {
     pub channel_id: String,
     pub channel_name: String,
@@ -336,14 +357,106 @@ pub struct ChannelMapping {
     pub system_prompt: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ChannelResolutionKind {
+    ProvidedId,
+    ExistingChannel,
+    CreatedChannel,
+    Checkpoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedChannelMapping {
     channel_id: String,
     channel_name: String,
+    requested_channel_name: String,
     role_id: String,
     description: Option<String>,
     system_prompt: Option<String>,
     created: bool,
+    resolution: ChannelResolutionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OnboardingRerunPolicy {
+    ReuseExisting,
+    ReplaceExisting,
+}
+
+impl OnboardingRerunPolicy {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("reuse_existing") => Ok(Self::ReuseExisting),
+            Some("replace_existing") => Ok(Self::ReplaceExisting),
+            Some(other) => Err(format!("unsupported rerun_policy '{other}'")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseExisting => "reuse_existing",
+            Self::ReplaceExisting => "replace_existing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OnboardingCompletionStage {
+    ChannelsResolved,
+    ArtifactsPersisted,
+    Completed,
+}
+
+impl OnboardingCompletionStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ChannelsResolved => "channels_resolved",
+            Self::ArtifactsPersisted => "artifacts_persisted",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OnboardingCompletionChannelState {
+    role_id: String,
+    requested_channel_name: String,
+    channel_id: String,
+    channel_name: String,
+    created: bool,
+    resolution: ChannelResolutionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OnboardingCompletionState {
+    request_fingerprint: String,
+    guild_id: String,
+    provider: String,
+    rerun_policy: String,
+    stage: OnboardingCompletionStage,
+    partial_apply: bool,
+    retry_recommended: bool,
+    updated_at_ms: i64,
+    last_error: Option<String>,
+    channels: Vec<OnboardingCompletionChannelState>,
+}
+
+#[derive(Debug, Clone)]
+struct CompleteExecutionOptions {
+    discord_api_base: String,
+    fail_after_stage: Option<OnboardingCompletionStage>,
+}
+
+impl Default for CompleteExecutionOptions {
+    fn default() -> Self {
+        Self {
+            discord_api_base: DISCORD_API_BASE.to_string(),
+            fail_after_stage: None,
+        }
+    }
 }
 
 fn is_discord_channel_id(value: &str) -> bool {
@@ -364,6 +477,203 @@ fn desired_channel_name(mapping: &ChannelMapping) -> Result<String, String> {
     normalized_channel_name(&mapping.channel_name)
         .or_else(|| normalized_channel_name(&mapping.channel_id))
         .ok_or_else(|| format!("agent '{}' is missing a channel name", mapping.role_id))
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn onboarding_completion_state_path(runtime_root: &Path) -> PathBuf {
+    crate::runtime_layout::config_dir(runtime_root).join("onboarding_completion_state.json")
+}
+
+fn load_onboarding_completion_state(
+    runtime_root: &Path,
+) -> Result<Option<OnboardingCompletionState>, String> {
+    let path = onboarding_completion_state_path(runtime_root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "failed to read onboarding completion state {}: {e}",
+            path.display()
+        )
+    })?;
+    let state = serde_json::from_str::<OnboardingCompletionState>(&content).map_err(|e| {
+        format!(
+            "failed to parse onboarding completion state {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(Some(state))
+}
+
+fn save_onboarding_completion_state(
+    runtime_root: &Path,
+    state: &OnboardingCompletionState,
+) -> Result<(), String> {
+    let path = onboarding_completion_state_path(runtime_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create completion state dir {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("failed to serialize onboarding completion state: {e}"))?;
+    std::fs::write(&path, content).map_err(|e| {
+        format!(
+            "failed to write onboarding completion state {}: {e}",
+            path.display()
+        )
+    })
+}
+
+fn build_onboarding_completion_state(
+    request_fingerprint: &str,
+    guild_id: &str,
+    provider: &str,
+    rerun_policy: OnboardingRerunPolicy,
+    stage: OnboardingCompletionStage,
+    partial_apply: bool,
+    retry_recommended: bool,
+    last_error: Option<String>,
+    resolved_channels: &[ResolvedChannelMapping],
+) -> OnboardingCompletionState {
+    OnboardingCompletionState {
+        request_fingerprint: request_fingerprint.to_string(),
+        guild_id: guild_id.trim().to_string(),
+        provider: provider.trim().to_string(),
+        rerun_policy: rerun_policy.as_str().to_string(),
+        stage,
+        partial_apply,
+        retry_recommended,
+        updated_at_ms: now_unix_ms(),
+        last_error,
+        channels: resolved_channels
+            .iter()
+            .map(|mapping| OnboardingCompletionChannelState {
+                role_id: mapping.role_id.clone(),
+                requested_channel_name: mapping.requested_channel_name.clone(),
+                channel_id: mapping.channel_id.clone(),
+                channel_name: mapping.channel_name.clone(),
+                created: mapping.created,
+                resolution: mapping.resolution,
+            })
+            .collect(),
+    }
+}
+
+fn onboarding_completion_state_value(
+    completion_state: Option<&OnboardingCompletionState>,
+) -> serde_json::Value {
+    completion_state
+        .and_then(|state| serde_json::to_value(state).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn onboarding_rerun_policy_value(
+    rerun_policy: OnboardingRerunPolicy,
+    explicit: bool,
+) -> serde_json::Value {
+    json!({
+        "applied": rerun_policy.as_str(),
+        "explicit": explicit,
+        "supported": ["reuse_existing", "replace_existing"],
+    })
+}
+
+fn completion_response(
+    status: StatusCode,
+    ok: bool,
+    provider: &str,
+    rerun_policy: OnboardingRerunPolicy,
+    explicit_rerun_policy: bool,
+    completion_state: Option<&OnboardingCompletionState>,
+    error: Option<String>,
+    conflicts: Vec<String>,
+    mut extra: serde_json::Map<String, serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    extra.insert("ok".to_string(), json!(ok));
+    extra.insert("provider".to_string(), json!(provider));
+    extra.insert(
+        "partial_apply".to_string(),
+        json!(
+            completion_state
+                .map(|state| state.partial_apply)
+                .unwrap_or(false)
+        ),
+    );
+    extra.insert(
+        "retry_recommended".to_string(),
+        json!(
+            completion_state
+                .map(|state| state.retry_recommended)
+                .unwrap_or(false)
+        ),
+    );
+    extra.insert(
+        "completion_state".to_string(),
+        onboarding_completion_state_value(completion_state),
+    );
+    extra.insert(
+        "rerun_policy".to_string(),
+        onboarding_rerun_policy_value(rerun_policy, explicit_rerun_policy),
+    );
+    if let Some(error) = error {
+        extra.insert("error".to_string(), json!(error));
+    }
+    if !conflicts.is_empty() {
+        extra.insert("conflicts".to_string(), json!(conflicts));
+    }
+    (status, serde_json::Value::Object(extra))
+}
+
+fn normalized_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn requested_channel_fingerprint(body: &CompleteBody) -> Result<String, String> {
+    let mut channels = body
+        .channels
+        .iter()
+        .map(|mapping| {
+            Ok(json!({
+                "role_id": mapping.role_id.trim(),
+                "channel_id": normalized_channel_name(&mapping.channel_id)
+                    .unwrap_or_else(|| mapping.channel_id.trim().to_string()),
+                "channel_name": desired_channel_name(mapping)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    channels.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+
+    let payload = json!({
+        "guild_id": body.guild_id.trim(),
+        "channels": channels,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(payload.to_string().as_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn role_map_entry_role_id(value: &serde_json::Value) -> Option<&str> {
+    value.get("roleId").and_then(|value| value.as_str())
+}
+
+fn role_map_entry_channel_id(value: &serde_json::Value) -> Option<&str> {
+    value.get("channelId").and_then(|value| value.as_str())
 }
 
 async fn discord_list_guild_channels(
@@ -448,17 +758,33 @@ async fn resolve_channel_mapping(
     api_base: &str,
     guild_id: &str,
     mapping: &ChannelMapping,
+    checkpoint: Option<&OnboardingCompletionChannelState>,
 ) -> Result<ResolvedChannelMapping, String> {
     let requested_name = desired_channel_name(mapping)?;
+
+    if let Some(checkpoint) = checkpoint {
+        return Ok(ResolvedChannelMapping {
+            channel_id: checkpoint.channel_id.clone(),
+            channel_name: checkpoint.channel_name.clone(),
+            requested_channel_name: requested_name.clone(),
+            role_id: mapping.role_id.clone(),
+            description: mapping.description.clone(),
+            system_prompt: mapping.system_prompt.clone(),
+            created: checkpoint.created,
+            resolution: ChannelResolutionKind::Checkpoint,
+        });
+    }
 
     if is_discord_channel_id(&mapping.channel_id) {
         return Ok(ResolvedChannelMapping {
             channel_id: mapping.channel_id.trim().to_string(),
-            channel_name: requested_name,
+            channel_name: requested_name.clone(),
+            requested_channel_name: requested_name.clone(),
             role_id: mapping.role_id.clone(),
             description: mapping.description.clone(),
             system_prompt: mapping.system_prompt.clone(),
             created: false,
+            resolution: ChannelResolutionKind::ProvidedId,
         });
     }
 
@@ -498,10 +824,12 @@ async fn resolve_channel_mapping(
         return Ok(ResolvedChannelMapping {
             channel_id: channel_id.to_string(),
             channel_name,
+            requested_channel_name: requested_name.clone(),
             role_id: mapping.role_id.clone(),
             description: mapping.description.clone(),
             system_prompt: mapping.system_prompt.clone(),
             created: false,
+            resolution: ChannelResolutionKind::ExistingChannel,
         });
     }
 
@@ -530,10 +858,12 @@ async fn resolve_channel_mapping(
     Ok(ResolvedChannelMapping {
         channel_id: channel_id.to_string(),
         channel_name,
+        requested_channel_name: requested_name,
         role_id: mapping.role_id.clone(),
         description: mapping.description.clone(),
         system_prompt: mapping.system_prompt.clone(),
         created: true,
+        resolution: ChannelResolutionKind::CreatedChannel,
     })
 }
 
@@ -697,18 +1027,378 @@ fn push_channel_alias(config: &mut crate::config::AgentChannelConfig, alias: Str
     }
 }
 
+fn load_onboarding_config(runtime_root: &Path) -> Result<crate::config::Config, String> {
+    let config_path = onboarding_config_path(runtime_root);
+    if config_path.is_file() {
+        crate::config::load_from_path(&config_path)
+            .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))
+    } else {
+        Ok(crate::config::Config::default())
+    }
+}
+
+fn load_onboarding_role_map(runtime_root: &Path) -> Result<serde_json::Value, String> {
+    let path = crate::runtime_layout::role_map_path(runtime_root);
+    if !path.is_file() {
+        return Ok(json!({
+            "version": 1,
+            "byChannelId": {},
+            "byChannelName": {},
+            "fallbackByChannelName": { "enabled": true },
+        }));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read role map {}: {e}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse role map {}: {e}", path.display()))
+}
+
+fn validate_unique_resolved_channels(
+    resolved_channels: &[ResolvedChannelMapping],
+) -> Result<(), String> {
+    let mut seen_roles = std::collections::BTreeSet::new();
+    let mut seen_channel_ids = std::collections::BTreeMap::new();
+
+    for mapping in resolved_channels {
+        if !seen_roles.insert(mapping.role_id.clone()) {
+            return Err(format!(
+                "duplicate onboarding agent id '{}' in completion payload",
+                mapping.role_id
+            ));
+        }
+
+        if let Some(previous_role) =
+            seen_channel_ids.insert(mapping.channel_id.clone(), mapping.role_id.clone())
+        {
+            return Err(format!(
+                "channel '{}' is assigned to both '{}' and '{}'",
+                mapping.channel_id, previous_role, mapping.role_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_onboarding_conflicts(
+    conn: &rusqlite::Connection,
+    runtime_root: &Path,
+    provider: &str,
+    resolved_channels: &[ResolvedChannelMapping],
+    rerun_policy: OnboardingRerunPolicy,
+) -> Result<Vec<String>, String> {
+    validate_unique_resolved_channels(resolved_channels)?;
+
+    let config = load_onboarding_config(runtime_root)?;
+    let role_map = load_onboarding_role_map(runtime_root)?;
+    let by_channel_id = role_map
+        .get("byChannelId")
+        .and_then(|value| value.as_object());
+    let by_channel_name = role_map
+        .get("byChannelName")
+        .and_then(|value| value.as_object());
+
+    let mut conflicts = Vec::new();
+
+    for mapping in resolved_channels {
+        let existing_agent = conn
+            .query_row(
+                "SELECT provider, discord_channel_id, description, system_prompt \
+                 FROM agents WHERE id = ?1",
+                [mapping.role_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| format!("failed to query agent {}: {e}", mapping.role_id))?;
+
+        if let Some((
+            existing_provider,
+            existing_channel_id,
+            existing_description,
+            existing_prompt,
+        )) = existing_agent
+        {
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+                if let Some(existing_channel_id) =
+                    normalized_optional_text(existing_channel_id.as_deref())
+                {
+                    if existing_channel_id != mapping.channel_id {
+                        conflicts.push(format!(
+                            "agent '{}' already uses Discord channel '{}' in DB; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+
+                if let Some(existing_provider) =
+                    normalized_optional_text(existing_provider.as_deref())
+                {
+                    if existing_provider != provider {
+                        conflicts.push(format!(
+                            "agent '{}' already uses provider '{}' in config DB state; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_provider, provider
+                        ));
+                    }
+                }
+
+                if let (Some(existing), Some(requested)) = (
+                    normalized_optional_text(existing_description.as_deref()),
+                    normalized_optional_text(mapping.description.as_deref()),
+                ) {
+                    if existing != requested {
+                        conflicts.push(format!(
+                            "agent '{}' already has a different description in DB; rerun_policy=reuse_existing refuses to overwrite it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+
+                if let (Some(existing), Some(requested)) = (
+                    normalized_optional_text(existing_prompt.as_deref()),
+                    normalized_optional_text(mapping.system_prompt.as_deref()),
+                ) {
+                    if existing != requested {
+                        conflicts.push(format!(
+                            "agent '{}' already has a different system prompt in DB; rerun_policy=reuse_existing refuses to overwrite it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+            }
+        }
+
+        let conflicting_db_channel_owner = conn
+            .query_row(
+                "SELECT id FROM agents WHERE discord_channel_id = ?1 AND id != ?2 LIMIT 1",
+                rusqlite::params![mapping.channel_id, mapping.role_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| {
+                format!(
+                    "failed to check existing DB channel owner {}: {e}",
+                    mapping.channel_id
+                )
+            })?;
+        if let Some(other_agent_id) = conflicting_db_channel_owner {
+            conflicts.push(format!(
+                "Discord channel '{}' is already assigned to agent '{}' in DB",
+                mapping.channel_id, other_agent_id
+            ));
+        }
+
+        if let Some(agent) = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == mapping.role_id)
+        {
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting && agent.provider != provider {
+                conflicts.push(format!(
+                    "agent '{}' already uses provider '{}' in agentdesk.yaml; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                    mapping.role_id, agent.provider, provider
+                ));
+            }
+
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+                if let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) {
+                    let channel = channel_config_from_existing(slot.clone());
+                    let existing_channel_id = channel.channel_id();
+                    let existing_names = channel.all_names();
+                    let same_channel_id =
+                        existing_channel_id.as_deref() == Some(mapping.channel_id.as_str());
+                    let same_channel_name = existing_names.iter().any(|name| {
+                        name == &mapping.channel_name || name == &mapping.requested_channel_name
+                    });
+                    let conflicts_with_existing = if existing_channel_id.is_some() {
+                        !same_channel_id
+                    } else {
+                        !existing_names.is_empty() && !same_channel_name
+                    };
+                    if conflicts_with_existing {
+                        conflicts.push(format!(
+                            "agent '{}' already maps to a different channel in agentdesk.yaml; rerun_policy=reuse_existing refuses to replace it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+            }
+        }
+
+        for agent in &config.agents {
+            if agent.id == mapping.role_id {
+                continue;
+            }
+            let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) else {
+                continue;
+            };
+            let channel = channel_config_from_existing(slot.clone());
+            let uses_same_target = channel.channel_id().as_deref()
+                == Some(mapping.channel_id.as_str())
+                || channel.all_names().iter().any(|name| {
+                    name == &mapping.channel_name || name == &mapping.requested_channel_name
+                });
+            if uses_same_target {
+                conflicts.push(format!(
+                    "agent '{}' already owns channel '{}' in agentdesk.yaml",
+                    agent.id, mapping.channel_id
+                ));
+            }
+        }
+
+        if let Some(entry) = by_channel_id.and_then(|entries| entries.get(&mapping.channel_id))
+            && let Some(role_id) = role_map_entry_role_id(entry)
+            && role_id != mapping.role_id
+        {
+            conflicts.push(format!(
+                "role_map.json already binds channel '{}' to agent '{}'",
+                mapping.channel_id, role_id
+            ));
+        }
+
+        if let Some(entry) = by_channel_name.and_then(|entries| entries.get(&mapping.channel_name))
+            && let Some(role_id) = role_map_entry_role_id(entry)
+            && role_id != mapping.role_id
+        {
+            conflicts.push(format!(
+                "role_map.json already binds channel name '{}' to agent '{}'",
+                mapping.channel_name, role_id
+            ));
+        }
+
+        if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+            if let Some(entries) = by_channel_id {
+                for (existing_channel_id, entry) in entries {
+                    if role_map_entry_role_id(entry) == Some(mapping.role_id.as_str())
+                        && existing_channel_id != &mapping.channel_id
+                    {
+                        conflicts.push(format!(
+                            "role_map.json already binds agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+            }
+
+            if let Some(entries) = by_channel_name {
+                for (existing_name, entry) in entries {
+                    if role_map_entry_role_id(entry) != Some(mapping.role_id.as_str()) {
+                        continue;
+                    }
+
+                    let same_name = existing_name == &mapping.channel_name
+                        || existing_name == &mapping.requested_channel_name;
+                    if !same_name {
+                        conflicts.push(format!(
+                            "role_map.json already binds agent '{}' to channel name '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_name, mapping.channel_name
+                        ));
+                        continue;
+                    }
+
+                    if let Some(existing_channel_id) = role_map_entry_channel_id(entry)
+                        && existing_channel_id != mapping.channel_id
+                    {
+                        conflicts.push(format!(
+                            "role_map.json already binds channel name '{}' for agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            existing_name, mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(conflicts)
+}
+
+fn write_onboarding_role_map(
+    runtime_root: &Path,
+    provider: &str,
+    resolved_channels: &[ResolvedChannelMapping],
+) -> Result<(), String> {
+    let mut role_map = load_onboarding_role_map(runtime_root)?;
+    let root = role_map
+        .as_object_mut()
+        .ok_or_else(|| "role map root must be a JSON object".to_string())?;
+
+    root.insert("version".to_string(), json!(1));
+    root.entry("fallbackByChannelName".to_string())
+        .or_insert_with(|| json!({ "enabled": true }));
+    root.entry("byChannelId".to_string())
+        .or_insert_with(|| json!({}));
+    root.entry("byChannelName".to_string())
+        .or_insert_with(|| json!({}));
+
+    let resolved_role_ids = resolved_channels
+        .iter()
+        .map(|mapping| mapping.role_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    root.get_mut("byChannelId")
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| "role map byChannelId must be a JSON object".to_string())?
+        .retain(|_, entry| {
+            role_map_entry_role_id(entry)
+                .map(|role_id| !resolved_role_ids.contains(role_id))
+                .unwrap_or(true)
+        });
+    root.get_mut("byChannelName")
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| "role map byChannelName must be a JSON object".to_string())?
+        .retain(|_, entry| {
+            role_map_entry_role_id(entry)
+                .map(|role_id| !resolved_role_ids.contains(role_id))
+                .unwrap_or(true)
+        });
+
+    for mapping in resolved_channels {
+        let workspace_tilde =
+            tilde_display_path(&runtime_root.join("workspaces").join(&mapping.role_id));
+        root.get_mut("byChannelId")
+            .and_then(|value| value.as_object_mut())
+            .ok_or_else(|| "role map byChannelId must be a JSON object".to_string())?
+            .insert(
+                mapping.channel_id.clone(),
+                json!({
+                    "roleId": mapping.role_id,
+                    "provider": provider,
+                    "workspace": workspace_tilde.clone(),
+                }),
+            );
+        root.get_mut("byChannelName")
+            .and_then(|value| value.as_object_mut())
+            .ok_or_else(|| "role map byChannelName must be a JSON object".to_string())?
+            .insert(
+                mapping.channel_name.clone(),
+                json!({
+                    "roleId": mapping.role_id,
+                    "channelId": mapping.channel_id,
+                    "workspace": workspace_tilde,
+                }),
+            );
+    }
+
+    let path = crate::runtime_layout::role_map_path(runtime_root);
+    let content = serde_json::to_string_pretty(&role_map)
+        .map_err(|e| format!("failed to serialize role map: {e}"))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("failed to write role map {}: {e}", path.display()))
+}
+
 fn write_agentdesk_channel_bindings(
     runtime_root: &Path,
     provider: &str,
     resolved_channels: &[ResolvedChannelMapping],
 ) -> Result<(), String> {
     let config_path = onboarding_config_path(runtime_root);
-    let mut config = if config_path.is_file() {
-        crate::config::load_from_path(&config_path)
-            .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))?
-    } else {
-        crate::config::Config::default()
-    };
+    let mut config = load_onboarding_config(runtime_root)?;
 
     for mapping in resolved_channels {
         let workspace = tilde_display_path(&runtime_root.join("workspaces").join(&mapping.role_id));
@@ -1015,150 +1705,413 @@ pub async fn complete(
     State(state): State<AppState>,
     Json(body): Json<CompleteBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, response) =
+        complete_with_options(&state, &body, &CompleteExecutionOptions::default()).await;
+    (status, Json(response))
+}
+
+async fn complete_with_options(
+    state: &AppState,
+    body: &CompleteBody,
+    options: &CompleteExecutionOptions,
+) -> (StatusCode, serde_json::Value) {
     let provider = body.provider.as_deref().unwrap_or("claude");
+    let explicit_rerun_policy = body
+        .rerun_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let rerun_policy = match OnboardingRerunPolicy::parse(body.rerun_policy.as_deref()) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return completion_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                provider,
+                OnboardingRerunPolicy::ReuseExisting,
+                explicit_rerun_policy,
+                None,
+                Some(error),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
+    };
+    let request_fingerprint = match requested_channel_fingerprint(body) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            return completion_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                None,
+                Some(error),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
+    };
     let discord_token = body
         .announce_token
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(body.token.as_str());
+
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            None,
+            Some("cannot determine runtime root".to_string()),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    };
+
+    if let Err(error) = crate::runtime_layout::ensure_runtime_layout(&root) {
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            None,
+            Some(format!("failed to prepare runtime layout: {error}")),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
+    let existing_completion_state = match load_onboarding_completion_state(&root) {
+        Ok(state) => state,
+        Err(error) => {
+            return completion_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                None,
+                Some(error),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
+    };
+
+    if let Some(existing_state) = existing_completion_state
+        .as_ref()
+        .filter(|state| state.partial_apply && state.request_fingerprint != request_fingerprint)
+    {
+        return completion_response(
+            StatusCode::CONFLICT,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(existing_state),
+            Some(
+                "an incomplete onboarding attempt exists for a different channel plan; retry the same payload or reset the previous partial apply before changing channel mappings".to_string(),
+            ),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
+    let checkpoint_state = existing_completion_state
+        .as_ref()
+        .filter(|state| state.request_fingerprint == request_fingerprint);
+
     let client = reqwest::Client::new();
     let mut resolved_channels = Vec::with_capacity(body.channels.len());
-
     for mapping in &body.channels {
+        let checkpoint = checkpoint_state.and_then(|state| {
+            let requested_name = desired_channel_name(mapping).ok()?;
+            state.channels.iter().find(|channel| {
+                channel.role_id == mapping.role_id
+                    && channel.requested_channel_name == requested_name
+            })
+        });
         let resolved = match resolve_channel_mapping(
             &client,
             discord_token,
-            DISCORD_API_BASE,
+            &options.discord_api_base,
             &body.guild_id,
             mapping,
+            checkpoint,
         )
         .await
         {
             Ok(resolved) => resolved,
             Err(error) => {
-                return (
+                return completion_response(
                     StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!(
-                            "failed to resolve channel for agent '{}': {}",
-                            mapping.role_id, error
-                        )
-                    })),
+                    false,
+                    provider,
+                    rerun_policy,
+                    explicit_rerun_policy,
+                    existing_completion_state.as_ref(),
+                    Some(format!(
+                        "failed to resolve channel for agent '{}': {}",
+                        mapping.role_id, error
+                    )),
+                    Vec::new(),
+                    serde_json::Map::new(),
                 );
             }
         };
         resolved_channels.push(resolved);
     }
 
+    if let Err(error) = validate_unique_resolved_channels(&resolved_channels) {
+        return completion_response(
+            StatusCode::BAD_REQUEST,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            existing_completion_state.as_ref(),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
     let channels_created = resolved_channels
         .iter()
-        .filter(|mapping| mapping.created)
+        .filter(|mapping| mapping.resolution == ChannelResolutionKind::CreatedChannel)
         .count();
+    let checkpoint_reused = resolved_channels
+        .iter()
+        .filter(|mapping| mapping.resolution == ChannelResolutionKind::Checkpoint)
+        .count();
+    let has_partial_apply = channels_created > 0
+        || checkpoint_state
+            .map(|state| state.partial_apply)
+            .unwrap_or(false);
 
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return (
+    let mut completion_state = build_onboarding_completion_state(
+        &request_fingerprint,
+        &body.guild_id,
+        provider,
+        rerun_policy,
+        OnboardingCompletionStage::ChannelsResolved,
+        has_partial_apply,
+        has_partial_apply,
+        None,
+        &resolved_channels,
+    );
+    if let Err(error) = save_onboarding_completion_state(&root, &completion_state) {
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "cannot determine runtime root"})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
         );
+    }
+
+    if options.fail_after_stage == Some(OnboardingCompletionStage::ChannelsResolved) {
+        let error = format!(
+            "test failpoint triggered after stage {}",
+            OnboardingCompletionStage::ChannelsResolved.as_str()
+        );
+        completion_state.last_error = Some(error.clone());
+        completion_state.retry_recommended = true;
+        if let Err(save_error) = save_onboarding_completion_state(&root, &completion_state) {
+            return completion_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                Some(format!(
+                    "{error}; additionally failed to persist completion state: {save_error}"
+                )),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
+    let mut conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(error) => {
+            completion_state.last_error = Some(format!("{error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                Some(format!("{error}")),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
     };
 
-    if let Err(error) = crate::runtime_layout::ensure_runtime_layout(&root) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to prepare runtime layout: {error}")})),
+    let conflicts = match collect_onboarding_conflicts(
+        &conn,
+        &root,
+        provider,
+        &resolved_channels,
+        rerun_policy,
+    ) {
+        Ok(conflicts) => conflicts,
+        Err(error) => {
+            completion_state.last_error = Some(error.clone());
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                Some(error),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
+        }
+    };
+    if !conflicts.is_empty() {
+        let error = "onboarding rerun would overwrite existing agent/channel bindings; re-run with rerun_policy=replace_existing only if you intend to replace them".to_string();
+        completion_state.last_error = Some(error.clone());
+        completion_state.retry_recommended = false;
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
+            StatusCode::CONFLICT,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            conflicts,
+            serde_json::Map::new(),
         );
     }
 
     let config_dir = crate::runtime_layout::config_dir(&root);
     if let Err(error) = std::fs::create_dir_all(&config_dir) {
-        return (
+        completion_state.last_error = Some(format!(
+            "failed to create config dir {}: {error}",
+            config_dir.display()
+        ));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({"error": format!("failed to create config dir {}: {error}", config_dir.display())}),
-            ),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
-    // Create workspace directories for each agent
     let workspaces_dir = root.join("workspaces");
     if let Err(error) = std::fs::create_dir_all(&workspaces_dir) {
-        return (
+        completion_state.last_error = Some(format!(
+            "failed to create workspaces dir {}: {error}",
+            workspaces_dir.display()
+        ));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({"error": format!("failed to create workspaces dir {}: {error}", workspaces_dir.display())}),
-            ),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
     for mapping in &resolved_channels {
         let ws_dir = workspaces_dir.join(&mapping.role_id);
         if let Err(error) = std::fs::create_dir_all(&ws_dir) {
-            return (
+            completion_state.last_error = Some(format!(
+                "failed to create workspace {}: {error}",
+                ws_dir.display()
+            ));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("failed to create workspace {}: {error}", ws_dir.display())}),
-                ),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
     }
 
-    let mut by_channel_id = serde_json::Map::new();
-    let mut by_channel_name = serde_json::Map::new();
-
-    for mapping in &resolved_channels {
-        let workspace_tilde = tilde_display_path(&root.join("workspaces").join(&mapping.role_id));
-        by_channel_id.insert(
-            mapping.channel_id.clone(),
-            json!({
-                "roleId": mapping.role_id,
-                "provider": provider,
-                "workspace": workspace_tilde,
-            }),
-        );
-        by_channel_name.insert(
-            mapping.channel_name.clone(),
-            json!({
-                "roleId": mapping.role_id,
-                "channelId": mapping.channel_id,
-                "workspace": workspace_tilde,
-            }),
-        );
-    }
-
-    let role_map = json!({
-        "version": 1,
-        "byChannelId": by_channel_id,
-        "byChannelName": by_channel_name,
-        "fallbackByChannelName": { "enabled": true },
-    });
-
-    let role_map_path = crate::runtime_layout::role_map_path(&root);
-    let role_map_json = match serde_json::to_string_pretty(&role_map) {
-        Ok(json_str) => json_str,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to serialize role map: {error}")})),
-            );
-        }
-    };
-    if let Err(error) = std::fs::write(&role_map_path, role_map_json) {
-        return (
+    if let Err(error) = write_onboarding_role_map(&root, provider, &resolved_channels) {
+        completion_state.last_error = Some(error);
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({"error": format!("failed to write role map {}: {error}", role_map_path.display())}),
-            ),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
     if let Err(error) = write_agentdesk_channel_bindings(&root, provider, &resolved_channels) {
-        return (
+        completion_state.last_error = Some(format!("failed to write agentdesk.yaml: {error}"));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to write agentdesk.yaml: {error}")})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
-    if let Err(e) = write_agentdesk_discord_config(
+    if let Err(error) = write_agentdesk_discord_config(
         &root,
         &body.guild_id,
         &body.token,
@@ -1167,23 +2120,52 @@ pub async fn complete(
         body.command_provider_2.as_deref(),
         body.owner_id.as_deref(),
     ) {
-        return (
+        completion_state.last_error = Some(format!(
+            "failed to write agentdesk.yaml discord config: {error}"
+        ));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to write agentdesk.yaml discord config: {e}")})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
-    if let Err(e) = write_credential_token(&root, "announce", body.announce_token.as_deref()) {
-        return (
+    if let Err(error) = write_credential_token(&root, "announce", body.announce_token.as_deref()) {
+        completion_state.last_error = Some(format!("failed to write announce credential: {error}"));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to write announce credential: {e}")})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
-    if let Err(e) = write_credential_token(&root, "notify", body.notify_token.as_deref()) {
-        return (
+    if let Err(error) = write_credential_token(&root, "notify", body.notify_token.as_deref()) {
+        completion_state.last_error = Some(format!("failed to write notify credential: {error}"));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to write notify credential: {e}")})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
@@ -1201,9 +2183,19 @@ pub async fn complete(
     ) {
         Ok(report) => report,
         Err(error) => {
-            return (
+            completion_state.last_error =
+                Some(format!("onboarding settings verification failed: {error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("onboarding settings verification failed: {error}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
     };
@@ -1211,28 +2203,99 @@ pub async fn complete(
     let pipeline_report = match verify_onboarding_pipeline_artifact(&root) {
         Ok(report) => report,
         Err(error) => {
-            return (
+            completion_state.last_error =
+                Some(format!("onboarding pipeline verification failed: {error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("onboarding pipeline verification failed: {error}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
     };
 
-    let mut conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
+    completion_state = build_onboarding_completion_state(
+        &request_fingerprint,
+        &body.guild_id,
+        provider,
+        rerun_policy,
+        OnboardingCompletionStage::ArtifactsPersisted,
+        true,
+        true,
+        None,
+        &resolved_channels,
+    );
+    if let Err(error) = save_onboarding_completion_state(&root, &completion_state) {
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
+    if options.fail_after_stage == Some(OnboardingCompletionStage::ArtifactsPersisted) {
+        let error = format!(
+            "test failpoint triggered after stage {}",
+            OnboardingCompletionStage::ArtifactsPersisted.as_str()
+        );
+        completion_state.last_error = Some(error.clone());
+        completion_state.retry_recommended = true;
+        if let Err(save_error) = save_onboarding_completion_state(&root, &completion_state) {
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                Some(format!(
+                    "{error}; additionally failed to persist completion state: {save_error}"
+                )),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
-    };
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
     let tx = match conn.transaction() {
         Ok(tx) => tx,
         Err(error) => {
-            return (
+            completion_state.last_error =
+                Some(format!("failed to start onboarding transaction: {error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to start onboarding transaction: {error}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
     };
@@ -1284,19 +2347,37 @@ pub async fn complete(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                     rusqlite::params![key, value],
                 ) {
-                    return (
+                    completion_state.last_error =
+                        Some(format!("failed to persist kv_meta {}: {error}", key));
+                    let _ = save_onboarding_completion_state(&root, &completion_state);
+                    return completion_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("failed to persist kv_meta {}: {error}", key)}),
-                        ),
+                        false,
+                        provider,
+                        rerun_policy,
+                        explicit_rerun_policy,
+                        Some(&completion_state),
+                        completion_state.last_error.clone(),
+                        Vec::new(),
+                        serde_json::Map::new(),
                     );
                 }
             }
             None => {
                 if let Err(error) = tx.execute("DELETE FROM kv_meta WHERE key = ?1", [key]) {
-                    return (
+                    completion_state.last_error =
+                        Some(format!("failed to clear kv_meta {}: {error}", key));
+                    let _ = save_onboarding_completion_state(&root, &completion_state);
+                    return completion_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("failed to clear kv_meta {}: {error}", key)})),
+                        false,
+                        provider,
+                        rerun_policy,
+                        explicit_rerun_policy,
+                        Some(&completion_state),
+                        completion_state.last_error.clone(),
+                        Vec::new(),
+                        serde_json::Map::new(),
                     );
                 }
             }
@@ -1305,24 +2386,36 @@ pub async fn complete(
 
     for mapping in &resolved_channels {
         if let Err(error) = tx.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, description, system_prompt, status, xp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0) \
+            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0) \
              ON CONFLICT(id) DO UPDATE SET \
                name = COALESCE(excluded.name, agents.name), \
+               provider = COALESCE(excluded.provider, agents.provider), \
                discord_channel_id = excluded.discord_channel_id, \
                description = COALESCE(excluded.description, agents.description), \
                system_prompt = COALESCE(excluded.system_prompt, agents.system_prompt)",
             rusqlite::params![
                 mapping.role_id,
                 mapping.role_id,
+                provider,
                 mapping.channel_id,
                 mapping.description,
                 mapping.system_prompt
             ],
         ) {
-            return (
+            completion_state.last_error =
+                Some(format!("failed to upsert agent {}: {error}", mapping.role_id));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to upsert agent {}: {error}", mapping.role_id)})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
     }
@@ -1341,9 +2434,18 @@ pub async fn complete(
             "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
         ) {
-            return (
+            completion_state.last_error = Some(format!("failed to upsert default office: {error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to upsert default office: {error}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
 
@@ -1360,9 +2462,19 @@ pub async fn complete(
                 office_id,
             ],
         ) {
-            return (
+            completion_state.last_error =
+                Some(format!("failed to upsert onboarding department: {error}"));
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to upsert onboarding department: {error}")})),
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
             );
         }
 
@@ -1372,31 +2484,86 @@ pub async fn complete(
                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![office_id, mapping.role_id, dept_id],
             ) {
-                return (
+                completion_state.last_error = Some(format!(
+                    "failed to assign office agent {}: {error}",
+                    mapping.role_id
+                ));
+                let _ = save_onboarding_completion_state(&root, &completion_state);
+                return completion_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("failed to assign office agent {}: {error}", mapping.role_id)}),
-                    ),
+                    false,
+                    provider,
+                    rerun_policy,
+                    explicit_rerun_policy,
+                    Some(&completion_state),
+                    completion_state.last_error.clone(),
+                    Vec::new(),
+                    serde_json::Map::new(),
                 );
             }
             if let Err(error) = tx.execute(
                 "UPDATE agents SET department = ?1 WHERE id = ?2",
                 rusqlite::params![dept_id, mapping.role_id],
             ) {
-                return (
+                completion_state.last_error = Some(format!(
+                    "failed to set agent department {}: {error}",
+                    mapping.role_id
+                ));
+                let _ = save_onboarding_completion_state(&root, &completion_state);
+                return completion_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("failed to set agent department {}: {error}", mapping.role_id)}),
-                    ),
+                    false,
+                    provider,
+                    rerun_policy,
+                    explicit_rerun_policy,
+                    Some(&completion_state),
+                    completion_state.last_error.clone(),
+                    Vec::new(),
+                    serde_json::Map::new(),
                 );
             }
         }
     }
 
     if let Err(error) = tx.commit() {
-        return (
+        completion_state.last_error =
+            Some(format!("failed to commit onboarding transaction: {error}"));
+        let _ = save_onboarding_completion_state(&root, &completion_state);
+        return completion_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to commit onboarding transaction: {error}")})),
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            completion_state.last_error.clone(),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+
+    completion_state = build_onboarding_completion_state(
+        &request_fingerprint,
+        &body.guild_id,
+        provider,
+        rerun_policy,
+        OnboardingCompletionStage::Completed,
+        false,
+        false,
+        None,
+        &resolved_channels,
+    );
+    if let Err(error) = save_onboarding_completion_state(&root, &completion_state) {
+        return completion_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            provider,
+            rerun_policy,
+            explicit_rerun_policy,
+            Some(&completion_state),
+            Some(error),
+            Vec::new(),
+            serde_json::Map::new(),
         );
     }
 
@@ -1406,10 +2573,11 @@ pub async fn complete(
             "ok": true,
             "label": "Discord channels ready",
             "detail": format!(
-                "{} channel mappings resolved ({} created, {} reused)",
+                "{} channel mappings resolved ({} created, {} reused, {} checkpointed)",
                 resolved_channels.len(),
                 channels_created,
-                resolved_channels.len().saturating_sub(channels_created),
+                resolved_channels.len().saturating_sub(channels_created + checkpoint_reused),
+                checkpoint_reused,
             ),
         }),
         json!({
@@ -1432,36 +2600,48 @@ pub async fn complete(
         }),
     ];
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "agents_created": resolved_channels.len(),
-            "channels_created": channels_created,
-            "provider": provider,
-            "checklist": checklist,
-            "artifacts": {
-                "settings": settings_report,
-                "pipeline": pipeline_report,
-                "channel_mappings": resolved_channels
-                    .iter()
-                    .map(|mapping| {
-                        json!({
-                            "role_id": mapping.role_id,
-                            "channel_id": mapping.channel_id,
-                            "channel_name": mapping.channel_name,
-                            "created": mapping.created,
-                        })
+    let mut extra = serde_json::Map::new();
+    extra.insert("agents_created".to_string(), json!(resolved_channels.len()));
+    extra.insert("channels_created".to_string(), json!(channels_created));
+    extra.insert("checklist".to_string(), json!(checklist));
+    extra.insert(
+        "artifacts".to_string(),
+        json!({
+            "settings": settings_report,
+            "pipeline": pipeline_report,
+            "channel_mappings": resolved_channels
+                .iter()
+                .map(|mapping| {
+                    json!({
+                        "role_id": mapping.role_id,
+                        "channel_id": mapping.channel_id,
+                        "channel_name": mapping.channel_name,
+                        "requested_channel_name": mapping.requested_channel_name,
+                        "created": mapping.created,
+                        "resolution": mapping.resolution,
                     })
-                    .collect::<Vec<_>>(),
-            }
-        })),
+                })
+                .collect::<Vec<_>>(),
+        }),
+    );
+
+    completion_response(
+        StatusCode::OK,
+        true,
+        provider,
+        rerun_policy,
+        explicit_rerun_policy,
+        Some(&completion_state),
+        None,
+        Vec::new(),
+        extra,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::sync::{
         Arc, MutexGuard,
@@ -1472,6 +2652,115 @@ mod tests {
 
     fn env_guard() -> MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    struct RuntimeRootGuard {
+        _lock: MutexGuard<'static, ()>,
+        _env: EnvVarGuard,
+    }
+
+    impl RuntimeRootGuard {
+        fn new(path: &Path) -> Self {
+            Self {
+                _lock: env_guard(),
+                _env: EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path),
+            }
+        }
+    }
+
+    fn test_db() -> crate::db::Db {
+        crate::db::test_db()
+    }
+
+    fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap()
+    }
+
+    fn sample_complete_body(
+        channel_id: &str,
+        channel_name: &str,
+        rerun_policy: Option<&str>,
+    ) -> CompleteBody {
+        CompleteBody {
+            token: "command-token".to_string(),
+            announce_token: None,
+            notify_token: None,
+            command_token_2: None,
+            command_provider_2: None,
+            guild_id: "123".to_string(),
+            owner_id: Some("42".to_string()),
+            provider: Some("codex".to_string()),
+            channels: vec![ChannelMapping {
+                channel_id: channel_id.to_string(),
+                channel_name: channel_name.to_string(),
+                role_id: "adk-cdx".to_string(),
+                description: Some("dispatch desk".to_string()),
+                system_prompt: Some("be precise".to_string()),
+            }],
+            template: Some("operations".to_string()),
+            rerun_policy: rerun_policy.map(str::to_string),
+        }
+    }
+
+    async fn spawn_mock_discord_server() -> (String, Arc<AtomicUsize>) {
+        let post_count = Arc::new(AtomicUsize::new(0));
+        let channels = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let channels_for_get = channels.clone();
+        let channels_for_post = channels.clone();
+        let post_count_for_route = post_count.clone();
+        let app = Router::new().route(
+            "/guilds/{guild_id}/channels",
+            get(move |AxumPath(_guild_id): AxumPath<String>| {
+                let channels = channels_for_get.clone();
+                async move { Json(channels.lock().unwrap().clone()) }
+            })
+            .post(
+                move |AxumPath(_guild_id): AxumPath<String>,
+                      Json(body): Json<serde_json::Value>| {
+                    let channels = channels_for_post.clone();
+                    let post_count = post_count_for_route.clone();
+                    async move {
+                        let count = post_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        let created = json!({
+                            "id": (1000 + count).to_string(),
+                            "name": body.get("name").and_then(|value| value.as_str()).unwrap_or("created"),
+                            "type": 0
+                        });
+                        channels.lock().unwrap().push(created.clone());
+                        Json(created)
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{}", addr), post_count)
     }
 
     #[cfg(unix)]
@@ -1624,6 +2913,7 @@ mod tests {
             &format!("http://{}", addr),
             "123",
             &mapping,
+            None,
         )
         .await
         .unwrap();
@@ -1676,6 +2966,7 @@ mod tests {
             &format!("http://{}", addr),
             "123",
             &mapping,
+            None,
         )
         .await
         .unwrap();
@@ -1684,6 +2975,217 @@ mod tests {
         assert_eq!(resolved.channel_name, "agentdesk-cdx");
         assert!(resolved.created);
         assert_eq!(post_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_retries_from_partial_state_without_duplicate_channel_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let (discord_api_base, post_count) = spawn_mock_discord_server().await;
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
+
+        let failure_options = CompleteExecutionOptions {
+            discord_api_base: discord_api_base.clone(),
+            fail_after_stage: Some(OnboardingCompletionStage::ArtifactsPersisted),
+        };
+        let (failed_status, failed_body) =
+            complete_with_options(&state, &body, &failure_options).await;
+        assert_eq!(failed_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failed_body["partial_apply"], json!(true));
+        assert_eq!(
+            failed_body["completion_state"]["stage"],
+            json!("artifacts_persisted")
+        );
+        assert_eq!(post_count.load(Ordering::SeqCst), 1);
+
+        let status_state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status_code, Json(status_body)) = status(axum::extract::State(status_state)).await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(status_body["partial_apply"], json!(true));
+        assert_eq!(
+            status_body["completion_state"]["channels"][0]["channel_id"],
+            json!("1001")
+        );
+
+        let success_options = CompleteExecutionOptions {
+            discord_api_base,
+            fail_after_stage: None,
+        };
+        let (success_status, success_body) =
+            complete_with_options(&state, &body, &success_options).await;
+        assert_eq!(success_status, StatusCode::OK);
+        assert_eq!(success_body["ok"], json!(true));
+        assert_eq!(success_body["partial_apply"], json!(false));
+        assert_eq!(post_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            success_body["artifacts"]["channel_mappings"][0]["resolution"],
+            json!("checkpoint")
+        );
+
+        let conn = db.read_conn().unwrap();
+        let stored_channel: String = conn
+            .query_row(
+                "SELECT discord_channel_id FROM agents WHERE id = 'adk-cdx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_channel, "1001");
+    }
+
+    #[tokio::test]
+    async fn complete_requires_explicit_replace_policy_before_overwriting_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let config_path = onboarding_config_path(temp.path());
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut config = crate::config::Config::default();
+        config.agents.push(crate::config::AgentDef {
+            id: "adk-cdx".to_string(),
+            name: "adk-cdx".to_string(),
+            name_ko: None,
+            provider: "claude".to_string(),
+            channels: crate::config::AgentChannels {
+                codex: Some(crate::config::AgentChannel::Detailed(
+                    crate::config::AgentChannelConfig {
+                        id: Some("5555".to_string()),
+                        name: Some("legacy-cdx".to_string()),
+                        aliases: Vec::new(),
+                        prompt_file: None,
+                        workspace: Some("~/legacy".to_string()),
+                        provider: Some("codex".to_string()),
+                        model: None,
+                        reasoning_effort: None,
+                        peer_agents: None,
+                    },
+                )),
+                ..crate::config::AgentChannels::default()
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        });
+        crate::config::save_to_path(&config_path, &config).unwrap();
+        let role_map_path = crate::runtime_layout::role_map_path(temp.path());
+        if let Some(parent) = role_map_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &role_map_path,
+            serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "byChannelId": {
+                    "5555": {
+                        "roleId": "adk-cdx",
+                        "provider": "codex",
+                        "workspace": "~/legacy"
+                    }
+                },
+                "byChannelName": {
+                    "legacy-cdx": {
+                        "roleId": "adk-cdx",
+                        "channelId": "5555",
+                        "workspace": "~/legacy"
+                    }
+                },
+                "fallbackByChannelName": { "enabled": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0)",
+                rusqlite::params![
+                    "adk-cdx",
+                    "adk-cdx",
+                    "claude",
+                    "5555",
+                    "existing desc",
+                    "existing prompt"
+                ],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let reuse_body = sample_complete_body("9001", "agentdesk-cdx", Some("reuse_existing"));
+        let (conflict_status, conflict_body) =
+            complete_with_options(&state, &reuse_body, &CompleteExecutionOptions::default()).await;
+        assert_eq!(conflict_status, StatusCode::CONFLICT);
+        assert_eq!(conflict_body["partial_apply"], json!(false));
+        assert_eq!(conflict_body["retry_recommended"], json!(false));
+        assert_eq!(
+            conflict_body["conflicts"][0]
+                .as_str()
+                .unwrap()
+                .contains("rerun_policy=reuse_existing"),
+            true
+        );
+
+        let replace_body = sample_complete_body("9001", "agentdesk-cdx", Some("replace_existing"));
+        let (replace_status, replace_body_json) =
+            complete_with_options(&state, &replace_body, &CompleteExecutionOptions::default())
+                .await;
+        assert_eq!(replace_status, StatusCode::OK);
+        assert_eq!(replace_body_json["ok"], json!(true));
+        assert_eq!(
+            replace_body_json["rerun_policy"]["applied"],
+            json!("replace_existing")
+        );
+
+        let conn = db.read_conn().unwrap();
+        let (provider, channel_id, description, prompt): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT provider, discord_channel_id, description, system_prompt \
+                 FROM agents WHERE id = 'adk-cdx'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(provider, "codex");
+        assert_eq!(channel_id, "9001");
+        assert_eq!(description.as_deref(), Some("dispatch desk"));
+        assert_eq!(prompt.as_deref(), Some("be precise"));
+
+        let saved_config = crate::config::load_from_path(&config_path).unwrap();
+        let saved_agent = saved_config
+            .agents
+            .iter()
+            .find(|agent| agent.id == "adk-cdx")
+            .unwrap();
+        let saved_channel = saved_agent
+            .channels
+            .codex
+            .as_ref()
+            .and_then(crate::config::AgentChannel::target)
+            .unwrap();
+        assert_eq!(saved_channel, "9001");
+
+        let saved_role_map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&role_map_path).unwrap()).unwrap();
+        assert!(saved_role_map["byChannelId"].get("5555").is_none());
+        assert!(saved_role_map["byChannelName"].get("legacy-cdx").is_none());
+        assert_eq!(
+            saved_role_map["byChannelId"]["9001"]["roleId"],
+            json!("adk-cdx")
+        );
+        assert_eq!(
+            saved_role_map["byChannelName"]["agentdesk-cdx"]["channelId"],
+            json!("9001")
+        );
     }
 
     #[cfg(unix)]
