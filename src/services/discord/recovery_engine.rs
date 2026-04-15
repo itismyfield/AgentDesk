@@ -1816,6 +1816,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: Some("host:tmux-1".to_string()),
             dispatch_id: Some("dispatch-from-state".to_string()),
+            last_watcher_relayed_offset: None,
         };
 
         assert!(persist_recovered_transcript(
@@ -1918,6 +1919,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: None,
             dispatch_id: None,
+            last_watcher_relayed_offset: None,
         };
 
         save_missing_session_handoff(
