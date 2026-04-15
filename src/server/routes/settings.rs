@@ -107,6 +107,13 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         None,
     ),
     (
+        "kanban_human_alert_channel_id",
+        "pipeline",
+        "사람 알림 채널 ID",
+        "Human Alert Channel ID",
+        None,
+    ),
+    (
         "review_enabled",
         "review",
         "리뷰 활성화",
@@ -212,6 +219,7 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
     match key {
         "kanban_manager_channel_id" => config.kanban.manager_channel_id.clone(),
         "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
+        "kanban_human_alert_channel_id" => config.kanban.human_alert_channel_id.clone(),
         "review_enabled" => stringified_bool(config.review.enabled),
         "max_review_rounds" => stringified_number(config.review.max_rounds),
         "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),

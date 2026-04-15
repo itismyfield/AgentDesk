@@ -29,8 +29,8 @@ use serde_json::json;
 /// 6. OnCardTerminal hook (when → done)
 /// 7. auto_queue_entries sync (when → done)
 ///
-/// `source`: who initiated the transition (e.g., "api", "policy", "pmd")
-/// `force`: PMD-only override to bypass dispatch validation
+/// `source`: who initiated the transition (e.g., "api", "policy", "agentdesk")
+/// `force`: administrative override to bypass dispatch validation
 pub fn transition_status(
     db: &Db,
     engine: &PolicyEngine,
@@ -194,7 +194,6 @@ where
             source,
             reason
         );
-        notify_pmd_violation(&conn, card_id, &old_status, new_status, source, reason);
         return Err(anyhow::anyhow!("{}", reason));
     }
 
@@ -625,111 +624,6 @@ fn github_sync_on_transition(
     } else if is_review_enter {
         let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
         let _ = crate::github::comment_issue(&repo, num, comment);
-    }
-}
-
-/// Cooldown period for violation alerts (30 minutes).
-const VIOLATION_COOLDOWN_SECS: i64 = 1800;
-
-/// Send a violation alert to the PMD/kanban-manager channel via announce bot.
-/// Applies dedup cooldown (30 min per card+from+to) and suppresses API-source alerts.
-fn notify_pmd_violation(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-    from: &str,
-    to: &str,
-    source: &str,
-    reason: &str,
-) {
-    // #200: API callers already receive error responses — no need to alert PMD.
-    if source == "api" {
-        tracing::debug!(
-            "[kanban] Suppressing violation alert for api source: {from} → {to} card {card_id}"
-        );
-        return;
-    }
-
-    // #200: Dedup cooldown — skip if same card+from+to was alerted within 30 min.
-    let cooldown_key = format!("violation_sent:{card_id}:{from}:{to}");
-    let recently_sent: bool = conn
-        .query_row(
-            "SELECT 1 FROM kv_meta WHERE key = ?1 \
-             AND (expires_at IS NULL OR expires_at > datetime('now'))",
-            [&cooldown_key],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if recently_sent {
-        tracing::debug!(
-            "[kanban] Violation alert cooldown active for {from} → {to} card {card_id}"
-        );
-        return;
-    }
-    // Record cooldown with TTL
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) \
-         VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'))",
-        rusqlite::params![cooldown_key, "1", VIOLATION_COOLDOWN_SECS.to_string()],
-    );
-
-    // Look up card title for the notification
-    let title: String = conn
-        .query_row(
-            "SELECT COALESCE(title, id) FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| card_id.to_string());
-
-    // Read kanban_manager_channel_id from kv_meta
-    let km_channel: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let Some(km_channel) = km_channel else {
-        tracing::debug!(
-            "[kanban] No kanban_manager_channel_id configured, skipping violation alert"
-        );
-        return;
-    };
-    let Some(channel_num) = km_channel.parse::<u64>().ok() else {
-        tracing::warn!("[kanban] Invalid kanban_manager_channel_id: {km_channel}");
-        return;
-    };
-
-    let message = format!(
-        "⚠️ **칸반 위반 감지**\n\n\
-         카드: {title}\n\
-         시도: {from} → {to}\n\
-         차단 사유: {reason}\n\
-         호출자: {source}\n\
-         카드 ID: {card_id}"
-    );
-
-    let token = match crate::credential::read_bot_token("announce") {
-        Some(t) => t,
-        None => {
-            tracing::debug!("[kanban] No announce bot token, skipping violation alert");
-            return;
-        }
-    };
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let client = reqwest::Client::new();
-            let _ = client
-                .post(format!(
-                    "https://discord.com/api/v10/channels/{channel_num}/messages"
-                ))
-                .header("Authorization", format!("Bot {}", token))
-                .json(&serde_json::json!({"content": message}))
-                .send()
-                .await;
-        });
     }
 }
 

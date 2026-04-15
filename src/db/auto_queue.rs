@@ -105,6 +105,117 @@ pub fn update_entry_status_on_conn(
     )
 }
 
+pub fn reactivate_done_entry_on_conn(
+    conn: &Connection,
+    entry_id: &str,
+    trigger_source: &str,
+    options: &EntryStatusUpdateOptions,
+) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
+    let current = load_entry_status_row(conn, entry_id)?;
+    if current.status != ENTRY_STATUS_DONE {
+        return update_entry_status_with_current_on_conn(
+            conn,
+            entry_id,
+            ENTRY_STATUS_DISPATCHED,
+            trigger_source,
+            options,
+            current,
+        );
+    }
+
+    let effective_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let effective_slot_index = options.slot_index.or(current.slot_index);
+
+    conn.execute_batch("SAVEPOINT auto_queue_entry_done_reactivate")?;
+    let restore_result = (|| -> rusqlite::Result<usize> {
+        let rows_affected = conn.execute(
+            "UPDATE auto_queue_entries
+                 SET status = 'dispatched',
+                     dispatch_id = ?1,
+                     slot_index = ?2,
+                     dispatched_at = datetime('now'),
+                     completed_at = NULL
+                 WHERE id = ?3
+                   AND status = 'done'",
+            rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,],
+        )?;
+
+        if rows_affected == 0 {
+            return Ok(0);
+        }
+
+        conn.execute(
+            "UPDATE auto_queue_runs
+                 SET status = 'active',
+                     completed_at = NULL
+                 WHERE id = ?1
+                   AND status = 'completed'",
+            [&current.run_id],
+        )?;
+
+        if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+            record_entry_dispatch_history_on_conn(conn, entry_id, dispatch_id, trigger_source)?;
+        }
+
+        record_entry_transition_on_conn(
+            conn,
+            entry_id,
+            ENTRY_STATUS_DONE,
+            ENTRY_STATUS_DISPATCHED,
+            trigger_source,
+        )?;
+
+        Ok(rows_affected)
+    })();
+
+    let rows_affected = match restore_result {
+        Ok(rows_affected) => {
+            conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_done_reactivate")?;
+            rows_affected
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO SAVEPOINT auto_queue_entry_done_reactivate; \
+                 RELEASE SAVEPOINT auto_queue_entry_done_reactivate",
+            );
+            return Err(EntryStatusUpdateError::Sql(error));
+        }
+    };
+
+    if rows_affected == 0 {
+        let latest = load_entry_status_row(conn, entry_id)?;
+        if entry_status_row_matches_target(
+            &latest,
+            ENTRY_STATUS_DISPATCHED,
+            effective_dispatch_id.as_deref(),
+            effective_slot_index,
+        ) {
+            return Ok(EntryStatusUpdateResult {
+                run_id: latest.run_id,
+                from_status: latest.status,
+                to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+                changed: false,
+            });
+        }
+
+        return Err(EntryStatusUpdateError::InvalidTransition {
+            entry_id: entry_id.to_string(),
+            from_status: latest.status,
+            to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+        });
+    }
+
+    Ok(EntryStatusUpdateResult {
+        run_id: current.run_id,
+        from_status: ENTRY_STATUS_DONE.to_string(),
+        to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+        changed: true,
+    })
+}
+
 fn update_entry_status_with_current_on_conn(
     conn: &Connection,
     entry_id: &str,
@@ -1937,8 +2048,8 @@ mod tests {
         ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocationError,
         allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
-        record_consultation_dispatch_on_conn, release_slot_for_group_agent,
-        save_phase_gate_state_on_conn, update_entry_status_on_conn,
+        reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn,
+        release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
@@ -2532,6 +2643,57 @@ mod tests {
             error,
             EntryStatusUpdateError::InvalidTransition { .. }
         ));
+    }
+
+    #[test]
+    fn reactivate_done_entry_allows_admin_restore_to_dispatched() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-reactivate', 'repo-1', 'agent-1', 'completed')",
+            [],
+        )
+        .expect("seed run");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, completed_at
+             ) VALUES ('entry-reactivate', 'run-reactivate', 'card-reactivate', 'agent-1', 'done', 0, datetime('now'))",
+            [],
+        )
+        .expect("seed done entry");
+
+        let restored = reactivate_done_entry_on_conn(
+            &conn,
+            "entry-reactivate",
+            "test_reactivate_done",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("reactivate done entry");
+        assert!(restored.changed);
+        assert_eq!(restored.from_status, ENTRY_STATUS_DONE);
+        assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+
+        let (status, dispatch_id, completed_at): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-reactivate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert!(dispatch_id.is_none());
+        assert!(completed_at.is_none());
+
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-reactivate'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run row");
+        assert_eq!(run_status, "active");
     }
 
     #[test]

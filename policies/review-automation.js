@@ -106,15 +106,24 @@ var reviewAutomation = {
     // #117: Update canonical card_review_state
     agentdesk.reviewState.sync(card.id, "reviewing", { review_round: newRound });
 
-    // Check review round limit — exceed → dilemma_pending with PMD notification
+    // Check review round limit — exceed → dilemma_pending with deadlock-manager notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
     if (newRound > maxRounds) {
       escalateToManualIntervention(card.id, "Max review rounds (" + maxRounds + ") exceeded — PM decision needed", {
         review: true,
-        reviewStateSync: { review_round: newRound }
+        reviewStateSync: { review_round: newRound },
+        skipEscalate: true
       });
       agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → dilemma_pending");
-      notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
+      notifyDeadlockManager(
+        "⚠️ [Review Deadlock] " +
+          (card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") +
+          (card.title || card.id) + "\n" +
+          "card_id: " + card.id + "\n" +
+          "agent: " + card.assigned_agent_id + "\n" +
+          "review round " + newRound + " exceeded max " + maxRounds,
+        "review-automation"
+      );
       return;
     }
     // Create review dispatch (targets same agent — counter channel picks it up)
