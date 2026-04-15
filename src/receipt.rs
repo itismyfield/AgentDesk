@@ -212,7 +212,7 @@ fn pricing_for(model: &str) -> Pricing {
             cache_read_factor: 0.0,
             cache_create_factor: 0.0,
         },
-        // Qwen pricing — token pricing unconfirmed for qwen3.6-plus; keep N/A until verified
+        // Qwen pricing — using $0 until official DashScope rates are confirmed
         m if m.contains("qwen") || m.contains("coder-model") => Pricing {
             input_per_m: 0.0,
             output_per_m: 0.0,
