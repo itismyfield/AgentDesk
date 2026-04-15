@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use poise::serenity_prelude as serenity;
+use rusqlite::OptionalExtension;
 use serenity::{ChannelId, EditMessage, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
@@ -1650,19 +1651,71 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     // Record termination audit for cleaned-up sessions
     for expired_session in &expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
-            crate::services::termination_audit::record_termination(
-                session_key,
-                None,
-                "cleanup",
-                "idle_session_expiry",
-                Some("in-memory session expired due to idle timeout"),
-                None,
-                None,
-                None,
-            );
+            let should_record =
+                mark_session_disconnected_for_idle_cleanup(shared.db.as_ref(), session_key);
+            if !should_record {
+                continue;
+            }
+
+            if let Some(db) = shared.db.as_ref() {
+                crate::services::termination_audit::record_termination_with_db(
+                    db,
+                    session_key,
+                    None,
+                    "cleanup",
+                    "idle_session_expiry",
+                    Some("in-memory session expired due to idle timeout"),
+                    None,
+                    None,
+                    None,
+                );
+            } else {
+                crate::services::termination_audit::record_termination(
+                    session_key,
+                    None,
+                    "cleanup",
+                    "idle_session_expiry",
+                    Some("in-memory session expired due to idle timeout"),
+                    None,
+                    None,
+                    None,
+                );
+            }
         }
     }
     tracing::info!("  [cleanup] Removed {} idle session(s)", expired.len());
+}
+
+fn mark_session_disconnected_for_idle_cleanup(
+    db: Option<&crate::db::Db>,
+    session_key: &str,
+) -> bool {
+    let Some(db) = db else {
+        return true;
+    };
+
+    let Ok(conn) = db.lock() else {
+        return true;
+    };
+
+    let prior_status = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    let _ = conn.execute(
+        "UPDATE sessions
+         SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+         WHERE session_key = ?1",
+        [session_key],
+    );
+
+    prior_status.as_deref() != Some("disconnected")
 }
 
 // ─── Slash commands (extracted to commands/ module) ──────────────────────────
@@ -1793,7 +1846,8 @@ mod tests {
     use super::{ChannelId, MessageId, UserId};
     use super::{
         DiscordBotSettings, Intervention, InterventionMode, is_allowed_turn_sender,
-        recovery_known_message_ids, should_phase2_recover_message,
+        mark_session_disconnected_for_idle_cleanup, recovery_known_message_ids,
+        should_phase2_recover_message,
     };
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
@@ -1942,5 +1996,100 @@ mod tests {
             !startup_block.contains("validate_channel_thread_maps_on_startup("),
             "startup critical path must not await thread-map validation directly"
         );
+    }
+
+    #[test]
+    fn idle_cleanup_marks_session_disconnected_before_recording_audit() {
+        let db = crate::db::test_db();
+        let session_key = "host:cleanup-session-status";
+
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, status, active_dispatch_id, claude_session_id, created_at)
+                 VALUES (?1, 'idle', 'dispatch-1', 'sid-1', datetime('now'))",
+                [session_key],
+            )
+            .unwrap();
+
+        assert!(mark_session_disconnected_for_idle_cleanup(
+            Some(&db),
+            session_key
+        ));
+
+        let session_row: (String, Option<String>, Option<String>) = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, active_dispatch_id, claude_session_id
+                 FROM sessions
+                 WHERE session_key = ?1",
+                [session_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_row.0, "disconnected");
+        assert_eq!(session_row.1, None);
+        assert_eq!(session_row.2, None);
+    }
+
+    #[test]
+    fn idle_cleanup_skips_duplicate_audit_when_force_kill_already_disconnected_session() {
+        let db = crate::db::test_db();
+        let session_key = "host:cleanup-session-dedupe";
+
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, status, created_at)
+                 VALUES (?1, 'disconnected', datetime('now'))",
+                [session_key],
+            )
+            .unwrap();
+
+        crate::services::termination_audit::record_termination_with_db(
+            &db,
+            session_key,
+            None,
+            "force_kill_api",
+            "force_kill",
+            Some("idle 60분 초과 — 자동 정리"),
+            None,
+            None,
+            Some(false),
+        );
+
+        let should_record = mark_session_disconnected_for_idle_cleanup(Some(&db), session_key);
+        assert!(
+            !should_record,
+            "cleanup must skip a second termination audit when force-kill already disconnected the session"
+        );
+
+        if should_record {
+            crate::services::termination_audit::record_termination_with_db(
+                &db,
+                session_key,
+                None,
+                "cleanup",
+                "idle_session_expiry",
+                Some("in-memory session expired due to idle timeout"),
+                None,
+                None,
+                None,
+            );
+        }
+
+        let audit_count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM session_termination_events WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 1);
     }
 }

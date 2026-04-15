@@ -807,9 +807,18 @@ mod tests {
                     ["test_http_last", JSON.stringify({ url: url, body: body })]
                 );
                 if (url.indexOf("/force-kill") !== -1) {
+                    var tmuxKilledRows = agentdesk.db.query(
+                        "SELECT value FROM kv_meta WHERE key = ?1",
+                        ["test_force_kill_tmux_killed"]
+                    );
+                    var tmuxKilled = true;
+                    if (tmuxKilledRows.length > 0) {
+                        var raw = (tmuxKilledRows[0].value || "").toLowerCase();
+                        tmuxKilled = !(raw === "0" || raw === "false" || raw === "no");
+                    }
                     return {
                         ok: true,
-                        tmux_killed: true
+                        tmux_killed: tmuxKilled
                     };
                 }
                 return {

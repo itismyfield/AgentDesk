@@ -157,6 +157,7 @@ impl HealthRegistry {
 pub struct RuntimeTurnStopResult {
     pub lifecycle_path: &'static str,
     pub queue_depth: usize,
+    pub termination_recorded: bool,
 }
 
 fn decrement_counter(counter: &AtomicUsize) {
@@ -221,6 +222,7 @@ pub async fn stop_provider_channel_runtime(
             return Some(RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
                 queue_depth: snapshot.intervention_queue.len(),
+                termination_recorded: result.token.is_some(),
             });
         }
     }
@@ -249,6 +251,7 @@ pub async fn stop_provider_channel_runtime(
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
         queue_depth,
+        termination_recorded: finish.removed_token.is_some(),
     })
 }
 

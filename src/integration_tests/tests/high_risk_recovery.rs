@@ -1089,4 +1089,44 @@ mod idle_session_cleanup {
             "idle safety TTL policy path must not enqueue a duplicate notify alert"
         );
     }
+
+    #[test]
+    fn scenario_632_idle_session_force_kill_response_with_dead_tmux_stays_silent() {
+        let policies_dir = setup_timeouts_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        let session_key = "host:idle-632-dead-tmux";
+
+        seed_agent(&db);
+        set_kv(&db, "server_port", "8791");
+        set_kv(&db, "test_force_kill_tmux_killed", "false");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1', 'codex', 'idle', datetime('now', '-181 minutes'), datetime('now', '-181 minutes'))",
+                [session_key],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        let url = http_last["url"].as_str().unwrap_or("");
+        assert!(url.contains("host%3Aidle-632-dead-tmux"));
+        assert!(url.ends_with("/force-kill"));
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "idle cleanup must stay silent when force-kill reports tmux_killed=false"
+        );
+    }
 }

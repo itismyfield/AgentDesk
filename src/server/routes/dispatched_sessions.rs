@@ -1346,8 +1346,22 @@ pub(crate) async fn force_kill_session_impl_with_reason(
         lifecycle.lifecycle_path
     );
 
+    if tmux_killed && !lifecycle.termination_recorded {
+        crate::services::termination_audit::record_termination_with_db(
+            &state.db,
+            session_key,
+            active_dispatch_id.as_deref(),
+            "force_kill_api",
+            "force_kill",
+            Some(reason),
+            None,
+            None,
+            Some(false),
+        );
+    }
+
     // Notify bot message for force-kill visibility
-    if let Some(ref channel_id_str) = runtime_channel_id {
+    if tmux_killed && let Some(ref channel_id_str) = runtime_channel_id {
         // Build human-readable message: agent name + reason from tmux exit file
         let agent_label = agent_id.as_deref().unwrap_or("unknown");
         let exit_reason = crate::services::tmux_diagnostics::read_tmux_exit_reason(&tmux_name)
@@ -1529,6 +1543,20 @@ mod tests {
 
     fn response_json(resp: Json<Value>) -> Value {
         resp.0
+    }
+
+    fn count_message_outbox_rows(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn count_termination_events(conn: &rusqlite::Connection, session_key: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM session_termination_events WHERE session_key = ?1",
+            [session_key],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1760,6 +1788,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_status, "disconnected");
+        assert_eq!(count_message_outbox_rows(&conn), 1);
+        assert_eq!(count_termination_events(&conn, &session_key), 1);
+    }
+
+    #[tokio::test]
+    async fn force_kill_session_skips_notify_and_audit_when_tmux_is_already_gone() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        let session_key = format!(
+            "host:AgentDesk-codex-force-kill-dead-{}",
+            std::process::id()
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-force-dead");
+            seed_session_without_dispatch(&conn, &session_key, "agent-force-dead");
+        }
+
+        let (status, body) = force_kill_session(
+            State(state),
+            Path(session_key.clone()),
+            Json(ForceKillOptions {
+                retry: false,
+                reason: Some("idle 60분 초과 — 자동 정리".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        assert_eq!(body["tmux_killed"], false);
+        assert_eq!(body["inflight_cleared"], false);
+        assert_eq!(body["queue_activation_requested"], true);
+
+        let conn = db.lock().unwrap();
+        let session_status: String = conn
+            .query_row(
+                "SELECT status FROM sessions WHERE session_key = ?1",
+                [&session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_status, "disconnected");
+        assert_eq!(count_message_outbox_rows(&conn), 0);
+        assert_eq!(count_termination_events(&conn, &session_key), 0);
     }
 
     #[tokio::test]
