@@ -469,6 +469,8 @@ pub struct KanbanConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadlock_manager_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_alert_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pm_decision_gate_enabled: Option<bool>,
 }
 
@@ -476,6 +478,7 @@ impl KanbanConfig {
     pub fn is_empty(&self) -> bool {
         self.manager_channel_id.is_none()
             && self.deadlock_manager_channel_id.is_none()
+            && self.human_alert_channel_id.is_none()
             && self.pm_decision_gate_enabled.is_none()
     }
 }
@@ -1230,6 +1233,7 @@ mod tests {
         config.kanban = KanbanConfig {
             manager_channel_id: Some("123456789012345678".to_string()),
             deadlock_manager_channel_id: Some("223456789012345678".to_string()),
+            human_alert_channel_id: Some("323456789012345678".to_string()),
             pm_decision_gate_enabled: Some(true),
         };
         config.review = ReviewConfig {
@@ -1355,6 +1359,10 @@ mod tests {
         assert_eq!(
             loaded.kanban.deadlock_manager_channel_id.as_deref(),
             Some("223456789012345678")
+        );
+        assert_eq!(
+            loaded.kanban.human_alert_channel_id.as_deref(),
+            Some("323456789012345678")
         );
         assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
         assert_eq!(loaded.review.enabled, Some(true));

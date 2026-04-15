@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -5653,7 +5653,7 @@ pub async fn reorder(
     (StatusCode::OK, Json(json!({ "ok": true })))
 }
 
-// ── PM-assisted callback ─────────────────────────────────────────────────────
+// ── Authenticated order submission callback ─────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct OrderBody {
@@ -5665,12 +5665,19 @@ pub struct OrderBody {
 }
 
 /// POST /api/auto-queue/runs/:id/order
-/// Callback from PMD: provides the ordered card list for a pending run.
+/// Authenticated callback: provides the ordered card list for a pending run.
 pub async fn submit_order(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<OrderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) =
+        crate::server::routes::kanban::require_explicit_bearer_token(&headers, "submit_order")
+    {
+        return response;
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -5680,6 +5687,8 @@ pub async fn submit_order(
             );
         }
     };
+    let caller_agent_id =
+        crate::server::routes::kanban::resolve_requesting_agent_id_on_conn(&conn, &headers);
     // Verify run exists and is pending, get repo for filtering
     let run_info: Option<(String, Option<String>)> = conn
         .query_row(
@@ -5773,9 +5782,14 @@ pub async fn submit_order(
     // to prevent the activate() fallback from filling the run with unintended cards
     let rationale = body
         .rationale
-        .as_deref()
-        .or(body.reasoning.as_deref())
-        .unwrap_or("PMD 분석 완료");
+        .clone()
+        .or(body.reasoning.clone())
+        .unwrap_or_else(|| {
+            caller_agent_id
+                .as_deref()
+                .map(|agent_id| format!("{agent_id} order submitted"))
+                .unwrap_or_else(|| "API order submitted".to_string())
+        });
     if created > 0 {
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'active', ai_rationale = ?1 WHERE id = ?2",
@@ -5800,7 +5814,7 @@ pub async fn submit_order(
     }
 
     // Queue created and activated — dispatch is a separate step via POST /api/auto-queue/activate
-    // This allows PMD to review/adjust the order before dispatching begins.
+    // This allows the caller to review/adjust the order before dispatching begins.
     drop(conn);
 
     (

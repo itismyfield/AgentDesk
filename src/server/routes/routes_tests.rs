@@ -2537,7 +2537,7 @@ async fn api_docs_flat_format_omits_removed_legacy_routes() {
         endpoints
             .iter()
             .any(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/runs/{id}/order"),
-        "flat docs must keep the PM-assisted submit_order callback route"
+        "flat docs must keep the submit_order callback route"
     );
 }
 
@@ -5415,7 +5415,7 @@ async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() 
 }
 
 #[tokio::test]
-async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
+async fn reopen_skips_preflight_already_applied_for_api_reopen() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -5465,7 +5465,7 @@ async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
                 .uri("/kanban-cards/card-reopen-skip/reopen")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(r#"{"reason":"skip preflight on PMD reopen"}"#))
+                .body(Body::from(r#"{"reason":"skip preflight on API reopen"}"#))
                 .unwrap(),
         )
         .await
@@ -5489,12 +5489,12 @@ async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
         .unwrap();
     assert_eq!(
         status, reopen_target,
-        "PMD reopen must skip already_applied preflight and keep card reopened"
+        "API reopen must skip already_applied preflight and keep card reopened"
     );
     let metadata: serde_json::Value =
         serde_json::from_str(metadata_raw.as_deref().unwrap_or("{}")).unwrap();
     assert_eq!(metadata["preflight_status"], "skipped");
-    assert_eq!(metadata["preflight_summary"], "Skipped for PMD reopen");
+    assert_eq!(metadata["preflight_summary"], "Skipped for API reopen");
     assert!(
         metadata.get("skip_preflight_once").is_none(),
         "skip_preflight_once must be consumed during reopen transition"
@@ -5619,6 +5619,12 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-reopen-reset-history', 'test-repo', 'agent-reopen-reset', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at
             ) VALUES (
@@ -5632,7 +5638,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, completed_at
             ) VALUES (
-                'entry-reopen-done', 'run-reopen-reset', 'card-reopen-reset', 'agent-reopen-reset',
+                'entry-reopen-done', 'run-reopen-reset-history', 'card-reopen-reset', 'agent-reopen-reset',
                 'done', datetime('now', '-30 minutes')
             )",
             [],

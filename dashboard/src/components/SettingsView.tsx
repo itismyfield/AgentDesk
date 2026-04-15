@@ -292,6 +292,10 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
     ko: "교착 상태나 멈춤 감지를 보고하는 Discord 채널입니다.",
     en: "Discord channel that receives deadlock and stalled-work alerts.",
   },
+  kanban_human_alert_channel_id: {
+    ko: "에이전트 fallback이나 수동 개입이 사람에게 라우팅될 Discord 채널입니다.",
+    en: "Discord channel used when alerts must be routed to a human instead of an agent.",
+  },
   review_enabled: {
     ko: "리뷰 단계를 전체 파이프라인에 적용할지 결정합니다.",
     en: "Controls whether the review step is enforced across the pipeline.",
