@@ -34,6 +34,7 @@ import {
 } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import type { DashboardTab } from "./app/dashboardTabs";
+import { syncDashboardTabToUrl } from "./app/dashboardTabs";
 import {
   Building2,
   KanbanSquare,
@@ -316,6 +317,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
       }
 
       if (routeId === "dashboard_meetings") {
+        syncDashboardTabToUrl("meetings");
         setDashboardRequestedTab("meetings");
         handleNavigate("dashboard");
         return;
@@ -359,6 +361,12 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   const clearRequestedDashboardTab = useCallback(() => {
     setDashboardRequestedTab(null);
   }, []);
+
+  const openDashboardMeetings = useCallback(() => {
+    syncDashboardTabToUrl("meetings");
+    setDashboardRequestedTab("meetings");
+    handleNavigate("dashboard");
+  }, [handleNavigate]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -542,6 +550,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 agents={agents}
                 departments={departments}
                 sessions={visibleDispatchedSessions}
+                meetings={roundTableMeetings}
                 onAssign={async (id, patch) => {
                   const updated = await api.assignDispatchedSession(id, patch);
                   setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
@@ -567,6 +576,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 }}
                 notifications={notifications}
                 onDismissNotification={dismissNotification}
+                onOpenMeetings={openDashboardMeetings}
               />
             )}
           </Suspense>

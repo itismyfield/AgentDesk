@@ -1,5 +1,13 @@
 import { useCallback, useMemo } from "react";
-import type { Agent, CompanySettings, Department, DispatchedSession, Office } from "../types";
+import { summarizeMeetings } from "../app/meetingSummary";
+import type {
+  Agent,
+  CompanySettings,
+  Department,
+  DispatchedSession,
+  Office,
+  RoundTableMeeting,
+} from "../types";
 import {
   NOTIFICATION_TYPE_COLORS,
   type Notification,
@@ -36,6 +44,7 @@ interface ControlCenterViewProps {
   agents: Agent[];
   departments: Department[];
   sessions: DispatchedSession[];
+  meetings: RoundTableMeeting[];
   onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
@@ -44,6 +53,7 @@ interface ControlCenterViewProps {
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   notifications: Notification[];
   onDismissNotification: (id: string) => void;
+  onOpenMeetings?: () => void;
 }
 
 function notificationTone(type: Notification["type"]): SurfaceTone {
@@ -75,6 +85,7 @@ export default function ControlCenterView({
   agents,
   departments,
   sessions,
+  meetings,
   onAssign,
   onAgentsChange,
   onDepartmentsChange,
@@ -83,6 +94,7 @@ export default function ControlCenterView({
   onSaveSettings,
   notifications,
   onDismissNotification,
+  onOpenMeetings,
 }: ControlCenterViewProps) {
   const t = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const recentNotifications = notifications.slice(0, 3);
@@ -119,6 +131,7 @@ export default function ControlCenterView({
     () => sessions.filter((session) => session.status !== "disconnected").length,
     [sessions],
   );
+  const meetingSummary = useMemo(() => summarizeMeetings(meetings), [meetings]);
 
   const organizationSections = useMemo(() => [
     {
@@ -288,6 +301,7 @@ export default function ControlCenterView({
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
                 title={t("조직", "Organization")}
+                description={organizationPaneSummary}
                 actions={(
                   <>
                     {organizationSections.map((section) => (
@@ -312,6 +326,37 @@ export default function ControlCenterView({
                     : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
                 }}
               >
+                <div className="mt-4 flex flex-wrap items-start gap-2">
+                  {activeOrganizationSection ? (
+                    <SurfaceMetricPill
+                      label={t("현재 섹션", "Current Focus")}
+                      value={isKo ? activeOrganizationSection.labelKo : activeOrganizationSection.labelEn}
+                      tone={organizationPane === "dispatch" ? "success" : "info"}
+                    />
+                  ) : null}
+                  <SurfaceMetricPill
+                    label={t("활성 세션", "Live Sessions")}
+                    value={activeSessionCount}
+                    tone="info"
+                  />
+                  <SurfaceMetricPill
+                    label={t("회의 후속", "Meeting Follow-up")}
+                    value={t(
+                      `${meetingSummary.unresolvedCount}개 미정리 · ${meetingSummary.activeCount}개 진행 중`,
+                      `${meetingSummary.unresolvedCount} unresolved · ${meetingSummary.activeCount} active`,
+                    )}
+                    tone={meetingSummary.unresolvedCount > 0 ? "warn" : "success"}
+                  />
+                  {onOpenMeetings ? (
+                    <SurfaceActionButton
+                      onClick={onOpenMeetings}
+                      tone={meetingSummary.unresolvedCount > 0 ? "success" : "neutral"}
+                      className="min-h-[56px] rounded-2xl px-4 py-3 text-left"
+                    >
+                      {t("회의 후속 열기", "Open Meeting Follow-ups")}
+                    </SurfaceActionButton>
+                  ) : null}
+                </div>
               </SurfaceSection>
             </div>
 
