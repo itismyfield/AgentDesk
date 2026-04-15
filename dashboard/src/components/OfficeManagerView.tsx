@@ -259,43 +259,49 @@ export default function OfficeManagerView({
 
   return (
     <div
-      className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
+      className="mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <SurfaceSection
-        title={tr("오피스 관리", "Offices")}
-        description={tr("오피스 CRUD, 멤버 배치, 표시 순서를 한 화면에서 관리합니다.", "Manage office CRUD, memberships, and ordering from one page.")}
-        badge={`${order.length} ${tr("개", "items")}`}
-        actions={(
-          <div className="flex flex-wrap items-center gap-2">
-            {orderDirty && (
-              <>
-                <SurfaceActionButton tone="neutral" onClick={cancelOrder}>
-                  {tr("순서 취소", "Cancel Order")}
-                </SurfaceActionButton>
-                <SurfaceActionButton tone="success" disabled={orderSaving} onClick={() => void saveOrder()}>
-                  <span className="inline-flex items-center gap-1.5">
-                    <Save size={13} />
-                    {orderSaving ? tr("저장 중...", "Saving...") : tr("순서 저장", "Save Order")}
-                  </span>
-                </SurfaceActionButton>
-              </>
-            )}
-            <SurfaceActionButton tone="accent" onClick={startCreate}>
-              <span className="inline-flex items-center gap-1.5">
-                <Plus size={13} />
-                {tr("오피스 추가", "Add Office")}
-              </span>
-            </SurfaceActionButton>
-          </div>
-        )}
-      >
-        <div className="mt-4 flex flex-wrap gap-3">
-          <SurfaceMetricPill label={tr("오피스", "Offices")} value={`${order.length} ${tr("개", "items")}`} tone="accent" />
-          <SurfaceMetricPill label={tr("배치 멤버", "Assigned")} value={`${memberIds.size} ${tr("명", "agents")}`} tone={memberIds.size > 0 ? "info" : "neutral"} />
-          <SurfaceMetricPill label={tr("정렬 상태", "Ordering")} value={orderDirty ? tr("변경 있음", "Unsaved changes") : tr("동기화됨", "In sync")} tone={orderDirty ? "warn" : "success"} />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
+            {tr("조직 · 오피스", "Organization · Offices")}
+          </h1>
+          <p className="mt-1 text-sm" style={{ color: "var(--th-text-muted)" }}>
+            {tr("오피스 멤버 배치와 표시 순서를 관리합니다.", "Manage office memberships and display ordering.")}
+          </p>
         </div>
-      </SurfaceSection>
+        <div className="flex items-center gap-2">
+          {orderDirty && (
+            <>
+              <button
+                onClick={cancelOrder}
+                className="rounded-lg border px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-100"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+                  color: "var(--th-text-secondary)",
+                }}
+              >
+                {tr("순서 취소", "Cancel Order")}
+              </button>
+              <button
+                disabled={orderSaving}
+                onClick={() => void saveOrder()}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-all"
+              >
+                {orderSaving ? tr("저장 중...", "Saving...") : tr("순서 저장", "Save Order")}
+              </button>
+            </>
+          )}
+          <button
+            onClick={startCreate}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-all"
+          >
+            + {tr("오피스 추가", "Add Office")}
+          </button>
+        </div>
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
         <SurfaceSection
