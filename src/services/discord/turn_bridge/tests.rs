@@ -207,6 +207,28 @@ fn turn_end_memory_plan_keeps_memento_feedback_analysis_when_prompt_is_too_long(
 }
 
 #[test]
+fn turn_end_memory_plan_prompt_too_long_does_not_clear_provider_session() {
+    let prompt_too_long = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &prompt_too_long,
+            MemoryBackendKind::Memento,
+            true,
+            true,
+            true,
+            false,
+        ),
+        Some(TurnEndMemoryPlan {
+            session_end_reason: None,
+            clear_provider_session: false,
+            persist_transcript: false,
+            analyze_recall_feedback: true,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
 fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
     let session = sample_session();
     assert_eq!(
