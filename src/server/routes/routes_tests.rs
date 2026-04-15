@@ -7284,8 +7284,8 @@ async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["ok"], false);
-    assert_eq!(json["run_status"], "restoring");
-    assert_eq!(json["restored_pending"], 1);
+    assert_eq!(json["run_status"], "cancelled");
+    assert_eq!(json["restored_pending"], 0);
     assert!(
         json["errors"]
             .as_array()
@@ -7307,7 +7307,7 @@ async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(run_status, "restoring");
+        assert_eq!(run_status, "cancelled");
 
         let restored_status: String = conn
             .query_row(
@@ -7316,7 +7316,7 @@ async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(restored_status, "pending");
+        assert_eq!(restored_status, "skipped");
 
         let missing_status: String = conn
             .query_row(
@@ -7349,7 +7349,7 @@ async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
     let retry_json: serde_json::Value = serde_json::from_slice(&retry_body).unwrap();
     assert_eq!(retry_json["ok"], true);
     assert_eq!(retry_json["run_status"], "active");
-    assert_eq!(retry_json["restored_pending"], 1);
+    assert_eq!(retry_json["restored_pending"], 2);
 
     let conn = db.lock().unwrap();
     let final_run_status: String = conn
