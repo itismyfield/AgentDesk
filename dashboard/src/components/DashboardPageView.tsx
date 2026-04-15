@@ -24,6 +24,8 @@ import {
 } from "./dashboard/HeroSections";
 import {
   AchievementWidget,
+  AutoQueueHistoryWidget,
+  BottleneckWidget,
   CronTimelineWidget,
   SkillTrendWidget,
 } from "./dashboard/ExtraWidgets";
@@ -239,6 +241,7 @@ export default function DashboardPageView({
             <HealthWidget t={t} />
             <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           </div>
+          <BottleneckWidget t={t} />
         </div>
       )}
 
@@ -266,6 +269,8 @@ export default function DashboardPageView({
             badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
           >
             <CronTimelineWidget t={t} />
+
+            <AutoQueueHistoryWidget t={t} />
 
             <SkillRankingSection
               skillRanking={skillRanking}
