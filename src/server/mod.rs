@@ -638,6 +638,45 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn extract_gemini_quota_limits_preserves_paid_tier_values() {
+        let payload = json!({
+            "metrics": [{
+                "metric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "consumerQuotaLimits": [
+                    {
+                        "unit": "1/min/{project}",
+                        "quotaBuckets": [
+                            {"effectiveLimit": "200"},
+                            {"effectiveLimit": 120}
+                        ]
+                    },
+                    {
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [
+                            {"effectiveLimit": 20000},
+                            {"effectiveLimit": 18000}
+                        ]
+                    }
+                ]
+            }]
+        });
+
+        let (rpm_limit, rpd_limit) = extract_gemini_quota_limits(&payload);
+        assert_eq!(rpm_limit, 120);
+        assert_eq!(rpd_limit, 18000);
+    }
+
+    #[test]
+    fn build_gemini_rate_limit_buckets_uses_non_negative_usage_placeholders() {
+        let buckets = build_gemini_rate_limit_buckets(15, 1500);
+
+        assert_eq!(buckets[0]["used"], json!(0));
+        assert_eq!(buckets[0]["remaining"], json!(15));
+        assert_eq!(buckets[1]["used"], json!(0));
+        assert_eq!(buckets[1]["remaining"], json!(1500));
+    }
+
     #[tokio::test]
     async fn startup_memory_health_refresh_uses_startup_reason() {
         crate::services::memory::reset_backend_health_for_tests();
@@ -1435,40 +1474,9 @@ async fn discover_gemini_project_id(token: &str) -> Result<String, anyhow::Error
         })
 }
 
-/// Fetch Gemini free-tier quota limits via the Google Cloud ServiceUsage API.
-///
-/// Returns RPM and RPD buckets sourced from `generate_content_free_tier_requests`
-/// quota metrics.  The `used` / `remaining` fields are -1 because the ServiceUsage
-/// API only exposes quota *limits*, not real-time consumption counters.
-async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    let token = load_gemini_access_token().await?;
-    let project_id = discover_gemini_project_id(&token).await?;
-
-    let client = reqwest::Client::new();
-    let url = format!(
-        "https://serviceusage.googleapis.com/v1beta1/projects/{}/services/\
-         generativelanguage.googleapis.com/consumerQuotaMetrics\
-         ?fields=metrics.metric,metrics.consumerQuotaLimits",
-        project_id
-    );
-    let resp = client
-        .get(&url)
-        .header("authorization", format!("Bearer {token}"))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Gemini ServiceUsage API returned {}",
-            resp.status()
-        ));
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-
-    // Defaults match the documented free-tier limits for gemini-2.5-pro / gemini-3.1-pro-preview
-    let mut rpm_limit: i64 = 15;
-    let mut rpd_limit: i64 = 1500;
+fn extract_gemini_quota_limits(data: &serde_json::Value) -> (i64, i64) {
+    let mut rpm_limit: Option<i64> = None;
+    let mut rpd_limit: Option<i64> = None;
 
     if let Some(metrics) = data.get("metrics").and_then(|m| m.as_array()) {
         for metric in metrics {
@@ -1496,9 +1504,9 @@ async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Er
 
                         if let Some(min_val) = min_positive {
                             if is_per_minute {
-                                rpm_limit = rpm_limit.min(min_val);
+                                rpm_limit = Some(rpm_limit.map_or(min_val, |current| current.min(min_val)));
                             } else if is_per_day {
-                                rpd_limit = rpd_limit.min(min_val);
+                                rpd_limit = Some(rpd_limit.map_or(min_val, |current| current.min(min_val)));
                             }
                         }
                     }
@@ -1507,22 +1515,64 @@ async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Er
         }
     }
 
-    Ok(vec![
+    (
+        rpm_limit.unwrap_or(15),
+        rpd_limit.unwrap_or(1500),
+    )
+}
+
+fn build_gemini_rate_limit_buckets(rpm_limit: i64, rpd_limit: i64) -> Vec<serde_json::Value> {
+    vec![
         serde_json::json!({
             "name": "rpm",
             "limit": rpm_limit,
-            "used": -1_i64,
-            "remaining": -1_i64,
+            "used": 0_i64,
+            "remaining": rpm_limit,
             "reset": 0_i64,
         }),
         serde_json::json!({
             "name": "rpd",
             "limit": rpd_limit,
-            "used": -1_i64,
-            "remaining": -1_i64,
+            "used": 0_i64,
+            "remaining": rpd_limit,
             "reset": 0_i64,
         }),
-    ])
+    ]
+}
+
+/// Fetch Gemini quota limits via the Google Cloud ServiceUsage API.
+///
+/// Returns RPM and RPD buckets sourced from `generate_content_free_tier_requests`
+/// quota metrics. The API does not expose real-time usage counters, so the
+/// returned buckets use non-negative placeholder usage (`used = 0`,
+/// `remaining = limit`) to keep downstream UI math stable.
+async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Error> {
+    let token = load_gemini_access_token().await?;
+    let project_id = discover_gemini_project_id(&token).await?;
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://serviceusage.googleapis.com/v1beta1/projects/{}/services/\
+         generativelanguage.googleapis.com/consumerQuotaMetrics\
+         ?fields=metrics.metric,metrics.consumerQuotaLimits",
+        project_id
+    );
+    let resp = client
+        .get(&url)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Gemini ServiceUsage API returned {}",
+            resp.status()
+        ));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let (rpm_limit, rpd_limit) = extract_gemini_quota_limits(&data);
+    Ok(build_gemini_rate_limit_buckets(rpm_limit, rpd_limit))
 }
 
 /// Background task that periodically syncs GitHub issues for all registered repos.

@@ -222,6 +222,19 @@ pub(super) fn build_model_picker_option_specs(
                     .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
             }),
     );
+    if options.is_empty() {
+        options.push(ModelPickerOptionSpec {
+            value: DEFAULT_PICKER_VALUE.to_string(),
+            label: default_picker_option_label(),
+            description: default_picker_option_description(
+                provider,
+                default_model,
+                default_source,
+                working_dir,
+            ),
+            selected: false,
+        });
+    }
     append_unavailable_selected_option(&mut options, selected_explicit_model);
     options
 }
@@ -405,6 +418,28 @@ mod tests {
                         == crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
                 "default sentinel must not appear as a dropdown option"
             );
+        });
+    }
+
+    #[test]
+    fn build_model_picker_option_specs_adds_default_fallback_when_catalog_is_empty() {
+        with_temp_qwen_env(|_temp_home, _temp_project| {
+            let options = build_model_picker_option_specs(
+                &ProviderKind::Qwen,
+                None,
+                None,
+                "default",
+                SOURCE_PROVIDER_DEFAULT,
+                None,
+            );
+
+            assert_eq!(options.len(), 1);
+            assert_eq!(
+                options[0].value,
+                crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+            );
+            assert_eq!(options[0].label, "기본값");
+            assert!(!options[0].selected);
         });
     }
 
