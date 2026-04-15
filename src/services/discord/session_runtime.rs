@@ -193,6 +193,15 @@ pub(super) fn choose_restore_channel_name(
         .map(ToOwned::to_owned)
 }
 
+pub(super) fn resolve_is_dm_channel(
+    dm_hint: Option<bool>,
+    live_channel_lookup_says_dm: bool,
+) -> bool {
+    // Prefer the gateway-provided DM hint when available so a transient
+    // Discord channel lookup failure cannot disable DM default-agent fallback.
+    dm_hint.unwrap_or(live_channel_lookup_says_dm)
+}
+
 /// Check if a path is a git repo and if another channel already uses it.
 /// Returns the conflicting channel's name if found.
 pub(super) fn detect_worktree_conflict(
@@ -415,6 +424,15 @@ pub(super) async fn auto_restore_session(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
 ) {
+    auto_restore_session_with_dm_hint(shared, channel_id, serenity_ctx, None).await;
+}
+
+pub(super) async fn auto_restore_session_with_dm_hint(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    serenity_ctx: &serenity::prelude::Context,
+    dm_hint: Option<bool>,
+) {
     if matches!(
         resolve_runtime_channel_binding_status(&serenity_ctx.http, channel_id).await,
         RuntimeChannelBindingStatus::Unowned
@@ -440,6 +458,7 @@ pub(super) async fn auto_restore_session(
         channel_id.to_channel(&serenity_ctx.http).await.ok(),
         Some(serenity::Channel::Private(_))
     );
+    let is_dm = resolve_is_dm_channel(dm_hint, is_dm);
 
     // Read settings first to get provider and runtime restore metadata.
     let (last_path, saved_remote, provider) = {
@@ -905,6 +924,18 @@ mod tests {
         );
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn resolve_is_dm_channel_prefers_gateway_hint() {
+        assert!(resolve_is_dm_channel(Some(true), false));
+        assert!(!resolve_is_dm_channel(Some(false), true));
+    }
+
+    #[test]
+    fn resolve_is_dm_channel_uses_lookup_when_hint_missing() {
+        assert!(resolve_is_dm_channel(None, true));
+        assert!(!resolve_is_dm_channel(None, false));
     }
 
     #[test]

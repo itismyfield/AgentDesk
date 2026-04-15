@@ -263,6 +263,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     merge_consecutive: bool,
     reply_context: Option<String>,
     has_reply_boundary: bool,
+    dm_hint: Option<bool>,
 ) -> Result<(), Error> {
     let original_channel_id = channel_id;
     let mut session_reset_reason = None;
@@ -309,6 +310,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id.to_channel(&ctx.http).await.ok(),
         Some(serenity::Channel::Private(_))
     );
+    let is_dm_channel = super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
     let dm_default_agent = if is_dm_channel {
         super::super::agentdesk_config::resolve_dm_default_agent(&provider)
     } else {
