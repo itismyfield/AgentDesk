@@ -37,6 +37,40 @@ interface RequestOptions extends RequestInit {
   timeoutMs?: number;
 }
 
+function composeRequestSignal(
+  timeoutSignal: AbortSignal,
+  externalSignal?: AbortSignal,
+): { signal: AbortSignal; cleanup: () => void } {
+  if (!externalSignal) {
+    return {
+      signal: timeoutSignal,
+      cleanup: () => {},
+    };
+  }
+
+  const controller = new AbortController();
+
+  const abortFromSource = () => {
+    if (controller.signal.aborted) return;
+    controller.abort(externalSignal.reason ?? timeoutSignal.reason);
+  };
+
+  if (timeoutSignal.aborted || externalSignal.aborted) {
+    abortFromSource();
+  }
+
+  timeoutSignal.addEventListener("abort", abortFromSource);
+  externalSignal.addEventListener("abort", abortFromSource);
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      timeoutSignal.removeEventListener("abort", abortFromSource);
+      externalSignal.removeEventListener("abort", abortFromSource);
+    },
+  };
+}
+
 function isRetryable(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
@@ -44,9 +78,10 @@ function isRetryable(status: number): boolean {
 async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
+  const shouldDedupe = isGet && !opts?.signal;
   const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  if (isGet) {
+  if (shouldDedupe) {
     const existing = inflightGets.get(url);
     if (existing) return existing as Promise<T>;
   }
@@ -60,18 +95,21 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
       }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const externalSignal = opts?.signal ?? undefined;
+      const { signal, cleanup } = composeRequestSignal(controller.signal, externalSignal);
       try {
-        const { timeoutMs: _timeoutMs, ...fetchOpts } = opts ?? {};
+        const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOpts } = opts ?? {};
         const res = await fetch(`${BASE}${url}`, {
           credentials: "include",
           ...fetchOpts,
-          signal: controller.signal,
+          signal,
           headers: {
             "Content-Type": "application/json",
             ...fetchOpts.headers,
           },
         });
         clearTimeout(timer);
+        cleanup();
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: "unknown" }));
           const error = new Error(err.error || `HTTP ${res.status}`);
@@ -84,9 +122,11 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
         return await res.json();
       } catch (error) {
         clearTimeout(timer);
+        cleanup();
         const resolvedError =
           error instanceof Error ? error : new Error(String(error));
         if (resolvedError.name === "AbortError") {
+          if (externalSignal?.aborted) throw resolvedError;
           lastError = new Error(`Request timeout: ${url}`);
           if (isGet && attempt < MAX_RETRIES) continue;
         } else if (
@@ -104,10 +144,10 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   };
 
   const promise = execute().finally(() => {
-    if (isGet) inflightGets.delete(url);
+    if (shouldDedupe) inflightGets.delete(url);
   });
 
-  if (isGet) inflightGets.set(url, promise);
+  if (shouldDedupe) inflightGets.set(url, promise);
 
   return promise.catch((error) => {
     const resolvedError =
@@ -419,8 +459,12 @@ export async function getStats(officeId?: string): Promise<DashboardStats> {
   return request(`/api/stats${q}`);
 }
 
-export async function getTokenAnalytics(period: "7d" | "30d" | "90d" = "30d"): Promise<TokenAnalyticsResponse> {
+export async function getTokenAnalytics(
+  period: "7d" | "30d" | "90d" = "30d",
+  opts?: { signal?: AbortSignal },
+): Promise<TokenAnalyticsResponse> {
   return request(`/api/token-analytics?period=${period}`, {
+    signal: opts?.signal,
     timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
   });
 }

@@ -4,6 +4,8 @@ import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
   SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceNotice,
   SurfaceSection,
 } from "../common/SurfacePrimitives";
 
@@ -51,6 +53,7 @@ const HIDDEN_PROVIDERS = new Set(["github"]);
 
 /** Bucket IDs to exclude from UI display */
 const HIDDEN_BUCKETS = new Set(["7d Sonnet"]);
+const RATE_LIMIT_FETCH_TIMEOUT_MS = 15_000;
 
 function transformRawData(
   raw: RawRateLimitData,
@@ -140,6 +143,14 @@ function formatTimeRemaining(resetsAt: string | null): string {
   return `${minutes}m`;
 }
 
+function createTimedController(timeoutMs: number) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    controller,
+    cleanup: () => window.clearTimeout(timeoutId),
+  };
+}
 
 interface RateLimitWidgetProps {
   t: TFunction;
@@ -149,6 +160,8 @@ interface RateLimitWidgetProps {
 export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
+  const [error, setError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(true);
   const title = t({ ko: "프로바이더 상태", en: "Provider Status", ja: "プロバイダー状態", zh: "Provider 状态" });
   const tooltip = t({
     ko: "Claude/Codex/Gemini provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. STALE은 최근 동기화 결과가 늦어졌다는 뜻입니다.",
@@ -158,9 +171,14 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
   });
 
   useEffect(() => {
+    const { controller, cleanup } = createTimedController(RATE_LIMIT_FETCH_TIMEOUT_MS);
+
     (async () => {
       try {
-        const res = await fetch("/api/settings/runtime-config", { credentials: "include" });
+        const res = await fetch("/api/settings/runtime-config", {
+          credentials: "include",
+          signal: controller.signal,
+        });
         if (!res.ok) return;
         const s = await res.json();
         const current = s.current ?? s;
@@ -168,26 +186,75 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
           warning: current.rateLimitWarningPct ?? 80,
           danger: current.rateLimitDangerPct ?? 95,
         });
-      } catch { /* ignore */ }
+      } catch {
+        // Keep default thresholds when runtime config is temporarily unavailable.
+      } finally {
+        cleanup();
+      }
     })();
+
+    return () => {
+      cleanup();
+      controller.abort();
+    };
   }, []);
 
   useEffect(() => {
-    let mounted = true;
+    let activeController: AbortController | null = null;
+
     const load = async () => {
+      activeController?.abort();
+      const { controller, cleanup } = createTimedController(RATE_LIMIT_FETCH_TIMEOUT_MS);
+      activeController = controller;
+      setIsRefreshing(true);
+
       try {
-        const res = await fetch("/api/rate-limits", { credentials: "include" });
-        if (!res.ok) return;
+        const res = await fetch("/api/rate-limits", {
+          credentials: "include",
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const raw = (await res.json()) as RawRateLimitData;
-        if (mounted) setData(transformRawData(raw, thresholds.warning, thresholds.danger));
-      } catch { /* ignore */ }
+        if (controller.signal.aborted) return;
+        setData(transformRawData(raw, thresholds.warning, thresholds.danger));
+        setError(null);
+      } catch (nextError) {
+        if (controller.signal.aborted) return;
+        setError(nextError instanceof Error ? nextError.message : String(nextError));
+      } finally {
+        cleanup();
+        if (!controller.signal.aborted) setIsRefreshing(false);
+      }
     };
-    load();
-    const timer = setInterval(load, 30_000);
-    return () => { mounted = false; clearInterval(timer); };
+
+    void load();
+    const timer = window.setInterval(() => void load(), 30_000);
+    return () => {
+      activeController?.abort();
+      window.clearInterval(timer);
+    };
   }, [thresholds]);
 
-  if (!data || !data.providers || data.providers.length === 0) return null;
+  const sectionActions = onOpenSettings ? (
+    <>
+      <TooltipLabel
+        text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
+        tooltip={tooltip}
+        className="max-w-fit text-sm"
+      />
+      <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
+        {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+      </SurfaceActionButton>
+    </>
+  ) : (
+    <TooltipLabel
+      text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
+      tooltip={tooltip}
+      className="max-w-fit text-sm"
+    />
+  );
+  const providers = data?.providers ?? [];
+  const hasProviders = providers.length > 0;
 
   return (
     <SurfaceSection
@@ -199,121 +266,144 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
         ja: "Claude/Codex/Gemini バケット使用量と stale キャッシュ状態をひと目で確認します。",
         zh: "一眼查看 Claude/Codex/Gemini bucket 使用率与 stale cache 状态。",
       })}
-      actions={(
-        <>
-          <TooltipLabel
-            text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
-            tooltip={tooltip}
-            className="max-w-fit text-sm"
-          />
-          {onOpenSettings ? (
-            <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
-              {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
-            </SurfaceActionButton>
-          ) : undefined}
-        </>
-      )}
+      actions={sectionActions}
     >
-      <div className="mt-4 grid gap-3 xl:grid-cols-3">
-        {data.providers.map((provider) => {
-          const accent = getAccent(provider.provider);
-          return (
-            <SurfaceCard
-              key={provider.provider}
-              className="rounded-3xl p-4"
-              style={{
-                borderColor: `color-mix(in srgb, ${accent} 22%, var(--th-border) 78%)`,
-                background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-              }}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div
-                    className="text-xs font-bold uppercase tracking-wider"
-                    style={{ color: accent }}
-                  >
-                    {(PROVIDER_ICONS[provider.provider] ?? "•")} {provider.provider}
-                  </div>
-                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {provider.stale
-                      ? t({ ko: "캐시 지연 상태", en: "Stale cache", ja: "キャッシュ遅延", zh: "缓存延迟" })
-                      : t({ ko: "정상 수집 중", en: "Fresh cache", ja: "正常取得中", zh: "缓存正常" })}
-                  </div>
-                </div>
-                <span
-                  className="rounded-full px-2 py-1 text-[10px] font-medium"
-                  style={{
-                    color: provider.stale ? "#fbbf24" : accent,
-                    border: `1px solid ${provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
-                    background: provider.stale
-                      ? "rgba(251,191,36,0.1)"
-                      : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
-                  }}
-                >
-                  {provider.stale
-                    ? t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })
-                    : t({ ko: "정상", en: "FRESH", ja: "正常", zh: "正常" })}
-                </span>
-              </div>
+      {error && hasProviders ? (
+        <SurfaceNotice className="mt-4" compact tone="warn">
+          {t({
+            ko: `최근 정상 데이터를 유지 중이며 새 동기화에 실패했습니다. (${error})`,
+            en: `Keeping the last good snapshot because the latest refresh failed. (${error})`,
+            ja: `直近の正常データを維持しつつ、最新の再同期に失敗しました。(${error})`,
+            zh: `正在保留最近一次正常数据，最新刷新失败。(${error})`,
+          })}
+        </SurfaceNotice>
+      ) : null}
 
-              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {provider.buckets.map((bucket) => {
-                  const colors = getColors(provider.provider, bucket.level);
-                  const remaining = formatTimeRemaining(bucket.resets_at);
-                  return (
-                    <div key={bucket.id} className="relative">
-                      <div className="mb-1.5 flex items-center justify-between gap-2">
-                        <span
-                          className="text-xs font-bold"
-                          style={{ color: colors.text }}
-                        >
-                          {bucket.label}
-                        </span>
-                        <span
-                          className="text-xs font-mono font-bold"
-                          style={{
-                            color: colors.text,
-                            textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
-                          }}
-                        >
-                          {bucket.utilization}%
-                        </span>
-                      </div>
-                      <div style={{ minWidth: 60 }}>
-                        <div
-                          className="relative rounded-full overflow-hidden"
-                          style={{
-                            height: 10,
-                            background: "rgba(255,255,255,0.12)",
-                            border: "1px solid rgba(255,255,255,0.08)",
-                          }}
-                        >
-                          <div
-                            className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                            style={{
-                              width: `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
-                              background: colors.bar,
-                              boxShadow: `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
-                            }}
-                          />
-                        </div>
-                      </div>
-                      {remaining && (
-                        <span
-                          className="mt-1 inline-flex whitespace-nowrap text-[10px]"
-                          style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}
-                        >
-                          ↻ {remaining}
-                        </span>
-                      )}
-                    </div>
-                  );
+      {!hasProviders ? (
+        <SurfaceEmptyState className="mt-4 rounded-3xl p-4 text-sm leading-6">
+          {isRefreshing
+            ? t({
+                ko: "프로바이더 상태를 불러오는 중입니다.",
+                en: "Loading provider status.",
+                ja: "プロバイダー状態を読み込み中です。",
+                zh: "正在加载 provider 状态。",
+              })
+            : error
+              ? t({
+                  ko: `프로바이더 상태를 불러오지 못했습니다. ${error}`,
+                  en: `Unable to load provider status. ${error}`,
+                  ja: `プロバイダー状態を読み込めませんでした。${error}`,
+                  zh: `无法加载 provider 状态。${error}`,
+                })
+              : t({
+                  ko: "표시할 프로바이더 상태가 없습니다.",
+                  en: "No provider status is available yet.",
+                  ja: "表示できるプロバイダー状態がまだありません。",
+                  zh: "暂无可显示的 provider 状态。",
                 })}
-              </div>
-            </SurfaceCard>
-          );
-        })}
-      </div>
+        </SurfaceEmptyState>
+      ) : (
+        <div className="mt-4 grid gap-3 xl:grid-cols-3">
+          {providers.map((provider) => {
+            const accent = getAccent(provider.provider);
+            return (
+              <SurfaceCard
+                key={provider.provider}
+                className="rounded-3xl p-4"
+                style={{
+                  borderColor: `color-mix(in srgb, ${accent} 22%, var(--th-border) 78%)`,
+                  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                }}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div
+                      className="text-xs font-bold uppercase tracking-wider"
+                      style={{ color: accent }}
+                    >
+                      {(PROVIDER_ICONS[provider.provider] ?? "•")} {provider.provider}
+                    </div>
+                    <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                      {provider.stale
+                        ? t({ ko: "캐시 지연 상태", en: "Stale cache", ja: "キャッシュ遅延", zh: "缓存延迟" })
+                        : t({ ko: "정상 수집 중", en: "Fresh cache", ja: "正常取得中", zh: "缓存正常" })}
+                    </div>
+                  </div>
+                  <span
+                    className="rounded-full px-2 py-1 text-[10px] font-medium"
+                    style={{
+                      color: provider.stale ? "#fbbf24" : accent,
+                      border: `1px solid ${provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
+                      background: provider.stale
+                        ? "rgba(251,191,36,0.1)"
+                        : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
+                    }}
+                  >
+                    {provider.stale
+                      ? t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })
+                      : t({ ko: "정상", en: "FRESH", ja: "正常", zh: "正常" })}
+                  </span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  {provider.buckets.map((bucket) => {
+                    const colors = getColors(provider.provider, bucket.level);
+                    const remaining = formatTimeRemaining(bucket.resets_at);
+                    return (
+                      <div key={bucket.id} className="relative">
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                          <span
+                            className="text-xs font-bold"
+                            style={{ color: colors.text }}
+                          >
+                            {bucket.label}
+                          </span>
+                          <span
+                            className="text-xs font-mono font-bold"
+                            style={{
+                              color: colors.text,
+                              textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
+                            }}
+                          >
+                            {bucket.utilization}%
+                          </span>
+                        </div>
+                        <div style={{ minWidth: 60 }}>
+                          <div
+                            className="relative overflow-hidden rounded-full"
+                            style={{
+                              height: 10,
+                              background: "rgba(255,255,255,0.12)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                            }}
+                          >
+                            <div
+                              className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+                              style={{
+                                width: `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
+                                background: colors.bar,
+                                boxShadow: `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                        {remaining && (
+                          <span
+                            className="mt-1 inline-flex whitespace-nowrap text-[10px]"
+                            style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}
+                          >
+                            ↻ {remaining}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </SurfaceCard>
+            );
+          })}
+        </div>
+      )}
     </SurfaceSection>
   );
 }

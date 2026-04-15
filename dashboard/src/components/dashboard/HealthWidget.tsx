@@ -23,6 +23,7 @@ interface HealthMetricCard {
 
 interface HealthWidgetProps {
   t: TFunction;
+  localeTag: string;
 }
 
 interface PollStateArgs {
@@ -334,9 +335,9 @@ function buildSummary(data: HealthResponse, t: TFunction): string {
   });
 }
 
-function formatUpdatedAt(timestamp: number | null): string {
+function formatUpdatedAt(timestamp: number | null, localeTag: string): string {
   if (!timestamp) return "n/a";
-  return new Date(timestamp).toLocaleTimeString("ko-KR", {
+  return new Date(timestamp).toLocaleTimeString(localeTag, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -344,7 +345,7 @@ function formatUpdatedAt(timestamp: number | null): string {
   });
 }
 
-export default function HealthWidget({ t }: HealthWidgetProps) {
+export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
   const [data, setData] = useState<HealthResponse | null>(null);
   const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -449,7 +450,7 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
           {summary}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-          <span>{t({ ko: `업데이트 ${formatUpdatedAt(lastSuccessAt)}`, en: `Updated ${formatUpdatedAt(lastSuccessAt)}`, ja: `Updated ${formatUpdatedAt(lastSuccessAt)}`, zh: `Updated ${formatUpdatedAt(lastSuccessAt)}` })}</span>
+          <span>{t({ ko: `업데이트 ${formatUpdatedAt(lastSuccessAt, localeTag)}`, en: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}`, ja: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}`, zh: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}` })}</span>
           {data?.db === false ? <span>{t({ ko: "DB 비정상", en: "DB down", ja: "DB down", zh: "DB down" })}</span> : null}
           {data?.dashboard === false ? <span>{t({ ko: "Dashboard dist 없음", en: "Dashboard dist missing", ja: "Dashboard dist missing", zh: "Dashboard dist missing" })}</span> : null}
         </div>

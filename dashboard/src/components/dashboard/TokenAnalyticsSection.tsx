@@ -340,32 +340,37 @@ export default function TokenAnalyticsSection({
   const [cardsLoading, setCardsLoading] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
+    let activeController: AbortController | null = null;
 
     const load = async () => {
       const cached = analyticsCache.get(period);
       const fresh = cached
         ? Date.now() - cached.fetchedAt < ANALYTICS_CACHE_TTL
         : false;
-      if (cached && mounted) setData(cached.data);
+      if (cached) setData(cached.data);
       if (fresh) return;
 
-      if (mounted) setLoading(true);
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      setLoading(true);
       try {
-        const next = await getTokenAnalytics(period);
+        const next = await getTokenAnalytics(period, { signal: controller.signal });
+        if (controller.signal.aborted) return;
         analyticsCache.set(period, { data: next, fetchedAt: Date.now() });
-        if (mounted) setData(next);
+        setData(next);
       } catch {
+        if (controller.signal.aborted) return;
         // Ignore transient dashboard fetch failures and keep cached state.
       } finally {
-        if (mounted) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
 
     void load();
     const timer = setInterval(() => void load(), 60_000);
     return () => {
-      mounted = false;
+      activeController?.abort();
       clearInterval(timer);
     };
   }, [period]);
