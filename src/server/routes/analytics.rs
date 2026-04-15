@@ -25,6 +25,7 @@ const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[
         "No Qwen rate-limit telemetry source is implemented yet.",
     ),
 ];
+const UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 fn sqlite_datetime_to_millis(value: &str) -> Option<i64> {
     if let Ok(ts) = DateTime::parse_from_rfc3339(value) {
@@ -632,7 +633,7 @@ fn build_rate_limit_provider_payloads(
         .prepare("SELECT provider, data, fetched_at FROM rate_limit_cache ORDER BY provider")
     {
         Ok(s) => s,
-        Err(_) => return build_unsupported_rate_limit_entries(now),
+        Err(_) => return build_unsupported_rate_limit_entries(conn, now),
     };
 
     let mut seen = HashSet::new();
@@ -680,6 +681,9 @@ fn build_rate_limit_provider_payloads(
         if seen.contains(*provider) {
             continue;
         }
+        if !provider_has_recent_session_usage(conn, provider, now) {
+            continue;
+        }
         providers.push(json!({
             "provider": provider,
             "buckets": [],
@@ -708,9 +712,35 @@ fn build_rate_limit_provider_payloads(
     providers
 }
 
-fn build_unsupported_rate_limit_entries(now: i64) -> Vec<serde_json::Value> {
+fn provider_has_recent_session_usage(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    now: i64,
+) -> bool {
+    let threshold = now.saturating_sub(UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS);
+    conn.query_row(
+        "SELECT 1
+         FROM sessions
+         WHERE lower(provider) = lower(?1)
+           AND COALESCE(
+                 CAST(strftime('%s', last_heartbeat) AS INTEGER),
+                 CAST(strftime('%s', created_at) AS INTEGER),
+                 0
+               ) >= ?2
+         LIMIT 1",
+        rusqlite::params![provider, threshold],
+        |_row| Ok(()),
+    )
+    .is_ok()
+}
+
+fn build_unsupported_rate_limit_entries(
+    conn: &rusqlite::Connection,
+    now: i64,
+) -> Vec<serde_json::Value> {
     UNSUPPORTED_RATE_LIMIT_PROVIDERS
         .iter()
+        .filter(|(provider, _reason)| provider_has_recent_session_usage(conn, provider, now))
         .map(|(provider, reason)| {
             json!({
                 "provider": provider,
@@ -782,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn build_rate_limit_provider_payloads_appends_unsupported_gemini_and_qwen() {
+    fn build_rate_limit_provider_payloads_hides_unused_unsupported_gemini_and_qwen() {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
@@ -805,13 +835,30 @@ mod tests {
 
         let providers = build_rate_limit_provider_payloads(&conn, 1_700_000_100);
 
-        assert_eq!(providers.len(), 3);
+        assert_eq!(providers.len(), 1);
         assert_eq!(providers[0]["provider"], json!("claude"));
-        assert_eq!(providers[1]["provider"], json!("gemini"));
-        assert_eq!(providers[1]["unsupported"], json!(true));
-        assert_eq!(providers[2]["provider"], json!("qwen"));
-        assert_eq!(providers[2]["unsupported"], json!(true));
-        assert_eq!(providers[1]["buckets"], json!([]));
-        assert_eq!(providers[2]["buckets"], json!([]));
+    }
+
+    #[test]
+    fn build_rate_limit_provider_payloads_shows_recent_unsupported_provider_only_when_used() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
+             VALUES (?1, ?2, 'completed', ?3, ?4)",
+            rusqlite::params![
+                "gemini-session-1",
+                "gemini",
+                "2023-11-14 22:00:00",
+                "2023-11-14 22:10:00"
+            ],
+        )
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads(&conn, 1_700_000_100);
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("gemini"));
+        assert_eq!(providers[0]["unsupported"], json!(true));
+        assert_eq!(providers[0]["buckets"], json!([]));
     }
 }

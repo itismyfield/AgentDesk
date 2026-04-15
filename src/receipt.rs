@@ -183,7 +183,37 @@ struct CodexTokenUsage {
 
 fn pricing_for(model: &str) -> Pricing {
     match model {
-        m if m.contains("gemini") || m.contains("qwen") || m.contains("coder-model") => Pricing {
+        // Gemini pricing (Google AI / ai.google.dev, USD per 1M tokens, ≤200K context)
+        // Source: https://ai.google.dev/gemini-api/docs/pricing (checked 2026-04-15)
+        m if m.contains("gemini-3.1-pro-preview") || m.contains("gemini-2.5-pro") => Pricing {
+            input_per_m: 2.00,
+            output_per_m: 12.00,
+            cache_read_factor: 0.1, // $0.20/$2.00
+            cache_create_factor: 0.0, // cache storage billed per-hour, not per-token
+        },
+        m if m.contains("gemini-2.5-flash-lite") || m.contains("flash-lite") => Pricing {
+            input_per_m: 0.10,
+            output_per_m: 0.40,
+            cache_read_factor: 0.1, // $0.01/$0.10
+            cache_create_factor: 0.0,
+        },
+        m if m.contains("gemini-2.5-flash") || (m.contains("gemini") && m.contains("flash")) => {
+            Pricing {
+                input_per_m: 0.30,
+                output_per_m: 2.50,
+                cache_read_factor: 0.1, // $0.03/$0.30
+                cache_create_factor: 0.0,
+            }
+        }
+        // Gemini fallback (unknown Gemini model) — N/A
+        m if m.contains("gemini") => Pricing {
+            input_per_m: 0.0,
+            output_per_m: 0.0,
+            cache_read_factor: 0.0,
+            cache_create_factor: 0.0,
+        },
+        // Qwen pricing — token pricing unconfirmed for qwen3.6-plus; keep N/A until verified
+        m if m.contains("qwen") || m.contains("coder-model") => Pricing {
             input_per_m: 0.0,
             output_per_m: 0.0,
             cache_read_factor: 0.0,
@@ -331,6 +361,7 @@ fn shorten_model(model: &str) -> String {
         }
         m if m.contains("gemini") => "Gemini".into(),
         m if m.contains("qwen3-max") || m.contains("qwen3:max") => "Qwen3 Max".into(),
+        m if m.contains("qwen3.6-plus") || m.contains("qwen3.6:plus") => "Qwen3.6 Plus".into(),
         m if m.contains("qwen3.5-plus") || m.contains("qwen3.5:plus") => "Qwen3.5 Plus".into(),
         m if m.contains("qwen3.5-flash") || m.contains("qwen3.5:flash") => "Qwen3.5 Flash".into(),
         m if m.contains("qwen3.5") && m.contains("397b") => "Qwen3.5 397B".into(),
@@ -2075,8 +2106,23 @@ mod tests {
 
         assert_eq!(gemini_line.display_name, "Gemini 2.5 Pro");
         assert_eq!(qwen_line.display_name, "Qwen");
-        assert_eq!(gemini_line.cost, 0.0);
-        assert_eq!(gemini_line.cost_without_cache, 0.0);
+
+        // Gemini 2.5 Pro: $2.00/M input, $12.00/M output, cache_read_factor=0.1
+        // input: 1000*2.00/1e6=0.002, cache_read: 50*2.00*0.1/1e6=0.00001, output: 200*12.00/1e6=0.0024
+        let expected_gemini_cost = 0.00441_f64;
+        // no_cache: (1000+50+25)*2.00/1e6 + 200*12.00/1e6 = 0.00215+0.0024 = 0.00455
+        let expected_gemini_no_cache = 0.00455_f64;
+        assert!(
+            (gemini_line.cost - expected_gemini_cost).abs() < 1e-9,
+            "Gemini cost should use 2.5 Pro pricing, not Sonnet fallback: got {}",
+            gemini_line.cost
+        );
+        assert!(
+            (gemini_line.cost_without_cache - expected_gemini_no_cache).abs() < 1e-9,
+            "Gemini no_cache cost mismatch: got {}",
+            gemini_line.cost_without_cache
+        );
+        // Qwen pricing still N/A ($0) until token rates are verified
         assert_eq!(qwen_line.cost, 0.0);
         assert_eq!(qwen_line.cost_without_cache, 0.0);
     }
