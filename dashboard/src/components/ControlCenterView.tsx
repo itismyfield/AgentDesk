@@ -171,7 +171,7 @@ export default function ControlCenterView({
               className="text-[11px] font-semibold uppercase tracking-[0.18em]"
               style={{ color: "var(--th-text-muted)" }}
             >
-              {t("운영 표면", "Operations Surface")}
+              {t("관리", "Management")}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <h2
@@ -287,13 +287,7 @@ export default function ControlCenterView({
             {compactControlHeader}
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
-                eyebrow={t("인력 운영", "Staff Ops")}
-                title={t("조직 운영 표면", "Organization Operations Surface")}
-                description={t(
-                  "에이전트, 부서, 오피스, 파견 세션을 같은 조직 표면 안에서 전환합니다.",
-                  "Switch between agents, departments, offices, and dispatch sessions within one organization surface.",
-                )}
-                badge={activeOrganizationSection ? (isKo ? activeOrganizationSection.labelKo : activeOrganizationSection.labelEn) : undefined}
+                title={t("조직", "Organization")}
                 actions={(
                   <>
                     {organizationSections.map((section) => (
@@ -318,28 +312,20 @@ export default function ControlCenterView({
                     : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
                 }}
               >
-                <p className="mt-4 text-sm leading-6 break-words" style={{ color: "var(--th-text-muted)" }}>
-                  {organizationPaneSummary}
-                </p>
               </SurfaceSection>
             </div>
 
             {organizationPane === "dispatch" && (
-              <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pb-40 pt-4 sm:px-6">
-                <SurfaceCard
-                  className="rounded-3xl p-4 sm:p-5"
-                  style={{
-                    borderColor: "color-mix(in srgb, var(--th-border) 74%, transparent)",
-                    background: "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
-                  }}
-                >
-                  <SessionPanel
-                    sessions={sessions}
-                    departments={departments}
-                    agents={agents}
-                    onAssign={onAssign}
-                  />
-                </SurfaceCard>
+              <div
+                className="mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6"
+                style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+              >
+                <SessionPanel
+                  sessions={sessions}
+                  departments={departments}
+                  agents={agents}
+                  onAssign={onAssign}
+                />
               </div>
             )}
 
