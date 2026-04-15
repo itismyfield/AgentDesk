@@ -1,5 +1,6 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
+import { getStaleLinkedSessions } from "../agent-insights";
 import type {
   Agent,
   CompanySettings,
@@ -8,8 +9,11 @@ import type {
   RoundTableMeeting,
 } from "../types";
 import {
+  SurfaceActionButton,
+  SurfaceCard,
   SurfaceEmptyState,
   SurfaceListItem,
+  SurfaceMetaBadge,
   SurfaceSection,
   SurfaceSegmentButton,
   SurfaceSubsection,
@@ -77,9 +81,12 @@ interface DashboardPageViewProps {
 export default function DashboardPageView({
   stats,
   agents,
+  sessions,
   meetings,
   settings,
   onSelectAgent,
+  onOpenKanbanSignal,
+  onOpenDispatchSessions,
   onOpenSettings,
   onRefreshMeetings,
 }: DashboardPageViewProps) {
@@ -109,7 +116,7 @@ export default function DashboardPageView({
         const next = await getSkillRanking(skillWindow, 10);
         if (mounted) setSkillRanking(next);
       } catch {
-        if (mounted) setSkillRanking(null);
+        // Keep the last successful ranking during transient network failures.
       }
     };
 
@@ -158,12 +165,12 @@ export default function DashboardPageView({
       icon: "⏸️",
     },
     {
-      id: "open-cards",
-      label: t({ ko: "열린 카드", en: "Open Cards", ja: "オープンカード", zh: "开放卡片" }),
-      value: stats.kanban.open_total,
-      sub: t({ ko: "칸반 총량", en: "Kanban load", ja: "カンバン総量", zh: "看板总量" }),
+      id: "dispatched",
+      label: t({ ko: "파견 세션", en: "Dispatched", ja: "派遣セッション", zh: "派遣会话" }),
+      value: stats.dispatched_count,
+      sub: t({ ko: "외부 연결", en: "External sessions", ja: "外部接続", zh: "外部连接" }),
       color: "#f59e0b",
-      icon: "📋",
+      icon: "🛰️",
     },
   ];
 
@@ -182,6 +189,30 @@ export default function DashboardPageView({
         : [];
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
   const maxXp = topAgents.reduce((max, agent) => Math.max(max, agent.xp), 1);
+  const staleLinkedSessions = useMemo(() => getStaleLinkedSessions(sessions), [sessions]);
+  const reconnectingSessions = useMemo(
+    () => sessions.filter((session) => session.linked_agent_id && session.status === "disconnected"),
+    [sessions],
+  );
+  const activeMeetings = useMemo(
+    () => meetings.filter((meeting) => meeting.status === "in_progress"),
+    [meetings],
+  );
+  const recentMeetings = useMemo(
+    () =>
+      [...meetings]
+        .sort((left, right) => {
+          const leftTime = left.started_at || left.created_at;
+          const rightTime = right.started_at || right.created_at;
+          return rightTime - leftTime;
+        })
+        .slice(0, 4),
+    [meetings],
+  );
+  const openMeetingFollowUps = useMemo(
+    () => meetings.reduce((sum, meeting) => sum + countOpenMeetingIssues(meeting), 0),
+    [meetings],
+  );
 
   return (
     <div
@@ -244,6 +275,112 @@ export default function DashboardPageView({
         <div className="space-y-5">
           <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <SurfaceSubsection
+              title={t({ ko: "운영 시그널", en: "Ops Signals", ja: "運用シグナル", zh: "运营信号" })}
+              description={t({
+                ko: "세션 이상, 칸반 병목, 회의 후속 정리를 현재 탭에서 바로 점검합니다.",
+                en: "Inspect session anomalies, kanban bottlenecks, and meeting follow-ups from this tab.",
+                ja: "セッション異常、カンバンの詰まり、会議後続整理をこのタブで直接確認します。",
+                zh: "在当前标签页直接检查会话异常、看板瓶颈和会议后续整理。",
+              })}
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-accent-info) 22%, var(--th-border) 78%)",
+                background:
+                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, var(--th-accent-info) 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+              }}
+            >
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <PulseSignalCard
+                  label={t({ ko: "세션 신호", en: "Session Signal", ja: "セッション信号", zh: "会话信号" })}
+                  value={staleLinkedSessions.length + reconnectingSessions.length}
+                  accent="#f97316"
+                  sublabel={t({
+                    ko: `${staleLinkedSessions.length} stale / ${reconnectingSessions.length} reconnecting`,
+                    en: `${staleLinkedSessions.length} stale / ${reconnectingSessions.length} reconnecting`,
+                    ja: `${staleLinkedSessions.length} stale / ${reconnectingSessions.length} reconnecting`,
+                    zh: `${staleLinkedSessions.length} stale / ${reconnectingSessions.length} reconnecting`,
+                  })}
+                  actionLabel={t({ ko: "Dispatch 보기", en: "Open Dispatch", ja: "Dispatch を開く", zh: "打开 Dispatch" })}
+                  onAction={onOpenDispatchSessions}
+                />
+                <PulseSignalCard
+                  label={t({ ko: "리뷰 대기", en: "Review Queue", ja: "レビュー待ち", zh: "待审查" })}
+                  value={stats.kanban.review_queue}
+                  accent="#14b8a6"
+                  sublabel={t({
+                    ko: "검토/판정이 필요한 카드",
+                    en: "Cards waiting for review or decision",
+                    ja: "レビューまたは判断待ちカード",
+                    zh: "等待审查或决策的卡片",
+                  })}
+                  actionLabel={t({ ko: "칸반 열기", en: "Open Kanban", ja: "カンバンを開く", zh: "打开看板" })}
+                  onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("review") : undefined}
+                />
+                <PulseSignalCard
+                  label={t({ ko: "블록됨", en: "Blocked", ja: "ブロック", zh: "阻塞" })}
+                  value={stats.kanban.blocked}
+                  accent="#ef4444"
+                  sublabel={t({
+                    ko: "수동 판단이나 해소를 기다리는 카드",
+                    en: "Cards waiting on unblock or manual intervention",
+                    ja: "解除や手動判断待ちのカード",
+                    zh: "等待解除阻塞或人工判断的卡片",
+                  })}
+                  actionLabel={t({ ko: "막힘 카드 보기", en: "Open Blocked", ja: "Blocked を開く", zh: "打开阻塞卡片" })}
+                  onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("blocked") : undefined}
+                />
+                <PulseSignalCard
+                  label={t({ ko: "수락 지연", en: "Waiting Acceptance", ja: "受諾遅延", zh: "接收延迟" })}
+                  value={stats.kanban.waiting_acceptance}
+                  accent="#10b981"
+                  sublabel={t({
+                    ko: "requested 상태에 머문 카드",
+                    en: "Cards stalled in requested",
+                    ja: "requested に留まるカード",
+                    zh: "停留在 requested 的卡片",
+                  })}
+                  actionLabel={t({ ko: "requested 보기", en: "Open Requested", ja: "requested を開く", zh: "打开 requested" })}
+                  onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("requested") : undefined}
+                />
+                <PulseSignalCard
+                  label={t({ ko: "진행 정체", en: "Stale In Progress", ja: "進行停滞", zh: "进行停滞" })}
+                  value={stats.kanban.stale_in_progress}
+                  accent="#f59e0b"
+                  sublabel={t({
+                    ko: "오래 머무는 in_progress 카드",
+                    en: "Cards stuck in progress",
+                    ja: "進行が長引く in_progress カード",
+                    zh: "长时间停留在 in_progress 的卡片",
+                  })}
+                  actionLabel={t({ ko: "정체 카드 보기", en: "Open Stale", ja: "停滞カードを開く", zh: "打开停滞卡片" })}
+                  onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("stalled") : undefined}
+                />
+                <PulseSignalCard
+                  label={t({ ko: "회의 후속", en: "Meeting Follow-up", ja: "会議フォローアップ", zh: "会议后续" })}
+                  value={openMeetingFollowUps}
+                  accent="#22c55e"
+                  sublabel={t({
+                    ko: `${activeMeetings.length} active / ${meetings.length} total`,
+                    en: `${activeMeetings.length} active / ${meetings.length} total`,
+                    ja: `${activeMeetings.length} active / ${meetings.length} total`,
+                    zh: `${activeMeetings.length} active / ${meetings.length} total`,
+                  })}
+                  actionLabel={t({ ko: "회의록 열기", en: "Open Meetings", ja: "会議録を開く", zh: "打开会议记录" })}
+                  onAction={() => setActiveTab("meetings")}
+                />
+              </div>
+            </SurfaceSubsection>
+
+            <MeetingTimelineCard
+              meetings={recentMeetings}
+              activeCount={activeMeetings.length}
+              followUpCount={openMeetingFollowUps}
+              localeTag={localeTag}
+              t={t}
+              onOpenMeetings={() => setActiveTab("meetings")}
+            />
+          </div>
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <HealthWidget t={t} />
             <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           </div>
@@ -273,6 +410,11 @@ export default function DashboardPageView({
               zh: "把 cron 执行流与技能使用面放在一起查看。",
             })}
             badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-warn) 20%, var(--th-border) 80%)",
+              background:
+                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-warn) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            }}
           >
             <CronTimelineWidget t={t} />
 
@@ -313,6 +455,11 @@ export default function DashboardPageView({
               zh: "只保留排行与真实成就，去掉装饰性奖励噪音。",
             })}
             badge={t({ ko: "Focused", en: "Focused", ja: "Focused", zh: "Focused" })}
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-primary) 18%, var(--th-border) 82%)",
+              background:
+                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-primary) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            }}
           >
             <DashboardRankingBoard
               topAgents={topAgents}
@@ -341,31 +488,37 @@ export default function DashboardPageView({
                     "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, var(--th-accent-primary) 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
                 }}
               >
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  {topAgents.slice(0, 3).map((agent, index) => (
-                    <div
-                      key={agent.id}
-                      className="rounded-2xl border px-4 py-3"
-                      style={{
-                        borderColor: "rgba(148,163,184,0.16)",
-                        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                      }}
-                    >
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
-                        {t({ ko: `${index + 1}위`, en: `Rank ${index + 1}`, ja: `${index + 1}位`, zh: `第 ${index + 1} 名` })}
+                {topAgents.length === 0 ? (
+                  <SurfaceEmptyState className="mt-4 px-4 py-6 text-center text-sm">
+                    {t({ ko: "아직 XP 집계 대상이 없습니다.", en: "No XP snapshot is available yet.", ja: "まだ XP スナップショット対象がありません。", zh: "尚无 XP 快照数据。" })}
+                  </SurfaceEmptyState>
+                ) : (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                    {topAgents.slice(0, 3).map((agent, index) => (
+                      <div
+                        key={agent.id}
+                        className="rounded-2xl border px-4 py-3"
+                        style={{
+                          borderColor: "rgba(148,163,184,0.16)",
+                          background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                        }}
+                      >
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+                          {t({ ko: `${index + 1}위`, en: `Rank ${index + 1}`, ja: `${index + 1}位`, zh: `第 ${index + 1} 名` })}
+                        </div>
+                        <div className="mt-2 truncate text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+                          {agent.name}
+                        </div>
+                        <div className="mt-1 text-lg font-black tracking-tight" style={{ color: "var(--th-accent-primary)" }}>
+                          {numberFormatter.format(agent.xp)} XP
+                        </div>
+                        <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                          {t({ ko: `${numberFormatter.format(agent.tasksDone)}개 완료`, en: `${numberFormatter.format(agent.tasksDone)} completed`, ja: `${numberFormatter.format(agent.tasksDone)} 完了`, zh: `完成 ${numberFormatter.format(agent.tasksDone)} 项` })}
+                        </div>
                       </div>
-                      <div className="mt-2 truncate text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                        {agent.name}
-                      </div>
-                      <div className="mt-1 text-lg font-black tracking-tight" style={{ color: "var(--th-accent-primary)" }}>
-                        {numberFormatter.format(agent.xp)} XP
-                      </div>
-                      <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        {t({ ko: `${numberFormatter.format(agent.tasksDone)}개 완료`, en: `${numberFormatter.format(agent.tasksDone)} completed`, ja: `${numberFormatter.format(agent.tasksDone)} 完了`, zh: `完成 ${numberFormatter.format(agent.tasksDone)} 项` })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </SurfaceSubsection>
             </div>
           </PulseSectionShell>
@@ -384,6 +537,11 @@ export default function DashboardPageView({
               zh: "在仪表盘内直接继续处理圆桌结果与后续 issue 整理。",
             })}
             badge={t({ ko: `${meetings.length}개 기록`, en: `${meetings.length} records`, ja: `${meetings.length}件`, zh: `${meetings.length} 条` })}
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-success) 18%, var(--th-border) 82%)",
+              background:
+                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-success) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            }}
           >
             <Suspense
               fallback={(
@@ -406,12 +564,14 @@ function PulseSectionShell({
   title,
   subtitle,
   badge,
+  style,
   children,
 }: {
   eyebrow: string;
   title: string;
   subtitle: string;
   badge: string;
+  style?: CSSProperties;
   children: ReactNode;
 }) {
   return (
@@ -421,7 +581,7 @@ function PulseSectionShell({
       description={subtitle}
       badge={badge}
       className="rounded-[28px] p-4 sm:p-5"
-      style={{
+      style={style ?? {
         borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
         background:
           "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 99%, transparent) 100%)",
@@ -429,6 +589,186 @@ function PulseSectionShell({
     >
       <div className="mt-4 space-y-4">{children}</div>
     </SurfaceSection>
+  );
+}
+
+function countOpenMeetingIssues(meeting: RoundTableMeeting): number {
+  const totalIssues = meeting.proposed_issues?.length ?? 0;
+  if (meeting.status !== "completed" || totalIssues === 0) return 0;
+
+  const results = meeting.issue_creation_results ?? [];
+  if (results.length === 0) {
+    return Math.max(totalIssues - meeting.issues_created, 0);
+  }
+
+  const created = results.filter((result) => result.ok && result.discarded !== true).length;
+  const discarded = results.filter((result) => result.discarded === true).length;
+  return Math.max(totalIssues - created - discarded, 0);
+}
+
+function PulseSignalCard({
+  label,
+  value,
+  sublabel,
+  accent,
+  actionLabel,
+  onAction,
+}: {
+  label: string;
+  value: number;
+  sublabel: string;
+  accent: string;
+  actionLabel: string;
+  onAction?: () => void;
+}) {
+  return (
+    <SurfaceCard
+      className="min-w-0 rounded-2xl p-4"
+      style={{
+        borderColor: `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`,
+        background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 93%, ${accent} 7%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)`,
+      }}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em]" style={{ color: accent }}>
+            {label}
+          </div>
+          <div className="mt-2 text-3xl font-black tracking-tight" style={{ color: "var(--th-text-heading)" }}>
+            {value}
+          </div>
+          <p className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+            {sublabel}
+          </p>
+        </div>
+        {onAction ? (
+          <SurfaceActionButton
+            onClick={onAction}
+            className="w-full shrink-0 sm:w-auto"
+            style={{
+              color: accent,
+              border: `1px solid color-mix(in srgb, ${accent} 28%, var(--th-border) 72%)`,
+              background: `color-mix(in srgb, ${accent} 14%, var(--th-card-bg) 86%)`,
+            }}
+          >
+            {actionLabel}
+          </SurfaceActionButton>
+        ) : null}
+      </div>
+    </SurfaceCard>
+  );
+}
+
+function MeetingTimelineCard({
+  meetings,
+  activeCount,
+  followUpCount,
+  localeTag,
+  t,
+  onOpenMeetings,
+}: {
+  meetings: RoundTableMeeting[];
+  activeCount: number;
+  followUpCount: number;
+  localeTag: string;
+  t: TFunction;
+  onOpenMeetings?: () => void;
+}) {
+  const formatter = useMemo(
+    () => new Intl.DateTimeFormat(localeTag, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+    [localeTag],
+  );
+
+  const getMeetingStatusLabel = useCallback(
+    (status: RoundTableMeeting["status"]) =>
+      t({
+        ko: status === "in_progress" ? "진행 중" : status === "completed" ? "완료" : "초안",
+        en: status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Draft",
+        ja: status === "in_progress" ? "進行中" : status === "completed" ? "完了" : "下書き",
+        zh: status === "in_progress" ? "进行中" : status === "completed" ? "已完成" : "草稿",
+      }),
+    [t],
+  );
+
+  return (
+    <SurfaceSubsection
+      title={t({ ko: "회의 타임라인", en: "Meeting Timeline", ja: "会議タイムライン", zh: "会议时间线" })}
+      description={t({
+        ko: `${activeCount}개 진행 중, 후속 이슈 ${followUpCount}개 미정리`,
+        en: `${activeCount} active, ${followUpCount} follow-up issues still open`,
+        ja: `${activeCount}件進行中、後続イシュー ${followUpCount}件 未整理`,
+        zh: `${activeCount} 个进行中，${followUpCount} 个后续 issue 未整理`,
+      })}
+      actions={onOpenMeetings ? (
+        <SurfaceActionButton tone="success" onClick={onOpenMeetings}>
+          {t({ ko: "회의록 열기", en: "Open Meetings", ja: "会議録を開く", zh: "打开会议记录" })}
+        </SurfaceActionButton>
+      ) : undefined}
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, var(--th-accent-primary) 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+      }}
+    >
+      <div className="space-y-2">
+        {meetings.length === 0 ? (
+          <SurfaceEmptyState className="px-4 py-6 text-center text-sm">
+            {t({ ko: "최근 회의가 없습니다.", en: "No recent meetings yet.", ja: "最近の会議はありません。", zh: "暂无最近会议。" })}
+          </SurfaceEmptyState>
+        ) : (
+          meetings.map((meeting) => {
+            const statusTone = meeting.status === "in_progress" ? "success" : meeting.status === "completed" ? "info" : "neutral";
+            const issueCount = countOpenMeetingIssues(meeting);
+            return (
+              <SurfaceListItem
+                key={meeting.id}
+                tone={statusTone}
+                trailing={(
+                  <div className="text-right">
+                    <div className="text-xs font-semibold" style={{ color: "var(--th-text-heading)" }}>
+                      {meeting.primary_provider ? meeting.primary_provider.toUpperCase() : "RT"}
+                    </div>
+                    <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                      {t({
+                        ko: `${meeting.issues_created}개 생성`,
+                        en: `${meeting.issues_created} created`,
+                        ja: `${meeting.issues_created}件 作成`,
+                        zh: `已创建 ${meeting.issues_created} 个`,
+                      })}
+                    </div>
+                  </div>
+                )}
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SurfaceMetaBadge tone={statusTone}>{getMeetingStatusLabel(meeting.status)}</SurfaceMetaBadge>
+                    <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                      {formatter.format(meeting.started_at || meeting.created_at)}
+                    </span>
+                  </div>
+                  <div className="mt-1 truncate font-medium" style={{ color: "var(--th-text)" }}>
+                    {meeting.agenda}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                    <SurfaceMetaBadge>
+                      {meeting.participant_names.length} {t({ ko: "참여자", en: "participants", ja: "参加者", zh: "参与者" })}
+                    </SurfaceMetaBadge>
+                    <SurfaceMetaBadge>
+                      {meeting.total_rounds} {t({ ko: "라운드", en: "rounds", ja: "ラウンド", zh: "轮" })}
+                    </SurfaceMetaBadge>
+                    {issueCount > 0 ? (
+                      <SurfaceMetaBadge tone="warn">
+                        {issueCount} {t({ ko: "후속 대기", en: "follow-up pending", ja: "後続待ち", zh: "后续待处理" })}
+                      </SurfaceMetaBadge>
+                    ) : null}
+                  </div>
+                </div>
+              </SurfaceListItem>
+            );
+          })
+        )}
+      </div>
+    </SurfaceSubsection>
   );
 }
 
