@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 // ── Types ─────────────────────────────────────────────
 
@@ -136,6 +136,78 @@ interface OnboardingStatusResponse {
     command?: CommandBotEntry["provider"];
     command2?: CommandBotEntry["provider"];
   };
+}
+
+interface OnboardingDraft {
+  version: 1;
+  step: number;
+  commandBots: CommandBotEntry[];
+  announceToken: string;
+  notifyToken: string;
+  announceBotInfo: BotInfo | null;
+  notifyBotInfo: BotInfo | null;
+  providerStatuses: Record<string, ProviderStatus>;
+  selectedTemplate: string | null;
+  agents: AgentDef[];
+  customName: string;
+  customDesc: string;
+  customNameEn: string;
+  customDescEn: string;
+  expandedAgent: string | null;
+  selectedGuild: string;
+  channelAssignments: ChannelAssignment[];
+  ownerId: string;
+  hasExistingSetup: boolean;
+  confirmRerunOverwrite: boolean;
+}
+
+const ONBOARDING_DRAFT_STORAGE_KEY = "agentdesk.onboarding.draft.v1";
+
+function readOnboardingDraft(): OnboardingDraft | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ONBOARDING_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<OnboardingDraft>;
+    if (parsed?.version !== 1) return null;
+    return {
+      version: 1,
+      step: typeof parsed.step === "number" ? parsed.step : 1,
+      commandBots:
+        Array.isArray(parsed.commandBots) && parsed.commandBots.length > 0
+          ? parsed.commandBots
+          : [{ provider: "claude", token: "", botInfo: null }],
+      announceToken: parsed.announceToken ?? "",
+      notifyToken: parsed.notifyToken ?? "",
+      announceBotInfo: parsed.announceBotInfo ?? null,
+      notifyBotInfo: parsed.notifyBotInfo ?? null,
+      providerStatuses: parsed.providerStatuses ?? {},
+      selectedTemplate: parsed.selectedTemplate ?? null,
+      agents: parsed.agents ?? [],
+      customName: parsed.customName ?? "",
+      customDesc: parsed.customDesc ?? "",
+      customNameEn: parsed.customNameEn ?? "",
+      customDescEn: parsed.customDescEn ?? "",
+      expandedAgent: parsed.expandedAgent ?? null,
+      selectedGuild: parsed.selectedGuild ?? "",
+      channelAssignments: parsed.channelAssignments ?? [],
+      ownerId: parsed.ownerId ?? "",
+      hasExistingSetup: Boolean(parsed.hasExistingSetup),
+      confirmRerunOverwrite: Boolean(parsed.confirmRerunOverwrite),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeOnboardingDraft(draft: OnboardingDraft): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ONBOARDING_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+}
+
+function clearOnboardingDraft(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(ONBOARDING_DRAFT_STORAGE_KEY);
 }
 
 interface ChecklistItem {
@@ -373,43 +445,94 @@ function ChecklistPanel({ title, items }: { title: string; items: ChecklistItem[
 interface StepStatusItem {
   step: number;
   label: string;
-  ok: boolean;
-  active: boolean;
+  status: "complete" | "active" | "blocked" | "pending";
 }
 
-function StepStatusRail({ items }: { items: StepStatusItem[] }) {
+function StepStatusRail({
+  items,
+  isKo,
+  setItemRef,
+}: {
+  items: StepStatusItem[];
+  isKo: boolean;
+  setItemRef: (step: number, node: HTMLDivElement | null) => void;
+}) {
+  const statusMeta = (status: StepStatusItem["status"]) => {
+    switch (status) {
+      case "complete":
+        return {
+          icon: "✓",
+          label: isKo ? "완료" : "Complete",
+          borderColor: "rgba(16,185,129,0.24)",
+          backgroundColor: "rgba(16,185,129,0.08)",
+          iconColor: "#86efac",
+        };
+      case "active":
+        return {
+          icon: "•",
+          label: isKo ? "진행 중" : "Active",
+          borderColor: "rgba(99,102,241,0.34)",
+          backgroundColor: "rgba(99,102,241,0.12)",
+          iconColor: "#c4b5fd",
+        };
+      case "blocked":
+        return {
+          icon: "!",
+          label: isKo ? "보완 필요" : "Needs attention",
+          borderColor: "rgba(248,113,113,0.24)",
+          backgroundColor: "rgba(127,29,29,0.18)",
+          iconColor: "#fca5a5",
+        };
+      default:
+        return {
+          icon: "○",
+          label: isKo ? "대기" : "Pending",
+          borderColor: "rgba(148,163,184,0.18)",
+          backgroundColor: "rgba(15,23,42,0.32)",
+          iconColor: "var(--th-text-muted)",
+        };
+    }
+  };
+
   return (
-    <div className="flex gap-2 overflow-x-auto pb-1">
+    <div className="space-y-2">
+      <div className="relative">
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-5 bg-gradient-to-r from-[color:var(--th-bg-surface)] to-transparent sm:hidden" />
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-[color:var(--th-bg-surface)] to-transparent sm:hidden" />
+        <div className="flex gap-2 overflow-x-auto pb-1" role="list" aria-label={isKo ? "온보딩 단계" : "Onboarding steps"}>
       {items.map((item) => (
         <div
           key={item.step}
-          className="min-w-[8.5rem] rounded-xl border px-3 py-2"
+          ref={(node) => setItemRef(item.step, node)}
+          role="listitem"
+          aria-current={item.status === "active" ? "step" : undefined}
+          className="min-w-[7.25rem] rounded-xl border px-3 py-2 sm:min-w-[8.5rem]"
           style={{
-            borderColor: item.active
-              ? "rgba(99,102,241,0.34)"
-              : item.ok
-                ? "rgba(16,185,129,0.24)"
-                : "rgba(148,163,184,0.18)",
-            backgroundColor: item.active
-              ? "rgba(99,102,241,0.12)"
-              : item.ok
-                ? "rgba(16,185,129,0.08)"
-                : "rgba(15,23,42,0.32)",
+            borderColor: statusMeta(item.status).borderColor,
+            backgroundColor: statusMeta(item.status).backgroundColor,
           }}
         >
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
             Step {item.step}
           </div>
           <div className="mt-1 flex items-center gap-2">
-            <span style={{ color: item.ok ? "#86efac" : item.active ? "#c4b5fd" : "var(--th-text-muted)" }}>
-              {item.ok ? "✓" : item.active ? "•" : "!"}
+            <span aria-hidden="true" style={{ color: statusMeta(item.status).iconColor }}>
+              {statusMeta(item.status).icon}
             </span>
             <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
               {item.label}
             </span>
           </div>
+          <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+            {statusMeta(item.status).label}
+          </div>
         </div>
       ))}
+        </div>
+      </div>
+      <div className="text-[11px] sm:hidden" style={{ color: "var(--th-text-muted)" }}>
+        {isKo ? "가로 스크롤로 전체 단계를 확인할 수 있습니다." : "Swipe horizontally to see every step."}
+      </div>
     </div>
   );
 }
@@ -418,40 +541,54 @@ function StepStatusRail({ items }: { items: StepStatusItem[] }) {
 
 export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const initialDraftRef = useRef<OnboardingDraft | null>(null);
+  if (initialDraftRef.current === null) {
+    initialDraftRef.current = readOnboardingDraft();
+  }
+  const initialDraft = initialDraftRef.current;
+  const railItemRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
 
   // Step control
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(initialDraft?.step ?? 1);
   const TOTAL_STEPS = 5;
 
   // Step 1: Bot tokens
-  const [commandBots, setCommandBots] = useState<CommandBotEntry[]>([
-    { provider: "claude", token: "", botInfo: null },
-  ]);
-  const [announceToken, setAnnounceToken] = useState("");
-  const [notifyToken, setNotifyToken] = useState("");
-  const [announceBotInfo, setAnnounceBotInfo] = useState<BotInfo | null>(null);
-  const [notifyBotInfo, setNotifyBotInfo] = useState<BotInfo | null>(null);
+  const [commandBots, setCommandBots] = useState<CommandBotEntry[]>(
+    initialDraft?.commandBots.length
+      ? initialDraft.commandBots
+      : [{ provider: "claude", token: "", botInfo: null }],
+  );
+  const [announceToken, setAnnounceToken] = useState(initialDraft?.announceToken ?? "");
+  const [notifyToken, setNotifyToken] = useState(initialDraft?.notifyToken ?? "");
+  const [announceBotInfo, setAnnounceBotInfo] = useState<BotInfo | null>(initialDraft?.announceBotInfo ?? null);
+  const [notifyBotInfo, setNotifyBotInfo] = useState<BotInfo | null>(initialDraft?.notifyBotInfo ?? null);
   const [validating, setValidating] = useState(false);
 
   // Step 2: Provider verification
-  const [providerStatuses, setProviderStatuses] = useState<Record<string, ProviderStatus>>({});
+  const [providerStatuses, setProviderStatuses] = useState<Record<string, ProviderStatus>>(initialDraft?.providerStatuses ?? {});
   const [checkingProviders, setCheckingProviders] = useState(false);
 
   // Step 3: Agent selection
-  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
-  const [agents, setAgents] = useState<AgentDef[]>([]);
-  const [customName, setCustomName] = useState("");
-  const [customDesc, setCustomDesc] = useState("");
+  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(initialDraft?.selectedTemplate ?? null);
+  const [agents, setAgents] = useState<AgentDef[]>(initialDraft?.agents ?? []);
+  const [customName, setCustomName] = useState(initialDraft?.customName ?? "");
+  const [customDesc, setCustomDesc] = useState(initialDraft?.customDesc ?? "");
+  const [customNameEn, setCustomNameEn] = useState(initialDraft?.customNameEn ?? "");
+  const [customDescEn, setCustomDescEn] = useState(initialDraft?.customDescEn ?? "");
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
-  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(initialDraft?.expandedAgent ?? null);
 
   // Step 4: Channel setup
   const [guilds, setGuilds] = useState<Guild[]>([]);
-  const [selectedGuild, setSelectedGuild] = useState("");
-  const [channelAssignments, setChannelAssignments] = useState<ChannelAssignment[]>([]);
+  const [selectedGuild, setSelectedGuild] = useState(initialDraft?.selectedGuild ?? "");
+  const [channelAssignments, setChannelAssignments] = useState<ChannelAssignment[]>(initialDraft?.channelAssignments ?? []);
 
   // Step 5: Owner
-  const [ownerId, setOwnerId] = useState("");
+  const [ownerId, setOwnerId] = useState(initialDraft?.ownerId ?? "");
+  const [hasExistingSetup, setHasExistingSetup] = useState(initialDraft?.hasExistingSetup ?? false);
+  const [confirmRerunOverwrite, setConfirmRerunOverwrite] = useState(initialDraft?.confirmRerunOverwrite ?? false);
+  const [draftNoticeVisible, setDraftNoticeVisible] = useState(Boolean(initialDraft));
   const [completing, setCompleting] = useState(false);
   const [completionChecklist, setCompletionChecklist] = useState<CompletionChecklistItem[] | null>(null);
   const [error, setError] = useState("");
@@ -487,6 +624,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     );
   const newChannelCount = channelAssignments.filter((assignment) => !assignment.channelId).length;
   const ownerIdValid = !ownerId.trim() || /^\d{17,20}$/.test(ownerId.trim());
+  const overwriteAcknowledged = !hasExistingSetup || confirmRerunOverwrite;
   const completionReady =
     commandBotsReady &&
     announceReady &&
@@ -495,13 +633,62 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     hasSelectedGuild &&
     channelAssignmentsReady &&
     ownerIdValid &&
-    notifyReady;
+    notifyReady &&
+    overwriteAcknowledged;
+
+  const setRailItemRef = useCallback((stepNumber: number, node: HTMLDivElement | null) => {
+    railItemRefs.current[stepNumber] = node;
+  }, []);
+
+  const goToStep = useCallback((nextStep: number) => {
+    setStep(nextStep);
+    setError("");
+  }, []);
+
+  const resetDraft = useCallback(() => {
+    clearOnboardingDraft();
+    initialDraftRef.current = null;
+    setStep(1);
+    setCommandBots([{ provider: "claude", token: "", botInfo: null }]);
+    setAnnounceToken("");
+    setNotifyToken("");
+    setAnnounceBotInfo(null);
+    setNotifyBotInfo(null);
+    setProviderStatuses({});
+    setSelectedTemplate(null);
+    setAgents([]);
+    setCustomName("");
+    setCustomDesc("");
+    setCustomNameEn("");
+    setCustomDescEn("");
+    setExpandedAgent(null);
+    setGuilds([]);
+    setSelectedGuild("");
+    setChannelAssignments([]);
+    setOwnerId("");
+    setConfirmRerunOverwrite(false);
+    setCompletionChecklist(null);
+    setError("");
+    setDraftNoticeVisible(false);
+  }, []);
 
   // Load existing config for pre-fill
   useEffect(() => {
     void fetch("/api/onboarding/status", { credentials: "include" })
       .then((r) => r.json())
       .then((d: OnboardingStatusResponse) => {
+        const serverHasExistingSetup = Boolean(
+          d.owner_id ||
+            d.guild_id ||
+            d.bot_tokens?.command ||
+            d.bot_tokens?.announce ||
+            d.bot_tokens?.notify ||
+            d.bot_tokens?.command2,
+        );
+        setHasExistingSetup(serverHasExistingSetup);
+        if (initialDraft) {
+          return;
+        }
         if (d.owner_id) setOwnerId(d.owner_id);
         if (d.guild_id) setSelectedGuild(d.guild_id);
         const commandToken = d.bot_tokens?.command;
@@ -531,7 +718,68 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         if (d.bot_tokens?.notify) setNotifyToken(d.bot_tokens.notify);
       })
       .catch(() => {});
-  }, []);
+  }, [initialDraft]);
+
+  useEffect(() => {
+    if (completionChecklist) {
+      return;
+    }
+    writeOnboardingDraft({
+      version: 1,
+      step,
+      commandBots,
+      announceToken,
+      notifyToken,
+      announceBotInfo,
+      notifyBotInfo,
+      providerStatuses,
+      selectedTemplate,
+      agents,
+      customName,
+      customDesc,
+      customNameEn,
+      customDescEn,
+      expandedAgent,
+      selectedGuild,
+      channelAssignments,
+      ownerId,
+      hasExistingSetup,
+      confirmRerunOverwrite,
+    });
+  }, [
+    agents,
+    announceBotInfo,
+    announceToken,
+    channelAssignments,
+    commandBots,
+    completionChecklist,
+    confirmRerunOverwrite,
+    customDesc,
+    customDescEn,
+    customName,
+    customNameEn,
+    expandedAgent,
+    hasExistingSetup,
+    notifyBotInfo,
+    notifyToken,
+    ownerId,
+    providerStatuses,
+    selectedGuild,
+    selectedTemplate,
+    step,
+  ]);
+
+  useEffect(() => {
+    railItemRefs.current[step]?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "center",
+    });
+
+    window.requestAnimationFrame(() => {
+      stepHeadingRef.current?.focus();
+    });
+  }, [step]);
 
   // ── API helpers ───────────────────────────────────
 
@@ -652,15 +900,22 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   useEffect(() => {
     if (agents.length > 0) {
       const suffix = providerSuffix(primaryProvider);
-      setChannelAssignments(
-        agents.map((a) => ({
-          agentId: a.id,
-          agentName: a.name,
-          recommendedName: `${a.id}-${suffix}`,
-          channelId: "",
-          channelName: `${a.id}-${suffix}`,
-        })),
-      );
+      setChannelAssignments((prev) => {
+        const previousByAgent = new Map(prev.map((assignment) => [assignment.agentId, assignment]));
+        return agents.map((agent) => {
+          const existing = previousByAgent.get(agent.id);
+          const recommendedName = `${agent.id}-${suffix}`;
+          return {
+            agentId: agent.id,
+            agentName: agent.name,
+            recommendedName,
+            channelId: existing?.channelId ?? "",
+            channelName: existing?.channelName || existing?.recommendedName || recommendedName,
+          };
+        });
+      });
+    } else {
+      setChannelAssignments([]);
     }
   }, [agents, primaryProvider]);
 
@@ -675,6 +930,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     if (!customName.trim()) return;
     const name = customName.trim();
     const desc = customDesc.trim();
+    const nameEn = customNameEn.trim() || name;
+    const descEn = customDescEn.trim() || desc || nameEn;
     const id = name
       .toLowerCase()
       .replace(/[^a-z0-9가-힣]/g, "-")
@@ -688,7 +945,9 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {
         id,
         name,
+        nameEn,
         description: desc,
+        descriptionEn: descEn,
         prompt,
         custom: true,
       },
@@ -696,6 +955,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     setExpandedAgent(id);
     setCustomName("");
     setCustomDesc("");
+    setCustomNameEn("");
+    setCustomDescEn("");
   };
 
   const removeAgent = (id: string) => {
@@ -765,11 +1026,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       const d = await r.json();
       if (d.ok) {
         if (Array.isArray(d.checklist)) {
+          clearOnboardingDraft();
+          setDraftNoticeVisible(false);
           setCompletionChecklist(d.checklist);
-          window.setTimeout(() => {
-            onComplete();
-          }, 1200);
         } else {
+          clearOnboardingDraft();
           onComplete();
         }
       } else {
@@ -941,17 +1202,39 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         ? tr("완료 시 Discord 채널, 설정 파일, 파이프라인 검증까지 서버에서 진행합니다.", "Completion will apply Discord channels, settings, and pipeline verification on the server.")
         : tr("이전 단계의 실패 항목이 남아 있어 아직 완료를 실행할 수 없습니다.", "A previous step is still failing, so completion is blocked."),
     },
+    ...(hasExistingSetup
+      ? [
+          {
+            key: "rerun-overwrite",
+            label: tr("재실행 덮어쓰기 확인", "Rerun overwrite acknowledgement"),
+            ok: overwriteAcknowledged,
+            detail: overwriteAcknowledged
+              ? tr(
+                  "기존 role_id 기반 에이전트와 채널 매핑을 다시 적용할 수 있다는 점을 확인했습니다.",
+                  "You acknowledged that existing role-based agents and channel mappings may be applied again.",
+                )
+              : tr(
+                  "현재 API는 기존 에이전트 구성을 프리필하지 않습니다. 같은 role_id를 다시 적용할 수 있다는 점을 확인해야 완료할 수 있습니다.",
+                  "The current API does not prefill the existing agent layout. Completion requires acknowledging that the same role IDs may be applied again.",
+                ),
+          },
+        ]
+      : []),
   ];
+  const stepStatusFor = (stepNumber: number, ok: boolean): StepStatusItem["status"] => {
+    if (step === stepNumber) return "active";
+    if (step > stepNumber) return ok ? "complete" : "blocked";
+    return "pending";
+  };
   const stepStatusItems: StepStatusItem[] = [
-    { step: 1, label: tr("봇", "Bots"), ok: step1Checklist.every((item) => item.ok), active: step === 1 },
-    { step: 2, label: tr("프로바이더", "Providers"), ok: step2Checklist.every((item) => item.ok), active: step === 2 },
-    { step: 3, label: tr("에이전트", "Agents"), ok: step3Checklist.every((item) => item.ok), active: step === 3 },
-    { step: 4, label: tr("채널", "Channels"), ok: step4Checklist.every((item) => item.ok), active: step === 4 },
+    { step: 1, label: tr("봇", "Bots"), status: stepStatusFor(1, step1Checklist.every((item) => item.ok)) },
+    { step: 2, label: tr("프로바이더", "Providers"), status: stepStatusFor(2, step2Checklist.every((item) => item.ok)) },
+    { step: 3, label: tr("에이전트", "Agents"), status: stepStatusFor(3, step3Checklist.every((item) => item.ok)) },
+    { step: 4, label: tr("채널", "Channels"), status: stepStatusFor(4, step4Checklist.every((item) => item.ok)) },
     {
       step: 5,
       label: tr("적용", "Apply"),
-      ok: (completionChecklist ?? step5Checklist).every((item) => item.ok),
-      active: step === 5,
+      status: stepStatusFor(5, (completionChecklist ?? step5Checklist).every((item) => item.ok)),
     },
   ];
   const applySummary = [
@@ -960,8 +1243,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       label: tr("Discord 채널", "Discord channels"),
       detail: hasSelectedGuild
         ? tr(
-            `${channelAssignments.length}개 에이전트 채널 매핑을 적용하고, 새 채널 ${newChannelCount}개는 완료 시 실제 생성합니다.`,
-            `Applies ${channelAssignments.length} agent channel mappings and creates ${newChannelCount} new channels on completion.`,
+            `${channelAssignments.length}개 에이전트 채널 매핑을 적용하고, 새 채널 ${newChannelCount}개는 완료 시 실제 생성합니다. 네트워크 오류 뒤 재시도 전에는 Discord에 일부 채널이 먼저 생겼는지 확인하는 편이 안전합니다.`,
+            `Applies ${channelAssignments.length} agent channel mappings and creates ${newChannelCount} new channels on completion. After a network error, check whether some channels were already created in Discord before retrying.`,
           )
         : tr(
             "서버를 선택해야 실제 채널 생성과 기존 채널 연결을 확정할 수 있습니다.",
@@ -988,8 +1271,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       key: "verification",
       label: tr("완료 후 검증", "Post-apply verification"),
       detail: tr(
-        "완료 응답의 체크리스트로 실제 생성/저장 결과를 다시 확인합니다.",
-        "The completion response checklist confirms what was actually created and saved.",
+        "성공 응답은 설정 산출물과 기본 파이프라인 파일 검증이 끝난 뒤에만 내려옵니다. 현재 체크리스트는 read-back 비교가 아니라 생성/검증 결과 요약입니다.",
+        "A success response arrives only after settings artifacts and the default pipeline file are verified. The current checklist is a summary of creation/verification, not a read-back diff.",
       ),
     },
   ];
@@ -998,6 +1281,44 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
 
   return (
     <div className="mx-auto w-full max-w-2xl min-w-0 space-y-6 p-4 sm:p-8">
+      {draftNoticeVisible && (
+        <div
+          className="rounded-xl border px-4 py-3"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
+            background: "color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent)",
+          }}
+        >
+          <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+            {tr("브라우저에 저장된 온보딩 진행 상태를 복원했습니다.", "Restored your saved onboarding progress from this browser.")}
+          </div>
+          <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
+            {tr(
+              "새로고침하거나 브라우저를 닫아도 이 기기에서는 이어서 진행할 수 있습니다. 처음부터 다시 하려면 임시 저장을 비우세요.",
+              "You can resume on this device even after a refresh or tab close. Clear the draft if you want to start over.",
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setDraftNoticeVisible(false)}
+              className={btnSmall}
+              style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
+            >
+              {tr("계속 진행", "Keep going")}
+            </button>
+            <button
+              type="button"
+              onClick={resetDraft}
+              className={btnSmall}
+              style={{ borderColor: "rgba(248,113,113,0.3)", color: "#fca5a5" }}
+            >
+              {tr("임시 저장 비우기", "Clear draft")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="text-center space-y-2">
         <h1 className="text-2xl font-bold" style={{ color: "var(--th-text-heading)" }}>
@@ -1020,7 +1341,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         </div>
       </div>
 
-      <StepStatusRail items={stepStatusItems} />
+      <StepStatusRail items={stepStatusItems} isKo={isKo} setItemRef={setRailItemRef} />
 
       {/* Error banner */}
       {error && (
@@ -1036,7 +1357,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 1 && (
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
-            <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
               {tr("Discord 봇 연결", "Connect Discord Bots")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
@@ -1302,15 +1623,23 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </button>
             {/* "다음" only after all required bots are validated */}
             {commandBots[0]?.botInfo?.valid && announceBotInfo?.valid ? (
-              <button onClick={() => setStep(2)} className={btnPrimary}>
+              <button onClick={() => goToStep(2)} className={btnPrimary}>
                 {tr("다음", "Next")}
               </button>
             ) : (
-              <button onClick={() => setStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+              <button onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
                 {tr("나중에 입력", "Skip for now")}
               </button>
             )}
           </div>
+          {!commandBotsReady || !announceReady ? (
+            <p className="text-xs leading-5" style={{ color: "#fde68a" }}>
+              {tr(
+                "이 단계 검증을 건너뛰면 Step 5에서 완료가 막힙니다. 최소한 실행 봇과 통신 봇 검증, 서버 초대까지 끝내는 편이 안전합니다.",
+                "Skipping validation here will block completion in Step 5. It is safer to finish command/communication bot validation and server invites first.",
+              )}
+            </p>
+          ) : null}
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
             <code
@@ -1327,7 +1656,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 2 && (
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
-            <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
               {tr("AI 프로바이더 확인", "AI Provider Verification")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
@@ -1408,16 +1737,28 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 2 체크리스트", "Step 2 checklist")} items={step2Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => setStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button onClick={() => goToStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
             <button onClick={() => void checkProviders()} disabled={checkingProviders} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("다시 확인", "Re-check")}
             </button>
-            <button onClick={() => setStep(3)} className={btnPrimary}>
-              {tr("다음", "Next")}
+            <button
+              onClick={() => goToStep(3)}
+              className={providersReady ? btnPrimary : btnSecondary}
+              style={providersReady ? undefined : { borderColor: "rgba(148,163,184,0.3)" }}
+            >
+              {providersReady ? tr("다음", "Next") : tr("확인 없이 계속", "Continue anyway")}
             </button>
           </div>
+          {!providersReady ? (
+            <p className="text-xs leading-5" style={{ color: "#fde68a" }}>
+              {tr(
+                "CLI 설치나 로그인이 안 된 상태로 넘어가면 Step 5에서 완료할 수 없습니다. 지금은 역할 구성만 먼저 이어서 준비하는 용도입니다.",
+                "If installation or login is still missing, Step 5 cannot complete. Continue only if you want to prepare the rest of the setup first.",
+              )}
+            </p>
+          ) : null}
         </div>
       )}
 
@@ -1425,7 +1766,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 3 && (
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
-            <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
               {tr("역할 프리셋과 에이전트 구성", "Role Presets & Agents")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
@@ -1545,39 +1886,65 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           )}
 
           {/* Custom agent creation — single row */}
-          <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
-            <input
-              type="text"
-              placeholder={tr("에이전트 이름", "Agent name")}
-              value={customName}
-              onChange={(e) => setCustomName(e.target.value)}
-              className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
-              style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-            />
-            <input
-              type="text"
-              placeholder={tr("한줄 설명", "Brief description")}
-              value={customDesc}
-              onChange={(e) => setCustomDesc(e.target.value)}
-              className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
-              style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-            />
-            <button
-              onClick={addCustomAgent}
-              disabled={!customName.trim()}
-              className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
-            >
-              + {tr("추가", "Add")}
-            </button>
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                type="text"
+                placeholder={tr("에이전트 이름", "Agent name")}
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+              />
+              <input
+                type="text"
+                placeholder={tr("한줄 설명", "Brief description")}
+                value={customDesc}
+                onChange={(e) => setCustomDesc(e.target.value)}
+                className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+              />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
+              <input
+                type="text"
+                placeholder={tr("영문 이름 (선택)", "English name (optional)")}
+                value={customNameEn}
+                onChange={(e) => setCustomNameEn(e.target.value)}
+                className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+              />
+              <input
+                type="text"
+                placeholder={tr("영문 설명 (선택)", "English description (optional)")}
+                value={customDescEn}
+                onChange={(e) => setCustomDescEn(e.target.value)}
+                className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+              />
+              <button
+                onClick={addCustomAgent}
+                disabled={!customName.trim()}
+                className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+              >
+                + {tr("추가", "Add")}
+              </button>
+            </div>
+            <p className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                "영문 필드를 비워두면 현재 입력값을 그대로 사용합니다. 다국어 대시보드에서 별도 표기가 필요할 때만 채우면 됩니다.",
+                "Leave the English fields empty to reuse the current values. Fill them only when you need separate wording in English mode.",
+              )}
+            </p>
           </div>
 
           <ChecklistPanel title={tr("Step 3 체크리스트", "Step 3 checklist")} items={step3Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => setStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => setStep(4)} disabled={agents.length === 0} className={btnPrimary}>
+            <button onClick={() => goToStep(4)} disabled={agents.length === 0} className={btnPrimary}>
               {tr("다음", "Next")} ({agents.length}{tr("개 에이전트", " agents")})
             </button>
           </div>
@@ -1588,7 +1955,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 4 && (
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
-            <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
               {tr("채널 설정", "Channel Setup")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
@@ -1704,10 +2071,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 4 체크리스트", "Step 4 checklist")} items={step4Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => setStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => setStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
+            <button onClick={() => goToStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
               {tr("다음", "Next")}
             </button>
           </div>
@@ -1718,7 +2085,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 5 && (
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
-            <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
               {tr("소유자 설정 및 확인", "Owner Setup & Confirm")}
             </h2>
           </div>
@@ -1840,6 +2207,37 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </div>
           </div>
 
+          {hasExistingSetup && (
+            <div
+              className="rounded-xl border p-4 space-y-3"
+              style={{ borderColor: "rgba(251,191,36,0.24)", backgroundColor: "rgba(251,191,36,0.08)" }}
+            >
+              <div className="text-sm font-medium" style={{ color: "#fde68a" }}>
+                {tr("기존 구성이 감지된 상태에서 다시 실행 중입니다.", "You are re-running onboarding on top of an existing setup.")}
+              </div>
+              <p className="text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
+                {tr(
+                  "현재 API는 기존 에이전트/채널 구성을 이 화면에 프리필하지 않습니다. 같은 role_id를 다시 적용하면 기존 agent row와 채널 매핑이 갱신될 수 있으니, 아래 요약을 먼저 확인한 뒤 실행하세요.",
+                  "The current API does not prefill the existing agent/channel layout in this screen. Re-applying the same role IDs can update existing agent rows and channel mappings, so review the summary before running completion.",
+                )}
+              </p>
+              <label className="flex items-start gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
+                <input
+                  type="checkbox"
+                  checked={confirmRerunOverwrite}
+                  onChange={(event) => setConfirmRerunOverwrite(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border"
+                />
+                <span>
+                  {tr(
+                    "기존 role_id 에이전트와 채널 매핑이 다시 적용될 수 있다는 점을 이해했고, 현재 요약 기준으로 재실행합니다.",
+                    "I understand that existing role-based agents and channel mappings may be applied again, and I want to re-run onboarding with the current summary.",
+                  )}
+                </span>
+              </label>
+            </div>
+          )}
+
           <ChecklistPanel
             title={
               completionChecklist
@@ -1850,18 +2248,35 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           />
 
           {completionChecklist && (
-            <div className="text-xs" style={{ color: "#86efac" }}>
-              {tr("설정이 실제로 저장되었습니다. 잠시 후 대시보드로 이동합니다.", "Setup has been applied. Moving to the dashboard shortly.")}
+            <div className="text-xs leading-5" style={{ color: "#86efac" }}>
+              {tr(
+                "설정이 실제로 저장되었습니다. 체크리스트를 검토한 뒤 직접 대시보드로 돌아가면 됩니다.",
+                "Setup has been applied. Review the checklist, then return to the dashboard when you are ready.",
+              )}
             </div>
           )}
 
           <div className={actionRow}>
-            <button onClick={() => setStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
-              {tr("이전", "Back")}
-            </button>
-            <button onClick={() => void handleComplete()} disabled={completing || completionChecklist !== null || !completionReady} className={btnPrimary}>
-              {completing ? tr("설정 중...", "Setting up...") : tr("설정 완료", "Complete Setup")}
-            </button>
+            {completionChecklist ? (
+              <button
+                onClick={() => {
+                  clearOnboardingDraft();
+                  onComplete();
+                }}
+                className={btnPrimary}
+              >
+                {tr("대시보드로 돌아가기", "Return to dashboard")}
+              </button>
+            ) : (
+              <>
+                <button onClick={() => goToStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+                  {tr("이전", "Back")}
+                </button>
+                <button onClick={() => void handleComplete()} disabled={completing || !completionReady} className={btnPrimary}>
+                  {completing ? tr("설정 중...", "Setting up...") : tr("설정 완료", "Complete Setup")}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
