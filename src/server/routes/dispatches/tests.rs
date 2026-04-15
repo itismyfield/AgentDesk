@@ -800,7 +800,7 @@ async fn impl_dispatch_followup_detects_new_review_dispatch() {
 }
 
 #[tokio::test]
-async fn thread_not_archived_when_card_not_done() {
+async fn active_thread_id_preserved_when_card_not_done() {
     // When an implementation dispatch completes but card is in "review" (not done),
     // the thread should NOT be archived — it may be reused for rework/review-decision.
     let db = test_db();
@@ -842,7 +842,7 @@ async fn thread_not_archived_when_card_not_done() {
 }
 
 #[tokio::test]
-async fn thread_archived_and_cleared_when_card_done() {
+async fn active_thread_id_cleared_when_card_done() {
     // When a card reaches "done", active_thread_id should be cleared.
     // (Thread archiving requires Discord API call, but we verify the DB cleanup.)
     let db = test_db();

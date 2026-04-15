@@ -608,11 +608,13 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
 }
 
 #[tokio::test]
+#[ignore = "requires tmux"]
 async fn stop_agent_turn_force_kills_matching_tmux_session() {
     let _env_lock = env_lock();
-    if Command::new("tmux").arg("-V").output().is_err() {
-        return;
-    }
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .expect("tmux must be installed for this test");
 
     let temp = tempfile::tempdir().unwrap();
     let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -655,11 +657,11 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
     let tmux_started = Command::new("tmux")
         .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !tmux_started {
-        return;
-    }
+        .expect("tmux session should start for this test");
+    assert!(
+        tmux_started.success(),
+        "tmux session should start for this test"
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -813,11 +815,13 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
 }
 
 #[tokio::test]
+#[ignore = "requires tmux"]
 async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     let _env_lock = env_lock();
-    if Command::new("tmux").arg("-V").output().is_err() {
-        return;
-    }
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .expect("tmux must be installed for this test");
 
     let tmux_name = format!("AgentDesk-codex-turn-cancel-{}", std::process::id());
     let session_key = format!("mac-mini:{tmux_name}");
@@ -826,11 +830,11 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     let tmux_started = Command::new("tmux")
         .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !tmux_started {
-        return;
-    }
+        .expect("tmux session should start for this test");
+    assert!(
+        tmux_started.success(),
+        "tmux session should start for this test"
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
