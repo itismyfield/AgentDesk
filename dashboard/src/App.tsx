@@ -299,6 +299,9 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
 
   const handleNavigate = useCallback(
     (nextView: ViewMode) => {
+      if (nextView === "settings") {
+        setControlTab("settings");
+      }
       setView(nextView);
       if (nextView === "dashboard") refreshStats();
     },
