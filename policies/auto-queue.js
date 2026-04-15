@@ -33,12 +33,16 @@ function _loadAutoQueueDispatchLogContext(dispatchId) {
   if (!_autoQueueHasValue(dispatchId)) return null;
   var rows = agentdesk.db.query(
     "SELECT " +
-    "COALESCE(e.run_id, json_extract(COALESCE(td.context, '{}'), '$.phase_gate.run_id')) as run_id, " +
+    "COALESCE(e.run_id, " +
+    "json_extract(COALESCE(td.context, '{}'), '$.run_id'), " +
+    "json_extract(COALESCE(td.context, '{}'), '$.phase_gate.run_id')) as run_id, " +
     "COALESCE(e.id, json_extract(COALESCE(td.context, '{}'), '$.entry_id')) as entry_id, " +
     "COALESCE(e.kanban_card_id, td.kanban_card_id, json_extract(COALESCE(td.context, '{}'), '$.phase_gate.anchor_card_id')) as card_id, " +
     "td.id as dispatch_id, " +
     "COALESCE(e.thread_group, CAST(json_extract(COALESCE(td.context, '{}'), '$.thread_group') AS INTEGER)) as thread_group, " +
-    "COALESCE(e.batch_phase, CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
+    "COALESCE(e.batch_phase, " +
+    "CAST(json_extract(COALESCE(td.context, '{}'), '$.batch_phase') AS INTEGER), " +
+    "CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
     "COALESCE(e.slot_index, CAST(json_extract(COALESCE(td.context, '{}'), '$.slot_index') AS INTEGER)) as slot_index, " +
     "COALESCE(e.agent_id, json_extract(COALESCE(td.context, '{}'), '$.agent_id'), " +
     "json_extract(COALESCE(td.context, '{}'), '$.target_agent_id'), " +
@@ -157,89 +161,6 @@ var autoQueue = {
       doneEntries[0].batch_phase || 0,
       payload.card_id
     );
-    var remainingCount = (remaining.length > 0) ? remaining[0].cnt : 0;
-
-    if (donePhase > 0) {
-      var phaseRemaining = agentdesk.db.query(
-        "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
-        "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) = ?",
-        [runId, donePhase]
-      );
-      var currentPhaseDone = phaseRemaining.length > 0 && phaseRemaining[0].cnt === 0;
-      if (currentPhaseDone) {
-        var nextPhaseRows = agentdesk.db.query(
-          "SELECT MIN(batch_phase) as next_phase FROM auto_queue_entries " +
-          "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) > ?",
-          [runId, donePhase]
-        );
-        var nextPhase = (nextPhaseRows.length > 0) ? nextPhaseRows[0].next_phase : null;
-        if (_phaseGateRequired(runId, donePhase)) {
-          var finalPhase = remainingCount === 0;
-          _createPhaseGateDispatches(runId, donePhase, nextPhase, finalPhase, payload.card_id);
-          return;
-        }
-        if (nextPhase !== null && nextPhase !== undefined) {
-          var nextPhaseCountRows = agentdesk.db.query(
-            "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
-            "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) = ?",
-            [runId, nextPhase]
-          );
-          var nextPhaseCount = (nextPhaseCountRows.length > 0) ? nextPhaseCountRows[0].cnt : 0;
-          autoQueueLog("info", "Phase " + donePhase + " 완료, Phase " + nextPhase + " 시작 (" + nextPhaseCount + " entries)", {
-            run_id: runId,
-            card_id: payload.card_id,
-            thread_group: doneGroup,
-            batch_phase: donePhase
-          });
-          activateRun(runId, null);
-          return;
-        }
-      }
-    }
-
-    if (remainingCount === 0) {
-      if (!finalizeRunWithoutPhaseGate(runId)) {
-        completeRunAndNotify(runId);
-      }
-      return;
-    }
-
-    // #140: Check if the completed entry's GROUP is now done
-    var groupRemaining = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND COALESCE(thread_group, 0) = ? AND status IN ('pending', 'dispatched')",
-      [runId, doneGroup]
-    );
-    var groupDone = groupRemaining.length > 0 && groupRemaining[0].cnt === 0;
-
-    // Check if agent has any active (non-terminal) cards — don't dispatch if busy
-    var tCfg = agentdesk.pipeline.getConfig();
-    var tKickoff = agentdesk.pipeline.kickoffState(tCfg);
-    var tInProgress = agentdesk.pipeline.nextGatedTarget(tKickoff, tCfg);
-    var tReview = agentdesk.pipeline.nextGatedTarget(tInProgress, tCfg);
-    var activeStates = [tKickoff, tInProgress, tReview].filter(function(s) { return s; });
-    var placeholders = activeStates.map(function() { return "?"; }).join(",");
-    var active = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (" + placeholders + ")",
-      [agentId].concat(activeStates)
-    );
-    var agentBusy = active.length > 0 && active[0].cnt > 0;
-
-    if (!groupDone) {
-      if (!agentBusy) {
-        activateRun(runId, doneGroup);
-      } else {
-        autoQueueLog("info", "Agent " + agentId + " still busy, deferring group " + doneGroup + " next dispatch", {
-          run_id: runId,
-          card_id: payload.card_id,
-          thread_group: doneGroup,
-          batch_phase: donePhase
-        });
-      }
-      return;
-    }
-
-    activateRun(runId, null);
-
   },
 
   onDispatchCompleted: function(payload) {
@@ -285,9 +206,10 @@ var autoQueue = {
 
       var entry = aqEntries[0];
       if (entry.status === "pending" || entry.status === "dispatched") {
-        agentdesk.db.execute(
-          "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE id = ? AND status IN ('pending', 'dispatched')",
-          [entry.id]
+        agentdesk.autoQueue.updateEntryStatus(
+          entry.id,
+          "done",
+          "noop_completion"
         );
         entry.status = "done";
       }
@@ -644,120 +566,25 @@ function loadPhaseGateState(runId, phase) {
   return state;
 }
 
-function _dedupePhaseGateDispatchIds(dispatchIds) {
-  var seen = {};
-  var deduped = [];
-  for (var i = 0; i < dispatchIds.length; i++) {
-    var dispatchId = dispatchIds[i];
-    if (!dispatchId || seen[dispatchId]) continue;
-    seen[dispatchId] = true;
-    deduped.push(dispatchId);
-  }
-  return deduped;
-}
-
-function _loadValidPhaseGateDispatchIds(dispatchIds) {
-  if (dispatchIds.length === 0) return [];
-
-  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
-  var rows = agentdesk.db.query(
-    "SELECT id FROM task_dispatches WHERE id IN (" + placeholders + ")",
-    dispatchIds
-  );
-  var validIds = {};
-  for (var i = 0; i < rows.length; i++) {
-    validIds[rows[i].id] = true;
-  }
-
-  var valid = [];
-  for (var j = 0; j < dispatchIds.length; j++) {
-    var dispatchId = dispatchIds[j];
-    if (validIds[dispatchId]) {
-      valid.push(dispatchId);
-    }
-  }
-  return valid;
-}
-
-function _deleteStalePhaseGateRows(runId, phase, dispatchIds) {
-  if (dispatchIds.length === 0) {
-    agentdesk.db.execute(
-      "DELETE FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
-      [runId, phase]
-    );
-    return;
-  }
-
-  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
-  agentdesk.db.execute(
-    "DELETE FROM auto_queue_phase_gates " +
-    "WHERE run_id = ? AND phase = ? " +
-    "AND (dispatch_id IS NULL OR dispatch_id NOT IN (" + placeholders + "))",
-    [runId, phase].concat(dispatchIds)
-  );
-}
-
 function savePhaseGateState(runId, phase, state) {
   if (!state) return;
-  var dispatchIds = [];
-  if (Array.isArray(state.dispatch_ids)) {
-    dispatchIds = state.dispatch_ids.filter(function(dispatchId) {
-      return !!dispatchId;
-    });
-  }
-  dispatchIds = _loadValidPhaseGateDispatchIds(_dedupePhaseGateDispatchIds(dispatchIds));
-  var status = state.status || "pending";
-  var verdict = state.failed_verdict || state.verdict || null;
-  var passVerdict = state.pass_verdict ||
-    (state.gates && state.gates[0] && state.gates[0].pass_verdict) ||
-    "phase_gate_passed";
-  var nextPhase = state.next_phase !== undefined ? state.next_phase : null;
-  var finalPhase = !!state.final_phase;
-  var anchorCardId = state.anchor_card_id || null;
-  var failureReason = state.failed_reason || null;
-  var createdAt = state.created_at || null;
-
-  _deleteStalePhaseGateRows(runId, phase, dispatchIds);
-
-  if (dispatchIds.length === 0) {
-    agentdesk.db.execute(
-      "INSERT INTO auto_queue_phase_gates (" +
-      "run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase, " +
-      "final_phase, anchor_card_id, failure_reason, created_at, updated_at" +
-      ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), datetime('now'))",
-      [runId, phase, status, verdict, passVerdict, nextPhase, finalPhase ? 1 : 0, anchorCardId, failureReason, createdAt]
-    );
-    return;
-  }
-
-  for (var i = 0; i < dispatchIds.length; i++) {
-    var dispatchId = dispatchIds[i];
-    agentdesk.db.execute(
-      "INSERT INTO auto_queue_phase_gates (" +
-      "run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase, " +
-      "final_phase, anchor_card_id, failure_reason, created_at, updated_at" +
-      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), datetime('now')) " +
-      "ON CONFLICT(dispatch_id) DO UPDATE SET " +
-      "run_id = excluded.run_id, " +
-      "phase = excluded.phase, " +
-      "status = excluded.status, " +
-      "verdict = excluded.verdict, " +
-      "pass_verdict = excluded.pass_verdict, " +
-      "next_phase = excluded.next_phase, " +
-      "final_phase = excluded.final_phase, " +
-      "anchor_card_id = excluded.anchor_card_id, " +
-      "failure_reason = excluded.failure_reason, " +
-      "updated_at = datetime('now')",
-      [runId, phase, status, verdict, dispatchId, passVerdict, nextPhase, finalPhase ? 1 : 0, anchorCardId, failureReason, createdAt]
-    );
-  }
+  agentdesk.autoQueue.savePhaseGateState(runId, phase, {
+    status: state.status || "pending",
+    verdict: state.failed_verdict || state.verdict || null,
+    dispatch_ids: Array.isArray(state.dispatch_ids) ? state.dispatch_ids : [],
+    pass_verdict: state.pass_verdict ||
+      (state.gates && state.gates[0] && state.gates[0].pass_verdict) ||
+      "phase_gate_passed",
+    next_phase: state.next_phase !== undefined ? state.next_phase : null,
+    final_phase: !!state.final_phase,
+    anchor_card_id: state.anchor_card_id || null,
+    failure_reason: state.failed_reason || null,
+    created_at: state.created_at || null
+  });
 }
 
 function clearPhaseGateState(runId, phase) {
-  agentdesk.db.execute(
-    "DELETE FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ?",
-    [runId, phase]
-  );
+  agentdesk.autoQueue.clearPhaseGateState(runId, phase);
 }
 
 function loadRunInfo(runId) {
@@ -778,48 +605,45 @@ function runHasBlockingPhaseGate(runId) {
   return rows.length > 0 && rows[0].cnt > 0;
 }
 
-function remainingRunnableEntryCount(runId) {
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
-    "WHERE run_id = ? AND status IN ('pending', 'dispatched')",
-    [runId]
-  );
-  return rows.length > 0 ? (rows[0].cnt || 0) : 0;
-}
-
 function finalizeRunWithoutPhaseGate(runId) {
   if (!runId) return false;
 
-  var runInfo = loadRunInfo(runId);
-  if (!runInfo) return false;
-  if (runInfo.status !== "active" && runInfo.status !== "paused") return false;
   if (runHasBlockingPhaseGate(runId)) return false;
   if (remainingRunnableEntryCount(runId) > 0) return false;
 
-  agentdesk.db.execute(
-    "UPDATE auto_queue_slots " +
-    "SET assigned_run_id = NULL, assigned_thread_group = NULL, updated_at = datetime('now') " +
-    "WHERE assigned_run_id = ?",
-    [runId]
-  );
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs " +
-    "SET status = 'completed', completed_at = datetime('now') " +
-    "WHERE id = ? AND status IN ('active', 'paused')",
-    [runId]
-  );
+  var completed = false;
+  try {
+    var result = agentdesk.autoQueue.completeRun(
+      runId,
+      "finalize_without_phase_gate",
+      { releaseSlots: true }
+    );
+    completed = !!(result && result.changed);
+  } catch (e) {
+    autoQueueLog("warn", "Failed to finalize run " + runId + ": " + e, {
+      run_id: runId
+    });
+    return false;
+  }
+  if (!completed) return false;
+
   autoQueueLog("info", "Finalized non-phase-gate run " + runId + " and released its slots", {
     run_id: runId
   });
-  notifyRunCompleted(runId, runInfo);
   return true;
 }
 
-function pauseRun(runId) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'paused' WHERE id = ? AND status = 'active'",
-    [runId]
-  );
+function pauseRun(runId, source) {
+  if (!runId) return false;
+  try {
+    var result = agentdesk.autoQueue.pauseRun(runId, source || "policy_pause");
+    return !!(result && result.changed);
+  } catch (e) {
+    autoQueueLog("warn", "Failed to pause run " + runId + ": " + e, {
+      run_id: runId
+    });
+    return false;
+  }
 }
 
 function loadPhaseGateDispatches(dispatchIds) {
@@ -860,34 +684,41 @@ function _phaseGateRequired(runId, phase) {
 }
 
 function completeRunAndNotify(runId) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
-    [runId]
-  );
+  if (!runId) return;
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_complete_resume");
+  } catch (e) {
+    autoQueueLog("warn", "Failed to resume final phase-gate run " + runId + ": " + e, {
+      run_id: runId
+    });
+  }
   activateRun(runId, null);
-  var runInfo = agentdesk.db.query(
-    "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
-    [runId]
-  );
-  notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
+}
+
+function remainingRunnableEntryCount(runId, phase) {
+  var sql =
+    "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
+    "WHERE run_id = ? AND status IN ('pending', 'dispatched')";
+  var params = [runId];
+  if (phase !== null && phase !== undefined) {
+    sql += " AND COALESCE(batch_phase, 0) = ?";
+    params.push(phase);
+  }
+  var rows = agentdesk.db.query(sql, params);
+  return (rows.length > 0) ? rows[0].cnt : 0;
+}
+
+function _deployGateTitle(phase) {
+  return "[Deploy Gate] Phase " + phase + " 빌드+배포";
 }
 
 function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardId) {
   if (!runId || !agentId) return;
 
-  var remaining = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
-    [runId]
-  );
-  var remainingCount = (remaining.length > 0) ? remaining[0].cnt : 0;
+  var remainingCount = remainingRunnableEntryCount(runId, null);
 
   if ((donePhase || 0) > 0) {
-    var phaseRemaining = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
-      "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) = ?",
-      [runId, donePhase]
-    );
-    var currentPhaseDone = phaseRemaining.length > 0 && phaseRemaining[0].cnt === 0;
+    var currentPhaseDone = remainingRunnableEntryCount(runId, donePhase) === 0;
     if (currentPhaseDone) {
       var nextPhaseRows = agentdesk.db.query(
         "SELECT MIN(batch_phase) as next_phase FROM auto_queue_entries " +
@@ -955,10 +786,14 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
 }
 
 function resumeRunAndActivate(runId, nextPhase) {
-  agentdesk.db.execute(
-    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
-    [runId]
-  );
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_resume");
+  } catch (e) {
+    autoQueueLog("warn", "Failed to resume run " + runId + ": " + e, {
+      run_id: runId,
+      batch_phase: nextPhase !== undefined ? nextPhase : null
+    });
+  }
   if (nextPhase !== null && nextPhase !== undefined) {
     autoQueueLog("info", "Resuming run " + runId + " for phase " + nextPhase, {
       run_id: runId,
@@ -1053,6 +888,16 @@ function _phaseGateTitle(group, phase, runId) {
 }
 
 function _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCardId) {
+  var livePhaseCount = remainingRunnableEntryCount(runId, phase);
+  if (livePhaseCount > 0) {
+    autoQueueLog("info", "Skipping deploy gate for phase " + phase + " — " + livePhaseCount + " live entries remain", {
+      run_id: runId,
+      card_id: anchorCardId,
+      batch_phase: phase
+    });
+    return null;
+  }
+
   pauseRun(runId);
 
   var state = {
@@ -1064,11 +909,12 @@ function _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCa
     status: "pending",
     dispatch_ids: [],
     gates: [],
+    gate_title: _deployGateTitle(phase),
     created_at: new Date().toISOString()
   };
 
   savePhaseGateState(runId, phase, state);
-  autoQueueLog("info", "Deploy gate created for phase " + phase + " — Rust will execute asynchronously", {
+  autoQueueLog("info", _deployGateTitle(phase) + " 생성 — Rust가 비동기로 실행합니다", {
     run_id: runId,
     card_id: anchorCardId,
     batch_phase: phase
@@ -1205,18 +1051,6 @@ function activateRun(runId, threadGroup, agentId) {
   }
 }
 
-// ── Shared dispatch helper (group-aware) (#140) ─────────────────
-function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
-  var result = activateRun(runId, threadGroup, agentId);
-  if (!result) return;
-  if (result.count > 0) {
-    autoQueueLog("info", "activate API dispatched " + result.count + " entry(s) for run " + runId + " group " + threadGroup, {
-      run_id: runId,
-      thread_group: threadGroup
-    });
-  }
-}
-
 // ── Consultation dispatch helper (#256) ─────────────────────────
 function _createConsultationDispatch(entry, agentId, preflightMeta) {
   // Find the counterpart agent for consultation
@@ -1240,19 +1074,12 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
       "[Consultation] " + entry.title
     );
     if (dispatchId) {
-      // Update metadata with consultation info
-      var newMeta = JSON.parse(JSON.stringify(preflightMeta));
-      newMeta.consultation_status = "pending";
-      newMeta.consultation_dispatch_id = dispatchId;
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-        [JSON.stringify(newMeta), entry.kanban_card_id]
-      );
-      agentdesk.autoQueue.updateEntryStatus(
+      agentdesk.autoQueue.recordConsultationDispatch(
         entry.id,
-        "dispatched",
+        entry.kanban_card_id,
+        dispatchId,
         "consultation_dispatch_created",
-        { dispatchId: dispatchId }
+        preflightMeta
       );
       autoQueueLog("info", "Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id, {
         entry_id: entry.id,
@@ -1265,88 +1092,6 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
       entry_id: entry.id,
       card_id: entry.kanban_card_id
     });
-  }
-}
-
-// Legacy helper for backward compatibility
-function dispatchNextEntry(agentId) {
-  if (!agentId) return;
-  try {
-    agentdesk.autoQueue.activate({
-      agent_id: agentId,
-      active_only: true
-    });
-  } catch (e) {
-    agentdesk.log.warn("[auto-queue] legacy activate bridge failed for agent " + agentId + ": " + e);
-  }
-}
-
-function collectRunMainChannels(runId, runInfo) {
-  var targets = {};
-
-  if (runInfo && runInfo.unified_thread_id) {
-    try {
-      var map = JSON.parse(runInfo.unified_thread_id);
-      for (var key in map) {
-        if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
-        var value = map[key];
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          for (var nestedKey in value) {
-            if (!Object.prototype.hasOwnProperty.call(value, nestedKey)) continue;
-            if (/^\d+$/.test(nestedKey)) targets[nestedKey] = true;
-          }
-        } else if (/^\d+$/.test(key)) {
-          targets[key] = true;
-        }
-      }
-    } catch (e) {
-      autoQueueLog("warn", "Failed to parse unified_thread_id for run " + runId + ": " + e, {
-        run_id: runId
-      });
-    }
-  }
-
-  var channelIds = Object.keys(targets);
-  if (channelIds.length > 0) return channelIds;
-
-  // #304: resolve primary channel via centralized resolver instead of legacy column
-  var fallbackAgents = agentdesk.db.query(
-    "SELECT DISTINCT e.agent_id FROM auto_queue_entries e WHERE e.run_id = ?",
-    [runId]
-  );
-  for (var i = 0; i < fallbackAgents.length; i++) {
-    try {
-      var ch = agentdesk.agents && agentdesk.agents.resolvePrimaryChannel
-        ? agentdesk.agents.resolvePrimaryChannel(fallbackAgents[i].agent_id)
-        : null;
-      if (ch) targets[ch] = true;
-    } catch (e) {
-      agentdesk.log.warn("[auto-queue] resolvePrimaryChannel failed for " + fallbackAgents[i].agent_id + ": " + e);
-    }
-  }
-  return Object.keys(targets);
-}
-
-function notifyRunCompleted(runId, runInfo) {
-  var channelIds = collectRunMainChannels(runId, runInfo);
-  if (channelIds.length === 0) {
-    autoQueueLog("info", "Run " + runId + " complete — no main channel found for notify", {
-      run_id: runId
-    });
-    return;
-  }
-
-  var totals = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ?",
-    [runId]
-  );
-  var totalCount = (totals.length > 0) ? totals[0].cnt : 0;
-  var repoLabel = (runInfo && runInfo.repo) ? runInfo.repo : "auto-queue";
-  var shortRun = runId.substring(0, 8);
-  var message = "자동큐 완료: " + repoLabel + " / run " + shortRun + " / " + totalCount + "개";
-
-  for (var i = 0; i < channelIds.length; i++) {
-    agentdesk.message.queue("channel:" + channelIds[i], message, "notify", "system");
   }
 }
 

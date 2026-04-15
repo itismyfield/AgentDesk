@@ -155,7 +155,6 @@ body {
   background: var(--th-surface);
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
 }
 
 .dash-card-accent {
@@ -320,6 +319,23 @@ body {
 .group:hover > .dash-chart-tooltip,
 .group:focus-within > .dash-chart-tooltip {
   opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.dash-chart-tooltip-bottom {
+  bottom: auto;
+  top: calc(100% + 0.5rem);
+  transform: translate(-50%, -0.25rem);
+}
+
+.dash-chart-tooltip-bottom::after {
+  top: auto;
+  bottom: 100%;
+  transform: translate(-50%, 0.45rem) rotate(225deg);
+}
+
+.group:hover > .dash-chart-tooltip-bottom,
+.group:focus-within > .dash-chart-tooltip-bottom {
   transform: translate(-50%, 0);
 }
 

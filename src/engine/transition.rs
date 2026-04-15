@@ -290,24 +290,18 @@ fn decide_pipeline_transition(
                     }
                 }
             }
-            TransitionType::ForceOnly if force => {}
-            TransitionType::ForceOnly => {
-                return TransitionDecision {
-                    outcome: TransitionOutcome::Blocked(format!(
-                        "Transition {} → {} requires force=true (PMD/policy only)",
-                        card.status, target
-                    )),
-                    intents: vec![TransitionIntent::AuditLog {
-                        card_id: card.id.clone(),
-                        from: card.status.clone(),
-                        to: target.to_string(),
-                        source: source.to_string(),
-                        message: "BLOCKED: force required".to_string(),
-                    }],
-                };
-            }
         },
-        None if force => {}
+        None if force => {
+            tracing::info!(
+                card_id = %card.id,
+                from = %card.status,
+                to = %target,
+                source = %source,
+                "force transition without rule: {} → {}",
+                card.status,
+                target
+            );
+        }
         None => {
             return TransitionDecision {
                 outcome: TransitionOutcome::Blocked(format!(

@@ -236,7 +236,6 @@ pub(super) fn build_system_prompt(
     channel_id: ChannelId,
     token: &str,
     disabled_notice: &str,
-    skills_notice: &str,
     narrate_progress: bool,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
@@ -275,21 +274,13 @@ pub(super) fn build_system_prompt(
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
          not necessarily your most recent message. Prioritize the reply target over the latest message when interpreting user intent. \
          If ambiguous, ask which message the user is responding to. \
-         Avoid mixing status reports and action questions in a single message — it makes the reply target unclear.{}{}",
+         Avoid mixing status reports and action questions in a single message — it makes the reply target unclear.{}",
         discord_context,
         current_path,
         channel_id.get(),
         discord_token_hash(token),
         narration_guidance,
-        disabled_notice,
-        // Skill inventory is caller-supplied. Production currently passes an
-        // empty string to avoid duplicating providers' native skill injection.
-        // ReviewLite also omits it defensively even if a caller provides one.
-        if profile == DispatchProfile::ReviewLite {
-            ""
-        } else {
-            skills_notice
-        }
+        disabled_notice
     );
     system_prompt_owned.push_str("\n\n");
     system_prompt_owned.push_str(tool_output_efficiency_guidance());
@@ -446,7 +437,6 @@ mod tests {
         channel_id: u64,
         token: &str,
         disabled_notice: &str,
-        skills_notice: &str,
     ) -> String {
         build_system_prompt(
             discord_context,
@@ -454,7 +444,6 @@ mod tests {
             ChannelId::new(channel_id),
             token,
             disabled_notice,
-            skills_notice,
             true,  // narrate_progress
             None,  // role_binding
             false, // queued_turn
@@ -475,7 +464,6 @@ mod tests {
             123456789,
             "fake-token",
             "",
-            "",
         );
         assert!(
             output.contains("Channel: #general (guild: TestServer)"),
@@ -485,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_cwd() {
-        let output = call_build("ctx", "/home/user/projects", 1, "tok", "", "");
+        let output = call_build("ctx", "/home/user/projects", 1, "tok", "");
         assert!(
             output.contains("Current working directory: /home/user/projects"),
             "System prompt should contain the current working directory"
@@ -494,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_file_send_command() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(
             output.contains("agentdesk discord-sendfile"),
             "System prompt should contain the agentdesk discord-sendfile command"
@@ -503,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_disables_interactive_tools() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(
             output.contains("CANNOT interact with any interactive prompts"),
             "System prompt should warn that interactive tools are disabled"
@@ -516,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_context_compression_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(output.contains("[Context Compression]"));
         assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
         assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
@@ -524,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_tool_output_efficiency_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(output.contains("[Tool Output Efficiency]"));
         assert!(output.contains("Large tool results persist in context"));
         assert!(output.contains("Use LIMIT clauses for SQL"));
@@ -534,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_api_friction_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(output.contains("[ADK API Usage]"));
         assert!(output.contains("GET /api/docs/{category}"));
         assert!(output.contains("API_FRICTION:"));
@@ -543,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_narration_when_enabled() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        let output = call_build("ctx", "/tmp", 1, "tok", "");
         assert!(output.contains("Always keep the user informed about what you are doing."));
         assert!(!output.contains("The user cannot see your tool calls"));
     }
@@ -555,7 +543,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             false,
             None,
@@ -613,7 +600,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             None,
             false,
@@ -638,7 +624,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             None,
             false,
@@ -662,7 +647,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             true,
             None,
@@ -697,7 +681,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             Some(&binding),
             false,
@@ -713,7 +696,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             true,
             Some(&binding),
@@ -754,7 +736,6 @@ mod tests {
             ChannelId::new(1488022491992424448),
             "tok",
             "",
-            "",
             true,
             Some(&binding),
             false,
@@ -789,7 +770,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             Some(&binding),
             false,
@@ -812,7 +792,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             true,
             None,
@@ -852,7 +831,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             Some(&binding),
             false,
@@ -889,7 +867,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             true,
             None,
@@ -928,7 +905,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "",
             true,
             None,
             true,
@@ -957,7 +933,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             "",
             true,
             None,

@@ -47,6 +47,17 @@ type ViewMode = "office" | "dashboard" | "kanban" | "settings";
 type ControlTab = "organization" | "settings";
 type OrganizationPane = "agents" | "departments" | "offices" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
+type DashboardTab = "operations" | "tokens" | "automation" | "achievements" | "meetings";
+
+const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
+
+function focusDashboardTab(tab: DashboardTab) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
 
 interface ShellRoute {
   id: ViewMode;
@@ -311,6 +322,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
       }
 
       if (routeId === "dashboard_meetings") {
+        focusDashboardTab("meetings");
         handleNavigate("dashboard");
         return;
       }
@@ -465,7 +477,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 onOpenKanbanSignal={openKanbanSignalFocus}
                 onOpenDispatchSessions={openDispatchSessions}
                 onOpenSettings={openSettingsView}
-                onOpenMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
+                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
               />
             )}
 
@@ -530,6 +542,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 agents={agents}
                 departments={departments}
                 sessions={visibleDispatchedSessions}
+                meetings={roundTableMeetings}
                 onAssign={async (id, patch) => {
                   const updated = await api.assignDispatchedSession(id, patch);
                   setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));

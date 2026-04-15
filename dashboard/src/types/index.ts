@@ -549,7 +549,7 @@ export interface PipelineConfigFull {
   transitions: {
     from: string;
     to: string;
-    type: "free" | "gated" | "force_only";
+    type: "free" | "gated";
     gates?: string[];
   }[];
   gates: Record<string, { type: string; check?: string; description?: string }>;

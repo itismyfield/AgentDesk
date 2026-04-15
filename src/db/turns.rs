@@ -75,6 +75,7 @@ impl PersistTurnOwned {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn upsert_turn(db: &Db, entry: PersistTurn<'_>) -> Result<()> {
     let mut conn = db
         .lock()
@@ -82,8 +83,16 @@ pub fn upsert_turn(db: &Db, entry: PersistTurn<'_>) -> Result<()> {
     upsert_turn_on_conn(&mut conn, entry)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn upsert_turn_owned(db: &Db, entry: &PersistTurnOwned) -> Result<()> {
     upsert_turn(db, entry.as_borrowed())
+}
+
+pub fn upsert_turn_owned_on_separate_conn(db: &Db, entry: &PersistTurnOwned) -> Result<()> {
+    let mut conn = db
+        .separate_conn()
+        .map_err(|e| anyhow!("db separate_conn failed while persisting turn: {e}"))?;
+    upsert_turn_on_conn(&mut conn, entry.as_borrowed())
 }
 
 pub fn upsert_turn_on_conn(conn: &mut Connection, entry: PersistTurn<'_>) -> Result<()> {
@@ -201,7 +210,10 @@ fn u64_to_i64(value: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistTurn, TurnTokenUsage, upsert_turn};
+    use super::{
+        PersistTurn, PersistTurnOwned, TurnTokenUsage, upsert_turn,
+        upsert_turn_owned_on_separate_conn,
+    };
     use crate::db::test_db;
 
     #[test]
@@ -371,5 +383,69 @@ mod tests {
         assert_eq!(row.5, 2);
         assert_eq!(row.6, 3);
         assert_eq!(row.7, 4);
+    }
+
+    #[test]
+    fn upsert_turn_owned_on_separate_conn_persists_turn_rows() {
+        let db = test_db();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent One')",
+                [],
+            )
+            .unwrap();
+
+        upsert_turn_owned_on_separate_conn(
+            &db,
+            &PersistTurnOwned {
+                turn_id: "discord:2:3".to_string(),
+                session_key: Some("claude/token/host:adk-cdx".to_string()),
+                thread_id: Some("201".to_string()),
+                thread_title: Some("[AgentDesk] #593 turns persistence".to_string()),
+                channel_id: "101".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                provider: Some("claude".to_string()),
+                session_id: Some("session-def".to_string()),
+                dispatch_id: Some("dispatch-2".to_string()),
+                started_at: Some("2026-04-15 07:00:00".to_string()),
+                finished_at: Some("2026-04-15 07:00:08".to_string()),
+                duration_ms: Some(8_000),
+                token_usage: TurnTokenUsage {
+                    input_tokens: 55,
+                    cache_create_tokens: 5,
+                    cache_read_tokens: 7,
+                    output_tokens: 11,
+                },
+            },
+        )
+        .unwrap();
+
+        let conn = db.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT thread_title, session_id, input_tokens, cache_create_tokens,
+                        cache_read_tokens, output_tokens
+                 FROM turns WHERE turn_id = 'discord:2:3'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(row.0.as_deref(), Some("[AgentDesk] #593 turns persistence"));
+        assert_eq!(row.1.as_deref(), Some("session-def"));
+        assert_eq!(row.2, 55);
+        assert_eq!(row.3, 5);
+        assert_eq!(row.4, 7);
+        assert_eq!(row.5, 11);
     }
 }

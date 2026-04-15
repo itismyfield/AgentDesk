@@ -256,9 +256,12 @@ pub(super) fn create_git_worktree(
         .map_err(|e| format!("Failed to create worktree base dir: {}", e))?;
     let wt_dir = wt_base.join(format!("{}-{}-{}", provider, safe_name, ts));
     let wt_path = wt_dir.display().to_string();
+    let base_ref = git_upstream_base_ref(repo_path);
 
     let output = std::process::Command::new("git")
-        .args(["-C", repo_path, "worktree", "add", &wt_path, "-b", &branch])
+        .args([
+            "-C", repo_path, "worktree", "add", "-b", &branch, &wt_path, &base_ref,
+        ])
         .output()
         .map_err(|e| format!("git worktree add failed: {}", e))?;
 
@@ -285,6 +288,31 @@ fn git_upstream_base_ref(repo_path: &str) -> String {
     {
         return "origin/main".to_string();
     }
+
+    // origin/main not available locally — attempt a shallow fetch before falling back
+    let fetch = std::process::Command::new("git")
+        .args(["-C", repo_path, "fetch", "origin", "main", "--depth=1"])
+        .output();
+    if let Ok(out) = fetch
+        && out.status.success()
+    {
+        // Re-verify after fetch
+        let recheck = std::process::Command::new("git")
+            .args(["-C", repo_path, "rev-parse", "--verify", "origin/main"])
+            .output();
+        if let Ok(out) = recheck
+            && out.status.success()
+        {
+            tracing::info!(
+                "git fetch origin main --depth=1 succeeded for repo {repo_path}; using origin/main as base ref"
+            );
+            return "origin/main".to_string();
+        }
+    }
+
+    tracing::warn!(
+        "origin/main unavailable for repo {repo_path} even after fetch attempt; falling back to local 'main'"
+    );
     "main".to_string()
 }
 
@@ -1060,6 +1088,40 @@ mod tests {
             branch_exists(repo_dir, branch),
             "branch should stay until origin/main contains it"
         );
+    }
+
+    #[test]
+    fn create_git_worktree_starts_from_origin_main_even_when_local_main_is_ahead() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+
+        let origin_head_before = run_git(repo_dir, &["rev-parse", "origin/main"]);
+        run_git(
+            repo_dir,
+            &["commit", "--allow-empty", "-m", "local-only commit"],
+        );
+        let local_head_after = run_git(repo_dir, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            origin_head_before, local_head_after,
+            "test setup requires local main to be ahead of origin/main"
+        );
+
+        let (worktree_path, branch_name) =
+            create_git_worktree(repo_dir.to_str().unwrap(), "slot-reset", "claude").unwrap();
+        let worktree_head = run_git(Path::new(&worktree_path), &["rev-parse", "HEAD"]);
+        let worktree_branch = run_git(Path::new(&worktree_path), &["branch", "--show-current"]);
+
+        assert_eq!(
+            worktree_head, origin_head_before,
+            "fresh worktree must start from origin/main rather than local main HEAD"
+        );
+        assert_eq!(worktree_branch, branch_name);
+
+        cleanup_git_worktree(&WorktreeInfo {
+            original_path: repo_dir.to_string_lossy().to_string(),
+            worktree_path,
+            branch_name,
+        });
     }
 
     #[test]

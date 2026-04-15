@@ -30,9 +30,15 @@ pub(crate) mod shared_memory;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
+mod tmux_error_detect;
+#[cfg(unix)]
 mod tmux_lifecycle;
 #[cfg(unix)]
+mod tmux_overload_retry;
+#[cfg(unix)]
 mod tmux_reaper;
+#[cfg(unix)]
+mod tmux_restart_handoff;
 mod turn_bridge;
 
 pub(crate) use meeting_orchestrator as meeting;

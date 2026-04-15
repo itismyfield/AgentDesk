@@ -653,27 +653,42 @@ mod outbox_boundary {
         seed_card(&db, "card-160d", "ready");
         seed_dispatch(&db, "d-160d", "card-160d", "implementation", "pending");
 
-        // Insert duplicate outbox entries for the same dispatch
-        seed_outbox(&db, "d-160d", "notify");
-        seed_outbox(&db, "d-160d", "notify");
+        // Duplicate notify insertions must collapse to a single durable row.
+        {
+            let conn = db.lock().unwrap();
+            let inserted_first = conn
+                .execute(
+                    "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
+                     VALUES ('d-160d', 'notify', 'agent-1', 'card-160d', 'Test', 'pending')",
+                    [],
+                )
+                .unwrap();
+            let inserted_second = conn
+                .execute(
+                    "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
+                     VALUES ('d-160d', 'notify', 'agent-1', 'card-160d', 'Test', 'pending')",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(inserted_first, 1, "first notify row must insert");
+            assert_eq!(inserted_second, 0, "duplicate notify row must be ignored");
+        }
 
         let mock = MockNotifier::new();
         let processed = process_outbox_batch(&db, &mock).await;
 
-        // Worker processes all pending entries
-        assert_eq!(processed, 2, "Worker should process both pending entries");
-        // MockNotifier doesn't have the two-phase guard — both entries call through.
-        // In production, send_dispatch_to_discord deduplicates via dispatch_reserving/notified.
+        // Worker processes the single retained notify row.
+        assert_eq!(processed, 1, "Worker should process one deduplicated entry");
         assert_eq!(
             mock.notify_count(),
-            2,
-            "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
+            1,
+            "deduplicated notify rows must call the notifier only once"
         );
 
-        // Both notify rows are done; dispatch transition queues a single status sync.
+        // The retained notify row is done; dispatch transition queues a single status sync.
         assert_eq!(
             outbox_status_for_action(&db, "d-160d", "notify"),
-            vec!["done", "done"]
+            vec!["done"]
         );
         assert_eq!(
             outbox_status_for_action(&db, "d-160d", "status_reaction"),
@@ -737,12 +752,16 @@ mod outbox_boundary {
         let processed = process_outbox_batch(&db, &mock).await;
 
         assert_eq!(processed, 1);
-        assert_eq!(mock.notify_count(), 1);
+        assert_eq!(
+            mock.notify_count(),
+            0,
+            "completed dispatches must be drained without re-delivery"
+        );
         assert_eq!(outbox_status(&db, "d-160c"), vec!["done"]);
         assert_eq!(
             get_dispatch_status(&db, "d-160c"),
             "completed",
-            "terminal dispatch status must not be rewritten by notify success"
+            "terminal dispatch status must stay completed after notify suppression"
         );
     }
 }

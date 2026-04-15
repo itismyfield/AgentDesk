@@ -61,6 +61,13 @@ fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i6
         .and_then(|value| value.as_i64())
 }
 
+fn context_reset_slot_thread_before_reuse(dispatch_context: Option<&serde_json::Value>) -> bool {
+    dispatch_context
+        .and_then(|ctx| ctx.get("reset_slot_thread_before_reuse"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DispatchMessageTarget {
     channel_id: String,
@@ -459,6 +466,7 @@ fn collect_slot_thread_candidates(
     card_id: &str,
     slot_binding: Option<&SlotThreadBinding>,
     channel_id: u64,
+    include_recent_slot_history: bool,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
     push_unique_thread_candidate(
@@ -469,7 +477,7 @@ fn collect_slot_thread_candidates(
         &mut candidates,
         get_thread_for_channel(conn, card_id, channel_id).as_deref(),
     );
-    if let Some(binding) = slot_binding {
+    if include_recent_slot_history && let Some(binding) = slot_binding {
         for thread_id in recent_slot_thread_history(conn, agent_id, binding.slot_index) {
             push_unique_thread_candidate(&mut candidates, Some(thread_id.as_str()));
         }
@@ -1333,6 +1341,23 @@ async fn send_dispatch_to_discord_inner_with_context(
             channel_id_num,
         )
     };
+    let reset_slot_thread_before_reuse =
+        context_reset_slot_thread_before_reuse(dispatch_context_json.as_ref());
+    if reset_slot_thread_before_reuse
+        && let Some(binding) = slot_binding.clone()
+        && binding.thread_id.is_some()
+    {
+        reset_slot_thread_bindings_excluding(
+            db,
+            &binding.agent_id,
+            binding.slot_index,
+            Some(dispatch_id),
+        )
+        .await?;
+        slot_binding = db.lock().ok().and_then(|conn| {
+            read_slot_thread_binding(&conn, &binding.agent_id, binding.slot_index, channel_id_num)
+        });
+    }
     if let Some(binding) = slot_binding.clone() {
         if reset_stale_slot_thread_if_needed(
             db,
@@ -1372,6 +1397,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                 card_id,
                 slot_binding.as_ref(),
                 channel_id_num,
+                !reset_slot_thread_before_reuse,
             )
         })
         .unwrap_or_default();
@@ -2463,6 +2489,113 @@ mod tests {
             dispatch_context["discord_message_id"],
             "message-thread-history"
         );
+    }
+
+    #[tokio::test]
+    async fn send_dispatch_skips_recent_slot_thread_history_when_context_requests_reset() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, github_issue_number,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-current', 'Reset card', 'requested', 'agent-1', 'dispatch-current', 507,
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-old', 'Old card', 'done', 'agent-1', 'dispatch-old',
+                    datetime('now', '-1 day'), datetime('now', '-1 day')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-current', 'card-current', 'agent-1', 'implementation', 'pending',
+                    'Reset card', '{\"slot_index\":1,\"reset_slot_thread_before_reuse\":true}', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-old', 'card-old', 'agent-1', 'implementation', 'completed',
+                    'Old card', '{\"slot_index\":1}', 'thread-history',
+                    datetime('now', '-1 day'), datetime('now', '-1 day')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+                 VALUES ('agent-1', 1, '{}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "Reset card",
+            "card-current",
+            "dispatch-current",
+            "announce-token",
+            &base_url,
+            None,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+
+        let state = state.lock().unwrap();
+        assert!(
+            !state
+                .calls
+                .contains(&"GET /channels/thread-history".to_string()),
+            "reset context must not probe old slot-thread history"
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/123/threads".to_string())
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/thread-created/messages".to_string())
+        );
+
+        let conn = db.lock().unwrap();
+        let thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_id.as_deref(), Some("thread-created"));
     }
 
     #[tokio::test]
