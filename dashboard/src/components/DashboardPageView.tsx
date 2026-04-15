@@ -22,6 +22,10 @@ import {
   syncDashboardTabToUrl,
   type DashboardTab,
 } from "../app/dashboardTabs";
+import {
+  countOpenMeetingIssues,
+  summarizeMeetings,
+} from "../app/meetingSummary";
 import type {
   Agent,
   CompanySettings,
@@ -315,10 +319,7 @@ export default function DashboardPageView({
     () => sessions.filter((session) => session.linked_agent_id && session.status === "disconnected"),
     [sessions],
   );
-  const activeMeetings = useMemo(
-    () => meetings.filter((meeting) => meeting.status === "in_progress"),
-    [meetings],
-  );
+  const meetingSummary = useMemo(() => summarizeMeetings(meetings), [meetings]);
   const recentMeetings = useMemo(
     () =>
       [...meetings]
@@ -328,10 +329,6 @@ export default function DashboardPageView({
           return rightTime - leftTime;
         })
         .slice(0, 4),
-    [meetings],
-  );
-  const openMeetingFollowUps = useMemo(
-    () => meetings.reduce((sum, meeting) => sum + countOpenMeetingIssues(meeting), 0),
     [meetings],
   );
 
@@ -460,13 +457,13 @@ export default function DashboardPageView({
                 />
                 <PulseSignalCard
                   label={t({ ko: "회의 후속", en: "Meeting Follow-up", ja: "会議フォローアップ", zh: "会议后续" })}
-                  value={openMeetingFollowUps}
+                  value={meetingSummary.unresolvedCount}
                   accent="#22c55e"
                   sublabel={t({
-                    ko: `${activeMeetings.length} active / ${meetings.length} total`,
-                    en: `${activeMeetings.length} active / ${meetings.length} total`,
-                    ja: `${activeMeetings.length} active / ${meetings.length} total`,
-                    zh: `${activeMeetings.length} active / ${meetings.length} total`,
+                    ko: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    en: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    ja: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    zh: `${meetingSummary.activeCount} active / ${meetings.length} total`,
                   })}
                   actionLabel={t({ ko: "회의록 열기", en: "Open Meetings", ja: "会議録を開く", zh: "打开会议记录" })}
                   onAction={() => setActiveTab("meetings")}
@@ -476,8 +473,8 @@ export default function DashboardPageView({
 
             <MeetingTimelineCard
               meetings={recentMeetings}
-              activeCount={activeMeetings.length}
-              followUpCount={openMeetingFollowUps}
+              activeCount={meetingSummary.activeCount}
+              followUpCount={meetingSummary.unresolvedCount}
               localeTag={localeTag}
               t={t}
               onOpenMeetings={() => setActiveTab("meetings")}
@@ -759,20 +756,6 @@ function PulseSectionShell({
       <div className="mt-4 space-y-4">{children}</div>
     </SurfaceSection>
   );
-}
-
-function countOpenMeetingIssues(meeting: RoundTableMeeting): number {
-  const totalIssues = meeting.proposed_issues?.length ?? 0;
-  if (meeting.status !== "completed" || totalIssues === 0) return 0;
-
-  const results = meeting.issue_creation_results ?? [];
-  if (results.length === 0) {
-    return Math.max(totalIssues - meeting.issues_created, 0);
-  }
-
-  const created = results.filter((result) => result.ok && result.discarded !== true).length;
-  const discarded = results.filter((result) => result.discarded === true).length;
-  return Math.max(totalIssues - created - discarded, 0);
 }
 
 function PulseSignalCard({
