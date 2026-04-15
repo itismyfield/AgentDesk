@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +15,156 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+const ONBOARDING_DRAFT_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct OnboardingDraftBotInfo {
+    valid: bool,
+    bot_id: Option<String>,
+    bot_name: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct OnboardingDraftCommandBot {
+    provider: String,
+    token: String,
+    bot_info: Option<OnboardingDraftBotInfo>,
+}
+
+impl Default for OnboardingDraftCommandBot {
+    fn default() -> Self {
+        Self {
+            provider: "claude".to_string(),
+            token: String::new(),
+            bot_info: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct OnboardingDraftProviderStatus {
+    installed: bool,
+    logged_in: bool,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct OnboardingDraftAgent {
+    id: String,
+    name: String,
+    name_en: Option<String>,
+    description: String,
+    description_en: Option<String>,
+    prompt: String,
+    custom: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct OnboardingDraftChannelAssignment {
+    agent_id: String,
+    agent_name: String,
+    recommended_name: String,
+    channel_id: String,
+    channel_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct OnboardingDraft {
+    version: u8,
+    updated_at_ms: i64,
+    step: u8,
+    command_bots: Vec<OnboardingDraftCommandBot>,
+    announce_token: String,
+    notify_token: String,
+    announce_bot_info: Option<OnboardingDraftBotInfo>,
+    notify_bot_info: Option<OnboardingDraftBotInfo>,
+    provider_statuses: BTreeMap<String, OnboardingDraftProviderStatus>,
+    selected_template: Option<String>,
+    agents: Vec<OnboardingDraftAgent>,
+    custom_name: String,
+    custom_desc: String,
+    custom_name_en: String,
+    custom_desc_en: String,
+    expanded_agent: Option<String>,
+    selected_guild: String,
+    channel_assignments: Vec<OnboardingDraftChannelAssignment>,
+    owner_id: String,
+    has_existing_setup: bool,
+    confirm_rerun_overwrite: bool,
+}
+
+impl OnboardingDraft {
+    fn normalize(mut self) -> Result<Self, String> {
+        if self.version != ONBOARDING_DRAFT_VERSION {
+            return Err(format!(
+                "unsupported onboarding draft version '{}'",
+                self.version
+            ));
+        }
+        self.step = self.step.clamp(1, 5);
+        self.updated_at_ms = now_unix_ms();
+        if self.command_bots.is_empty() {
+            self.command_bots.push(OnboardingDraftCommandBot::default());
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OnboardingSetupMode {
+    Fresh,
+    Rerun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OnboardingResumeState {
+    None,
+    DraftAvailable,
+    PartialApply,
+}
+
+fn onboarding_setup_mode(completed: bool) -> OnboardingSetupMode {
+    if completed {
+        OnboardingSetupMode::Rerun
+    } else {
+        OnboardingSetupMode::Fresh
+    }
+}
+
+fn onboarding_resume_state(
+    draft_available: bool,
+    completion_state: Option<&OnboardingCompletionState>,
+) -> OnboardingResumeState {
+    if completion_state
+        .map(|state| state.partial_apply)
+        .unwrap_or(false)
+    {
+        OnboardingResumeState::PartialApply
+    } else if draft_available {
+        OnboardingResumeState::DraftAvailable
+    } else {
+        OnboardingResumeState::None
+    }
+}
+
+fn onboarding_draft_secret_policy_value() -> serde_json::Value {
+    json!({
+        "stores_raw_tokens": true,
+        "returns_raw_tokens_in_draft": true,
+        "masked_in_status_after_completion": true,
+        "cleared_on_complete": true,
+        "cleared_on_delete": true,
+    })
+}
 
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
@@ -116,8 +267,16 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         .ok();
 
     let completed = has_bots && agent_count > 0;
-    let completion_state = crate::cli::agentdesk_runtime_root()
-        .and_then(|root| load_onboarding_completion_state(&root).ok().flatten());
+    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let completion_state = runtime_root
+        .as_ref()
+        .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
+    let draft_available = runtime_root
+        .as_ref()
+        .and_then(|root| load_onboarding_draft(root).ok().flatten())
+        .is_some();
+    let setup_mode = onboarding_setup_mode(completed);
+    let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
 
     // Mask tokens after onboarding is complete to prevent unauthenticated leakage.
     // Only show full tokens during initial setup (before completion).
@@ -152,6 +311,9 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             "guild_id": guild_id,
             "owner_id": owner_id,
             "agents": agents,
+            "draft_available": draft_available,
+            "setup_mode": setup_mode,
+            "resume_state": resume_state,
             "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
             "partial_apply": completion_state
                 .as_ref()
@@ -165,6 +327,131 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
                 OnboardingRerunPolicy::ReuseExisting,
                 false,
             ),
+        })),
+    )
+}
+
+/// GET /api/onboarding/draft
+/// Returns the in-progress onboarding draft, distinct from completed setup summary.
+pub async fn draft_get(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let completed = match state.db.lock() {
+        Ok(conn) => conn
+            .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
+            .unwrap_or(false),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    };
+
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "cannot determine runtime root"})),
+        );
+    };
+
+    let draft = match load_onboarding_draft(&root) {
+        Ok(draft) => draft,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    let completion_state = match load_onboarding_completion_state(&root) {
+        Ok(state) => state,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    let available = draft.is_some();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "available": available,
+            "completed": completed,
+            "draft": draft,
+            "setup_mode": onboarding_setup_mode(completed),
+            "resume_state": onboarding_resume_state(available, completion_state.as_ref()),
+            "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
+            "secret_policy": onboarding_draft_secret_policy_value(),
+        })),
+    )
+}
+
+/// PUT /api/onboarding/draft
+/// Persists the in-progress onboarding draft required to resume across browsers.
+pub async fn draft_put(Json(body): Json<OnboardingDraft>) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "cannot determine runtime root"})),
+        );
+    };
+
+    if let Err(error) = crate::runtime_layout::ensure_runtime_layout(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to prepare runtime layout: {error}")})),
+        );
+    }
+
+    let draft = match body.normalize() {
+        Ok(draft) => draft,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+
+    if let Err(error) = save_onboarding_draft(&root, &draft) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "available": true,
+            "draft": draft,
+            "secret_policy": onboarding_draft_secret_policy_value(),
+        })),
+    )
+}
+
+/// DELETE /api/onboarding/draft
+/// Explicitly removes the in-progress onboarding draft.
+pub async fn draft_delete() -> (StatusCode, Json<serde_json::Value>) {
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "cannot determine runtime root"})),
+        );
+    };
+
+    if let Err(error) = clear_onboarding_draft(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "available": false,
+            "secret_policy": onboarding_draft_secret_policy_value(),
         })),
     )
 }
@@ -484,6 +771,72 @@ fn now_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn onboarding_draft_path(runtime_root: &Path) -> PathBuf {
+    crate::runtime_layout::config_dir(runtime_root).join("onboarding_draft.json")
+}
+
+fn load_onboarding_draft(runtime_root: &Path) -> Result<Option<OnboardingDraft>, String> {
+    let path = onboarding_draft_path(runtime_root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read onboarding draft {}: {e}", path.display()))?;
+    let draft = match serde_json::from_str::<OnboardingDraft>(&content) {
+        Ok(draft) => draft,
+        Err(error) => {
+            let corrupt_path = path.with_file_name(format!(
+                "{}.corrupt-{}",
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("draft"),
+                now_unix_ms()
+            ));
+            match std::fs::rename(&path, &corrupt_path) {
+                Ok(()) => tracing::warn!(
+                    "ignored corrupt onboarding draft {}; moved to {}: {}",
+                    path.display(),
+                    corrupt_path.display(),
+                    error
+                ),
+                Err(rename_error) => tracing::warn!(
+                    "ignored corrupt onboarding draft {}; failed to move aside: {}; parse error: {}",
+                    path.display(),
+                    rename_error,
+                    error
+                ),
+            }
+            return Ok(None);
+        }
+    };
+    Ok(Some(draft))
+}
+
+fn save_onboarding_draft(runtime_root: &Path, draft: &OnboardingDraft) -> Result<(), String> {
+    let path = onboarding_draft_path(runtime_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create draft dir {}: {e}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(draft)
+        .map_err(|e| format!("failed to serialize onboarding draft: {e}"))?;
+    crate::services::discord::runtime_store::atomic_write(&path, &content)
+        .map_err(|e| format!("failed to write onboarding draft {}: {e}", path.display()))
+}
+
+fn clear_onboarding_draft(runtime_root: &Path) -> Result<(), String> {
+    let path = onboarding_draft_path(runtime_root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to remove onboarding draft {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn onboarding_completion_state_path(runtime_root: &Path) -> PathBuf {
@@ -2601,6 +2954,9 @@ async fn complete_with_options(
             serde_json::Map::new(),
         );
     }
+    if let Err(error) = clear_onboarding_draft(&root) {
+        tracing::warn!("failed to clear onboarding draft after completion: {error}");
+    }
 
     let checklist = vec![
         json!({
@@ -2683,7 +3039,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use axum::{Router, extract::Path as AxumPath, routing::get};
+    use axum::{Router, body::Body, extract::Path as AxumPath, http::Request, routing::get};
+    use tower::ServiceExt;
 
     fn env_guard() -> MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::lock_test_env()
@@ -2759,6 +3116,94 @@ mod tests {
         }
     }
 
+    fn sample_draft() -> OnboardingDraft {
+        OnboardingDraft {
+            version: ONBOARDING_DRAFT_VERSION,
+            updated_at_ms: 1,
+            step: 4,
+            command_bots: vec![
+                OnboardingDraftCommandBot {
+                    provider: "codex".to_string(),
+                    token: "command-token".to_string(),
+                    bot_info: Some(OnboardingDraftBotInfo {
+                        valid: true,
+                        bot_id: Some("100".to_string()),
+                        bot_name: Some("command".to_string()),
+                        error: None,
+                    }),
+                },
+                OnboardingDraftCommandBot {
+                    provider: "claude".to_string(),
+                    token: "command-token-2".to_string(),
+                    bot_info: Some(OnboardingDraftBotInfo {
+                        valid: true,
+                        bot_id: Some("101".to_string()),
+                        bot_name: Some("command-2".to_string()),
+                        error: None,
+                    }),
+                },
+            ],
+            announce_token: "announce-token".to_string(),
+            notify_token: "notify-token".to_string(),
+            announce_bot_info: Some(OnboardingDraftBotInfo {
+                valid: true,
+                bot_id: Some("200".to_string()),
+                bot_name: Some("announce".to_string()),
+                error: None,
+            }),
+            notify_bot_info: Some(OnboardingDraftBotInfo {
+                valid: true,
+                bot_id: Some("300".to_string()),
+                bot_name: Some("notify".to_string()),
+                error: None,
+            }),
+            provider_statuses: BTreeMap::from([
+                (
+                    "codex".to_string(),
+                    OnboardingDraftProviderStatus {
+                        installed: true,
+                        logged_in: true,
+                        version: Some("1.2.3".to_string()),
+                    },
+                ),
+                (
+                    "claude".to_string(),
+                    OnboardingDraftProviderStatus {
+                        installed: true,
+                        logged_in: false,
+                        version: Some("9.9.9".to_string()),
+                    },
+                ),
+            ]),
+            selected_template: Some("operations".to_string()),
+            agents: vec![OnboardingDraftAgent {
+                id: "adk-cdx".to_string(),
+                name: "Dispatch Desk".to_string(),
+                name_en: Some("Dispatch Desk".to_string()),
+                description: "dispatch desk".to_string(),
+                description_en: Some("dispatch desk".to_string()),
+                prompt: "be precise".to_string(),
+                custom: true,
+            }],
+            custom_name: "Dispatch Desk".to_string(),
+            custom_desc: "dispatch desk".to_string(),
+            custom_name_en: "Dispatch Desk".to_string(),
+            custom_desc_en: "dispatch desk".to_string(),
+            expanded_agent: Some("adk-cdx".to_string()),
+            selected_guild: "guild-123".to_string(),
+            channel_assignments: vec![OnboardingDraftChannelAssignment {
+                agent_id: "adk-cdx".to_string(),
+                agent_name: "Dispatch Desk".to_string(),
+                recommended_name: "adk-cdx-cdx".to_string(),
+                channel_id: "1234".to_string(),
+                channel_name: "dispatch-room".to_string(),
+            }],
+            owner_id: "42".to_string(),
+            has_existing_setup: false,
+            confirm_rerun_overwrite: false,
+        }
+    }
+
     async fn spawn_mock_discord_server() -> (String, Arc<AtomicUsize>) {
         let post_count = Arc::new(AtomicUsize::new(0));
         let channels = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
@@ -2796,6 +3241,119 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{}", addr), post_count)
+    }
+
+    #[tokio::test]
+    async fn draft_api_round_trip_exposes_resume_state_and_secret_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let app = Router::new()
+            .route(
+                "/draft",
+                axum::routing::get(draft_get)
+                    .put(draft_put)
+                    .delete(draft_delete),
+            )
+            .route("/status", axum::routing::get(status))
+            .with_state(state);
+
+        let put_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/draft")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&sample_draft()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = axum::body::to_bytes(put_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
+        assert_eq!(put_json["ok"], json!(true));
+        assert_eq!(
+            put_json["draft"]["command_bots"][0]["token"],
+            json!("command-token")
+        );
+        assert_eq!(
+            put_json["secret_policy"]["cleared_on_complete"],
+            json!(true)
+        );
+
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_response.status(), StatusCode::OK);
+        let status_body = axum::body::to_bytes(status_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["setup_mode"], json!("fresh"));
+        assert_eq!(status_json["draft_available"], json!(true));
+        assert_eq!(status_json["resume_state"], json!("draft_available"));
+
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/draft")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["available"], json!(true));
+        assert_eq!(get_json["draft"]["selected_template"], json!("operations"));
+        assert_eq!(get_json["secret_policy"]["stores_raw_tokens"], json!(true));
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/draft")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        let status_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_after_delete_body =
+            axum::body::to_bytes(status_after_delete.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        let status_after_delete_json: serde_json::Value =
+            serde_json::from_slice(&status_after_delete_body).unwrap();
+        assert_eq!(status_after_delete_json["draft_available"], json!(false));
+        assert_eq!(status_after_delete_json["resume_state"], json!("none"));
     }
 
     #[cfg(unix)]
@@ -3109,6 +3667,47 @@ mod tests {
             json!("checkpoint")
         );
         assert!(onboarding_config_path(temp.path()).is_file());
+    }
+
+    #[tokio::test]
+    async fn complete_keeps_existing_draft_on_failure_and_clears_it_on_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let (discord_api_base, _post_count) = spawn_mock_discord_server().await;
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
+
+        save_onboarding_draft(temp.path(), &sample_draft().normalize().unwrap()).unwrap();
+        assert!(onboarding_draft_path(temp.path()).is_file());
+
+        let failure_options = CompleteExecutionOptions {
+            discord_api_base: discord_api_base.clone(),
+            fail_after_stage: Some(OnboardingCompletionStage::ArtifactsPersisted),
+        };
+        let (failed_status, failed_body) =
+            complete_with_options(&state, &body, &failure_options).await;
+        assert_eq!(failed_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failed_body["partial_apply"], json!(true));
+        let retained_draft = load_onboarding_draft(temp.path()).unwrap().unwrap();
+        assert_eq!(retained_draft.command_bots[0].token, "command-token");
+
+        let success_options = CompleteExecutionOptions {
+            discord_api_base,
+            fail_after_stage: None,
+        };
+        let (success_status, success_body) =
+            complete_with_options(&state, &body, &success_options).await;
+        assert_eq!(success_status, StatusCode::OK);
+        assert_eq!(success_body["ok"], json!(true));
+        assert!(load_onboarding_draft(temp.path()).unwrap().is_none());
+
+        let status_state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status_code, Json(status_body)) = status(axum::extract::State(status_state)).await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(status_body["setup_mode"], json!("rerun"));
+        assert_eq!(status_body["draft_available"], json!(false));
+        assert_eq!(status_body["resume_state"], json!("none"));
     }
 
     #[test]

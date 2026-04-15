@@ -201,6 +201,24 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Get onboarding status",
         ),
         ep(
+            "GET",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Get onboarding resume draft",
+        ),
+        ep(
+            "PUT",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Persist onboarding resume draft",
+        ),
+        ep(
+            "DELETE",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Clear onboarding resume draft",
+        ),
+        ep(
             "POST",
             "/api/onboarding/validate-token",
             "onboarding",

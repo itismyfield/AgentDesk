@@ -1,19 +1,23 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  clearOnboardingDraft,
+  isMeaningfulOnboardingDraft,
+  pickPreferredOnboardingDraft,
+  readOnboardingDraft,
+  serverDraftToLocalDraft,
+  writeOnboardingDraft,
+  type AgentDef,
+  type BotInfo,
+  type ChannelAssignment,
+  type CommandBotEntry,
+  type OnboardingDraft,
+  type OnboardingResumeState,
+  type OnboardingStatusResponse,
+  type ProviderStatus,
+  type ServerOnboardingDraftResponse,
+} from "./onboardingDraft";
 
 // ── Types ─────────────────────────────────────────────
-
-interface BotInfo {
-  valid: boolean;
-  bot_id?: string;
-  bot_name?: string;
-  error?: string;
-}
-
-interface CommandBotEntry {
-  provider: "claude" | "codex" | "gemini" | "qwen";
-  token: string;
-  botInfo: BotInfo | null;
-}
 
 const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
 
@@ -93,131 +97,10 @@ function providerLoginCommand(provider: CommandBotEntry["provider"]) {
   }
 }
 
-interface AgentDef {
-  id: string;
-  name: string;
-  nameEn?: string;
-  description: string;
-  descriptionEn?: string;
-  prompt: string;
-  custom?: boolean;
-}
-
-interface ChannelAssignment {
-  agentId: string;
-  agentName: string;
-  recommendedName: string;
-  channelId: string;
-  channelName: string;
-}
-
 interface Guild {
   id: string;
   name: string;
   channels: Array<{ id: string; name: string; category_id?: string }>;
-}
-
-interface ProviderStatus {
-  installed: boolean;
-  logged_in: boolean;
-  version?: string;
-}
-
-interface OnboardingCompletionState {
-  stage?: string;
-  partial_apply?: boolean;
-  retry_recommended?: boolean;
-  last_error?: string | null;
-}
-
-interface OnboardingStatusResponse {
-  owner_id?: string;
-  guild_id?: string;
-  bot_tokens?: {
-    command?: string;
-    announce?: string;
-    notify?: string;
-    command2?: string;
-  };
-  bot_providers?: {
-    command?: CommandBotEntry["provider"];
-    command2?: CommandBotEntry["provider"];
-  };
-  completion_state?: OnboardingCompletionState;
-  partial_apply?: boolean;
-  retry_recommended?: boolean;
-}
-
-interface OnboardingDraft {
-  version: 1;
-  step: number;
-  commandBots: CommandBotEntry[];
-  announceToken: string;
-  notifyToken: string;
-  announceBotInfo: BotInfo | null;
-  notifyBotInfo: BotInfo | null;
-  providerStatuses: Record<string, ProviderStatus>;
-  selectedTemplate: string | null;
-  agents: AgentDef[];
-  customName: string;
-  customDesc: string;
-  customNameEn: string;
-  customDescEn: string;
-  expandedAgent: string | null;
-  selectedGuild: string;
-  channelAssignments: ChannelAssignment[];
-  ownerId: string;
-  hasExistingSetup: boolean;
-  confirmRerunOverwrite: boolean;
-}
-
-const ONBOARDING_DRAFT_STORAGE_KEY = "agentdesk.onboarding.draft.v1";
-
-function readOnboardingDraft(): OnboardingDraft | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(ONBOARDING_DRAFT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<OnboardingDraft>;
-    if (parsed?.version !== 1) return null;
-    return {
-      version: 1,
-      step: typeof parsed.step === "number" ? parsed.step : 1,
-      commandBots:
-        Array.isArray(parsed.commandBots) && parsed.commandBots.length > 0
-          ? parsed.commandBots
-          : [{ provider: "claude", token: "", botInfo: null }],
-      announceToken: parsed.announceToken ?? "",
-      notifyToken: parsed.notifyToken ?? "",
-      announceBotInfo: parsed.announceBotInfo ?? null,
-      notifyBotInfo: parsed.notifyBotInfo ?? null,
-      providerStatuses: parsed.providerStatuses ?? {},
-      selectedTemplate: parsed.selectedTemplate ?? null,
-      agents: parsed.agents ?? [],
-      customName: parsed.customName ?? "",
-      customDesc: parsed.customDesc ?? "",
-      customNameEn: parsed.customNameEn ?? "",
-      customDescEn: parsed.customDescEn ?? "",
-      expandedAgent: parsed.expandedAgent ?? null,
-      selectedGuild: parsed.selectedGuild ?? "",
-      channelAssignments: parsed.channelAssignments ?? [],
-      ownerId: parsed.ownerId ?? "",
-      hasExistingSetup: Boolean(parsed.hasExistingSetup),
-      confirmRerunOverwrite: Boolean(parsed.confirmRerunOverwrite),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writeOnboardingDraft(draft: OnboardingDraft): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(ONBOARDING_DRAFT_STORAGE_KEY, JSON.stringify(draft));
-}
-
-function clearOnboardingDraft(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(ONBOARDING_DRAFT_STORAGE_KEY);
 }
 
 interface ChecklistItem {
@@ -602,6 +485,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const [completing, setCompleting] = useState(false);
   const [completionChecklist, setCompletionChecklist] = useState<CompletionChecklistItem[] | null>(null);
   const [error, setError] = useState("");
+  const [draftSyncReady, setDraftSyncReady] = useState(false);
+  const [resumeState, setResumeState] = useState<OnboardingResumeState>("none");
 
   // Get primary provider from first command bot
   const primaryProvider = commandBots[0]?.provider ?? "claude";
@@ -655,6 +540,36 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     setError("");
   }, []);
 
+  const applyDraft = useCallback((draft: OnboardingDraft) => {
+    initialDraftRef.current = draft;
+    setStep(draft.step);
+    setCommandBots(
+      draft.commandBots.length
+        ? draft.commandBots
+        : [{ provider: "claude", token: "", botInfo: null }],
+    );
+    setAnnounceToken(draft.announceToken);
+    setNotifyToken(draft.notifyToken);
+    setAnnounceBotInfo(draft.announceBotInfo);
+    setNotifyBotInfo(draft.notifyBotInfo);
+    setProviderStatuses(draft.providerStatuses);
+    setSelectedTemplate(draft.selectedTemplate);
+    setAgents(draft.agents);
+    setCustomName(draft.customName);
+    setCustomDesc(draft.customDesc);
+    setCustomNameEn(draft.customNameEn);
+    setCustomDescEn(draft.customDescEn);
+    setExpandedAgent(draft.expandedAgent);
+    setSelectedGuild(draft.selectedGuild);
+    setChannelAssignments(draft.channelAssignments);
+    setOwnerId(draft.ownerId);
+    setHasExistingSetup(draft.hasExistingSetup);
+    setConfirmRerunOverwrite(draft.confirmRerunOverwrite);
+    setCompletionChecklist(null);
+    setError("");
+    setDraftNoticeVisible(true);
+  }, []);
+
   const resetDraft = useCallback(() => {
     clearOnboardingDraft();
     initialDraftRef.current = null;
@@ -679,63 +594,123 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     setConfirmRerunOverwrite(false);
     setCompletionChecklist(null);
     setError("");
+    setResumeState("none");
     setDraftNoticeVisible(false);
+    void fetch("/api/onboarding/draft", {
+      method: "DELETE",
+      credentials: "include",
+    }).catch(() => {});
   }, []);
 
-  // Load existing config for pre-fill
+  // Load existing config and the latest server draft, then restore the newer draft.
   useEffect(() => {
-    void fetch("/api/onboarding/status", { credentials: "include" })
-      .then((r) => r.json())
-      .then((d: OnboardingStatusResponse) => {
-        const serverHasExistingSetup = Boolean(
-          d.owner_id ||
-            d.guild_id ||
-            d.bot_tokens?.command ||
-            d.bot_tokens?.announce ||
-            d.bot_tokens?.notify ||
-            d.bot_tokens?.command2,
+    let cancelled = false;
+
+    async function loadInitialState() {
+      try {
+        const [statusResponse, draftResponse] = await Promise.all([
+          fetch("/api/onboarding/status", { credentials: "include" }),
+          fetch("/api/onboarding/draft", { credentials: "include" }),
+        ]);
+        const statusData = (await statusResponse.json()) as OnboardingStatusResponse;
+        const draftData = draftResponse.ok
+          ? ((await draftResponse.json()) as ServerOnboardingDraftResponse)
+          : null;
+        if (cancelled) return;
+
+        const serverHasExistingSetup = statusData.setup_mode
+          ? statusData.setup_mode === "rerun"
+          : Boolean(
+              statusData.owner_id ||
+                statusData.guild_id ||
+                statusData.bot_tokens?.command ||
+                statusData.bot_tokens?.announce ||
+                statusData.bot_tokens?.notify ||
+                statusData.bot_tokens?.command2,
+            );
+        const preferredDraft = pickPreferredOnboardingDraft(
+          initialDraftRef.current,
+          serverDraftToLocalDraft(draftData?.draft),
         );
+        const nextResumeState =
+          draftData?.resume_state ?? statusData.resume_state ?? "none";
+
         setHasExistingSetup(serverHasExistingSetup);
-        if (initialDraft) {
+        setResumeState(nextResumeState);
+
+        if (preferredDraft) {
+          applyDraft({
+            ...preferredDraft,
+            hasExistingSetup: serverHasExistingSetup || preferredDraft.hasExistingSetup,
+          });
+          setHasExistingSetup(serverHasExistingSetup || preferredDraft.hasExistingSetup);
           return;
         }
-        if (d.owner_id) setOwnerId(d.owner_id);
-        if (d.guild_id) setSelectedGuild(d.guild_id);
-        const commandToken = d.bot_tokens?.command;
-        const command2Token = d.bot_tokens?.command2;
-        if (commandToken) {
+
+        if (statusData.owner_id) setOwnerId(statusData.owner_id);
+        if (statusData.guild_id) setSelectedGuild(statusData.guild_id);
+        const commandToken = statusData.bot_tokens?.command;
+        const command2Token = statusData.bot_tokens?.command2;
+        if (!serverHasExistingSetup && commandToken) {
           setCommandBots((prev) => {
             const copy = [...prev];
             copy[0] = {
               ...copy[0],
-              provider: d.bot_providers?.command ?? copy[0].provider,
+              provider: statusData.bot_providers?.command ?? copy[0].provider,
               token: commandToken,
             };
             return copy;
           });
         }
-        if (command2Token) {
+        if (!serverHasExistingSetup && command2Token) {
           setCommandBots((prev) => [
             ...prev,
             {
-              provider: d.bot_providers?.command2 ?? COMMAND_PROVIDERS.find((provider) => provider !== prev[0].provider) ?? "codex",
+              provider:
+                statusData.bot_providers?.command2 ??
+                COMMAND_PROVIDERS.find((provider) => provider !== prev[0].provider) ??
+                "codex",
               token: command2Token,
               botInfo: null,
             },
           ]);
         }
-        if (d.bot_tokens?.announce) setAnnounceToken(d.bot_tokens.announce);
-        if (d.bot_tokens?.notify) setNotifyToken(d.bot_tokens.notify);
-      })
-      .catch(() => {});
-  }, [initialDraft]);
+        if (!serverHasExistingSetup && statusData.bot_tokens?.announce) {
+          setAnnounceToken(statusData.bot_tokens.announce);
+        }
+        if (!serverHasExistingSetup && statusData.bot_tokens?.notify) {
+          setNotifyToken(statusData.bot_tokens.notify);
+        }
+        if (nextResumeState === "partial_apply") {
+          setError(
+            tr(
+              "이전 온보딩 적용이 중간에 멈췄습니다. 같은 설정으로 다시 완료를 실행하면 기존 채널을 재사용합니다.",
+              "A previous onboarding apply stopped mid-flight. Re-running completion with the same setup will reuse the existing channels.",
+            ),
+          );
+        }
+      } catch {
+        // Ignore initial hydration failures and keep the local state fallback.
+      } finally {
+        if (!cancelled) {
+          setDraftSyncReady(true);
+        }
+      }
+    }
+
+    void loadInitialState();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyDraft, isKo]);
 
   useEffect(() => {
-    if (completionChecklist) {
+    if (!draftSyncReady || completionChecklist) {
       return;
     }
-    writeOnboardingDraft({
+    const nextDraft: OnboardingDraft = {
       version: 1,
+      updatedAtMs: Date.now(),
       step,
       commandBots,
       announceToken,
@@ -755,7 +730,76 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       ownerId,
       hasExistingSetup,
       confirmRerunOverwrite,
-    });
+    };
+    const controller = new AbortController();
+
+    if (!isMeaningfulOnboardingDraft(nextDraft)) {
+      initialDraftRef.current = null;
+      clearOnboardingDraft();
+      void fetch("/api/onboarding/draft", {
+        method: "DELETE",
+        credentials: "include",
+        signal: controller.signal,
+      }).catch(() => {});
+      return () => controller.abort();
+    }
+
+    initialDraftRef.current = nextDraft;
+    writeOnboardingDraft(nextDraft);
+    const timer = window.setTimeout(() => {
+      void fetch("/api/onboarding/draft", {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          version: nextDraft.version,
+          updated_at_ms: nextDraft.updatedAtMs,
+          step: nextDraft.step,
+          command_bots: nextDraft.commandBots.map((bot) => ({
+            provider: bot.provider,
+            token: bot.token,
+            bot_info: bot.botInfo,
+          })),
+          announce_token: nextDraft.announceToken,
+          notify_token: nextDraft.notifyToken,
+          announce_bot_info: nextDraft.announceBotInfo,
+          notify_bot_info: nextDraft.notifyBotInfo,
+          provider_statuses: nextDraft.providerStatuses,
+          selected_template: nextDraft.selectedTemplate,
+          agents: nextDraft.agents.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            name_en: agent.nameEn ?? null,
+            description: agent.description,
+            description_en: agent.descriptionEn ?? null,
+            prompt: agent.prompt,
+            custom: Boolean(agent.custom),
+          })),
+          custom_name: nextDraft.customName,
+          custom_desc: nextDraft.customDesc,
+          custom_name_en: nextDraft.customNameEn,
+          custom_desc_en: nextDraft.customDescEn,
+          expanded_agent: nextDraft.expandedAgent,
+          selected_guild: nextDraft.selectedGuild,
+          channel_assignments: nextDraft.channelAssignments.map((assignment) => ({
+            agent_id: assignment.agentId,
+            agent_name: assignment.agentName,
+            recommended_name: assignment.recommendedName,
+            channel_id: assignment.channelId,
+            channel_name: assignment.channelName,
+          })),
+          owner_id: nextDraft.ownerId,
+          has_existing_setup: nextDraft.hasExistingSetup,
+          confirm_rerun_overwrite: nextDraft.confirmRerunOverwrite,
+        }),
+        signal: controller.signal,
+      }).catch(() => {});
+    }, 300);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
   }, [
     agents,
     announceBotInfo,
@@ -777,6 +821,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     selectedGuild,
     selectedTemplate,
     step,
+    draftSyncReady,
   ]);
 
   useEffect(() => {
@@ -1036,6 +1081,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       });
       const d = await r.json();
       if (d.ok) {
+        setResumeState("none");
         if (Array.isArray(d.checklist)) {
           clearOnboardingDraft();
           setDraftNoticeVisible(false);
@@ -1293,6 +1339,20 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       ),
     },
   ];
+  const draftNoticeTitle =
+    resumeState === "partial_apply"
+      ? tr("중간에 멈춘 온보딩 상태를 복원했습니다.", "Restored the onboarding state from a partial apply.")
+      : tr("저장된 온보딩 진행 상태를 복원했습니다.", "Restored your saved onboarding progress.");
+  const draftNoticeDetail =
+    resumeState === "partial_apply"
+      ? tr(
+          "이전 적용이 중간에 멈췄습니다. 같은 설정으로 다시 완료를 실행하면 이미 만든 Discord 채널과 draft를 기준으로 이어서 진행합니다.",
+          "A previous apply stopped mid-flight. Re-running completion with the same setup will continue from the saved draft and any Discord channels that were already created.",
+        )
+      : tr(
+          "브라우저를 바꾸거나 새로고침해도 서버에 저장된 draft를 기준으로 이어서 진행할 수 있습니다. 처음부터 다시 하려면 임시 저장을 비우세요.",
+          "You can resume from the server-side draft even after switching browsers or refreshing. Clear the draft if you want to start over.",
+        );
 
   // ── Render ──────────────────────────────────────────
 
@@ -1307,13 +1367,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           }}
         >
           <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-            {tr("브라우저에 저장된 온보딩 진행 상태를 복원했습니다.", "Restored your saved onboarding progress from this browser.")}
+            {draftNoticeTitle}
           </div>
           <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
-            {tr(
-              "새로고침하거나 브라우저를 닫아도 이 기기에서는 이어서 진행할 수 있습니다. 처음부터 다시 하려면 임시 저장을 비우세요.",
-              "You can resume on this device even after a refresh or tab close. Clear the draft if you want to start over.",
-            )}
+            {draftNoticeDetail}
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
