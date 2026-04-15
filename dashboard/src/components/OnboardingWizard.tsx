@@ -438,6 +438,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   if (initialDraftRef.current === null) {
     initialDraftRef.current = readOnboardingDraft();
   }
+  const suppressNextServerDraftSyncRef = useRef(false);
   const initialDraft = initialDraftRef.current;
   const railItemRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -618,6 +619,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           : null;
         if (cancelled) return;
 
+        const serverDraft = serverDraftToLocalDraft(draftData?.draft);
         const serverHasExistingSetup = statusData.setup_mode
           ? statusData.setup_mode === "rerun"
           : Boolean(
@@ -630,7 +632,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             );
         const preferredDraft = pickPreferredOnboardingDraft(
           initialDraftRef.current,
-          serverDraftToLocalDraft(draftData?.draft),
+          serverDraft,
         );
         const nextResumeState =
           draftData?.resume_state ?? statusData.resume_state ?? "none";
@@ -639,6 +641,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         setResumeState(nextResumeState);
 
         if (preferredDraft) {
+          suppressNextServerDraftSyncRef.current = preferredDraft === serverDraft;
           applyDraft({
             ...preferredDraft,
             hasExistingSetup: serverHasExistingSetup || preferredDraft.hasExistingSetup,
@@ -647,6 +650,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           return;
         }
 
+        suppressNextServerDraftSyncRef.current = true;
         if (statusData.owner_id) setOwnerId(statusData.owner_id);
         if (statusData.guild_id) setSelectedGuild(statusData.guild_id);
         const commandToken = statusData.bot_tokens?.command;
@@ -732,6 +736,18 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       confirmRerunOverwrite,
     };
     const controller = new AbortController();
+
+    if (suppressNextServerDraftSyncRef.current) {
+      suppressNextServerDraftSyncRef.current = false;
+      if (isMeaningfulOnboardingDraft(nextDraft)) {
+        initialDraftRef.current = nextDraft;
+        writeOnboardingDraft(nextDraft);
+      } else {
+        initialDraftRef.current = null;
+        clearOnboardingDraft();
+      }
+      return () => controller.abort();
+    }
 
     if (!isMeaningfulOnboardingDraft(nextDraft)) {
       initialDraftRef.current = null;

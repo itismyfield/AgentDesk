@@ -16,6 +16,12 @@ use crate::services::provider_exec;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const ONBOARDING_DRAFT_VERSION: u8 = 1;
+const MAX_ONBOARDING_DRAFT_BYTES: usize = 128 * 1024;
+const MAX_ONBOARDING_DRAFT_COMMAND_BOTS: usize = 4;
+const MAX_ONBOARDING_DRAFT_AGENTS: usize = 64;
+const MAX_ONBOARDING_DRAFT_CHANNEL_ASSIGNMENTS: usize = 64;
+const MAX_ONBOARDING_DRAFT_PROVIDER_STATUSES: usize = 8;
+const MAX_ONBOARDING_DRAFT_FUTURE_SKEW_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -109,9 +115,46 @@ impl OnboardingDraft {
             ));
         }
         self.step = self.step.clamp(1, 5);
-        self.updated_at_ms = now_unix_ms();
+        let now = now_unix_ms();
+        self.updated_at_ms = if self.updated_at_ms > 0 {
+            self.updated_at_ms
+                .min(now.saturating_add(MAX_ONBOARDING_DRAFT_FUTURE_SKEW_MS))
+        } else {
+            now
+        };
         if self.command_bots.is_empty() {
             self.command_bots.push(OnboardingDraftCommandBot::default());
+        }
+        if self.command_bots.len() > MAX_ONBOARDING_DRAFT_COMMAND_BOTS {
+            return Err(format!(
+                "onboarding draft exceeds max command bot entries ({MAX_ONBOARDING_DRAFT_COMMAND_BOTS})"
+            ));
+        }
+        if self.agents.len() > MAX_ONBOARDING_DRAFT_AGENTS {
+            return Err(format!(
+                "onboarding draft exceeds max agents ({MAX_ONBOARDING_DRAFT_AGENTS})"
+            ));
+        }
+        if self.channel_assignments.len() > MAX_ONBOARDING_DRAFT_CHANNEL_ASSIGNMENTS {
+            return Err(format!(
+                "onboarding draft exceeds max channel assignments ({MAX_ONBOARDING_DRAFT_CHANNEL_ASSIGNMENTS})"
+            ));
+        }
+        if self.provider_statuses.len() > MAX_ONBOARDING_DRAFT_PROVIDER_STATUSES {
+            return Err(format!(
+                "onboarding draft exceeds max provider statuses ({MAX_ONBOARDING_DRAFT_PROVIDER_STATUSES})"
+            ));
+        }
+        let payload_size = serde_json::to_vec(&self)
+            .map_err(|error| {
+                format!("failed to serialize onboarding draft for validation: {error}")
+            })?
+            .len();
+        if payload_size > MAX_ONBOARDING_DRAFT_BYTES {
+            return Err(format!(
+                "onboarding draft exceeds max payload size ({} bytes)",
+                MAX_ONBOARDING_DRAFT_BYTES
+            ));
         }
         Ok(self)
     }
@@ -273,8 +316,8 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
     let draft_available = runtime_root
         .as_ref()
-        .and_then(|root| load_onboarding_draft(root).ok().flatten())
-        .is_some();
+        .map(|root| onboarding_draft_path(root).is_file())
+        .unwrap_or(false);
     let setup_mode = onboarding_setup_mode(completed);
     let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
 
@@ -3281,6 +3324,7 @@ mod tests {
             put_json["draft"]["command_bots"][0]["token"],
             json!("command-token")
         );
+        assert_eq!(put_json["draft"]["updated_at_ms"], json!(1));
         assert_eq!(
             put_json["secret_policy"]["cleared_on_complete"],
             json!(true)
@@ -3676,6 +3720,9 @@ mod tests {
         let (discord_api_base, _post_count) = spawn_mock_discord_server().await;
         let db = test_db();
         let state = AppState::test_state(db.clone(), test_engine(&db));
+        let app = Router::new()
+            .route("/draft", axum::routing::get(draft_get))
+            .with_state(state.clone());
         let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
 
         save_onboarding_draft(temp.path(), &sample_draft().normalize().unwrap()).unwrap();
@@ -3701,6 +3748,21 @@ mod tests {
         assert_eq!(success_status, StatusCode::OK);
         assert_eq!(success_body["ok"], json!(true));
         assert!(load_onboarding_draft(temp.path()).unwrap().is_none());
+        let draft_get_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/draft")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft_get_response.status(), StatusCode::OK);
+        let draft_get_body = axum::body::to_bytes(draft_get_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let draft_get_json: serde_json::Value = serde_json::from_slice(&draft_get_body).unwrap();
+        assert_eq!(draft_get_json["available"], json!(false));
 
         let status_state = AppState::test_state(db.clone(), test_engine(&db));
         let (status_code, Json(status_body)) = status(axum::extract::State(status_state)).await;
@@ -3708,6 +3770,53 @@ mod tests {
         assert_eq!(status_body["setup_mode"], json!("rerun"));
         assert_eq!(status_body["draft_available"], json!(false));
         assert_eq!(status_body["resume_state"], json!("none"));
+    }
+
+    #[tokio::test]
+    async fn draft_put_rejects_oversized_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let app = Router::new()
+            .route("/draft", axum::routing::put(draft_put))
+            .with_state(state);
+
+        let mut oversized = sample_draft();
+        oversized.agents = (0..80)
+            .map(|index| OnboardingDraftAgent {
+                id: format!("agent-{index}"),
+                name: format!("Agent {index}"),
+                name_en: Some(format!("Agent {index}")),
+                description: "desc".to_string(),
+                description_en: Some("desc".to_string()),
+                prompt: "prompt".repeat(32),
+                custom: true,
+            })
+            .collect();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/draft")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&oversized).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("max agents")
+        );
     }
 
     #[test]
