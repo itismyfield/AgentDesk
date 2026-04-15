@@ -685,6 +685,8 @@ struct RestoreRunCounts {
     unbound_dispatches: usize,
 }
 
+const RUN_STATUS_RESTORING: &str = "restoring";
+
 #[derive(Debug, Clone)]
 enum RestoreEntryDecision {
     Pending,
@@ -4539,7 +4541,7 @@ pub async fn restore_run(
                 Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
             );
         }
-        Some("cancelled") => {}
+        Some("cancelled") | Some(RUN_STATUS_RESTORING) => {}
         Some("active") => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -4550,7 +4552,9 @@ pub async fn restore_run(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": format!("only cancelled runs can be restored (status={status})"),
+                    "error": format!(
+                        "only cancelled or restoring runs can be restored (status={status})"
+                    ),
                     "run_id": run_id,
                     "status": status,
                 })),
@@ -4567,21 +4571,25 @@ pub async fn restore_run(
             );
         }
     };
-    let restored_run = conn
-        .execute(
-            "UPDATE auto_queue_runs
-             SET status = 'active',
-                 completed_at = NULL
-             WHERE id = ?1
-               AND status = 'cancelled'",
-            [&run_id],
-        )
-        .unwrap_or(0);
-    if restored_run == 0 {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": format!("failed to restore cancelled run '{run_id}'")})),
-        );
+    if run_status.as_deref() == Some("cancelled") {
+        let restored_run = conn
+            .execute(
+                "UPDATE auto_queue_runs
+                 SET status = ?2,
+                     completed_at = NULL
+                 WHERE id = ?1
+                   AND status = 'cancelled'",
+                rusqlite::params![&run_id, RUN_STATUS_RESTORING],
+            )
+            .unwrap_or(0);
+        if restored_run == 0 {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"error": format!("failed to start restore for cancelled run '{run_id}'")}),
+                ),
+            );
+        }
     }
     drop(conn);
 
@@ -4934,6 +4942,38 @@ pub async fn restore_run(
             );
         }
     };
+    if errors.is_empty() {
+        let finalized = conn
+            .execute(
+                "UPDATE auto_queue_runs
+                 SET status = 'active',
+                     completed_at = NULL
+                 WHERE id = ?1
+                   AND status = ?2",
+                rusqlite::params![&run_id, RUN_STATUS_RESTORING],
+            )
+            .unwrap_or(0);
+        if finalized == 0 {
+            let current_status: Option<String> = conn
+                .query_row(
+                    "SELECT status
+                     FROM auto_queue_runs
+                     WHERE id = ?1",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            match current_status.as_deref() {
+                Some("active") => {}
+                Some(status) => errors.push(format!(
+                    "failed to finalize restore for run '{run_id}' (status={status})"
+                )),
+                None => errors.push(format!(
+                    "failed to finalize restore for missing run '{run_id}'"
+                )),
+            }
+        }
+    }
     let final_run_status = conn
         .query_row(
             "SELECT status

@@ -7201,6 +7201,193 @@ async fn auto_queue_restore_run_rejects_active_run() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restore-retry");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-restore-retry-ok",
+        1811,
+        "ready",
+        "agent-restore-retry",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-restore-retry-fail",
+        1812,
+        "ready",
+        "agent-restore-retry",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-restore-retry', 'test-repo', 'agent-restore-retry', 'cancelled', 2, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-retry-ok', 'run-restore-retry', 'card-restore-retry-ok',
+                'agent-restore-retry', 'skipped', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-retry-fail', 'run-restore-retry', 'card-restore-retry-fail',
+                'agent-restore-retry', 'skipped', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_restore_retry_entry
+             BEFORE UPDATE OF status ON auto_queue_entries
+             WHEN OLD.id = 'entry-restore-retry-fail'
+               AND NEW.status != OLD.status
+             BEGIN
+                 SELECT RAISE(ABORT, 'restore retry blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-retry/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["run_status"], "restoring");
+    assert_eq!(json["restored_pending"], 1);
+    assert!(
+        json["errors"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|value| value
+                .as_str()
+                .unwrap_or_default()
+                .contains("entry-restore-retry-fail")),
+        "restore response must surface the skipped entry that still needs recovery"
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-restore-retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_status, "restoring");
+
+        let restored_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-retry-ok'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_status, "pending");
+
+        let missing_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-retry-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing_status, "skipped");
+        conn.execute("DROP TRIGGER fail_restore_retry_entry", [])
+            .unwrap();
+    }
+
+    let retry_app = test_api_router(db.clone(), test_engine(&db), None);
+    let retry_response = retry_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-retry/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_body = axum::body::to_bytes(retry_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let retry_json: serde_json::Value = serde_json::from_slice(&retry_body).unwrap();
+    assert_eq!(retry_json["ok"], true);
+    assert_eq!(retry_json["run_status"], "active");
+    assert_eq!(retry_json["restored_pending"], 1);
+
+    let conn = db.lock().unwrap();
+    let final_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-restore-retry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(final_run_status, "active");
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE run_id = 'run-restore-retry'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            (
+                "entry-restore-retry-fail".to_string(),
+                "pending".to_string(),
+            ),
+            ("entry-restore-retry-ok".to_string(), "pending".to_string()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
