@@ -884,32 +884,30 @@ export default function AutoQueuePanel({
     );
   };
 
-  const renderPhaseGateIndicator = (
-    fromPhase: number,
-    toPhase: number,
-  ) => {
-    const gates = gatesByPhase.get(toPhase) ?? [];
-    const hasDeploy = deployPhases.has(toPhase);
+  const renderPhaseGateIndicator = (phase: number) => {
+    const gates = gatesByPhase.get(phase) ?? [];
+    const hasDeploy = deployPhases.has(phase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
-    const isPending = gate != null && gateStatus === "pending";
-    const statusColor =
-      gateStatus === "passed"
-        ? "#4ade80"
-        : gateStatus === "failed"
-          ? "#ef4444"
-          : "#f59e0b";
-    const statusLabel =
-      gateStatus === "passed"
-        ? tr("통과", "Passed")
-        : gateStatus === "failed"
-          ? tr("실패", "Failed")
-          : tr("대기", "Pending");
+    const isPassed = gateStatus === "passed";
+    const isFailed = gateStatus === "failed";
+    const isPending = !isPassed && !isFailed;
+    const statusColor = isPassed
+      ? "#4ade80"
+      : isFailed
+        ? "#ef4444"
+        : "#f59e0b";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : "⏳";
+    const statusLabel = isPassed
+      ? tr("통과", "Passed")
+      : isFailed
+        ? tr("실패", "Failed")
+        : tr("대기", "Pending");
 
     return (
       <div
-        key={`gate-${fromPhase}-${toPhase}`}
+        key={`gate-${phase}`}
         className="flex items-center gap-2 px-3 py-1.5"
       >
         <div
@@ -924,7 +922,7 @@ export default function AutoQueuePanel({
           }}
         >
           <span style={{ color: statusColor, fontSize: 14 }}>
-            {gateStatus === "passed" ? "✓" : gateStatus === "failed" ? "✗" : "⏳"}
+            {statusIcon}
           </span>
           <span
             className="text-xs font-mono font-semibold"
@@ -1418,13 +1416,8 @@ export default function AutoQueuePanel({
           {viewMode === "all" && (
             hasBatchPhases ? (
               <div className="space-y-3">
-                {phaseSections.map(([phase, phaseEntries], sectionIdx) => (
+                {phaseSections.map(([phase, phaseEntries]) => (
                   <div key={`phase-section-${phase}`}>
-                    {sectionIdx > 0 &&
-                      renderPhaseGateIndicator(
-                        phaseSections[sectionIdx - 1][0],
-                        phase,
-                      )}
                     {renderPhaseBlock(
                       phase,
                       phaseEntries,
@@ -1459,6 +1452,7 @@ export default function AutoQueuePanel({
                         ))}
                       </div>,
                     )}
+                    {renderPhaseGateIndicator(phase)}
                   </div>
                 ))}
               </div>
@@ -1516,7 +1510,7 @@ export default function AutoQueuePanel({
                 </div>
               )}
               {hasBatchPhases
-                ? phaseSections.map(([phase, phaseEntries], sectionIdx) => {
+                ? phaseSections.map(([phase, phaseEntries]) => {
                     const groupsInPhase = new Map<number, DispatchQueueEntryType[]>();
                     for (const entry of phaseEntries) {
                       const groupNum = entry.thread_group ?? 0;
@@ -1526,11 +1520,6 @@ export default function AutoQueuePanel({
                     }
                     return (
                       <div key={`phase-section-${phase}`}>
-                        {sectionIdx > 0 &&
-                          renderPhaseGateIndicator(
-                            phaseSections[sectionIdx - 1][0],
-                            phase,
-                          )}
                         {renderPhaseBlock(
                           phase,
                           phaseEntries,
@@ -1542,6 +1531,7 @@ export default function AutoQueuePanel({
                               )}
                           </div>,
                         )}
+                        {renderPhaseGateIndicator(phase)}
                       </div>
                     );
                   })
