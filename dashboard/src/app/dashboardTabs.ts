@@ -18,10 +18,21 @@ export function readDashboardTabFromUrl(): DashboardTab {
   return isDashboardTab(stored) ? stored : "operations";
 }
 
-export function syncDashboardTabToUrl(tab: DashboardTab) {
+export function syncDashboardTabToUrl(
+  tab: DashboardTab,
+  options: { replace?: boolean } = {},
+) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
+  const currentTab = url.searchParams.get(DASHBOARD_TAB_QUERY_KEY);
   url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
   window.localStorage.setItem(DASHBOARD_TAB_STORAGE_KEY, tab);
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  if (currentTab === tab) return;
+
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  if (options.replace) {
+    window.history.replaceState(null, "", nextUrl);
+    return;
+  }
+  window.history.pushState(null, "", nextUrl);
 }

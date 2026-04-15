@@ -1,7 +1,21 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ErrorInfo,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
 import { getStaleLinkedSessions } from "../agent-insights";
 import {
+  DASHBOARD_TABS,
   readDashboardTabFromUrl,
   syncDashboardTabToUrl,
   type DashboardTab,
@@ -49,6 +63,20 @@ const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
 
 type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
 
+interface DashboardTabDefinition {
+  id: DashboardTab;
+  label: string;
+  detail: string;
+}
+
+function dashboardTabButtonId(tab: DashboardTab): string {
+  return `dashboard-tab-${tab}`;
+}
+
+function dashboardTabPanelId(tab: DashboardTab): string {
+  return `dashboard-panel-${tab}`;
+}
+
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
   agents: Agent[];
@@ -85,18 +113,103 @@ export default function DashboardPageView({
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => readDashboardTabFromUrl());
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(null);
   const [skillWindow, setSkillWindow] = useState<"7d" | "30d" | "all">("all");
+  const tabButtonRefs = useRef<Record<DashboardTab, HTMLButtonElement | null>>({
+    operations: null,
+    tokens: null,
+    automation: null,
+    achievements: null,
+    meetings: null,
+  });
+  const hasSyncedInitialTabRef = useRef(false);
+
+  const tabDefinitions: DashboardTabDefinition[] = useMemo(
+    () => [
+      {
+        id: "operations",
+        label: t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" }),
+        detail: t({ ko: "HEALTH + 프로바이더 상태", en: "HEALTH + provider status", ja: "HEALTH + provider 状態", zh: "HEALTH + provider 状态" }),
+      },
+      {
+        id: "tokens",
+        label: t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "Token" }),
+        detail: t({ ko: "히트맵 + 비용 + ROI", en: "Heatmap + spend + ROI", ja: "ヒートマップ + コスト + ROI", zh: "热力图 + 成本 + ROI" }),
+      },
+      {
+        id: "automation",
+        label: t({ ko: "자동화", en: "Automation", ja: "自動化", zh: "自动化" }),
+        detail: t({ ko: "크론 + 스킬 허브", en: "Cron + skill hub", ja: "Cron + スキルハブ", zh: "Cron + 技能中心" }),
+      },
+      {
+        id: "achievements",
+        label: t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" }),
+        detail: t({ ko: "랭킹 + 업적", en: "Ranking + achievements", ja: "ランキング + 実績", zh: "排行 + 成就" }),
+      },
+      {
+        id: "meetings",
+        label: t({ ko: "회의", en: "Meetings", ja: "会議", zh: "会议" }),
+        detail: t({ ko: "기록 + 후속 일감", en: "Records + follow-ups", ja: "記録 + フォローアップ", zh: "记录 + 后续事项" }),
+      },
+    ],
+    [t],
+  );
+
+  const focusDashboardTab = useCallback((tab: DashboardTab) => {
+    setActiveTab(tab);
+    window.requestAnimationFrame(() => {
+      tabButtonRefs.current[tab]?.focus();
+    });
+  }, []);
+
+  const handleTabKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, tab: DashboardTab) => {
+      const currentIndex = DASHBOARD_TABS.indexOf(tab);
+      if (currentIndex < 0) return;
+
+      let nextTab: DashboardTab | null = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextTab = DASHBOARD_TABS[(currentIndex + 1) % DASHBOARD_TABS.length];
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextTab = DASHBOARD_TABS[(currentIndex - 1 + DASHBOARD_TABS.length) % DASHBOARD_TABS.length];
+      } else if (event.key === "Home") {
+        nextTab = DASHBOARD_TABS[0];
+      } else if (event.key === "End") {
+        nextTab = DASHBOARD_TABS[DASHBOARD_TABS.length - 1];
+      }
+
+      if (!nextTab) return;
+      event.preventDefault();
+      focusDashboardTab(nextTab);
+    },
+    [focusDashboardTab],
+  );
 
   useEffect(() => {
-    syncDashboardTabToUrl(activeTab);
+    syncDashboardTabToUrl(activeTab, { replace: !hasSyncedInitialTabRef.current });
+    hasSyncedInitialTabRef.current = true;
   }, [activeTab]);
 
   useEffect(() => {
-    if (!requestedTab) return;
-    setActiveTab(requestedTab);
-    onRequestedTabHandled?.();
-  }, [requestedTab, onRequestedTabHandled]);
+    const handlePopState = () => setActiveTab(readDashboardTabFromUrl());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
+    if (!requestedTab) return;
+    focusDashboardTab(requestedTab);
+    onRequestedTabHandled?.();
+  }, [focusDashboardTab, requestedTab, onRequestedTabHandled]);
+
+  useEffect(() => {
+    tabButtonRefs.current[activeTab]?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "center",
+    });
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== "achievements") return;
     let mounted = true;
 
     const load = async () => {
@@ -114,7 +227,7 @@ export default function DashboardPageView({
       mounted = false;
       clearInterval(timer);
     };
-  }, [skillWindow]);
+  }, [activeTab, skillWindow]);
 
   if (!stats) {
     return (
@@ -225,42 +338,31 @@ export default function DashboardPageView({
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
         }}
       >
-        <div className="mt-4 flex flex-wrap gap-2">
-          <DashboardTabButton
-            active={activeTab === "operations"}
-            label={t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" })}
-            detail={t({ ko: "HEALTH + 프로바이더 상태", en: "HEALTH + provider status", ja: "HEALTH + provider 状態", zh: "HEALTH + provider 状态" })}
-            onClick={() => setActiveTab("operations")}
-          />
-          <DashboardTabButton
-            active={activeTab === "tokens"}
-            label={t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "Token" })}
-            detail={t({ ko: "히트맵 + 비용 + ROI", en: "Heatmap + spend + ROI", ja: "ヒートマップ + コスト + ROI", zh: "热力图 + 成本 + ROI" })}
-            onClick={() => setActiveTab("tokens")}
-          />
-          <DashboardTabButton
-            active={activeTab === "automation"}
-            label={t({ ko: "자동화", en: "Automation", ja: "自動化", zh: "自动化" })}
-            detail={t({ ko: "크론 + 스킬 허브", en: "Cron + skill hub", ja: "Cron + スキルハブ", zh: "Cron + 技能中心" })}
-            onClick={() => setActiveTab("automation")}
-          />
-          <DashboardTabButton
-            active={activeTab === "achievements"}
-            label={t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" })}
-            detail={t({ ko: "랭킹 + 업적", en: "Ranking + achievements", ja: "ランキング + 実績", zh: "排行 + 成就" })}
-            onClick={() => setActiveTab("achievements")}
-          />
-          <DashboardTabButton
-            active={activeTab === "meetings"}
-            label={t({ ko: "회의", en: "Meetings", ja: "会議", zh: "会议" })}
-            detail={t({ ko: "기록 + 후속 일감", en: "Records + follow-ups", ja: "記録 + フォローアップ", zh: "记录 + 后续事项" })}
-            onClick={() => setActiveTab("meetings")}
-          />
+        <div
+          role="tablist"
+          aria-label={t({ ko: "대시보드 섹션", en: "Dashboard sections", ja: "ダッシュボードセクション", zh: "仪表盘分区" })}
+          className="mt-4 -mx-1 overflow-x-auto px-1 pb-1 sm:mx-0 sm:px-0 sm:pb-0"
+        >
+          <div className="flex min-w-max gap-2 sm:min-w-0 sm:flex-wrap">
+            {tabDefinitions.map((tab) => (
+              <DashboardTabButton
+                key={tab.id}
+                tab={tab.id}
+                active={activeTab === tab.id}
+                label={tab.label}
+                detail={tab.detail}
+                onClick={() => setActiveTab(tab.id)}
+                onKeyDown={handleTabKeyDown}
+                buttonRef={(node) => {
+                  tabButtonRefs.current[tab.id] = node;
+                }}
+              />
+            ))}
+          </div>
         </div>
       </SurfaceSection>
 
-      {activeTab === "operations" && (
-        <div className="space-y-5">
+      <DashboardTabPanel tab="operations" activeTab={activeTab} t={t}>
           <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <SurfaceSubsection
@@ -373,21 +475,17 @@ export default function DashboardPageView({
             <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           </div>
           <BottleneckWidget t={t} />
-        </div>
-      )}
+      </DashboardTabPanel>
 
-      {activeTab === "tokens" && (
-        <div className="space-y-5">
+      <DashboardTabPanel tab="tokens" activeTab={activeTab} t={t}>
           <TokenAnalyticsSection
             agents={agents}
             t={t}
             numberFormatter={numberFormatter}
           />
-        </div>
-      )}
+      </DashboardTabPanel>
 
-      {activeTab === "automation" && (
-        <div className="space-y-5">
+      <DashboardTabPanel tab="automation" activeTab={activeTab} t={t}>
           <PulseSectionShell
             eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
             title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
@@ -428,11 +526,9 @@ export default function DashboardPageView({
               <SkillCatalogView embedded />
             </Suspense>
           </PulseSectionShell>
-        </div>
-      )}
+      </DashboardTabPanel>
 
-      {activeTab === "achievements" && (
-        <div className="space-y-5">
+      <DashboardTabPanel tab="achievements" activeTab={activeTab} t={t}>
           <PulseSectionShell
             eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
             title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
@@ -510,11 +606,9 @@ export default function DashboardPageView({
               </SurfaceSubsection>
             </div>
           </PulseSectionShell>
-        </div>
-      )}
+      </DashboardTabPanel>
 
-      {activeTab === "meetings" && (
-        <div className="space-y-5">
+      <DashboardTabPanel tab="meetings" activeTab={activeTab} t={t}>
           <PulseSectionShell
             eyebrow={t({ ko: "Meetings", en: "Meetings", ja: "Meetings", zh: "Meetings" })}
             title={t({ ko: "회의 기록 / 후속 일감", en: "Meeting Records / Follow-ups", ja: "会議記録 / フォローアップ", zh: "会议记录 / 后续事项" })}
@@ -541,10 +635,95 @@ export default function DashboardPageView({
               <MeetingMinutesView meetings={meetings} onRefresh={() => onRefreshMeetings?.()} embedded />
             </Suspense>
           </PulseSectionShell>
-        </div>
-      )}
+      </DashboardTabPanel>
     </div>
   );
+}
+
+function DashboardTabPanel({
+  tab,
+  activeTab,
+  t,
+  children,
+}: {
+  tab: DashboardTab;
+  activeTab: DashboardTab;
+  t: TFunction;
+  children: ReactNode;
+}) {
+  if (activeTab !== tab) return null;
+
+  return (
+    <DashboardTabErrorBoundary tab={tab} t={t}>
+      <div
+        role="tabpanel"
+        id={dashboardTabPanelId(tab)}
+        aria-labelledby={dashboardTabButtonId(tab)}
+        tabIndex={0}
+        className="space-y-5"
+      >
+        {children}
+      </div>
+    </DashboardTabErrorBoundary>
+  );
+}
+
+class DashboardTabErrorBoundary extends Component<
+  { tab: DashboardTab; t: TFunction; children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(`Dashboard tab "${this.props.tab}" crashed`, error, errorInfo);
+  }
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+
+    return (
+      <SurfaceEmptyState className="rounded-3xl border px-4 py-8 text-center text-sm">
+        <div className="space-y-3">
+          <div className="text-3xl opacity-40">⚠️</div>
+          <div style={{ color: "var(--th-text-heading)" }}>
+            {this.props.t({
+              ko: "이 탭을 렌더링하는 중 오류가 발생했습니다.",
+              en: "This tab failed while rendering.",
+              ja: "このタブの描画中にエラーが発生しました。",
+              zh: "该标签页渲染时发生错误。",
+            })}
+          </div>
+          <div style={{ color: "var(--th-text-muted)" }}>
+            {this.props.t({
+              ko: "다른 탭으로 이동한 뒤 다시 돌아오거나 새로고침해 주세요.",
+              en: "Switch away and come back, or refresh the page.",
+              ja: "別のタブに移動して戻るか、ページを更新してください。",
+              zh: "请切换到其他标签页后再返回，或刷新页面。",
+            })}
+          </div>
+          <div className="flex justify-center">
+            <SurfaceActionButton
+              tone="neutral"
+              onClick={() => this.setState({ hasError: false })}
+            >
+              {this.props.t({
+                ko: "다시 시도",
+                en: "Try Again",
+                ja: "再試行",
+                zh: "重试",
+              })}
+            </SurfaceActionButton>
+          </div>
+        </div>
+      </SurfaceEmptyState>
+    );
+  }
 }
 
 function PulseSectionShell({
@@ -897,21 +1076,34 @@ function SkillRankingList({
 }
 
 function DashboardTabButton({
+  tab,
   active,
   label,
   detail,
   onClick,
+  onKeyDown,
+  buttonRef,
 }: {
+  tab: DashboardTab;
   active: boolean;
   label: string;
   detail: string;
   onClick: () => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, tab: DashboardTab) => void;
+  buttonRef: (node: HTMLButtonElement | null) => void;
 }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
+      id={dashboardTabButtonId(tab)}
+      role="tab"
+      aria-selected={active}
+      aria-controls={dashboardTabPanelId(tab)}
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
-      className="min-w-[10rem] flex-1 rounded-2xl border px-4 py-3 text-left transition-colors sm:flex-none"
+      onKeyDown={(event) => onKeyDown(event, tab)}
+      className="min-h-12 w-[11rem] shrink-0 snap-start rounded-2xl border px-4 py-3 text-left transition-colors sm:min-w-[10rem] sm:flex-1 sm:w-auto"
       style={{
         borderColor: active
           ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
