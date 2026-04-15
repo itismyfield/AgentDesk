@@ -923,7 +923,6 @@ fn codex_reasoning_summary(item: &Value) -> Option<String> {
 fn normalize_codex_mcp_segment(value: &str) -> Option<String> {
     let normalized = value
         .trim()
-        .replace("__", "_")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join("_");
@@ -1375,6 +1374,32 @@ mod tests {
                 );
             }
             other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_codex_mcp_tool_name_preserves_double_underscore_segments() {
+        let (tx, rx) = mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started_at = std::time::Instant::now();
+
+        let _ = handle_codex_json_line(
+            r#"{"type":"mcp_tool_call_begin","call_id":"call-2","invocation":{"server":"memento__beta","tool":"context","arguments":{}}}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+
+        let items: Vec<StreamMessage> = rx.try_iter().collect();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            StreamMessage::ToolUse { name, .. } => {
+                assert_eq!(name, "mcp__memento__beta__context");
+            }
+            other => panic!("Expected ToolUse, got {:?}", other),
         }
     }
 
