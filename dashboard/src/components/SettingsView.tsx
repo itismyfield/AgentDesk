@@ -1,8 +1,8 @@
-import { Suspense, lazy, useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { CompanySettings } from "../types";
 import * as api from "../api";
-import TooltipLabel from "./common/TooltipLabel";
 import {
+  SettingsCallout,
   SettingsCard,
   SettingsEmptyState,
   SettingsSection,
@@ -45,8 +45,21 @@ type ConfigEntry = {
 
 type ConfigEditValue = string | boolean;
 type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding";
+type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract" | "typed-only" | "backend-followup";
+
+interface AuditNote {
+  id: string;
+  titleKo: string;
+  titleEn: string;
+  descriptionKo: string;
+  descriptionEn: string;
+  keys: string[];
+  status: AuditNoteStatus;
+}
 
 const SETTINGS_PANEL_STORAGE_KEY = "agentdesk.settings.active-panel";
+const SETTINGS_PANEL_QUERY_KEY = "settingsPanel";
+const SETTINGS_RUNTIME_CATEGORY_STORAGE_KEY = "agentdesk.settings.runtime-category";
 const GENERAL_FIELD_KEYS = ["companyName", "ceoName", "language", "theme"] as const;
 
 const CATEGORIES: Array<{
@@ -374,15 +387,132 @@ const SYSTEM_CATEGORY_META = {
 
 const PRIMARY_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["pipeline", "review", "timeout", "dispatch"];
 const ADVANCED_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["context", "system"];
+const AUDIT_NOTES: AuditNote[] = [
+  {
+    id: "settings-json-merge",
+    titleKo: "회사 설정 JSON은 전체 덮어쓰기 모델",
+    titleEn: "Company settings JSON uses full replacement",
+    descriptionKo: "`/api/settings`는 patch merge가 아니라 body 전체를 저장합니다. 현재 UI는 기존 `settings` JSON과 병합해 hidden key 손실을 막아야 합니다.",
+    descriptionEn: "`/api/settings` stores the full body instead of merging patches. The UI must merge with the existing `settings` JSON to avoid losing hidden keys.",
+    keys: ["settings"],
+    status: "backend-followup",
+  },
+  {
+    id: "server-port-readonly",
+    titleKo: "`server_port`는 사실상 읽기 전용",
+    titleEn: "`server_port` is effectively read-only",
+    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 다시 기록합니다. 편집 가능한 값처럼 보이면 운영 오해를 만듭니다.",
+    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on boot. Presenting it as editable is misleading.",
+    keys: ["server_port"],
+    status: "read-only",
+  },
+  {
+    id: "context-clear-gap",
+    titleKo: "`context_clear_*`는 설명은 있지만 settings API에 없음",
+    titleEn: "`context_clear_*` is described but not exposed by settings API",
+    descriptionKo: "UI 설명에는 등장하지만 `/api/settings/config` whitelist에는 없습니다. dead config인지 빠진 API 항목인지 본체 정리가 필요합니다.",
+    descriptionEn: "The UI descriptions mention it, but `/api/settings/config` does not expose it. ADK core should decide whether it is dead config or a missing API field.",
+    keys: ["context_clear_percent", "context_clear_idle_minutes"],
+    status: "backend-followup",
+  },
+  {
+    id: "onboarding-secrets",
+    titleKo: "온보딩 관련 설정은 별도 API/DB 전용",
+    titleEn: "Onboarding settings are managed through a dedicated API/DB path",
+    descriptionKo: "봇 토큰, guild/owner/provider, 보조 command token은 `/api/onboarding/*`와 개별 `kv_meta` 키로 관리됩니다. 일반 설정창보다 위저드가 안전합니다.",
+    descriptionEn: "Bot tokens, guild/owner/provider, and secondary command tokens are managed via `/api/onboarding/*` and dedicated `kv_meta` keys. A wizard is safer than the general settings form.",
+    keys: [
+      "onboarding_bot_token",
+      "onboarding_guild_id",
+      "onboarding_owner_id",
+      "onboarding_announce_token",
+      "onboarding_notify_token",
+      "onboarding_command_token_2",
+      "onboarding_provider",
+      "onboarding_command_provider_2",
+    ],
+    status: "managed-elsewhere",
+  },
+  {
+    id: "room-theme-multipath",
+    titleKo: "`roomThemes`는 단일 정본이 아님",
+    titleEn: "`roomThemes` is not a single-source setting",
+    descriptionKo: "`dashboard/src/app/office-workflow-pack.ts`에서 preset room theme와 custom room theme를 합쳐 사용합니다. 일반 설정 필드보다 office/visual 편집 흐름에서 관리하는 편이 맞습니다.",
+    descriptionEn: "`dashboard/src/app/office-workflow-pack.ts` merges preset room themes with custom room themes. It fits office/visual editing better than a generic settings form.",
+    keys: ["roomThemes"],
+    status: "managed-elsewhere",
+  },
+  {
+    id: "typed-only-company-settings",
+    titleKo: "타입에는 있지만 현재 소비/편집 경로가 확인되지 않은 회사 설정",
+    titleEn: "Company settings with no confirmed editor or runtime consumer",
+    descriptionKo: "현재 audit 기준으로 일부 `CompanySettings` 필드는 타입에는 있지만 실제 편집 화면이나 소비처가 확인되지 않았습니다. 제거/활성화/문서화 중 하나가 필요합니다.",
+    descriptionEn: "In the current audit, some `CompanySettings` fields exist in types but have no confirmed editor or runtime consumer. They should be removed, activated, or documented.",
+    keys: [
+      "autoUpdateEnabled",
+      "autoUpdateNoticePending",
+      "oauthAutoSwap",
+      "officeWorkflowPack",
+      "providerModelConfig",
+      "messengerChannels",
+      "officePackProfiles",
+      "officePackHydratedPacks",
+    ],
+    status: "typed-only",
+  },
+  {
+    id: "merge-automation-gap",
+    titleKo: "merge automation 설정은 policy에서 읽지만 UI/API에는 없음",
+    titleEn: "Merge automation settings are consumed by policy but absent from UI/API",
+    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 policy에서 실제 사용되지만 현재 settings API whitelist와 UI에는 없습니다.",
+    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are consumed by policy, but they are absent from the current settings API whitelist and UI.",
+    keys: ["merge_automation_enabled", "merge_strategy", "merge_allowed_authors"],
+    status: "backend-followup",
+  },
+  {
+    id: "workspace-fallback-gap",
+    titleKo: "`workspace`는 policy fallback에서 읽지만 정본이 아님",
+    titleEn: "`workspace` is read as a policy fallback but is not canonical",
+    descriptionKo: "`agentdesk.config.get('workspace')`는 `kv_meta` fallback일 뿐이고 실제 정본은 agent/session/runtime에 퍼져 있습니다. 일반 설정값처럼 설명하면 오해가 생깁니다.",
+    descriptionEn: "`agentdesk.config.get('workspace')` is only a `kv_meta` fallback. The real source of truth is spread across agent, session, and runtime surfaces.",
+    keys: ["workspace"],
+    status: "backend-followup",
+  },
+  {
+    id: "max-chain-depth-consumer-gap",
+    titleKo: "`max_chain_depth`는 노출되지만 실제 소비처가 확인되지 않음",
+    titleEn: "`max_chain_depth` is exposed but has no confirmed runtime consumer",
+    descriptionKo: "`/api/settings/config` whitelist에는 있지만 현재 코드 검색 기준으로 확실한 런타임 소비처가 보이지 않습니다. dead config인지 누락 연결인지 본체 정리가 필요합니다.",
+    descriptionEn: "It is in the `/api/settings/config` whitelist, but the current code audit did not find a confirmed runtime consumer. ADK core should decide whether it is dead config or a missing integration.",
+    keys: ["max_chain_depth"],
+    status: "backend-followup",
+  },
+];
 
 function isSettingsPanel(value: string | null): value is SettingsPanel {
   return value === "general" || value === "runtime" || value === "pipeline" || value === "onboarding";
 }
 
+function isRuntimeCategoryId(value: string | null): value is string {
+  return CATEGORIES.some((category) => category.id === value);
+}
+
+function readSettingsPanelFromUrl(): SettingsPanel | null {
+  if (typeof window === "undefined") return null;
+  const value = new URLSearchParams(window.location.search).get(SETTINGS_PANEL_QUERY_KEY);
+  return isSettingsPanel(value) ? value : null;
+}
+
 function readStoredSettingsPanel(): SettingsPanel {
   if (typeof window === "undefined") return "general";
-  const value = window.localStorage.getItem(SETTINGS_PANEL_STORAGE_KEY);
-  return isSettingsPanel(value) ? value : "general";
+  const stored = window.localStorage.getItem(SETTINGS_PANEL_STORAGE_KEY);
+  return readSettingsPanelFromUrl() ?? (isSettingsPanel(stored) ? stored : "general");
+}
+
+function readStoredRuntimeCategory(): string {
+  if (typeof window === "undefined") return CATEGORIES[0]?.id ?? "polling";
+  const value = window.localStorage.getItem(SETTINGS_RUNTIME_CATEGORY_STORAGE_KEY);
+  return isRuntimeCategoryId(value) ? value : (CATEGORIES[0]?.id ?? "polling");
 }
 
 function isBooleanConfigKey(key: string): boolean {
@@ -417,24 +547,81 @@ function formatUnit(value: number, unit: string): string {
   return unit ? `${value}${unit}` : `${value}`;
 }
 
+function auditStatusLabel(status: AuditNoteStatus, isKo: boolean): string {
+  if (isKo) {
+    if (status === "read-only") return "읽기 전용";
+    if (status === "managed-elsewhere") return "별도 관리";
+    if (status === "typed-only") return "타입 전용 후보";
+    return "본체 정리 필요";
+  }
+  if (status === "read-only") return "Read-only";
+  if (status === "managed-elsewhere") return "Managed elsewhere";
+  if (status === "typed-only") return "Typed-only candidate";
+  return "Core cleanup needed";
+}
+
+function auditStatusClass(status: AuditNoteStatus): string {
+  if (status === "read-only") return "border-slate-400/30 bg-slate-400/10 text-slate-200";
+  if (status === "managed-elsewhere") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+  return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+}
+
+function configLayerLabel(overrideActive: boolean, isKo: boolean): string {
+  return overrideActive ? (isKo ? "실시간 override" : "Live override") : (isKo ? "기준값" : "Baseline");
+}
+
+function configLayerClass(overrideActive: boolean): string {
+  return overrideActive ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+}
+
+function baselineSourceNote(source: string | null | undefined, isKo: boolean): string | null {
+  if (source === "yaml") return isKo ? "기준값 출처: agentdesk.yaml" : "Baseline source: agentdesk.yaml";
+  if (source === "hardcoded") return isKo ? "기준값 출처: 하드코딩 기본값" : "Baseline source: hardcoded default";
+  if (source === "config") return isKo ? "기준값 출처: 서버 설정" : "Baseline source: server config";
+  return null;
+}
+
+function restartBehaviorNote(behavior: string | null | undefined, isKo: boolean): string | null {
+  if (behavior === "reseed-from-yaml") {
+    return isKo ? "재시작 시 YAML baseline이 다시 적용됩니다." : "Restart re-applies the YAML baseline.";
+  }
+  if (behavior === "persist-live-override") {
+    return isKo ? "재시작 후에도 현재 live override가 유지됩니다." : "The live override persists across restart.";
+  }
+  if (behavior === "reset-to-baseline") {
+    return isKo ? "재시작 시 baseline으로 초기화됩니다." : "Restart resets this back to baseline.";
+  }
+  if (behavior === "clear-on-restart") {
+    return isKo ? "재시작 시 override가 제거됩니다." : "Restart clears this override.";
+  }
+  if (behavior === "config-only") {
+    return isKo ? "서버 설정에서 직접 읽는 값이라 여기서는 읽기 전용입니다." : "This value comes directly from server config and is read-only here.";
+  }
+  return null;
+}
+
 function PanelNavButton({
   active,
   title,
   detail,
   count,
+  ariaControls,
   onClick,
 }: {
   active: boolean;
   title: string;
   detail: string;
   count?: string;
+  ariaControls?: string;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="w-full rounded-2xl border px-4 py-3 text-left transition-colors"
+      aria-current={active ? "page" : undefined}
+      aria-controls={ariaControls}
+      className="w-full rounded-2xl border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-card-bg)]"
       style={{
         borderColor: active
           ? "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)"
@@ -471,12 +658,12 @@ function PanelNavButton({
 
 function CompactFieldCard({
   label,
-  tooltip,
+  description,
   children,
   footer,
 }: {
   label: string;
-  tooltip: string;
+  description: string;
   children: ReactNode;
   footer?: ReactNode;
 }) {
@@ -488,7 +675,12 @@ function CompactFieldCard({
         background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
       }}
     >
-      <TooltipLabel text={label} tooltip={tooltip} className="max-w-full text-sm font-medium" />
+      <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+        {label}
+      </div>
+      <p className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+        {description}
+      </p>
       <div className="mt-3">{children}</div>
       {footer && (
         <div className="mt-3 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
@@ -544,7 +736,11 @@ function GeneralSettingsField({
       <label htmlFor={id} className="block text-sm font-medium" style={{ color: "var(--th-text)" }}>
         {label}
       </label>
-      <p id={descriptionId} className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+      <p
+        id={descriptionId}
+        className="mt-1 text-xs leading-5"
+        style={{ color: "var(--th-text-muted)" }}
+      >
         {description}
       </p>
       <div className="mt-3">{children}</div>
@@ -562,12 +758,73 @@ function GeneralSettingsField({
   );
 }
 
+function StorageSurfaceCard({
+  title,
+  body,
+  footer,
+}: {
+  title: string;
+  body: string;
+  footer: string;
+}) {
+  return (
+    <SettingsCard
+      className="rounded-2xl p-4"
+      style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+    >
+      <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+        {title}
+      </div>
+      <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+        {body}
+      </p>
+      <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-secondary)" }}>
+        {footer}
+      </div>
+    </SettingsCard>
+  );
+}
+
+function AuditNoteCard({ note, isKo }: { note: AuditNote; isKo: boolean }) {
+  return (
+    <SettingsCard
+      className="rounded-2xl p-4"
+      style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+            {isKo ? note.titleKo : note.titleEn}
+          </div>
+          <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+            {isKo ? note.descriptionKo : note.descriptionEn}
+          </p>
+        </div>
+        <span className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-medium ${auditStatusClass(note.status)}`}>
+          {auditStatusLabel(note.status, isKo)}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {note.keys.map((key) => (
+          <span
+            key={key}
+            className="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px]"
+            style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}
+          >
+            {key}
+          </span>
+        ))}
+      </div>
+    </SettingsCard>
+  );
+}
+
 export default function SettingsView({
   settings,
   onSave,
   isKo,
 }: SettingsViewProps) {
-  const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
 
   const [companyName, setCompanyName] = useState(settings.companyName);
   const [ceoName, setCeoName] = useState(settings.ceoName);
@@ -586,8 +843,10 @@ export default function SettingsView({
   const [configSaving, setConfigSaving] = useState(false);
 
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
-  const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(CATEGORIES[0]?.id ?? "polling");
+  const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const onboardingDialogRef = useRef<HTMLDivElement | null>(null);
+  const onboardingCloseButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setCompanyName(settings.companyName);
@@ -600,6 +859,73 @@ export default function SettingsView({
     if (typeof window === "undefined") return;
     window.localStorage.setItem(SETTINGS_PANEL_STORAGE_KEY, activePanel);
   }, [activePanel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SETTINGS_RUNTIME_CATEGORY_STORAGE_KEY, activeRuntimeCategoryId);
+  }, [activeRuntimeCategoryId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (readSettingsPanelFromUrl() !== activePanel) {
+      const url = new URL(window.location.href);
+      url.searchParams.set(SETTINGS_PANEL_QUERY_KEY, activePanel);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }, [activePanel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handlePopState = () => {
+      const panelFromUrl = readSettingsPanelFromUrl();
+      if (panelFromUrl) setActivePanel(panelFromUrl);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!showOnboarding || typeof window === "undefined") return;
+    const previousActiveElement =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusCloseButton = window.setTimeout(() => {
+      onboardingCloseButtonRef.current?.focus();
+    }, 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setShowOnboarding(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = onboardingDialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.clearTimeout(focusCloseButton);
+      window.removeEventListener("keydown", handleKeyDown);
+      previousActiveElement?.focus();
+    };
+  }, [showOnboarding]);
 
   useEffect(() => {
     void api.getRuntimeConfig()
@@ -647,10 +973,7 @@ export default function SettingsView({
   const configDirty = Object.keys(configEdits).length > 0;
   const runtimeFieldCount = CATEGORIES.reduce((sum, category) => sum + category.fields.length, 0);
 
-  const visibleConfigEntries = useMemo(
-    () => configEntries.filter((entry) => !isReadOnlyConfigKey(entry.key) && entry.editable !== false),
-    [configEntries],
-  );
+  const visibleConfigEntries = useMemo(() => configEntries, [configEntries]);
 
   const groupedConfigEntries = useMemo(
     () =>
@@ -665,6 +988,26 @@ export default function SettingsView({
   );
 
   const activeRuntimeCategory = CATEGORIES.find((category) => category.id === activeRuntimeCategoryId) ?? CATEGORIES[0];
+
+  const handlePanelChange = useCallback((panel: SettingsPanel, mode: "push" | "replace" = "push") => {
+    setActivePanel((current) => {
+      if (typeof window !== "undefined" && !(current === panel && mode === "push")) {
+        const url = new URL(window.location.href);
+        url.searchParams.set(SETTINGS_PANEL_QUERY_KEY, panel);
+        if (mode === "replace") {
+          window.history.replaceState(window.history.state, "", url);
+        } else {
+          window.history.pushState(window.history.state, "", url);
+        }
+      }
+      return panel;
+    });
+  }, []);
+
+  const openOnboarding = useCallback(() => {
+    handlePanelChange("onboarding");
+    setShowOnboarding(true);
+  }, [handlePanelChange]);
 
   const navItems = useMemo(
     () => [
@@ -817,7 +1160,10 @@ export default function SettingsView({
                 required
                 maxLength={GENERAL_FIELD_LIMITS.companyName}
                 aria-invalid={Boolean(companyNameError)}
-                aria-describedby={joinDescribedBy("settings-company-name-description", companyNameError ? "settings-company-name-error" : null)}
+                aria-describedby={joinDescribedBy(
+                  "settings-company-name-description",
+                  companyNameError ? "settings-company-name-error" : null,
+                )}
                 className="w-full rounded-2xl px-3 py-2.5 text-sm"
                 style={inputStyle}
               />
@@ -841,7 +1187,10 @@ export default function SettingsView({
                 onBlur={() => setCeoName((current) => current.trim())}
                 maxLength={GENERAL_FIELD_LIMITS.ceoName}
                 aria-invalid={Boolean(ceoNameError)}
-                aria-describedby={joinDescribedBy("settings-ceo-name-description", ceoNameError ? "settings-ceo-name-error" : null)}
+                aria-describedby={joinDescribedBy(
+                  "settings-ceo-name-description",
+                  ceoNameError ? "settings-ceo-name-error" : null,
+                )}
                 className="w-full rounded-2xl px-3 py-2.5 text-sm"
                 style={inputStyle}
               />
@@ -924,6 +1273,50 @@ export default function SettingsView({
           </button>
         </div>
       </form>
+
+      <SettingsSubsection
+        className="mt-5"
+        title={tr("저장 경로", "Storage surfaces")}
+        description={tr(
+          "이 화면의 값이 어디에 저장되는지 먼저 보여줍니다. 저장면을 숨기면 운영자가 설정의 실제 영향 범위를 오해하게 됩니다.",
+          "Show where each setting is persisted. Hiding storage surfaces makes the UI misleading for operators.",
+        )}
+      >
+        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+          <StorageSurfaceCard
+            title={tr("회사 설정 JSON", "Company settings JSON")}
+            body={tr(
+              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서 merged save가 필요합니다.",
+              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace API, so the UI must send a merged save.",
+            )}
+            footer={tr("source: kv_meta['settings']", "source: kv_meta['settings']")}
+          />
+          <StorageSurfaceCard
+            title={tr("런타임 설정", "Runtime config")}
+            body={tr(
+              "폴링 주기와 cache TTL 같은 값은 `kv_meta['runtime-config']`에 저장되고 재시작 없이 반영됩니다.",
+              "Polling intervals and cache TTL values live in `kv_meta['runtime-config']` and apply without restart.",
+            )}
+            footer={tr("source: kv_meta['runtime-config']", "source: kv_meta['runtime-config']")}
+          />
+          <StorageSurfaceCard
+            title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
+            body={tr(
+              "리뷰, 타임아웃, context compact 같은 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해 노출됩니다.",
+              "Review, timeout, and context-compaction values are stored as individual `kv_meta` keys and exposed through `/api/settings/config`.",
+            )}
+            footer={tr("source: individual kv_meta keys", "source: individual kv_meta keys")}
+          />
+          <StorageSurfaceCard
+            title={tr("온보딩/시크릿", "Onboarding and secrets")}
+            body={tr(
+              "봇 토큰과 guild/owner/provider 설정은 일반 폼이 아니라 전용 온보딩 API와 위저드가 관리합니다.",
+              "Bot tokens and guild/owner/provider wiring are managed by the dedicated onboarding API and wizard rather than the general form.",
+            )}
+            footer={tr("source: onboarding API + kv_meta", "source: onboarding API + kv_meta")}
+          />
+        </div>
+      </SettingsSubsection>
     </SettingsSection>
   );
 
@@ -934,16 +1327,6 @@ export default function SettingsView({
       description={tr(
         "재시작 없이 바로 반영되는 값만 모았습니다.",
         "Only the values that apply without restart are shown here.",
-      )}
-      actions={(
-        <button
-          onClick={handleRcSave}
-          disabled={rcSaving || !rcDirty}
-          className={primaryActionClass}
-          style={primaryActionStyle}
-        >
-          {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 저장", "Save runtime")}
-        </button>
       )}
     >
       {!rcLoaded ? (
@@ -980,7 +1363,7 @@ export default function SettingsView({
               title={tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}
               description={tr(activeRuntimeCategory.descriptionKo, activeRuntimeCategory.descriptionEn)}
             >
-              <div className="grid gap-3 xl:grid-cols-2">
+              <div className="grid gap-3 md:grid-cols-2">
                 {activeRuntimeCategory.fields.map((field) => {
                   const value = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
                   const defaultValue = rcDefaults[field.key] ?? 0;
@@ -990,7 +1373,7 @@ export default function SettingsView({
                     <CompactFieldCard
                       key={field.key}
                       label={tr(field.labelKo, field.labelEn)}
-                      tooltip={tr(field.descriptionKo, field.descriptionEn)}
+                      description={tr(field.descriptionKo, field.descriptionEn)}
                       footer={tr(
                         `현재 ${formatUnit(value, field.unit)} · 기본값 ${formatUnit(defaultValue, field.unit)}`,
                         `Current ${formatUnit(value, field.unit)} · Default ${formatUnit(defaultValue, field.unit)}`,
@@ -1041,6 +1424,27 @@ export default function SettingsView({
               </div>
             </SettingsSubsection>
           )}
+
+          <SettingsCallout
+            className="mt-0"
+            action={(
+              <button
+                onClick={handleRcSave}
+                disabled={rcSaving || !rcDirty}
+                className={primaryActionClass}
+                style={primaryActionStyle}
+              >
+                {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 저장", "Save runtime")}
+              </button>
+            )}
+          >
+            <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                "런타임 설정은 저장 즉시 반영됩니다. 현재 선택한 하위 카테고리는 브라우저에 기억해 두었다가 다음 방문 때 다시 엽니다.",
+                "Runtime settings apply immediately on save. The selected subcategory is remembered in the browser and restored on the next visit.",
+              )}
+            </p>
+          </SettingsCallout>
         </div>
       )}
     </SettingsSection>
@@ -1057,28 +1461,73 @@ export default function SettingsView({
         title={tr(meta.titleKo, meta.titleEn)}
         description={tr(meta.descriptionKo, meta.descriptionEn)}
       >
-        <div className="grid gap-3 xl:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           {entries.map((entry) => {
             const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
             const hasLocalEdit = Object.prototype.hasOwnProperty.call(configEdits, entry.key);
             const currentValue = hasLocalEdit ? configEdits[entry.key] : (entry.value ?? entry.default ?? "");
             const defaultLabel = entry.default ?? tr("없음", "None");
+            const readOnly = isReadOnlyConfigKey(entry.key) || entry.editable === false;
             const isEnabled = parseBooleanConfigValue(currentValue);
+            const layerLabel = configLayerLabel(Boolean(entry.override_active), isKo);
+            const layerClass = configLayerClass(Boolean(entry.override_active));
+            const baselineNote = baselineSourceNote(entry.baseline_source, isKo);
+            const restartNote = restartBehaviorNote(entry.restart_behavior, isKo);
+            const descriptionText = isKo ? description?.ko ?? entry.key : description?.en ?? entry.key;
+            const precisionNote = entry.key.endsWith("_channel_id")
+              ? tr(
+                  "Discord channel ID는 정밀도 손실을 피하려고 문자열로 유지합니다.",
+                  "Discord channel IDs stay as strings to avoid precision loss.",
+                )
+              : null;
+
+            const footer = (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium"
+                    style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
+                  >
+                    kv_meta
+                  </span>
+                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${layerClass}`}>
+                    {layerLabel}
+                  </span>
+                  {readOnly ? (
+                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${auditStatusClass("read-only")}`}>
+                      {auditStatusLabel("read-only", isKo)}
+                    </span>
+                  ) : null}
+                  <code className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: "rgba(15,23,42,0.42)", color: "var(--th-text-secondary)" }}>
+                    {entry.key}
+                  </code>
+                </div>
+                <div className="space-y-1" style={{ color: "var(--th-text-muted)" }}>
+                  <div>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</div>
+                  {entry.baseline ? <div>{tr(`baseline: ${entry.baseline}`, `baseline: ${entry.baseline}`)}</div> : null}
+                  {baselineNote ? <div>{baselineNote}</div> : null}
+                  {restartNote ? <div>{restartNote}</div> : null}
+                  {precisionNote ? <div>{precisionNote}</div> : null}
+                </div>
+              </div>
+            );
 
             if (isBooleanConfigKey(entry.key)) {
               return (
                 <CompactFieldCard
                   key={entry.key}
                   label={isKo ? entry.label_ko : entry.label_en}
-                  tooltip={isKo ? description?.ko ?? entry.key : description?.en ?? entry.key}
-                  footer={tr(`기본값 ${defaultLabel}`, `Default ${defaultLabel}`)}
+                  description={descriptionText}
+                  footer={footer}
                 >
                   <button
                     type="button"
                     role="switch"
                     aria-checked={isEnabled}
+                    aria-readonly={readOnly}
+                    disabled={readOnly}
                     onClick={() => handleConfigEdit(entry.key, !isEnabled)}
-                    className="flex min-h-[52px] w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition-colors"
+                    className="flex min-h-[52px] w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-70"
                     style={{
                       borderColor: isEnabled ? "rgba(16,185,129,0.35)" : "rgba(148,163,184,0.24)",
                       background: isEnabled ? "rgba(16,185,129,0.12)" : "rgba(15,23,42,0.2)",
@@ -1088,6 +1537,11 @@ export default function SettingsView({
                       <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
                         {isEnabled ? tr("활성화", "Enabled") : tr("비활성", "Disabled")}
                       </div>
+                      {readOnly ? (
+                        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                          {tr("현재 상태만 표시합니다.", "Displayed as status only.")}
+                        </div>
+                      ) : null}
                     </div>
                     <span
                       className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors"
@@ -1107,13 +1561,14 @@ export default function SettingsView({
               <CompactFieldCard
                 key={entry.key}
                 label={isKo ? entry.label_ko : entry.label_en}
-                tooltip={isKo ? description?.ko ?? entry.key : description?.en ?? entry.key}
-                footer={tr(`기본값 ${defaultLabel}`, `Default ${defaultLabel}`)}
+                description={descriptionText}
+                footer={footer}
               >
                 <input
-                  type={isNumericConfigKey(entry.key) ? "number" : "text"}
+                  type={isNumericConfigKey(entry.key) && !readOnly ? "number" : "text"}
                   inputMode={isNumericConfigKey(entry.key) ? "numeric" : undefined}
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  disabled={readOnly}
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-80"
                   style={inputStyle}
                   value={String(currentValue)}
                   onChange={(event) => handleConfigEdit(entry.key, event.target.value)}
@@ -1131,18 +1586,8 @@ export default function SettingsView({
       eyebrow={tr("파이프라인", "Pipeline")}
       title={tr("리뷰와 상태 전환 정책", "Review and transition policy")}
       description={tr(
-        "운영 흐름에 직접 영향을 주는 항목만 남기고, 저장 위치 같은 내부 메모는 숨겼습니다.",
-        "Only the controls that affect the live workflow remain visible; storage implementation notes are hidden.",
-      )}
-      actions={(
-        <button
-          onClick={handleConfigSave}
-          disabled={configSaving || !configDirty}
-          className={primaryActionClass}
-          style={primaryActionStyle}
-        >
-          {configSaving ? tr("저장 중...", "Saving...") : tr("파이프라인 저장", "Save pipeline")}
-        </button>
+        "개별 `kv_meta` 키로 저장되는 정책 값을 편집하고, 저장 레이어와 read-only 조건도 같이 노출합니다.",
+        "Edit policy values stored as individual `kv_meta` keys and expose storage-layer/read-only metadata alongside them.",
       )}
     >
       {configEntries.length === 0 ? (
@@ -1151,6 +1596,27 @@ export default function SettingsView({
         </SettingsEmptyState>
       ) : (
         <div className="mt-5 space-y-5">
+          <SettingsCallout
+            className="mt-0"
+            action={(
+              <button
+                onClick={handleConfigSave}
+                disabled={configSaving || !configDirty}
+                className={primaryActionClass}
+                style={primaryActionStyle}
+              >
+                {configSaving ? tr("저장 중...", "Saving...") : tr("파이프라인 저장", "Save pipeline")}
+              </button>
+            )}
+          >
+            <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 드러내며, `context_clear_*` 같은 API 바깥 항목은 아래 audit 노트에서 별도로 정리합니다.",
+                "This section edits only whitelisted individual `kv_meta` keys. Read-only items remain visible as status, and API-outside items such as `context_clear_*` are tracked in the audit notes below.",
+              )}
+            </p>
+          </SettingsCallout>
+
           <div className="space-y-3">
             <GroupLabel title={tr("자주 쓰는 설정", "Frequent settings")} />
             {PRIMARY_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
@@ -1159,6 +1625,20 @@ export default function SettingsView({
             <GroupLabel title={tr("고급 설정", "Advanced settings")} />
             {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
           </div>
+
+          <SettingsSubsection
+            title={tr("감사 노트", "Audit notes")}
+            description={tr(
+              "일반 폼에 바로 넣으면 거짓말이 되거나, 프론트만으로는 정본을 보장할 수 없는 항목입니다. 운영자에게 현재 한계를 숨기지 않기 위해 그대로 노출합니다.",
+              "These items would become misleading in the regular form or cannot be made truthful from the frontend alone. They stay visible so operators can see the current limits.",
+            )}
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              {AUDIT_NOTES.map((note) => (
+                <AuditNoteCard key={note.id} note={note} isKo={isKo} />
+              ))}
+            </div>
+          </SettingsSubsection>
         </div>
       )}
     </SettingsSection>
@@ -1174,7 +1654,7 @@ export default function SettingsView({
       )}
       actions={(
         <button
-          onClick={() => setShowOnboarding(true)}
+          onClick={openOnboarding}
           className={secondaryActionClass}
           style={secondaryActionStyle}
         >
@@ -1182,7 +1662,7 @@ export default function SettingsView({
         </button>
       )}
     >
-      <div className="mt-5 grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
+      <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
         <SettingsCard
           className="rounded-3xl p-5"
           style={{
@@ -1239,9 +1719,20 @@ export default function SettingsView({
       className="mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
+      <a
+        href="#settings-panel-content"
+        className="sr-only rounded-lg px-3 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50"
+        style={{
+          background: "var(--th-card-bg)",
+          color: "var(--th-text)",
+          border: "1px solid color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
+        }}
+      >
+        {tr("설정 본문으로 건너뛰기", "Skip to settings content")}
+      </a>
       <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
         <aside
-          className="hidden lg:flex lg:w-56 lg:shrink-0 lg:flex-col lg:gap-2 lg:rounded-[28px] lg:border lg:p-3"
+          className="hidden lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-2rem)] lg:w-56 lg:self-start lg:shrink-0 lg:flex-col lg:gap-2 lg:rounded-[28px] lg:border lg:p-3"
           style={{
             borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
             background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -1259,29 +1750,19 @@ export default function SettingsView({
             </div>
           </div>
 
-          {navItems.map((item) => (
-            <PanelNavButton
-              key={item.id}
-              active={activePanel === item.id}
-              title={item.title}
-              detail={item.detail}
-              count={item.count}
-              onClick={() => setActivePanel(item.id)}
-            />
-          ))}
-
-          <div className="mt-auto pt-2">
-            <button
-              onClick={() => {
-                setActivePanel("onboarding");
-                setShowOnboarding(true);
-              }}
-              className={secondaryActionClass}
-              style={{ ...secondaryActionStyle, width: "100%" }}
-            >
-              {tr("온보딩 다시 실행", "Re-run onboarding")}
-            </button>
-          </div>
+          <nav aria-label={tr("설정 섹션", "Settings sections")} className="space-y-2">
+            {navItems.map((item) => (
+              <PanelNavButton
+                key={item.id}
+                active={activePanel === item.id}
+                title={item.title}
+                detail={item.detail}
+                count={item.count}
+                ariaControls="settings-panel-content"
+                onClick={() => handlePanelChange(item.id)}
+              />
+            ))}
+          </nav>
         </aside>
 
         <div className="min-w-0 flex-1 lg:min-h-0">
@@ -1295,25 +1776,23 @@ export default function SettingsView({
                   {tr("운영 설정", "Operations settings")}
                 </div>
               </div>
-              <button
-                onClick={() => {
-                  setActivePanel("onboarding");
-                  setShowOnboarding(true);
-                }}
-                className={secondaryActionClass}
-                style={secondaryActionStyle}
-              >
-                {tr("온보딩 다시 실행", "Re-run onboarding")}
-              </button>
             </div>
 
-            <div className="flex gap-2 overflow-x-auto pb-1 lg:hidden">
+            <div
+              className="relative flex gap-2 overflow-x-auto pb-1 after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-10 after:bg-gradient-to-l after:from-[color:var(--th-bg-surface)] after:to-transparent lg:hidden"
+              role="tablist"
+              aria-label={tr("설정 패널", "Settings panels")}
+            >
               {navItems.map((item) => (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setActivePanel(item.id)}
-                  className="shrink-0 rounded-full border px-3 py-2 text-xs font-medium transition-colors"
+                  id={`settings-tab-${item.id}`}
+                  role="tab"
+                  aria-selected={activePanel === item.id}
+                  aria-controls="settings-panel-content"
+                  onClick={() => handlePanelChange(item.id)}
+                  className="shrink-0 rounded-full border px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-bg-surface)]"
                   style={{
                     borderColor: activePanel === item.id
                       ? "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)"
@@ -1329,7 +1808,13 @@ export default function SettingsView({
               ))}
             </div>
 
-            <div className="min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+            <div
+              id="settings-panel-content"
+              role="tabpanel"
+              aria-labelledby={`settings-tab-${activePanel}`}
+              tabIndex={-1}
+              className="min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1"
+            >
               {renderActivePanel()}
             </div>
           </div>
@@ -1339,11 +1824,12 @@ export default function SettingsView({
       {showOnboarding && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0a0e1a]" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
           <div className="flex min-h-screen items-start justify-center pb-16 pt-8">
-            <div className="w-full max-w-2xl">
+            <div ref={onboardingDialogRef} className="w-full max-w-2xl">
               <div className="mb-2 flex justify-end px-4">
                 <button
+                  ref={onboardingCloseButtonRef}
                   onClick={() => setShowOnboarding(false)}
-                  className="min-h-[44px] rounded-lg border px-4 py-2.5 text-sm"
+                  className="min-h-[44px] rounded-lg border px-4 py-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0e1a]"
                   style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
                 >
                   ✕ {tr("닫기", "Close")}
