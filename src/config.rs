@@ -90,6 +90,12 @@ pub struct DiscordBotAuthConfig {
         deserialize_with = "deserialize_optional_u64_vec",
         skip_serializing_if = "Option::is_none"
     )]
+    pub require_mention_channel_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allowed_user_ids: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
@@ -106,6 +112,7 @@ pub struct DiscordBotAuthConfig {
 impl DiscordBotAuthConfig {
     pub fn is_empty(&self) -> bool {
         self.allowed_channel_ids.is_none()
+            && self.require_mention_channel_ids.is_none()
             && self.allowed_user_ids.is_none()
             && self.allowed_tools.is_none()
             && self.allow_all_users.is_none()
@@ -1208,6 +1215,7 @@ mod tests {
                 agent: Some("agent-1".to_string()),
                 auth: DiscordBotAuthConfig {
                     allowed_channel_ids: Some(vec![123456789012345678]),
+                    require_mention_channel_ids: Some(vec![223456789012345678]),
                     allowed_user_ids: Some(vec![343742347365974026]),
                     allowed_tools: Some(vec!["Bash".to_string(), "WebFetch".to_string()]),
                     allow_all_users: Some(false),
@@ -1319,6 +1327,13 @@ mod tests {
                 .allowed_channel_ids
                 .as_deref(),
             Some(&[123456789012345678][..])
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
+                .require_mention_channel_ids
+                .as_deref(),
+            Some(&[223456789012345678][..])
         );
         assert_eq!(
             loaded.discord.bots["announce"]

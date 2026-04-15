@@ -10,6 +10,25 @@ pub(in crate::services::discord) fn should_process_turn_message(
     )
 }
 
+pub(super) fn content_has_explicit_user_mention(content: &str, user_id: serenity::UserId) -> bool {
+    let raw_id = user_id.get();
+    content.contains(&format!("<@{raw_id}>")) || content.contains(&format!("<@!{raw_id}>"))
+}
+
+pub(super) fn should_skip_for_missing_required_mention(
+    settings: &DiscordBotSettings,
+    effective_channel_id: serenity::ChannelId,
+    is_dm: bool,
+    content: &str,
+    bot_user_id: serenity::UserId,
+) -> bool {
+    !is_dm
+        && settings
+            .require_mention_channel_ids
+            .contains(&effective_channel_id.get())
+        && !content_has_explicit_user_mention(content, bot_user_id)
+}
+
 fn should_skip_human_slash_message(
     content: &str,
     known_slash_commands: Option<&std::collections::HashSet<String>>,
@@ -483,6 +502,7 @@ pub(in crate::services::discord) async fn handle_event(
             let user_id = new_message.author.id;
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
+            let is_dm = new_message.guild_id.is_none();
             let effective_channel_id = resolve_thread_parent(&ctx.http, channel_id)
                 .await
                 .map(|(parent_id, _)| parent_id)
@@ -493,11 +513,27 @@ pub(in crate::services::discord) async fn handle_event(
                 &data.provider,
                 &settings_snapshot,
                 channel_id,
-                Some(new_message.guild_id.is_none()),
+                Some(is_dm),
             )
             .await
             .is_err()
             {
+                return Ok(());
+            }
+            if should_skip_for_missing_required_mention(
+                &settings_snapshot,
+                effective_channel_id,
+                is_dm,
+                &new_message.content,
+                ctx.cache.current_user().id,
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏭ MENTION-GUARD: skipping message {} in channel {} (effective {}) because bot mention is required",
+                    new_message.id,
+                    channel_id,
+                    effective_channel_id,
+                );
                 return Ok(());
             }
             // Allow unbound channels for the owner (direct Claude Code usage).
@@ -548,13 +584,7 @@ pub(in crate::services::discord) async fn handle_event(
                     new_message.attachments.len()
                 );
                 // Ensure session exists before handling uploads
-                auto_restore_session_with_dm_hint(
-                    &data.shared,
-                    channel_id,
-                    ctx,
-                    Some(new_message.guild_id.is_none()),
-                )
-                .await;
+                auto_restore_session_with_dm_hint(&data.shared, channel_id, ctx, Some(is_dm)).await;
                 super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?;
             }
 
@@ -979,7 +1009,7 @@ pub(in crate::services::discord) async fn handle_event(
                 merge_consecutive,
                 reply_context,
                 has_reply_boundary,
-                Some(new_message.guild_id.is_none()),
+                Some(is_dm),
             )
             .await?;
         }

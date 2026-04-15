@@ -106,6 +106,8 @@ pub(super) struct DiscordBotSettings {
     /// Explicit Discord channel allowlist for this bot token.
     /// Empty means "no channel restriction".
     pub(super) allowed_channel_ids: Vec<u64>,
+    /// Channels that require an explicit bot mention before intake proceeds.
+    pub(super) require_mention_channel_ids: Vec<u64>,
     /// channel_id (string) → last working directory path
     pub(super) last_sessions: std::collections::HashMap<String, String>,
     /// channel_id (string) → last remote profile name
@@ -132,6 +134,7 @@ impl Default for DiscordBotSettings {
                 .map(|s| s.to_string())
                 .collect(),
             allowed_channel_ids: Vec::new(),
+            require_mention_channel_ids: Vec::new(),
             last_sessions: std::collections::HashMap::new(),
             last_remotes: std::collections::HashMap::new(),
             channel_model_overrides: std::collections::HashMap::new(),

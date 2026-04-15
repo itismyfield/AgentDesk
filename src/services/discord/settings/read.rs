@@ -6,6 +6,7 @@ struct LegacyBotSettingsEntry {
     provider: Option<ProviderKind>,
     allowed_tools: Option<Vec<String>>,
     allowed_channel_ids: Vec<u64>,
+    require_mention_channel_ids: Vec<u64>,
     channel_model_overrides: std::collections::HashMap<String, String>,
     owner_user_id: Option<u64>,
     allowed_user_ids: Vec<u64>,
@@ -42,6 +43,11 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
         .map(ProviderKind::from_str_or_unsupported);
     let allowed_channel_ids = entry
         .get("allowed_channel_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
+        .unwrap_or_default();
+    let require_mention_channel_ids = entry
+        .get("require_mention_channel_ids")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
@@ -83,6 +89,7 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
         provider,
         allowed_tools,
         allowed_channel_ids,
+        require_mention_channel_ids,
         channel_model_overrides,
         owner_user_id,
         allowed_user_ids,
@@ -249,6 +256,13 @@ pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
                 .and_then(|bot| bot.auth.allowed_channel_ids.clone()),
             legacy.allowed_channel_ids,
             "allowed_channel_ids",
+        ),
+        require_mention_channel_ids: fallback_legacy_vec(
+            configured
+                .as_ref()
+                .and_then(|bot| bot.auth.require_mention_channel_ids.clone()),
+            legacy.require_mention_channel_ids,
+            "require_mention_channel_ids",
         ),
         channel_model_overrides: legacy.channel_model_overrides,
         owner_user_id: fallback_legacy_option(

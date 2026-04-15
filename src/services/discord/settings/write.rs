@@ -79,6 +79,7 @@ fn persist_bot_auth_to_yaml_checked(
         bot.provider = Some(settings.provider.as_str().to_string());
         bot.agent = settings.agent.clone();
         bot.auth.allowed_channel_ids = Some(settings.allowed_channel_ids.clone());
+        bot.auth.require_mention_channel_ids = Some(settings.require_mention_channel_ids.clone());
         bot.auth.allowed_user_ids = Some(settings.allowed_user_ids.clone());
         bot.auth.allowed_tools = Some(normalize_allowed_tools(&settings.allowed_tools));
         bot.auth.allow_all_users = Some(settings.allow_all_users);
@@ -172,6 +173,14 @@ fn save_runtime_bot_settings_checked(
             entry.insert(
                 "allowed_channel_ids".to_string(),
                 serde_json::json!(settings.allowed_channel_ids),
+            );
+        }
+        if settings.require_mention_channel_ids.is_empty() {
+            entry.remove("require_mention_channel_ids");
+        } else {
+            entry.insert(
+                "require_mention_channel_ids".to_string(),
+                serde_json::json!(settings.require_mention_channel_ids),
             );
         }
         if settings.allowed_user_ids.is_empty() {

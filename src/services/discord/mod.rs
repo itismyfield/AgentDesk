@@ -314,6 +314,8 @@ pub(super) struct DiscordBotSettings {
     /// Explicit Discord channel allowlist for this bot token.
     /// Empty means "no channel restriction".
     pub(super) allowed_channel_ids: Vec<u64>,
+    /// Channels that require an explicit bot mention before intake proceeds.
+    pub(super) require_mention_channel_ids: Vec<u64>,
     /// channel_id (string) → persisted model override
     pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (imprinting auth)
@@ -336,6 +338,7 @@ impl Default for DiscordBotSettings {
                 .map(|s| s.to_string())
                 .collect(),
             allowed_channel_ids: Vec::new(),
+            require_mention_channel_ids: Vec::new(),
             channel_model_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),

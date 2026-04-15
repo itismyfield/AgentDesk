@@ -12,6 +12,8 @@ discord:
       auth:
         allowed_channel_ids:
           - "123456789012345678"
+        require_mention_channel_ids:
+          - "223456789012345678"
         allowed_user_ids:
           - "123456789012345678"
     notify:
