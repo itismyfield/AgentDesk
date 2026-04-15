@@ -1003,7 +1003,26 @@ pub(super) fn format_for_discord_with_provider(
     } else {
         s
     };
-    format_for_discord(input)
+    let cleaned = strip_placeholder_lines(input);
+    format_for_discord(&cleaned)
+}
+
+/// Remove ephemeral placeholder lines (e.g. "⏳ 대기 중...") from the final
+/// delivered response.  These lines are useful during streaming but should not
+/// persist in the channel.
+fn strip_placeholder_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let t = line.trim();
+        if t.starts_with("⏳") && t.contains("대기") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// Mechanical formatting for Discord readability.
