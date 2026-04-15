@@ -664,7 +664,8 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
 
   var remainingCount = remainingRunnableEntryCount(runId, null);
 
-  if ((donePhase || 0) > 0) {
+  var effectiveDonePhase = (donePhase !== null && donePhase !== undefined) ? donePhase : -1;
+  if (effectiveDonePhase >= 0) {
     var currentPhaseDone = remainingRunnableEntryCount(runId, donePhase) === 0;
     if (currentPhaseDone) {
       var nextPhaseRows = agentdesk.db.query(
