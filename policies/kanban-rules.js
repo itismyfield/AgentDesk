@@ -97,18 +97,6 @@ function _runPreflight(cardId) {
     }
   }
 
-  // Check 2: Already has active implementation/rework dispatch?
-  var activeDispatch = agentdesk.db.query(
-    "SELECT id, dispatch_type, status FROM task_dispatches " +
-    "WHERE kanban_card_id = ? " +
-    "AND dispatch_type IN ('implementation', 'rework') " +
-    "AND status IN ('pending', 'dispatched')",
-    [cardId]
-  );
-  if (activeDispatch.length > 0) {
-    return { status: "already_applied", summary: "Active implementation/rework dispatch already exists" };
-  }
-
   // Check 3: Description/body too short or empty?
   var body = c.description || "";
   if (body.trim().length < 30) {

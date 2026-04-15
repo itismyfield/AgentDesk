@@ -154,9 +154,33 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
                 }
 
-                // Also update auto_queue_entries if terminal
+                // Also update auto_queue_entries and cancel orphan dispatches if terminal
                 if pipeline.is_terminal(&new_status) {
                     sync_auto_queue_terminal_on_conn(&conn, &card_id);
+                    // Cancel active implementation/rework/review-decision dispatches
+                    // so they don't remain orphaned after card reaches terminal.
+                    let orphan_dispatches: Vec<String> = conn
+                        .prepare(
+                            "SELECT id FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 \
+                             AND dispatch_type IN ('implementation', 'review-decision', 'rework') \
+                             AND status IN ('pending', 'dispatched')",
+                        )
+                        .ok()
+                        .and_then(|mut stmt| {
+                            stmt.query_map([&*card_id], |row| row.get::<_, String>(0))
+                                .ok()
+                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                        })
+                        .unwrap_or_default();
+                    for dispatch_id in &orphan_dispatches {
+                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                            &conn,
+                            dispatch_id,
+                            Some("js_terminal_cleanup"),
+                        )
+                        .ok();
+                    }
                 }
 
                 // #117/#158: Sync canonical review state via unified entrypoint
