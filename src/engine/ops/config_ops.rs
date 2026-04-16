@@ -21,7 +21,13 @@ pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 match conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [&key], |row| {
                     row.get::<_, String>(0)
                 }) {
-                    Ok(val) => serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()),
+                    Ok(val) => {
+                        if let Ok(decoded) = serde_json::from_str::<String>(&val) {
+                            serde_json::to_string(&decoded).unwrap_or_else(|_| "null".to_string())
+                        } else {
+                            serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())
+                        }
+                    }
                     Err(_) => "null".to_string(),
                 }
             }),

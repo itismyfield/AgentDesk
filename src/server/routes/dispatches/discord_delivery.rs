@@ -2724,8 +2724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reused_thread_probe_error_falls_back_to_creating_new_thread_after_phase_gate_dispatch()
-    {
+    async fn reused_thread_invalid_json_probe_error_falls_back_to_creating_new_thread() {
         let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
         let db = test_db();
         {

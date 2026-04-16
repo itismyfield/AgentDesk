@@ -60,6 +60,9 @@ function notifyCardOwner(cardId, reason, source) {
     );
     return notifyHumanAlert(message + "\n담당 에이전트 채널을 찾지 못해 사람이 확인해야 합니다.", src);
   }
+  if (target.indexOf("channel:") !== 0 && target.indexOf("agent:") !== 0) {
+    target = "channel:" + target;
+  }
 
   agentdesk.message.queue(target, message, "announce", src);
   return true;

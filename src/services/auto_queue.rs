@@ -202,6 +202,7 @@ pub struct PhaseGateView {
     pub phase: i64,
     pub status: String,
     pub dispatch_id: Option<String>,
+    pub rework_count: i64,
     pub failure_reason: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -669,7 +670,7 @@ fn build_status_response(
 
 fn query_phase_gates(conn: &rusqlite::Connection, run_id: &str) -> Vec<PhaseGateView> {
     let mut stmt = match conn.prepare(
-        "SELECT id, phase, status, dispatch_id, failure_reason, created_at, updated_at
+        "SELECT id, phase, status, dispatch_id, rework_count, failure_reason, created_at, updated_at
          FROM auto_queue_phase_gates
          WHERE run_id = ?1
          ORDER BY phase ASC",
@@ -683,9 +684,10 @@ fn query_phase_gates(conn: &rusqlite::Connection, run_id: &str) -> Vec<PhaseGate
             phase: row.get(1)?,
             status: row.get(2)?,
             dispatch_id: row.get(3)?,
-            failure_reason: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            rework_count: row.get(4)?,
+            failure_reason: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })
     .map(|rows| rows.filter_map(|r| r.ok()).collect())

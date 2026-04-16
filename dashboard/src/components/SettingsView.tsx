@@ -181,6 +181,26 @@ const CATEGORIES: Array<{
     ],
   },
   {
+    id: "auto-queue",
+    titleKo: "오토큐",
+    titleEn: "Auto-Queue",
+    descriptionKo: "phase gate 재평가와 자동 rework 상한을 조정합니다.",
+    descriptionEn: "Controls phase-gate re-evaluation and automatic rework limits.",
+    fields: [
+      {
+        key: "phase_gate_max_rework_retries",
+        labelKo: "Phase Gate 최대 재시도 횟수",
+        labelEn: "Phase gate max retries",
+        descriptionKo: "같은 phase gate에서 자동 rework를 몇 번까지 허용할지 정합니다.",
+        descriptionEn: "Maximum automatic rework attempts allowed for the same phase gate.",
+        unit: "",
+        min: 1,
+        max: 10,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "review",
     titleKo: "리뷰",
     titleEn: "Review",

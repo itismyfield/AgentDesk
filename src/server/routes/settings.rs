@@ -911,6 +911,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.runtime.dispatch_poll_sec = Some(45);
         config.runtime.max_retries = Some(5);
+        config.kanban.phase_gate_max_rework_retries = Some(6);
         let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
@@ -919,6 +920,8 @@ mod tests {
         assert_eq!(body["defaults"]["dispatchPollSec"], json!(45));
         assert_eq!(body["current"]["maxRetries"], json!(5));
         assert_eq!(body["defaults"]["maxRetries"], json!(5));
+        assert_eq!(body["current"]["phase_gate_max_rework_retries"], json!(6));
+        assert_eq!(body["defaults"]["phase_gate_max_rework_retries"], json!(6));
     }
 
     #[tokio::test]
@@ -930,6 +933,7 @@ mod tests {
             State(state),
             Json(json!({
                 "dispatchPollSec": 15,
+                "phase_gate_max_rework_retries": 4,
                 "maxRetries": 7,
                 "rateLimitStaleSec": 900
             })),
@@ -945,7 +949,15 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let phase_gate_retries: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'phase_gate_max_rework_retries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(stale_sec, "900");
+        assert_eq!(phase_gate_retries, "4");
     }
 
     #[tokio::test]

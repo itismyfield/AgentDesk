@@ -937,6 +937,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
             next_phase      INTEGER,
             final_phase     INTEGER NOT NULL DEFAULT 0,
+            rework_count    INTEGER NOT NULL DEFAULT 0,
             anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
             failure_reason  TEXT,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1129,6 +1130,7 @@ struct LegacyAutoQueuePhaseGateRow {
     pass_verdict: String,
     next_phase: Option<i64>,
     final_phase: i64,
+    rework_count: i64,
     anchor_card_id: Option<String>,
     failure_reason: Option<String>,
     created_at: Option<String>,
@@ -1140,6 +1142,12 @@ fn ensure_auto_queue_phase_gate_table_shape(conn: &Connection) -> Result<()> {
     if needs_rebuild {
         rebuild_auto_queue_phase_gates_table(conn)?;
     } else {
+        ensure_auto_queue_column(
+            conn,
+            "auto_queue_phase_gates",
+            "rework_count",
+            "ALTER TABLE auto_queue_phase_gates ADD COLUMN rework_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
         ensure_auto_queue_phase_gate_indexes(conn)?;
     }
     Ok(())
@@ -1189,6 +1197,7 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
             pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
             next_phase      INTEGER,
             final_phase     INTEGER NOT NULL DEFAULT 0,
+            rework_count    INTEGER NOT NULL DEFAULT 0,
             anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
             failure_reason  TEXT,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1196,8 +1205,10 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
          );",
     )?;
 
+    let legacy_has_rework_count =
+        auto_queue_has_column(conn, "auto_queue_phase_gates_legacy", "rework_count");
     let mut rows = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT
                 rowid,
                 run_id,
@@ -1212,12 +1223,18 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
                         THEN 1
                     ELSE 0
                 END AS final_phase,
+                {} AS rework_count,
                 anchor_card_id,
                 failure_reason,
                 CAST(created_at AS TEXT),
                 CAST(updated_at AS TEXT)
              FROM auto_queue_phase_gates_legacy",
-        )?
+            if legacy_has_rework_count {
+                "COALESCE(CAST(rework_count AS INTEGER), 0)"
+            } else {
+                "0"
+            }
+        ))?
         .query_map([], |row| {
             Ok(LegacyAutoQueuePhaseGateRow {
                 rowid: row.get(0)?,
@@ -1229,10 +1246,11 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
                 pass_verdict: row.get(6)?,
                 next_phase: row.get(7)?,
                 final_phase: row.get(8)?,
-                anchor_card_id: row.get(9)?,
-                failure_reason: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                rework_count: row.get(9)?,
+                anchor_card_id: row.get(10)?,
+                failure_reason: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1307,6 +1325,7 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
             .take()
             .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
         row.final_phase = if row.final_phase != 0 { 1 } else { 0 };
+        row.rework_count = row.rework_count.max(0);
 
         normalized_rows.push(row);
     }
@@ -1358,14 +1377,15 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
                 pass_verdict,
                 next_phase,
                 final_phase,
+                rework_count,
                 anchor_card_id,
                 failure_reason,
                 created_at,
                 updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                COALESCE(?11, CURRENT_TIMESTAMP),
-                COALESCE(?12, COALESCE(?11, CURRENT_TIMESTAMP))
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                COALESCE(?12, CURRENT_TIMESTAMP),
+                COALESCE(?13, COALESCE(?12, CURRENT_TIMESTAMP))
             )",
             rusqlite::params![
                 row.run_id,
@@ -1376,6 +1396,7 @@ fn rebuild_auto_queue_phase_gates_table(conn: &Connection) -> Result<()> {
                 row.pass_verdict,
                 row.next_phase,
                 row.final_phase,
+                row.rework_count,
                 row.anchor_card_id,
                 row.failure_reason,
                 row.created_at,
@@ -1559,6 +1580,7 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
         pass_verdict: String,
         next_phase: Option<i64>,
         final_phase: i64,
+        rework_count: i64,
         anchor_card_id: Option<String>,
         failure_reason: Option<String>,
         created_at: Option<String>,
@@ -1600,6 +1622,11 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
             .get("final_phase")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let rework_count = state
+            .get("rework_count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0)
+            .max(0);
         let anchor_card_id = state
             .get("anchor_card_id")
             .and_then(|value| value.as_str())
@@ -1651,6 +1678,7 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
             pass_verdict,
             next_phase,
             final_phase,
+            rework_count,
             anchor_card_id,
             failure_reason,
             created_at,
@@ -1682,11 +1710,12 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
                     pass_verdict,
                     next_phase,
                     final_phase,
+                    rework_count,
                     anchor_card_id,
                     failure_reason,
                     created_at,
                     updated_at
-                ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, CURRENT_TIMESTAMP), datetime('now'))",
+                ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, CURRENT_TIMESTAMP), datetime('now'))",
                 rusqlite::params![
                     row.run_id,
                     row.phase,
@@ -1695,6 +1724,7 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
                     row.pass_verdict,
                     row.next_phase,
                     row.final_phase,
+                    row.rework_count,
                     anchor_card_id,
                     row.failure_reason,
                     row.created_at,
@@ -1714,11 +1744,12 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
                     pass_verdict,
                     next_phase,
                     final_phase,
+                    rework_count,
                     anchor_card_id,
                     failure_reason,
                     created_at,
                     updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, CURRENT_TIMESTAMP), datetime('now'))
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, CURRENT_TIMESTAMP), datetime('now'))
                 ON CONFLICT(dispatch_id) DO UPDATE SET
                     run_id = excluded.run_id,
                     phase = excluded.phase,
@@ -1727,6 +1758,7 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
                     pass_verdict = excluded.pass_verdict,
                     next_phase = excluded.next_phase,
                     final_phase = excluded.final_phase,
+                    rework_count = excluded.rework_count,
                     anchor_card_id = excluded.anchor_card_id,
                     failure_reason = excluded.failure_reason,
                     updated_at = datetime('now')",
@@ -1739,6 +1771,7 @@ fn backfill_auto_queue_phase_gates(conn: &Connection) -> Result<()> {
                     row.pass_verdict,
                     row.next_phase,
                     row.final_phase,
+                    row.rework_count,
                     anchor_card_id,
                     row.failure_reason,
                     row.created_at,

@@ -12,6 +12,7 @@ const RUNTIME_CONFIG_KEYS: &[&str] = &[
     "claudeRateLimitPollSec",
     "codexRateLimitPollSec",
     "issueTriagePollSec",
+    "phase_gate_max_rework_retries",
     "ceoWarnDepth",
     "maxRetries",
     "reviewReminderMin",
@@ -130,6 +131,11 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
     );
     insert_runtime_number(
         &mut overrides,
+        "phase_gate_max_rework_retries",
+        config.kanban.phase_gate_max_rework_retries,
+    );
+    insert_runtime_number(
+        &mut overrides,
         "ceoWarnDepth",
         config.runtime.ceo_warn_depth,
     );
@@ -170,6 +176,7 @@ fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Va
         "claudeRateLimitPollSec": 120,
         "codexRateLimitPollSec": 120,
         "issueTriagePollSec": 300,
+        "phase_gate_max_rework_retries": 3,
         "ceoWarnDepth": 3,
         "maxRetries": 3,
         "reviewReminderMin": 30,

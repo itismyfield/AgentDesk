@@ -479,6 +479,8 @@ pub struct KanbanConfig {
     pub human_alert_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pm_decision_gate_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_gate_max_rework_retries: Option<u64>,
 }
 
 impl KanbanConfig {
@@ -487,6 +489,7 @@ impl KanbanConfig {
             && self.deadlock_manager_channel_id.is_none()
             && self.human_alert_channel_id.is_none()
             && self.pm_decision_gate_enabled.is_none()
+            && self.phase_gate_max_rework_retries.is_none()
     }
 }
 
@@ -1243,6 +1246,7 @@ mod tests {
             deadlock_manager_channel_id: Some("223456789012345678".to_string()),
             human_alert_channel_id: Some("323456789012345678".to_string()),
             pm_decision_gate_enabled: Some(true),
+            phase_gate_max_rework_retries: Some(6),
         };
         config.review = ReviewConfig {
             enabled: Some(true),
@@ -1380,6 +1384,7 @@ mod tests {
             Some("323456789012345678")
         );
         assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
+        assert_eq!(loaded.kanban.phase_gate_max_rework_retries, Some(6));
         assert_eq!(loaded.review.enabled, Some(true));
         assert_eq!(loaded.review.max_rounds, Some(4));
         assert_eq!(loaded.runtime.requested_timeout_min, Some(55));

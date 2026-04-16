@@ -295,10 +295,9 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 })
                 .unwrap_or_default();
             for entry_id in entry_ids {
-                if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
+                if let Err(error) = crate::db::auto_queue::reactivate_done_entry_on_conn(
                     &conn,
                     &entry_id,
-                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
                     "js_reopen",
                     &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
                 ) {

@@ -638,6 +638,7 @@ mod tests {
         dispatch_ids: &[&str],
         next_phase: Option<i64>,
         final_phase: bool,
+        rework_count: i64,
         anchor_card_id: Option<&str>,
         verdict: Option<&str>,
         failure_reason: Option<&str>,
@@ -648,8 +649,8 @@ mod tests {
             conn.execute(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict,
-                    next_phase, final_phase, anchor_card_id, failure_reason
-                ) VALUES (?1, ?2, ?3, ?4, NULL, 'phase_gate_passed', ?5, ?6, ?7, ?8)",
+                    next_phase, final_phase, rework_count, anchor_card_id, failure_reason
+                ) VALUES (?1, ?2, ?3, ?4, NULL, 'phase_gate_passed', ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     run_id,
                     phase,
@@ -657,6 +658,7 @@ mod tests {
                     verdict,
                     next_phase,
                     final_phase,
+                    rework_count,
                     anchor_card_id,
                     failure_reason,
                 ],
@@ -669,8 +671,8 @@ mod tests {
             conn.execute(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict,
-                    next_phase, final_phase, anchor_card_id, failure_reason
-                ) VALUES (?1, ?2, ?3, ?4, ?5, 'phase_gate_passed', ?6, ?7, ?8, ?9)",
+                    next_phase, final_phase, rework_count, anchor_card_id, failure_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'phase_gate_passed', ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     run_id,
                     phase,
@@ -679,6 +681,7 @@ mod tests {
                     dispatch_id,
                     next_phase,
                     final_phase,
+                    rework_count,
                     anchor_card_id,
                     failure_reason,
                 ],
@@ -691,7 +694,7 @@ mod tests {
         let conn = db.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT dispatch_id, status, verdict, next_phase, final_phase, anchor_card_id, failure_reason
+                "SELECT dispatch_id, status, verdict, next_phase, final_phase, rework_count, anchor_card_id, failure_reason
                  FROM auto_queue_phase_gates
                  WHERE run_id = ?1 AND phase = ?2
                  ORDER BY dispatch_id ASC",
@@ -705,8 +708,9 @@ mod tests {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .unwrap()
@@ -737,14 +741,15 @@ mod tests {
             "batch_phase": phase,
             "next_phase": rows[0].3,
             "final_phase": rows[0].4 != 0,
-            "anchor_card_id": rows[0].5,
+            "rework_count": rows[0].5,
+            "anchor_card_id": rows[0].6,
             "status": status,
             "dispatch_ids": dispatch_ids,
         });
         if let Some(failed_row) = failed {
             value["failed_dispatch_id"] = serde_json::json!(failed_row.0);
             value["failed_verdict"] = serde_json::json!(failed_row.2);
-            value["failed_reason"] = serde_json::json!(failed_row.6);
+            value["failed_reason"] = serde_json::json!(failed_row.7);
         }
         Some(value)
     }
@@ -1339,6 +1344,7 @@ mod tests {
                 pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
                 next_phase      INTEGER,
                 final_phase     INTEGER NOT NULL DEFAULT 0,
+                rework_count    INTEGER NOT NULL DEFAULT 0,
                 anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
                 failure_reason  TEXT,
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -4153,12 +4159,13 @@ mod tests {
             "multi-phase review-disabled terminal transition must pause the run for phase gate"
         );
         assert_eq!(
-            phase_gate_count, 1,
-            "multi-phase review-disabled terminal transition must create a phase-gate dispatch"
+            phase_gate_count, 0,
+            "multi-phase review-disabled terminal transition must not create a phase-gate dispatch"
         );
         assert_eq!(phase_gate_json["status"], "pending");
         assert_eq!(phase_gate_json["batch_phase"], 1);
         assert_eq!(phase_gate_json["next_phase"], 2);
+        assert_eq!(phase_gate_json["rework_count"], 0);
     }
 
     #[test]
@@ -4212,13 +4219,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn auto_queue_phase_gate_blocks_resume_then_completes_final_run_on_pass() {
+    #[test]
+    fn auto_queue_tick_phase_gate_completes_final_run_when_checks_pass() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
         ensure_auto_queue_tables(&db);
-        seed_card(&db, "card-phase-final", "done");
+        seed_card_with_repo(&db, "card-phase-final", "done", "test/repo", 9001, None);
 
         {
             let conn = db.lock().unwrap();
@@ -4228,66 +4235,69 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-final', 'run-phase-final', 'card-phase-final', 'agent-1', 'done', 2, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
         }
 
-        let phase_gate_dispatch = dispatch::create_dispatch(
+        seed_pr_tracking(
             &db,
-            &engine,
             "card-phase-final",
-            "agent-1",
-            "phase-gate",
-            "[phase-gate P2] Final",
-            &json!({
-                "auto_queue": true,
-                "sidecar_dispatch": true,
-                "phase_gate": {
-                    "run_id": "run-phase-final",
-                    "batch_phase": 2,
-                    "next_phase": serde_json::Value::Null,
-                    "final_phase": true,
-                    "pass_verdict": "phase_gate_passed",
-                    "expected_gate_count": 1
-                }
-            }),
-        )
-        .expect("phase gate dispatch should be created");
-        let phase_gate_dispatch_id = phase_gate_dispatch["id"].as_str().unwrap().to_string();
+            "test/repo",
+            Some("/tmp/wt/card-phase-final"),
+            "wt/card-phase-final",
+            Some(901),
+            Some("abc123"),
+            "merge",
+        );
         set_phase_gate_state(
             &db,
             "run-phase-final",
             2,
             "pending",
-            &[phase_gate_dispatch_id.as_str()],
+            &[],
             None,
             true,
+            0,
             Some("card-phase-final"),
             None,
             None,
         );
 
-        let state = AppState::test_state(db.clone(), engine.clone());
-        let (resume_status, resume_body) =
-            crate::server::routes::auto_queue::resume_run(axum::extract::State(state)).await;
-        assert_eq!(resume_status, axum::http::StatusCode::OK);
-        assert_eq!(resume_body.0["resumed_runs"].as_u64(), Some(0));
-        assert_eq!(resume_body.0["blocked_runs"].as_u64(), Some(1));
-        assert_eq!(
-            phase_gate_state(&db, "run-phase-final", 2).is_some(),
-            true,
-            "resume must leave the blocking phase gate untouched"
-        );
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.exec = function(cmd, args) {
+                        if (cmd !== "gh") return "ERROR: unexpected command";
+                        if (args[0] === "pr" && args[1] === "view") {
+                            return JSON.stringify({
+                                number: 901,
+                                state: "MERGED",
+                                mergedAt: "2026-04-16T08:00:00Z",
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-final",
+                                headRefOid: "abc123",
+                                title: "Final card"
+                            });
+                        }
+                        if (args[0] === "issue" && args[1] === "view") {
+                            return "CLOSED";
+                        }
+                        return "ERROR: unexpected gh args";
+                    };
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
 
-        let completed = dispatch::complete_dispatch(
-            &db,
-            &engine,
-            &phase_gate_dispatch_id,
-            &json!({
-                "verdict": "phase_gate_passed",
-                "summary": "phase gate approved"
-            }),
-        )
-        .expect("phase gate completion should succeed");
-        assert_eq!(completed["status"], "completed");
+        let (_, _logs) = capture_policy_logs(|| {
+            engine
+                .try_fire_hook_by_name("OnTick1min", json!({}))
+                .expect("OnTick1min should succeed");
+        });
 
         let run_status: String = {
             let conn = db.lock().unwrap();
@@ -4300,11 +4310,297 @@ mod tests {
         };
         assert_eq!(
             run_status, "completed",
-            "final phase-gate pass should resume and complete the paused run"
+            "tick reevaluation should resume and complete the final paused run"
         );
         assert!(
             phase_gate_state(&db, "run-phase-final", 2).is_none(),
-            "successful gate completion must clear the persisted phase gate state"
+            "successful tick phase gate pass must clear the persisted phase gate state"
+        );
+    }
+
+    #[test]
+    fn auto_queue_tick_phase_gate_creates_rework_on_confirmed_ci_failure() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let worktree_dir = tempfile::tempdir().unwrap();
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(&db, "card-phase-ci-fail", "done", "test/repo", 9002, None);
+        set_config_key(&db, "phase_gate_max_rework_retries", json!(3));
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-ci-fail', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-ci-fail', 'run-phase-ci-fail', 'card-phase-ci-fail', 'agent-1', 'done', 1, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_pr_tracking(
+            &db,
+            "card-phase-ci-fail",
+            "test/repo",
+            Some(worktree_dir.path().to_str().unwrap()),
+            "wt/card-phase-ci-fail",
+            Some(902),
+            Some("def456"),
+            "wait-ci",
+        );
+        set_phase_gate_state(
+            &db,
+            "run-phase-ci-fail",
+            1,
+            "pending",
+            &[],
+            Some(2),
+            false,
+            0,
+            Some("card-phase-ci-fail"),
+            None,
+            None,
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.exec = function(cmd, args) {
+                        if (cmd !== "gh") return "ERROR: unexpected command";
+                        if (args[0] === "pr" && args[1] === "view") {
+                            return JSON.stringify({
+                                number: 902,
+                                state: "OPEN",
+                                mergedAt: null,
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-ci-fail",
+                                headRefOid: "def456",
+                                title: "CI failing card"
+                            });
+                        }
+                        if (args[0] === "run" && args[1] === "list") {
+                            return JSON.stringify([{
+                                databaseId: 5002,
+                                status: "completed",
+                                conclusion: "failure",
+                                headSha: "def456",
+                                event: "pull_request"
+                            }]);
+                        }
+                        return "ERROR: unexpected gh args";
+                    };
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+
+        let (_, logs) = capture_policy_logs(|| {
+            engine
+                .try_fire_hook_by_name("OnTick1min", json!({}))
+                .expect("OnTick1min should succeed");
+        });
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-ci-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-phase-ci-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-phase-ci-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        let rework: (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(title), ''), MAX(json_extract(context, '$.phase_gate_rework.failure_type')) \
+                 FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-phase-ci-fail' \
+                   AND dispatch_type = 'rework' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json = phase_gate_state(&db, "run-phase-ci-fail", 1)
+            .expect("phase gate state must remain for rework");
+        assert_eq!(run_status, "paused");
+        assert_eq!(
+            card_status, "in_progress",
+            "phase gate should reopen the terminal card for rework; state={phase_gate_json} logs={logs}"
+        );
+        assert_eq!(blocked_reason.as_deref(), Some("ci:rework"));
+        assert_eq!(
+            rework.0, 1,
+            "confirmed CI failure must create one rework dispatch"
+        );
+        assert!(
+            rework.1.contains("CI 실패 수정"),
+            "rework title should mention CI failure recovery"
+        );
+        assert_eq!(rework.2.as_deref(), Some("ci_failure"));
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["rework_count"], 1);
+    }
+
+    #[test]
+    fn auto_queue_tick_phase_gate_final_fails_after_rework_cap_and_escalates() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let worktree_dir = tempfile::tempdir().unwrap();
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(&db, "card-phase-cap", "done", "test/repo", 9003, None);
+        set_config_key(&db, "phase_gate_max_rework_retries", json!(3));
+        set_config_key(&db, "kanban_human_alert_channel_id", json!("999"));
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-cap', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-cap', 'run-phase-cap', 'card-phase-cap', 'agent-1', 'done', 1, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_pr_tracking(
+            &db,
+            "card-phase-cap",
+            "test/repo",
+            Some(worktree_dir.path().to_str().unwrap()),
+            "wt/card-phase-cap",
+            Some(903),
+            Some("ghi789"),
+            "wait-ci",
+        );
+        set_phase_gate_state(
+            &db,
+            "run-phase-cap",
+            1,
+            "pending",
+            &[],
+            Some(2),
+            false,
+            3,
+            Some("card-phase-cap"),
+            None,
+            None,
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.exec = function(cmd, args) {
+                        if (cmd !== "gh") return "ERROR: unexpected command";
+                        if (args[0] === "pr" && args[1] === "view") {
+                            return JSON.stringify({
+                                number: 903,
+                                state: "OPEN",
+                                mergedAt: null,
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-cap",
+                                headRefOid: "ghi789",
+                                title: "Cap card"
+                            });
+                        }
+                        if (args[0] === "run" && args[1] === "list") {
+                            return JSON.stringify([{
+                                databaseId: 5003,
+                                status: "completed",
+                                conclusion: "failure",
+                                headSha: "ghi789",
+                                event: "pull_request"
+                            }]);
+                        }
+                        return "ERROR: unexpected gh args";
+                    };
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .expect("OnTick1min should succeed");
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-cap'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let rework_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-phase-cap' AND dispatch_type = 'rework' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json =
+            phase_gate_state(&db, "run-phase-cap", 1).expect("phase gate state must remain");
+        let messages = message_outbox_rows(&db);
+        assert_eq!(run_status, "paused");
+        assert_eq!(
+            rework_count, 0,
+            "retry cap must prevent new rework dispatches"
+        );
+        assert_eq!(phase_gate_json["status"], "failed");
+        assert_eq!(
+            phase_gate_json["failed_verdict"],
+            "phase_gate_final_failure"
+        );
+        assert_eq!(phase_gate_json["rework_count"], 3);
+        assert!(
+            phase_gate_json["failed_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("자동 재작업 한도(3)"),
+            "failure reason should mention the configured retry cap"
+        );
+        assert!(
+            messages.iter().any(|(target, content)| {
+                target == "channel:111" && content.contains("자동 재작업 한도(3)")
+            }),
+            "card owner must be notified about final phase gate failure"
+        );
+        assert!(
+            messages.iter().any(|(target, content)| {
+                target == "channel:999" && content.contains("자동 재작업 한도(3)")
+            }),
+            "human alert channel must receive the final escalation"
         );
     }
 

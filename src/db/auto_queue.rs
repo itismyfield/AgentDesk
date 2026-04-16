@@ -1082,6 +1082,7 @@ pub struct PhaseGateStateWrite {
     pub pass_verdict: String,
     pub next_phase: Option<i64>,
     pub final_phase: bool,
+    pub rework_count: i64,
     pub anchor_card_id: Option<String>,
     pub failure_reason: Option<String>,
     pub created_at: Option<String>,
@@ -1214,6 +1215,7 @@ pub fn save_phase_gate_state_on_conn(
     let status = normalize_phase_gate_status(&state.status);
     let verdict = normalize_optional_text(state.verdict.as_deref());
     let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
+    let rework_count = state.rework_count.max(0);
     let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
     let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
     let created_at = normalize_optional_text(state.created_at.as_deref());
@@ -1222,10 +1224,10 @@ pub fn save_phase_gate_state_on_conn(
         conn.execute(
             "INSERT INTO auto_queue_phase_gates (
                 run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                final_phase, anchor_card_id, failure_reason, created_at, updated_at
+                final_phase, rework_count, anchor_card_id, failure_reason, created_at, updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9,
-                COALESCE(?10, CURRENT_TIMESTAMP), datetime('now')
+                ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10,
+                COALESCE(?11, CURRENT_TIMESTAMP), datetime('now')
              )",
             rusqlite::params![
                 run_id,
@@ -1235,6 +1237,7 @@ pub fn save_phase_gate_state_on_conn(
                 pass_verdict,
                 state.next_phase,
                 if state.final_phase { 1 } else { 0 },
+                rework_count,
                 anchor_card_id,
                 failure_reason,
                 created_at
@@ -1245,10 +1248,10 @@ pub fn save_phase_gate_state_on_conn(
             conn.execute(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
+                    final_phase, rework_count, anchor_card_id, failure_reason, created_at, updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    COALESCE(?11, CURRENT_TIMESTAMP), datetime('now')
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    COALESCE(?12, CURRENT_TIMESTAMP), datetime('now')
                  )
                  ON CONFLICT(dispatch_id) DO UPDATE SET
                     run_id = excluded.run_id,
@@ -1258,6 +1261,7 @@ pub fn save_phase_gate_state_on_conn(
                     pass_verdict = excluded.pass_verdict,
                     next_phase = excluded.next_phase,
                     final_phase = excluded.final_phase,
+                    rework_count = excluded.rework_count,
                     anchor_card_id = excluded.anchor_card_id,
                     failure_reason = excluded.failure_reason,
                     updated_at = datetime('now')",
@@ -1270,6 +1274,7 @@ pub fn save_phase_gate_state_on_conn(
                     pass_verdict,
                     state.next_phase,
                     if state.final_phase { 1 } else { 0 },
+                    rework_count,
                     anchor_card_id,
                     failure_reason,
                     created_at
@@ -2157,6 +2162,7 @@ mod tests {
                 pass_verdict TEXT NOT NULL DEFAULT 'phase_gate_passed',
                 next_phase INTEGER,
                 final_phase INTEGER NOT NULL DEFAULT 0,
+                rework_count INTEGER NOT NULL DEFAULT 0,
                 anchor_card_id TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
                 failure_reason TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -3249,6 +3255,7 @@ mod tests {
                 pass_verdict: "phase_gate_passed".to_string(),
                 next_phase: Some(3),
                 final_phase: true,
+                rework_count: 2,
                 anchor_card_id: None,
                 failure_reason: Some("deploy-dev failed".to_string()),
                 created_at: Some("2026-04-15 00:00:00".to_string()),
@@ -3267,7 +3274,7 @@ mod tests {
 
         let mut stmt = conn
             .prepare(
-                "SELECT dispatch_id, status, verdict, next_phase, final_phase, failure_reason
+                "SELECT dispatch_id, status, verdict, next_phase, final_phase, rework_count, failure_reason
                  FROM auto_queue_phase_gates
                  WHERE run_id = ?1 AND phase = ?2
                  ORDER BY dispatch_id ASC",
@@ -3281,7 +3288,8 @@ mod tests {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .unwrap()
@@ -3294,7 +3302,8 @@ mod tests {
         assert_eq!(rows[0].2.as_deref(), Some("deploy_failed"));
         assert_eq!(rows[0].3, Some(3));
         assert_eq!(rows[0].4, 1);
-        assert_eq!(rows[0].5.as_deref(), Some("deploy-dev failed"));
+        assert_eq!(rows[0].5, 2);
+        assert_eq!(rows[0].6.as_deref(), Some("deploy-dev failed"));
     }
 
     #[test]

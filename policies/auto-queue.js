@@ -92,6 +92,31 @@ function autoQueueLog(level, message, context) {
 
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
+var PHASE_GATE_REWORK_CARD_TITLE_MAX_CHARS = 120;
+var PHASE_GATE_REWORK_DETAIL_MAX_CHARS = 72;
+
+function _autoQueueParseJsonObject(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function _autoQueueTruncateText(text, maxChars) {
+  var normalized = String(text || "");
+  if (maxChars <= 0) return "";
+  if (normalized.length <= maxChars) return normalized;
+  if (maxChars === 1) return "…";
+  return normalized.substring(0, maxChars - 1) + "…";
+}
+
+function phaseGateMaxReworkRetries() {
+  var configured = parseInt(agentdesk.config.get("phase_gate_max_rework_retries") || "3", 10);
+  if (isNaN(configured) || configured < 0) return 3;
+  return configured;
+}
 
 function phaseGateFailureKey(cardId, phase) {
   return "phase_gate_failure:" + cardId + ":" + phase;
@@ -415,6 +440,26 @@ var autoQueue = {
       finalizeRunWithoutPhaseGate(finishedRuns[fr].id);
     }
 
+    var pausedPhaseGates = agentdesk.db.query(
+      "SELECT DISTINCT g.run_id, g.phase " +
+      "FROM auto_queue_phase_gates g " +
+      "JOIN auto_queue_runs r ON r.id = g.run_id " +
+      "WHERE r.status = 'paused' AND g.status IN ('pending', 'failed') " +
+      "ORDER BY datetime(COALESCE(g.updated_at, g.created_at)) ASC, g.rowid ASC",
+      []
+    );
+    for (var pg = 0; pg < pausedPhaseGates.length; pg++) {
+      var gateRow = pausedPhaseGates[pg];
+      try {
+        reevaluateTickPhaseGate(gateRow.run_id, gateRow.phase);
+      } catch (e) {
+        autoQueueLog("warn", "onTick1min: phase gate reevaluation failed for run " + gateRow.run_id + " phase " + gateRow.phase + ": " + e, {
+          run_id: gateRow.run_id,
+          batch_phase: gateRow.phase
+        });
+      }
+    }
+
     // Find active runs with pending entries
     var activeRuns = agentdesk.db.query(
       "SELECT DISTINCT r.id " +
@@ -542,7 +587,7 @@ function _freePathToDispatchable(from, cfg) {
 function loadPhaseGateState(runId, phase) {
   var rows = agentdesk.db.query(
     "SELECT dispatch_id, status, verdict, pass_verdict, next_phase, final_phase, " +
-    "anchor_card_id, failure_reason, created_at " +
+    "rework_count, anchor_card_id, failure_reason, created_at " +
     "FROM auto_queue_phase_gates " +
     "WHERE run_id = ? AND phase = ? " +
     "ORDER BY CASE WHEN dispatch_id IS NULL THEN 0 ELSE 1 END ASC, created_at ASC, dispatch_id ASC",
@@ -579,6 +624,7 @@ function loadPhaseGateState(runId, phase) {
     batch_phase: phase,
     next_phase: rows[0].next_phase,
     final_phase: !!rows[0].final_phase,
+    rework_count: rows[0].rework_count || 0,
     anchor_card_id: rows[0].anchor_card_id || null,
     status: status,
     dispatch_ids: dispatchIds,
@@ -606,6 +652,7 @@ function savePhaseGateState(runId, phase, state) {
       "phase_gate_passed",
     next_phase: state.next_phase !== undefined ? state.next_phase : null,
     final_phase: !!state.final_phase,
+    rework_count: state.rework_count || 0,
     anchor_card_id: state.anchor_card_id || null,
     failure_reason: state.failed_reason || null,
     created_at: state.created_at || null
@@ -710,6 +757,489 @@ function _isDeployPhase(runId, phase) {
 function _phaseGateRequired(runId, phase) {
   if (_isDeployPhase(runId, phase)) return true;
   return countDistinctBatchPhases(runId) > 1;
+}
+
+function _loadPhaseGateCards(runId, phase) {
+  return agentdesk.db.query(
+    "SELECT e.id as entry_id, e.kanban_card_id as card_id, e.agent_id, " +
+    "COALESCE(kc.title, kc.id) as title, kc.github_issue_number, kc.repo_id, kc.status, kc.blocked_reason " +
+    "FROM auto_queue_entries e " +
+    "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
+    "WHERE e.run_id = ? AND COALESCE(e.batch_phase, 0) = ? " +
+    "ORDER BY e.priority_rank ASC, e.created_at ASC, e.id ASC",
+    [runId, phase]
+  );
+}
+
+function _loadPhaseGateActiveFixDispatch(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT id, dispatch_type, to_agent_id, status, context " +
+    "FROM task_dispatches " +
+    "WHERE kanban_card_id = ? " +
+    "AND dispatch_type IN ('implementation', 'rework') " +
+    "AND status IN ('pending', 'dispatched') " +
+    "ORDER BY CASE WHEN dispatch_type = 'rework' THEN 0 ELSE 1 END ASC, " +
+    "datetime(COALESCE(updated_at, created_at)) DESC, rowid DESC LIMIT 1",
+    [cardId]
+  );
+  if (rows.length === 0) return null;
+  rows[0].context_json = _autoQueueParseJsonObject(rows[0].context);
+  return rows[0];
+}
+
+function _resolvePhaseGatePrInfo(card) {
+  if (!card || !card.card_id) return null;
+  var tracking = agentdesk.prTracking.load(card.card_id, { fallback_state: "wait-ci" }) || null;
+  var repo = (tracking && tracking.repo_id) || card.repo_id || agentdesk.prTracking.repoForCard(card.card_id);
+  if (!repo) return null;
+
+  var prNumber = tracking && tracking.pr_number ? tracking.pr_number : null;
+  var branch = tracking && tracking.branch ? tracking.branch : null;
+  var headSha = tracking && tracking.head_sha ? tracking.head_sha : null;
+  if (!prNumber && branch) {
+    var discovered = agentdesk.prTracking.findOpenPrByBranch(repo, branch);
+    if (discovered) {
+      prNumber = discovered.number || null;
+      branch = discovered.branch || branch;
+      headSha = discovered.sha || headSha;
+      agentdesk.prTracking.upsert(
+        card.card_id,
+        repo,
+        tracking ? tracking.worktree_path : null,
+        branch,
+        prNumber,
+        headSha,
+        (tracking && tracking.state) || "wait-ci",
+        (tracking && tracking.last_error) || null
+      );
+      tracking = agentdesk.prTracking.load(card.card_id, { fallback_state: "wait-ci" }) || tracking;
+    }
+  }
+
+  if (!prNumber) return null;
+  return {
+    card_id: card.card_id,
+    repo: repo,
+    number: prNumber,
+    branch: branch,
+    sha: headSha,
+    worktree_path: tracking && tracking.worktree_path ? tracking.worktree_path : null,
+    tracking_state: tracking && tracking.state ? tracking.state : null
+  };
+}
+
+function _loadPhaseGatePrView(prInfo) {
+  if (!prInfo || !prInfo.repo || !prInfo.number) return null;
+  var raw = agentdesk.exec("gh", [
+    "pr", "view", String(prInfo.number),
+    "--json", "number,state,mergedAt,mergeable,headRefName,headRefOid,title",
+    "--repo", prInfo.repo
+  ]);
+  if (!raw || raw.indexOf("ERROR") === 0) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function _loadPhaseGateIssueClosed(issueNumber, repo) {
+  if (!issueNumber) return true;
+  if (!repo) return null;
+  var raw = agentdesk.exec("gh", [
+    "issue", "view", String(issueNumber),
+    "--repo", repo,
+    "--json", "state",
+    "--jq", ".state"
+  ]);
+  if (!raw || raw.indexOf("ERROR") === 0) return null;
+  return String(raw || "").trim().toUpperCase() === "CLOSED";
+}
+
+function _loadPhaseGateCiState(prInfo, prView) {
+  if (!prInfo || !prInfo.repo) {
+    return { status: "pending", reason: "missing PR repo" };
+  }
+  var branch = (prView && prView.headRefName) || prInfo.branch;
+  var headSha = (prView && prView.headRefOid) || prInfo.sha;
+  if (!branch) {
+    return { status: "pending", reason: "missing PR branch" };
+  }
+
+  var raw = agentdesk.exec("gh", [
+    "run", "list",
+    "--branch", branch,
+    "--repo", prInfo.repo,
+    "--json", "databaseId,status,conclusion,headSha,event",
+    "--limit", "10"
+  ]);
+  if (!raw || raw.indexOf("ERROR") === 0) {
+    return { status: "pending", reason: "CI lookup failed" };
+  }
+
+  var runs = [];
+  try {
+    runs = JSON.parse(raw) || [];
+  } catch (e) {
+    return { status: "pending", reason: "CI payload parse failed" };
+  }
+  if (!runs || runs.length === 0) {
+    return { status: "pending", reason: "CI run not found" };
+  }
+
+  var selected = runs[0];
+  if (headSha) {
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i].headSha === headSha) {
+        selected = runs[i];
+        break;
+      }
+    }
+  }
+
+  var runId = selected.databaseId || null;
+  var runUrl = runId ? ("https://github.com/" + prInfo.repo + "/actions/runs/" + runId) : null;
+  if (selected.status !== "completed") {
+    return {
+      status: "pending",
+      reason: "CI running",
+      run_id: runId,
+      run_url: runUrl
+    };
+  }
+  if (selected.conclusion === "success") {
+    return {
+      status: "success",
+      run_id: runId,
+      run_url: runUrl
+    };
+  }
+  if (selected.conclusion === "failure") {
+    return {
+      status: "failure",
+      reason: "CI failure confirmed",
+      conclusion: selected.conclusion,
+      run_id: runId,
+      run_url: runUrl
+    };
+  }
+  return {
+    status: "pending",
+    reason: "CI conclusion=" + (selected.conclusion || "unknown"),
+    conclusion: selected.conclusion || null,
+    run_id: runId,
+    run_url: runUrl
+  };
+}
+
+function _evaluateTickPhaseGateCard(card) {
+  var evaluation = {
+    card_id: card.card_id,
+    title: card.title || card.card_id,
+    agent_id: card.agent_id || null,
+    github_issue_number: card.github_issue_number || null,
+    repo_id: card.repo_id || null,
+    status: card.status || null,
+    blocked_reason: card.blocked_reason || null,
+    merge_verified: false,
+    build_passed: false,
+    issue_closed: false,
+    waiting_reason: null,
+    failure_type: null,
+    failure_message: null,
+    active_fix_dispatch: null,
+    pr: null,
+    pr_view: null,
+    ci: null
+  };
+
+  var prInfo = _resolvePhaseGatePrInfo(card);
+  if (!prInfo) {
+    evaluation.waiting_reason = "PR tracking pending";
+    return evaluation;
+  }
+  evaluation.pr = prInfo;
+
+  if (prInfo.tracking_state === "post-merge-cleanup" || prInfo.tracking_state === "closed") {
+    evaluation.merge_verified = true;
+    evaluation.build_passed = true;
+  }
+
+  var prView = _loadPhaseGatePrView(prInfo);
+  evaluation.pr_view = prView;
+
+  if (prView && prView.mergedAt) {
+    evaluation.merge_verified = true;
+    evaluation.build_passed = true;
+  }
+
+  if (!evaluation.merge_verified && prView && prView.mergeable === "CONFLICTING") {
+    evaluation.failure_type = "merge_conflict";
+    evaluation.failure_message = "PR #" + prInfo.number + " has merge conflicts with main";
+    evaluation.active_fix_dispatch = _loadPhaseGateActiveFixDispatch(card.card_id);
+    return evaluation;
+  }
+
+  if (!evaluation.build_passed) {
+    evaluation.ci = _loadPhaseGateCiState(prInfo, prView);
+    if (evaluation.ci.status === "success") {
+      evaluation.build_passed = true;
+    } else if (evaluation.ci.status === "failure") {
+      evaluation.failure_type = "ci_failure";
+      evaluation.failure_message = "PR #" + prInfo.number + " CI failed";
+      evaluation.active_fix_dispatch = _loadPhaseGateActiveFixDispatch(card.card_id);
+      return evaluation;
+    } else {
+      evaluation.waiting_reason = evaluation.ci.reason || "CI pending";
+    }
+  }
+
+  if (!evaluation.merge_verified) {
+    evaluation.waiting_reason = evaluation.waiting_reason || "merge pending";
+  }
+
+  var issueClosed = _loadPhaseGateIssueClosed(card.github_issue_number, prInfo.repo || card.repo_id);
+  if (issueClosed === true) {
+    evaluation.issue_closed = true;
+  } else if (!card.github_issue_number) {
+    evaluation.issue_closed = true;
+  } else if (issueClosed === false) {
+    evaluation.waiting_reason = evaluation.waiting_reason || ("issue #" + card.github_issue_number + " still open");
+  } else {
+    evaluation.waiting_reason = evaluation.waiting_reason || ("issue #" + card.github_issue_number + " lookup pending");
+  }
+
+  return evaluation;
+}
+
+function _phaseGateReworkDetailLabel(evaluation) {
+  if (!evaluation || !evaluation.failure_type) return "재작업";
+  if (evaluation.failure_type === "merge_conflict") return "충돌 해결";
+  return "CI 실패 수정";
+}
+
+function _phaseGateReworkTitle(evaluation) {
+  var issueLabel = evaluation.github_issue_number ? ("#" + evaluation.github_issue_number + " ") : "";
+  var compactTitle = _autoQueueTruncateText(evaluation.title || evaluation.card_id, PHASE_GATE_REWORK_CARD_TITLE_MAX_CHARS);
+  var compactDetail = _autoQueueTruncateText(_phaseGateReworkDetailLabel(evaluation), PHASE_GATE_REWORK_DETAIL_MAX_CHARS);
+  return "[Phase Gate Rework] " + issueLabel + compactTitle + " — " + compactDetail;
+}
+
+function _phaseGateReworkContext(runId, phase, evaluation) {
+  return {
+    auto_queue: true,
+    sidecar_dispatch: true,
+    target_repo: evaluation.pr ? evaluation.pr.repo : null,
+    worktree_path: evaluation.pr ? evaluation.pr.worktree_path : null,
+    worktree_branch: evaluation.pr ? evaluation.pr.branch : null,
+    phase_gate_rework: {
+      run_id: runId,
+      batch_phase: phase,
+      card_id: evaluation.card_id,
+      failure_type: evaluation.failure_type,
+      failure_reason: evaluation.failure_message,
+      repo: evaluation.pr ? evaluation.pr.repo : null,
+      pr_number: evaluation.pr ? evaluation.pr.number : null,
+      run_id_ci: evaluation.ci && evaluation.ci.run_id ? evaluation.ci.run_id : null,
+      run_url: evaluation.ci && evaluation.ci.run_url ? evaluation.ci.run_url : null
+    }
+  };
+}
+
+function _movePhaseGateCardToRework(evaluation) {
+  var cfg = agentdesk.pipeline.resolveForCard(evaluation.card_id);
+  var card = agentdesk.kanban.getCard(evaluation.card_id);
+  var initialState = agentdesk.pipeline.kickoffState(cfg);
+  var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
+  var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+  var reworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
+  if (reworkTarget) {
+    if (card && agentdesk.pipeline.isTerminal(card.status, cfg)) {
+      agentdesk.kanban.reopen(evaluation.card_id, reworkTarget);
+    } else {
+      agentdesk.kanban.setStatus(evaluation.card_id, reworkTarget);
+    }
+  }
+  if (evaluation.failure_type === "ci_failure") {
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET blocked_reason = 'ci:rework' WHERE id = ?",
+      [evaluation.card_id]
+    );
+  } else {
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
+      [evaluation.card_id]
+    );
+  }
+}
+
+function _saveFinalFailedPhaseGate(runId, phase, state, cardId, reason, context) {
+  state.status = "failed";
+  state.failed_verdict = "phase_gate_final_failure";
+  state.failed_reason = reason;
+  savePhaseGateState(runId, phase, state);
+  pauseRun(runId);
+  notifyCardOwner(cardId, reason, "auto-queue");
+  notifyHumanAlert(
+    "⚠️ [Phase Gate] " + loadPhaseGateCardLabel(cardId) + "\n" + reason,
+    "auto-queue"
+  );
+  autoQueueLog("warn", "Phase gate finalized as failed: " + reason, context);
+}
+
+function _handleConfirmedTickPhaseGateFailure(runId, phase, state, evaluation) {
+  var activeFix = evaluation.active_fix_dispatch;
+  if (activeFix) {
+    if ((state.rework_count || 0) === 0 && activeFix.dispatch_type === "rework") {
+      state.rework_count = 1;
+      savePhaseGateState(runId, phase, state);
+    }
+    autoQueueLog("info", "Phase gate waiting for active fix dispatch " + activeFix.id + " on card " + evaluation.card_id, {
+      run_id: runId,
+      card_id: evaluation.card_id,
+      dispatch_id: activeFix.id,
+      batch_phase: phase
+    });
+    return;
+  }
+
+  var limit = phaseGateMaxReworkRetries();
+  if ((state.rework_count || 0) >= limit) {
+    _saveFinalFailedPhaseGate(
+      runId,
+      phase,
+      state,
+      evaluation.card_id,
+      "phase " + phase + " 자동 재작업 한도(" + limit + ")를 초과했습니다. " + evaluation.failure_message,
+      {
+        run_id: runId,
+        card_id: evaluation.card_id,
+        batch_phase: phase
+      }
+    );
+    return;
+  }
+
+  var cardRows = agentdesk.db.query(
+    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ? LIMIT 1",
+    [evaluation.card_id]
+  );
+  if (cardRows.length === 0 || !cardRows[0].assigned_agent_id) {
+    _saveFinalFailedPhaseGate(
+      runId,
+      phase,
+      state,
+      evaluation.card_id,
+      "phase " + phase + " 재작업을 보낼 담당 에이전트가 없습니다. " + evaluation.failure_message,
+      {
+        run_id: runId,
+        card_id: evaluation.card_id,
+        batch_phase: phase
+      }
+    );
+    return;
+  }
+
+  try {
+    var dispatchId = agentdesk.dispatch.create(
+      evaluation.card_id,
+      cardRows[0].assigned_agent_id,
+      "rework",
+      _phaseGateReworkTitle(evaluation),
+      _phaseGateReworkContext(runId, phase, evaluation)
+    );
+    _movePhaseGateCardToRework(evaluation);
+    state.rework_count = (state.rework_count || 0) + 1;
+    savePhaseGateState(runId, phase, state);
+    autoQueueLog("info", "Created phase gate rework dispatch " + dispatchId + " for card " + evaluation.card_id, {
+      run_id: runId,
+      card_id: evaluation.card_id,
+      dispatch_id: dispatchId,
+      batch_phase: phase
+    });
+  } catch (e) {
+    _saveFinalFailedPhaseGate(
+      runId,
+      phase,
+      state,
+      evaluation.card_id,
+      "phase " + phase + " 재작업 dispatch 생성에 실패했습니다: " + e,
+      {
+        run_id: runId,
+        card_id: evaluation.card_id,
+        batch_phase: phase
+      }
+    );
+  }
+}
+
+function reevaluateTickPhaseGate(runId, phase) {
+  var state = loadPhaseGateState(runId, phase);
+  if (!state) return false;
+  if (_isDeployPhase(runId, phase)) return false;
+  if (state.dispatch_ids && state.dispatch_ids.length > 0) return false;
+  if (state.status === "failed" && state.failed_verdict === "phase_gate_final_failure") {
+    return false;
+  }
+
+  var cards = _loadPhaseGateCards(runId, phase);
+  if (cards.length === 0) {
+    _saveFinalFailedPhaseGate(
+      runId,
+      phase,
+      state,
+      state.anchor_card_id || null,
+      "phase " + phase + " gate target cards could not be found",
+      {
+        run_id: runId,
+        card_id: state.anchor_card_id || null,
+        batch_phase: phase
+      }
+    );
+    return true;
+  }
+
+  var allPassed = true;
+  var firstFailure = null;
+  for (var i = 0; i < cards.length; i++) {
+    var evaluation = _evaluateTickPhaseGateCard(cards[i]);
+    if (evaluation.failure_type && !firstFailure) {
+      firstFailure = evaluation;
+      allPassed = false;
+      break;
+    }
+    if (!(evaluation.merge_verified && evaluation.build_passed && evaluation.issue_closed)) {
+      allPassed = false;
+    }
+  }
+
+  if (allPassed) {
+    clearPhaseGateState(runId, phase);
+    resetPhaseGateFailureCount(state.anchor_card_id || cards[0].card_id, phase);
+    if (state.final_phase) {
+      completeRunAndNotify(runId);
+    } else {
+      resumeRunAndActivate(runId, state.next_phase);
+    }
+    autoQueueLog("info", "Tick phase gate passed for run " + runId + " phase " + phase, {
+      run_id: runId,
+      card_id: state.anchor_card_id || cards[0].card_id,
+      batch_phase: phase
+    });
+    return true;
+  }
+
+  state.status = "pending";
+  state.failed_verdict = null;
+  state.failed_reason = null;
+  savePhaseGateState(runId, phase, state);
+
+  if (firstFailure) {
+    _handleConfirmedTickPhaseGateFailure(runId, phase, state, firstFailure);
+    return true;
+  }
+
+  return false;
 }
 
 function completeRunAndNotify(runId) {
@@ -968,7 +1498,6 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
     return existing;
   }
 
-  var groups = _buildPhaseGateGroups(runId, phase);
   var state = {
     run_id: runId,
     batch_phase: phase,
@@ -982,91 +1511,8 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
   };
   pauseRun(runId);
 
-  if (groups.length === 0) {
-    state.status = "failed";
-    state.failed_reason = "no phase gate targets found";
-    savePhaseGateState(runId, phase, state);
-    handlePhaseGateFailure(
-      anchorCardId,
-      phase,
-      "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " has no gate targets",
-      {
-        run_id: runId,
-        card_id: anchorCardId,
-        batch_phase: phase
-      }
-    );
-    return state;
-  }
-
-  var errors = [];
-  for (var i = 0; i < groups.length; i++) {
-    var group = groups[i];
-    try {
-      var dispatchId = agentdesk.dispatch.create(
-        group.anchor_card_id || anchorCardId,
-        group.target_agent_id,
-        group.dispatch_type,
-        _phaseGateTitle(group, phase, runId),
-        {
-          auto_queue: true,
-          sidecar_dispatch: true,
-          phase_gate: {
-            run_id: runId,
-            batch_phase: phase,
-            next_phase: nextPhase,
-            final_phase: !!finalPhase,
-            source_agent_id: group.source_agent_id,
-            target_agent_id: group.target_agent_id,
-            dispatch_type: group.dispatch_type,
-            pass_verdict: group.pass_verdict,
-            checks: group.checks,
-            card_ids: group.card_ids,
-            issue_numbers: group.issue_numbers,
-            work_items: group.work_items,
-            expected_gate_count: groups.length
-          }
-        }
-      );
-      state.dispatch_ids.push(dispatchId);
-      state.gates.push({
-        dispatch_id: dispatchId,
-        source_agent_id: group.source_agent_id,
-        target_agent_id: group.target_agent_id,
-        dispatch_type: group.dispatch_type,
-        pass_verdict: group.pass_verdict,
-        checks: group.checks,
-        card_ids: group.card_ids
-      });
-    } catch (e) {
-      errors.push((group.target_agent_id || "unknown") + ": " + e);
-    }
-  }
-
-  if (errors.length > 0 || state.dispatch_ids.length === 0) {
-    state.status = "failed";
-    state.failed_reason = errors.join("; ") || "phase gate dispatch creation failed";
-    savePhaseGateState(runId, phase, state);
-    handlePhaseGateFailure(
-      anchorCardId,
-      phase,
-      "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " setup failed: " + state.failed_reason,
-      {
-        run_id: runId,
-        card_id: anchorCardId,
-        batch_phase: phase
-      }
-    );
-    autoQueueLog("warn", "Phase gate setup failed for run " + runId + " phase " + phase + ": " + state.failed_reason, {
-      run_id: runId,
-      card_id: anchorCardId,
-      batch_phase: phase
-    });
-    return state;
-  }
-
   savePhaseGateState(runId, phase, state);
-  autoQueueLog("info", "Created " + state.dispatch_ids.length + " phase gate dispatch(es) for run " + runId + " phase " + phase, {
+  autoQueueLog("info", "Created tick-based phase gate for run " + runId + " phase " + phase, {
     run_id: runId,
     card_id: anchorCardId,
     batch_phase: phase

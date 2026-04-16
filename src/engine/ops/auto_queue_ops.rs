@@ -333,6 +333,8 @@ struct PhaseGateStatePayload {
     #[serde(default)]
     final_phase: bool,
     #[serde(default)]
+    rework_count: i64,
+    #[serde(default)]
     anchor_card_id: Option<String>,
     #[serde(default)]
     failure_reason: Option<String>,
@@ -370,6 +372,7 @@ fn save_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64, state_json: &str
             .unwrap_or_else(|| "phase_gate_passed".to_string()),
         next_phase: payload.next_phase,
         final_phase: payload.final_phase,
+        rework_count: payload.rework_count.max(0),
         anchor_card_id: payload.anchor_card_id,
         failure_reason: payload.failure_reason,
         created_at: payload.created_at,

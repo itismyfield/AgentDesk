@@ -3510,6 +3510,7 @@ fn ensure_auto_queue_tables(db: &Db) {
             pass_verdict    TEXT NOT NULL DEFAULT 'phase_gate_passed',
             next_phase      INTEGER,
             final_phase     INTEGER NOT NULL DEFAULT 0,
+            rework_count    INTEGER NOT NULL DEFAULT 0,
             anchor_card_id  TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
             failure_reason  TEXT,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,

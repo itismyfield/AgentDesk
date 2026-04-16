@@ -184,6 +184,11 @@ fn test_engine_config_get() {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('quoted_key', '\"999\"')",
+            [],
+        )
+        .unwrap();
     }
 
     let rt = rquickjs::Runtime::new().unwrap();
@@ -192,6 +197,8 @@ fn test_engine_config_get() {
         register_globals(&ctx, db.clone()).unwrap();
         let val: String = ctx.eval(r#"agentdesk.config.get("test_key")"#).unwrap();
         assert_eq!(val, "test_value");
+        let quoted_val: String = ctx.eval(r#"agentdesk.config.get("quoted_key")"#).unwrap();
+        assert_eq!(quoted_val, "999");
 
         let is_null: bool = ctx
             .eval(r#"agentdesk.config.get("nonexistent") === null"#)
@@ -1395,12 +1402,13 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
                         pass_verdict: "phase_gate_passed",
                         next_phase: 3,
                         final_phase: true,
+                        rework_count: 2,
                         anchor_card_id: "aq-phase-card",
                         failure_reason: "deploy-dev failed",
                         created_at: "2026-04-15 00:00:00"
                     });
                     var rows = agentdesk.db.query(
-                        "SELECT dispatch_id, status, verdict, next_phase, final_phase, anchor_card_id, failure_reason " +
+                        "SELECT dispatch_id, status, verdict, next_phase, final_phase, rework_count, anchor_card_id, failure_reason " +
                         "FROM auto_queue_phase_gates WHERE run_id = ? AND phase = ? ORDER BY COALESCE(dispatch_id, '')",
                         ["aq-phase-run", 2]
                     );
@@ -1432,6 +1440,7 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
         assert_eq!(parsed["rows"][0]["verdict"], "deploy_failed");
         assert_eq!(parsed["rows"][0]["next_phase"], 3);
         assert_eq!(parsed["rows"][0]["final_phase"], 1);
+        assert_eq!(parsed["rows"][0]["rework_count"], 2);
         assert_eq!(parsed["rows"][0]["anchor_card_id"], "aq-phase-card");
         assert_eq!(parsed["rows"][0]["failure_reason"], "deploy-dev failed");
         assert_eq!(parsed["cleared"], true);
