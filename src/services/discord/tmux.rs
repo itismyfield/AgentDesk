@@ -1319,18 +1319,19 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
             }
-            // Record the offset range we just relayed to prevent duplicate relay.
-            last_relayed_offset = Some(data_start_offset);
-            // Persist to inflight state so replacement watcher instances also skip this offset.
-            if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name) {
-                if let Some(mut inflight) =
-                    super::inflight::load_inflight_state(&pk, channel_id.get())
-                {
-                    inflight.last_watcher_relayed_offset = Some(data_start_offset);
-                    let _ = super::inflight::save_inflight_state(&inflight);
-                }
-            }
             if relay_ok {
+                // Record the offset range only after a successful relay so retries
+                // are not suppressed when Discord delivery fails transiently.
+                last_relayed_offset = Some(data_start_offset);
+                if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
+                {
+                    if let Some(mut inflight) =
+                        super::inflight::load_inflight_state(&pk, channel_id.get())
+                    {
+                        inflight.last_watcher_relayed_offset = Some(data_start_offset);
+                        let _ = super::inflight::save_inflight_state(&inflight);
+                    }
+                }
                 clear_provider_overload_retry_state(channel_id);
             }
             relay_ok

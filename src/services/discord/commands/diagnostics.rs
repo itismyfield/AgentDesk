@@ -37,6 +37,16 @@ fn shorten_session_identifier(value: &str) -> String {
     }
 }
 
+async fn run_blocking_gemini_command<T, F>(label: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("{label} task failed: {error}"))?
+}
+
 async fn fetch_raw_provider_session_id(
     session_key: Option<&str>,
     provider: &ProviderKind,
@@ -757,7 +767,14 @@ pub(in crate::services::discord) async fn cmd_sessions(ctx: Context<'_>) -> Resu
         return Ok(());
     };
 
-    let sessions = match gemini::list_project_sessions(&working_dir) {
+    ctx.defer().await?;
+
+    let working_dir_for_list = working_dir.clone();
+    let sessions = match run_blocking_gemini_command("Gemini session list", move || {
+        gemini::list_project_sessions(&working_dir_for_list)
+    })
+    .await
+    {
         Ok(sessions) => sessions,
         Err(error) => {
             ctx.say(format!("Gemini session list failed: `{}`", error))
@@ -819,7 +836,14 @@ pub(in crate::services::discord) async fn cmd_deletesession(
         return Ok(());
     };
 
-    let sessions = match gemini::list_project_sessions(&working_dir) {
+    ctx.defer().await?;
+
+    let working_dir_for_list = working_dir.clone();
+    let sessions = match run_blocking_gemini_command("Gemini session list", move || {
+        gemini::list_project_sessions(&working_dir_for_list)
+    })
+    .await
+    {
         Ok(sessions) => sessions,
         Err(error) => {
             ctx.say(format!("Gemini session list failed: `{}`", error))
@@ -842,7 +866,13 @@ pub(in crate::services::discord) async fn cmd_deletesession(
             .map(|session| session.session_id.clone())
     };
 
-    let result = match gemini::delete_project_session(&working_dir, trimmed_identifier) {
+    let working_dir_for_delete = working_dir.clone();
+    let identifier_for_delete = trimmed_identifier.to_string();
+    let result = match run_blocking_gemini_command("Gemini session delete", move || {
+        gemini::delete_project_session(&working_dir_for_delete, &identifier_for_delete)
+    })
+    .await
+    {
         Ok(result) => result,
         Err(error) => {
             ctx.say(format!("Gemini session delete failed: `{}`", error))
