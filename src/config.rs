@@ -829,6 +829,11 @@ pub fn loopback() -> String {
 /// All code that needs the AgentDesk root directory MUST call this function
 /// instead of reimplementing the resolution logic.
 pub fn runtime_root() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(override_root) = test_runtime_root_override() {
+        return Some(override_root);
+    }
+
     if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
         let trimmed = override_root.trim();
         if !trimmed.is_empty() {
@@ -1048,6 +1053,29 @@ pub fn load_graceful() -> Config {
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RUNTIME_ROOT_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_runtime_root_override() -> Option<std::path::PathBuf> {
+    TEST_RUNTIME_ROOT_OVERRIDE.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn current_test_runtime_root_override() -> Option<std::path::PathBuf> {
+    test_runtime_root_override()
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
+    TEST_RUNTIME_ROOT_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = path;
+    });
 }
 
 #[cfg(test)]
