@@ -1324,11 +1324,19 @@ fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     }
 }
 
-fn parse_owner_id(owner_id: Option<&str>) -> Option<u64> {
-    owner_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
+fn parse_owner_id(owner_id: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = owner_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if !(17..=20).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("owner_id must be a Discord user id with 17-20 digits".to_string());
+    }
+
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "owner_id must be a valid Discord user id".to_string())
 }
 
 fn upsert_command_bot(
@@ -1366,7 +1374,7 @@ fn write_agentdesk_discord_config(
     };
 
     config.discord.guild_id = Some(guild_id.trim().to_string());
-    config.discord.owner_id = parse_owner_id(owner_id);
+    config.discord.owner_id = parse_owner_id(owner_id)?;
 
     upsert_command_bot(&mut config, "command", primary_token, primary_provider);
 
@@ -1915,11 +1923,11 @@ fn verify_onboarding_settings_artifacts(
             config.discord.guild_id
         ));
     }
-    if config.discord.owner_id != parse_owner_id(owner_id) {
+    let expected_owner_id = parse_owner_id(owner_id)?;
+    if config.discord.owner_id != expected_owner_id {
         return Err(format!(
             "discord owner mismatch after onboarding: expected {:?} got {:?}",
-            parse_owner_id(owner_id),
-            config.discord.owner_id
+            expected_owner_id, config.discord.owner_id
         ));
     }
 
@@ -2144,6 +2152,19 @@ async fn complete_with_options(
             false,
             None,
             Some("guild_id is required for onboarding completion".to_string()),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+    if let Err(error) = parse_owner_id(body.owner_id.as_deref()) {
+        return completion_response(
+            StatusCode::BAD_REQUEST,
+            false,
+            provider,
+            OnboardingRerunPolicy::ReuseExisting,
+            false,
+            None,
+            Some(error),
             Vec::new(),
             serde_json::Map::new(),
         );
@@ -3492,6 +3513,25 @@ mod tests {
             .unwrap(),
             "announce-token\n"
         );
+    }
+
+    #[test]
+    fn write_agentdesk_discord_config_rejects_short_owner_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let error = write_agentdesk_discord_config(
+            root,
+            "guild-123",
+            "primary-token",
+            "claude",
+            None,
+            None,
+            Some("7"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("owner_id must be a Discord user id"));
     }
 
     #[test]

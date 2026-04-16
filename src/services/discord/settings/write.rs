@@ -68,7 +68,11 @@ fn persist_bot_auth_to_yaml_checked(
         crate::config::Config::default()
     };
 
-    config.discord.owner_id = settings.owner_user_id;
+    // Keep the onboarding-configured owner stable; runtime settings should only
+    // fill the owner when the YAML is still unset.
+    if config.discord.owner_id.is_none() {
+        config.discord.owner_id = settings.owner_user_id;
+    }
 
     let Some(bot_name) = super::resolved_config_bot_name(&config, token) else {
         let rendered = serde_yaml::to_string(&config).map_err(|err| config_io_error(&path, err))?;

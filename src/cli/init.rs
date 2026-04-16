@@ -433,11 +433,19 @@ fn init_has_existing_configuration(root: &Path) -> bool {
     init_config_path(root).exists() || crate::runtime_layout::org_schema_path(root).exists()
 }
 
-fn parse_owner_id(owner_id: Option<&str>) -> Option<u64> {
-    owner_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
+fn parse_owner_id(owner_id: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = owner_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if !(17..=20).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("owner_id must be a Discord user id with 17-20 digits".to_string());
+    }
+
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "owner_id must be a valid Discord user id".to_string())
 }
 
 fn upsert_command_bot(
@@ -477,7 +485,7 @@ fn write_agentdesk_discord_config(
     };
 
     config.discord.guild_id = Some(guild_id.trim().to_string());
-    config.discord.owner_id = parse_owner_id(owner_id);
+    config.discord.owner_id = parse_owner_id(owner_id)?;
     upsert_command_bot(&mut config, token, provider, allowed_channel_ids);
 
     let rendered = serde_yaml::to_string(&config)
@@ -915,6 +923,20 @@ mod tests {
         assert!(plist.contains("<string>abc123</string>"));
         assert!(plist.contains("<key>SAMPLE_FLAG</key>"));
         assert!(plist.contains("<string>enabled</string>"));
+    }
+
+    #[test]
+    fn parse_owner_id_rejects_short_values() {
+        let error = parse_owner_id(Some("7")).unwrap_err();
+        assert!(error.contains("owner_id must be a Discord user id"));
+    }
+
+    #[test]
+    fn parse_owner_id_accepts_discord_snowflakes() {
+        assert_eq!(
+            parse_owner_id(Some("1469509284508340276")).unwrap(),
+            Some(1469509284508340276)
+        );
     }
 }
 
