@@ -1600,6 +1600,91 @@ async fn kanban_get_card() {
 }
 
 #[tokio::test]
+async fn kanban_list_and_get_include_latest_dispatch_result_summary() {
+    let db = test_db();
+    seed_test_agents(&db);
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+             VALUES ('card-summary', 'Card Summary', 'in_progress', 'medium', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+             ) VALUES (
+                'dispatch-rework-summary', 'card-summary', 'agent-1', 'rework', 'pending',
+                'Rework requested', ?1, datetime('now'), datetime('now')
+             )",
+            [json!({
+                "pm_decision": "rework",
+                "comment": "Handle the race condition"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET latest_dispatch_id = 'dispatch-rework-summary' WHERE id = 'card-summary'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine.clone(), None);
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/kanban-cards")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let listed_card = list_json["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "card-summary")
+        .expect("card-summary must be present in kanban list");
+    assert_eq!(
+        listed_card["latest_dispatch_result_summary"],
+        "PM requested rework: Handle the race condition"
+    );
+
+    let get_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/kanban-cards/card-summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        get_json["card"]["latest_dispatch_result_summary"],
+        "PM requested rework: Handle the race condition"
+    );
+    assert_eq!(get_json["card"]["latest_dispatch_type"], "rework");
+}
+
+#[tokio::test]
 async fn kanban_get_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -2933,6 +3018,113 @@ async fn dispatch_list_with_filter() {
     let dispatches = json["dispatches"].as_array().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0]["id"], "d1");
+}
+
+#[tokio::test]
+async fn dispatch_endpoints_include_normalized_result_summary() {
+    let db = test_db();
+    seed_test_agents(&db);
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+             VALUES ('card-dispatch-summary', 'Dispatch Summary Card', 'review', 'medium', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-cancel-summary', 'card-dispatch-summary', 'agent-1', 'implementation', 'cancelled',
+                'Cancelled dispatch', ?1, datetime('now', '-1 minute'), datetime('now', '-1 minute')
+             )",
+            [json!({
+                "reason": "auto_cancelled_on_terminal_card"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-summary', 'card-dispatch-summary', 'agent-1', 'review-decision', 'completed',
+                'Review decision', ?1, datetime('now'), datetime('now')
+             )",
+            [json!({
+                "decision": "accept",
+                "comment": "Looks good"
+            })
+            .to_string()],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine.clone(), None);
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/dispatches")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let dispatches = list_json["dispatches"].as_array().unwrap();
+
+    let cancelled = dispatches
+        .iter()
+        .find(|dispatch| dispatch["id"] == "dispatch-cancel-summary")
+        .expect("cancelled dispatch must be returned");
+    assert_eq!(
+        cancelled["result_summary"],
+        "Cancelled: terminal card cleanup"
+    );
+    assert_eq!(
+        cancelled["result"]["reason"],
+        serde_json::Value::String("auto_cancelled_on_terminal_card".to_string())
+    );
+
+    let review_decision = dispatches
+        .iter()
+        .find(|dispatch| dispatch["id"] == "dispatch-review-summary")
+        .expect("review decision dispatch must be returned");
+    assert_eq!(
+        review_decision["result_summary"],
+        "Accepted review feedback: Looks good"
+    );
+    assert_eq!(review_decision["result"]["decision"], "accept");
+
+    let get_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/dispatches/dispatch-review-summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        get_json["dispatch"]["result_summary"],
+        "Accepted review feedback: Looks good"
+    );
+    assert_eq!(get_json["dispatch"]["result"]["comment"], "Looks good");
 }
 
 // ── GitHub Repos API tests ────────────────────────────────────

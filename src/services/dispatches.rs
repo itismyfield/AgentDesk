@@ -280,6 +280,21 @@ impl DispatchService {
 
 fn dispatch_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
     let status = row.get::<_, String>(5)?;
+    let dispatch_type = row.get::<_, Option<String>>(4)?;
+    let context_raw = row.get::<_, Option<String>>(7)?;
+    let result_raw = row.get::<_, Option<String>>(8)?;
+    let context = context_raw
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let result = result_raw
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let result_summary = dispatch::summarize_dispatch_result(
+        dispatch_type.as_deref(),
+        Some(status.as_str()),
+        result.as_ref(),
+        context.as_ref(),
+    );
     let created_at = row.get::<_, Option<String>>(11).ok().flatten().or_else(|| {
         row.get::<_, Option<i64>>(11)
             .ok()
@@ -303,16 +318,14 @@ fn dispatch_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
         "kanban_card_id": row.get::<_, Option<String>>(1)?,
         "from_agent_id": row.get::<_, Option<String>>(2)?,
         "to_agent_id": row.get::<_, Option<String>>(3)?,
-        "dispatch_type": row.get::<_, Option<String>>(4)?,
+        "dispatch_type": dispatch_type,
         "status": status,
         "title": row.get::<_, Option<String>>(6)?,
-        "context": row.get::<_, Option<String>>(7)?
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok()),
-        "result": row.get::<_, Option<String>>(8)?
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok()),
+        "context": context,
+        "result": result,
         "context_file": Value::Null,
         "result_file": Value::Null,
-        "result_summary": Value::Null,
+        "result_summary": result_summary,
         "parent_dispatch_id": row.get::<_, Option<String>>(9)?,
         "chain_depth": row.get::<_, i64>(10).unwrap_or(0),
         "created_at": created_at,

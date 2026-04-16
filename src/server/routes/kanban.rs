@@ -16,7 +16,7 @@ pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.sta
     kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
     kc.created_at, kc.updated_at, \
     td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth, \
-    td.result AS d_result, \
+    td.result AS d_result, td.context AS d_context, \
     kc.description, kc.blocked_reason, kc.review_notes, kc.review_status, \
     kc.started_at, kc.requested_at, kc.completed_at, kc.pipeline_stage_id, \
     kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth, kc.review_entered_at \
@@ -1575,22 +1575,32 @@ pub(super) fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_js
     let metadata_parsed = metadata_raw
         .as_ref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let latest_dispatch_status = row.get::<_, Option<String>>(13).unwrap_or(None);
+    let latest_dispatch_type = row.get::<_, Option<String>>(14).unwrap_or(None);
+    let latest_dispatch_result_raw = row.get::<_, Option<String>>(17).unwrap_or(None);
+    let latest_dispatch_context_raw = row.get::<_, Option<String>>(18).unwrap_or(None);
+    let latest_dispatch_result_summary = crate::dispatch::summarize_dispatch_from_text(
+        latest_dispatch_type.as_deref(),
+        latest_dispatch_status.as_deref(),
+        latest_dispatch_result_raw.as_deref(),
+        latest_dispatch_context_raw.as_deref(),
+    );
 
-    // Extended columns (indices 18-30)
-    let description = row.get::<_, Option<String>>(18).unwrap_or(None);
-    let blocked_reason = row.get::<_, Option<String>>(19).unwrap_or(None);
-    let review_notes = row.get::<_, Option<String>>(20).unwrap_or(None);
-    let review_status = row.get::<_, Option<String>>(21).unwrap_or(None);
-    let started_at = row.get::<_, Option<String>>(22).unwrap_or(None);
-    let requested_at = row.get::<_, Option<String>>(23).unwrap_or(None);
-    let completed_at = row.get::<_, Option<String>>(24).unwrap_or(None);
-    let pipeline_stage_id = row.get::<_, Option<String>>(25).unwrap_or(None);
-    let owner_agent_id = row.get::<_, Option<String>>(26).unwrap_or(None);
-    let requester_agent_id = row.get::<_, Option<String>>(27).unwrap_or(None);
-    let parent_card_id = row.get::<_, Option<String>>(28).unwrap_or(None);
-    let sort_order = row.get::<_, i64>(29).unwrap_or(0);
-    let depth = row.get::<_, i64>(30).unwrap_or(0);
-    let review_entered_at = row.get::<_, Option<String>>(31).unwrap_or(None);
+    // Extended columns (indices 19-31)
+    let description = row.get::<_, Option<String>>(19).unwrap_or(None);
+    let blocked_reason = row.get::<_, Option<String>>(20).unwrap_or(None);
+    let review_notes = row.get::<_, Option<String>>(21).unwrap_or(None);
+    let review_status = row.get::<_, Option<String>>(22).unwrap_or(None);
+    let started_at = row.get::<_, Option<String>>(23).unwrap_or(None);
+    let requested_at = row.get::<_, Option<String>>(24).unwrap_or(None);
+    let completed_at = row.get::<_, Option<String>>(25).unwrap_or(None);
+    let pipeline_stage_id = row.get::<_, Option<String>>(26).unwrap_or(None);
+    let owner_agent_id = row.get::<_, Option<String>>(27).unwrap_or(None);
+    let requester_agent_id = row.get::<_, Option<String>>(28).unwrap_or(None);
+    let parent_card_id = row.get::<_, Option<String>>(29).unwrap_or(None);
+    let sort_order = row.get::<_, i64>(30).unwrap_or(0);
+    let depth = row.get::<_, i64>(31).unwrap_or(0);
+    let review_entered_at = row.get::<_, Option<String>>(32).unwrap_or(None);
 
     Ok(json!({
         "id": row.get::<_, String>(0)?,
@@ -1627,12 +1637,10 @@ pub(super) fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_js
         "depth": depth,
         "review_entered_at": review_entered_at,
         // dispatch join fields
-        "latest_dispatch_status": row.get::<_, Option<String>>(13).unwrap_or(None),
+        "latest_dispatch_status": latest_dispatch_status.clone(),
         "latest_dispatch_title": row.get::<_, Option<String>>(15).unwrap_or(None),
-        "latest_dispatch_type": row.get::<_, Option<String>>(14).unwrap_or(None),
-        "latest_dispatch_result_summary": row.get::<_, Option<String>>(17).unwrap_or(None)
-            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
-            .and_then(|v| v.get("summary").and_then(|s| s.as_str().map(|s| s.to_string()))),
+        "latest_dispatch_type": latest_dispatch_type.clone(),
+        "latest_dispatch_result_summary": latest_dispatch_result_summary,
         "latest_dispatch_chain_depth": row.get::<_, Option<i64>>(16).unwrap_or(None),
         "child_count": 0,
     }))

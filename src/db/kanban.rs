@@ -46,7 +46,7 @@ const CARD_SELECT_SQL: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc
     kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
     kc.created_at, kc.updated_at, \
     td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth, \
-    td.result AS d_result, \
+    td.result AS d_result, td.context AS d_context, \
     kc.description, kc.blocked_reason, kc.review_notes, kc.review_status, \
     kc.started_at, kc.requested_at, kc.completed_at, kc.pipeline_stage_id, \
     kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth \
@@ -102,6 +102,11 @@ pub fn list_cards(
 }
 
 fn kanban_card_row_to_record(row: &Row<'_>) -> rusqlite::Result<KanbanCardRecord> {
+    let latest_dispatch_status = row.get::<_, Option<String>>(13).unwrap_or(None);
+    let latest_dispatch_type = row.get::<_, Option<String>>(14).unwrap_or(None);
+    let latest_dispatch_result_raw = row.get::<_, Option<String>>(17).unwrap_or(None);
+    let latest_dispatch_context_raw = row.get::<_, Option<String>>(18).unwrap_or(None);
+
     Ok(KanbanCardRecord {
         id: row.get::<_, String>(0)?,
         repo_id: row.get::<_, Option<String>>(1)?,
@@ -118,38 +123,30 @@ fn kanban_card_row_to_record(row: &Row<'_>) -> rusqlite::Result<KanbanCardRecord
         metadata_raw: row.get::<_, Option<String>>(10).unwrap_or(None),
         created_at: string_or_integer_timestamp(row, 11),
         updated_at: string_or_integer_timestamp(row, 12),
-        latest_dispatch_status: row.get::<_, Option<String>>(13).unwrap_or(None),
-        latest_dispatch_type: row.get::<_, Option<String>>(14).unwrap_or(None),
+        latest_dispatch_status: latest_dispatch_status.clone(),
+        latest_dispatch_type: latest_dispatch_type.clone(),
         latest_dispatch_title: row.get::<_, Option<String>>(15).unwrap_or(None),
         latest_dispatch_chain_depth: row.get::<_, Option<i64>>(16).unwrap_or(None),
-        latest_dispatch_result_summary: row
-            .get::<_, Option<String>>(17)
-            .unwrap_or(None)
-            .and_then(parse_dispatch_result_summary),
-        description: row.get::<_, Option<String>>(18).unwrap_or(None),
-        blocked_reason: row.get::<_, Option<String>>(19).unwrap_or(None),
-        review_notes: row.get::<_, Option<String>>(20).unwrap_or(None),
-        review_status: row.get::<_, Option<String>>(21).unwrap_or(None),
-        started_at: row.get::<_, Option<String>>(22).unwrap_or(None),
-        requested_at: row.get::<_, Option<String>>(23).unwrap_or(None),
-        completed_at: row.get::<_, Option<String>>(24).unwrap_or(None),
-        pipeline_stage_id: row.get::<_, Option<String>>(25).unwrap_or(None),
-        owner_agent_id: row.get::<_, Option<String>>(26).unwrap_or(None),
-        requester_agent_id: row.get::<_, Option<String>>(27).unwrap_or(None),
-        parent_card_id: row.get::<_, Option<String>>(28).unwrap_or(None),
-        sort_order: row.get::<_, i64>(29).unwrap_or(0),
-        depth: row.get::<_, i64>(30).unwrap_or(0),
+        latest_dispatch_result_summary: crate::dispatch::summarize_dispatch_from_text(
+            latest_dispatch_type.as_deref(),
+            latest_dispatch_status.as_deref(),
+            latest_dispatch_result_raw.as_deref(),
+            latest_dispatch_context_raw.as_deref(),
+        ),
+        description: row.get::<_, Option<String>>(19).unwrap_or(None),
+        blocked_reason: row.get::<_, Option<String>>(20).unwrap_or(None),
+        review_notes: row.get::<_, Option<String>>(21).unwrap_or(None),
+        review_status: row.get::<_, Option<String>>(22).unwrap_or(None),
+        started_at: row.get::<_, Option<String>>(23).unwrap_or(None),
+        requested_at: row.get::<_, Option<String>>(24).unwrap_or(None),
+        completed_at: row.get::<_, Option<String>>(25).unwrap_or(None),
+        pipeline_stage_id: row.get::<_, Option<String>>(26).unwrap_or(None),
+        owner_agent_id: row.get::<_, Option<String>>(27).unwrap_or(None),
+        requester_agent_id: row.get::<_, Option<String>>(28).unwrap_or(None),
+        parent_card_id: row.get::<_, Option<String>>(29).unwrap_or(None),
+        sort_order: row.get::<_, i64>(30).unwrap_or(0),
+        depth: row.get::<_, i64>(31).unwrap_or(0),
     })
-}
-
-fn parse_dispatch_result_summary(raw: String) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("summary")
-                .and_then(|summary| summary.as_str().map(str::to_string))
-        })
 }
 
 fn string_or_integer_timestamp(row: &Row<'_>, index: usize) -> Option<String> {
