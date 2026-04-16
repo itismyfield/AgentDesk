@@ -261,6 +261,7 @@ src/
 │   ├── dispatches.rs
 │   ├── gemini.rs
 │   ├── kanban.rs
+│   ├── mcp_config.rs
 │   ├── mod.rs
 │   ├── process.rs
 │   ├── provider.rs

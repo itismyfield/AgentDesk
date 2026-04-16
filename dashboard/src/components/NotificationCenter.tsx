@@ -16,15 +16,34 @@ export function useNotifications(maxItems = 50) {
     (message: string, type: Notification["type"] = "info") => {
       const id = `n-${++idRef.current}`;
       setNotifications((prev) => [{ id, message, type, ts: Date.now() }, ...prev].slice(0, maxItems));
+      return id;
     },
     [maxItems],
+  );
+
+  const updateNotification = useCallback(
+    (id: string, message: string, type?: Notification["type"]) => {
+      setNotifications((prev) =>
+        prev.map((notification) =>
+          notification.id === id
+            ? {
+                ...notification,
+                message,
+                type: type ?? notification.type,
+                ts: Date.now(),
+              }
+            : notification,
+        ),
+      );
+    },
+    [],
   );
 
   const dismissNotification = useCallback((id: string) => {
     setNotifications((prev) => prev.filter((notification) => notification.id !== id));
   }, []);
 
-  return { notifications, pushNotification, dismissNotification } as const;
+  return { notifications, pushNotification, updateNotification, dismissNotification } as const;
 }
 
 const TOAST_TTL_MS = 5000;

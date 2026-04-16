@@ -9,7 +9,6 @@ import type {
   RoundTableMeeting,
 } from "../types";
 import {
-  NOTIFICATION_TYPE_COLORS,
   type Notification,
 } from "./NotificationCenter";
 import AgentManagerView from "./AgentManagerView";
@@ -27,14 +26,14 @@ import {
 } from "./common/SurfacePrimitives";
 import { SessionPanel } from "./session-panel/SessionPanel";
 
-type ControlTab = "organization" | "settings";
-type OrganizationPane = "agents" | "departments" | "offices" | "dispatch";
+type ControlTab = "agents" | "departments" | "offices" | "settings" | "meetings";
+type AgentsPane = "directory" | "dispatch";
 
 interface ControlCenterViewProps {
   controlTab: ControlTab;
   onControlTabChange: (tab: ControlTab) => void;
-  organizationPane: OrganizationPane;
-  onOrganizationPaneChange: (pane: OrganizationPane) => void;
+  agentsPane: AgentsPane;
+  onAgentsPaneChange: (pane: AgentsPane) => void;
   isKo: boolean;
   language: CompanySettings["language"];
   officeId: string | null;
@@ -52,7 +51,10 @@ interface ControlCenterViewProps {
   settings: CompanySettings;
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   notifications: Notification[];
+  onNotify?: (message: string, type?: Notification["type"]) => string;
+  onUpdateNotification?: (id: string, message: string, type?: Notification["type"]) => void;
   onDismissNotification: (id: string) => void;
+  onRefreshMeetings?: () => void;
   onOpenMeetings?: () => void;
 }
 
@@ -74,8 +76,8 @@ function notificationTone(type: Notification["type"]): SurfaceTone {
 export default function ControlCenterView({
   controlTab,
   onControlTabChange,
-  organizationPane,
-  onOrganizationPaneChange,
+  agentsPane,
+  onAgentsPaneChange,
   isKo,
   language,
   officeId,
@@ -93,12 +95,15 @@ export default function ControlCenterView({
   settings,
   onSaveSettings,
   notifications,
+  onNotify: _onNotify,
+  onUpdateNotification: _onUpdateNotification,
   onDismissNotification,
+  onRefreshMeetings,
   onOpenMeetings,
 }: ControlCenterViewProps) {
   const t = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const recentNotifications = notifications.slice(0, 3);
-  const organizationPaneSummary = organizationPane === "dispatch"
+  const agentsPaneSummary = agentsPane === "dispatch"
     ? t(
       "실시간 파견 세션을 확인하고, 부서 연결과 상태 점검을 한 흐름에서 처리합니다.",
       "Review live dispatched sessions, department links, and runtime status from one flow.",
@@ -110,12 +115,28 @@ export default function ControlCenterView({
 
   const sections = useMemo(() => [
     {
-      id: "organization" as const,
-      labelKo: "조직",
-      labelEn: "Organization",
-      descriptionKo: "에이전트, 부서, 오피스, 파견 세션을 한 흐름에서 관리합니다.",
-      descriptionEn: "Manage agents, departments, offices, and dispatch sessions from one flow.",
-      count: agents.length + departments.length + offices.length,
+      id: "agents" as const,
+      labelKo: "에이전트",
+      labelEn: "Agents",
+      descriptionKo: "프로필, XP, provider, 파견 세션 연결을 관리합니다.",
+      descriptionEn: "Manage profiles, XP, providers, and dispatch session links.",
+      count: agents.length,
+    },
+    {
+      id: "departments" as const,
+      labelKo: "부서",
+      labelEn: "Departments",
+      descriptionKo: "순서, 프롬프트, 테마를 정리합니다.",
+      descriptionEn: "Adjust order, prompts, and themes.",
+      count: departments.length,
+    },
+    {
+      id: "offices" as const,
+      labelKo: "오피스",
+      labelEn: "Offices",
+      descriptionKo: "오피스 CRUD와 멤버 구성을 관리합니다.",
+      descriptionEn: "Manage offices and memberships.",
+      count: offices.length,
     },
     {
       id: "settings" as const,
@@ -125,7 +146,15 @@ export default function ControlCenterView({
       descriptionEn: "Tune general, runtime, and system settings.",
       count: undefined,
     },
-  ], [agents.length, departments.length, offices.length]);
+    {
+      id: "meetings" as const,
+      labelKo: "회의",
+      labelEn: "Meetings",
+      descriptionKo: "회의 후속 이슈와 기록 상태를 확인합니다.",
+      descriptionEn: "Review meeting follow-ups and record health.",
+      count: meetings.length,
+    },
+  ], [agents.length, departments.length, meetings.length, offices.length]);
 
   const activeSessionCount = useMemo(
     () => sessions.filter((session) => session.status !== "disconnected").length,
@@ -133,30 +162,14 @@ export default function ControlCenterView({
   );
   const meetingSummary = useMemo(() => summarizeMeetings(meetings), [meetings]);
 
-  const organizationSections = useMemo(() => [
+  const agentSections = useMemo(() => [
     {
-      id: "agents" as const,
-      labelKo: "에이전트",
-      labelEn: "Agents",
+      id: "directory" as const,
+      labelKo: "디렉터리",
+      labelEn: "Directory",
       descriptionKo: "프로필, XP, 소속, provider를 관리합니다.",
       descriptionEn: "Manage profiles, XP, memberships, and providers.",
       count: agents.length,
-    },
-    {
-      id: "departments" as const,
-      labelKo: "부서",
-      labelEn: "Departments",
-      descriptionKo: "순서, 프롬프트, 테마를 정리합니다.",
-      descriptionEn: "Adjust order, prompts, and visual themes.",
-      count: departments.length,
-    },
-    {
-      id: "offices" as const,
-      labelKo: "오피스",
-      labelEn: "Offices",
-      descriptionKo: "오피스 CRUD와 멤버 구성을 관리합니다.",
-      descriptionEn: "Manage office CRUD and memberships.",
-      count: offices.length,
     },
     {
       id: "dispatch" as const,
@@ -166,8 +179,8 @@ export default function ControlCenterView({
       descriptionEn: "Assign detected sessions into offices and agents.",
       count: activeSessionCount,
     },
-  ], [activeSessionCount, agents.length, departments.length, offices.length]);
-  const activeOrganizationSection = organizationSections.find((section) => section.id === organizationPane);
+  ], [activeSessionCount, agents.length]);
+  const activeAgentSection = agentSections.find((section) => section.id === agentsPane);
   const activeControlSection = sections.find((section) => section.id === controlTab);
   const selectedOfficeLabel = selectedOfficeId
     ? offices.find((office) => office.id === selectedOfficeId)?.name_ko ||
@@ -221,7 +234,15 @@ export default function ControlCenterView({
               <SurfaceActionButton
                 key={section.id}
                 onClick={() => onControlTabChange(section.id)}
-                tone={controlTab === section.id ? (section.id === "settings" ? "accent" : "info") : "neutral"}
+                tone={
+                  controlTab === section.id
+                    ? section.id === "settings"
+                      ? "accent"
+                      : section.id === "meetings"
+                        ? "success"
+                        : "info"
+                    : "neutral"
+                }
                 className="gap-2 rounded-full px-3 py-2 text-xs"
               >
                 <span>{isKo ? section.labelKo : section.labelEn}</span>
@@ -272,7 +293,7 @@ export default function ControlCenterView({
           description={isKo ? section.descriptionKo : section.descriptionEn}
           count={section.count}
           active={controlTab === section.id}
-          tone={section.id === "settings" ? "accent" : "neutral"}
+          tone={section.id === "settings" ? "accent" : section.id === "meetings" ? "success" : "neutral"}
           onClick={() => onControlTabChange(section.id)}
         />
       ))}
@@ -289,7 +310,7 @@ export default function ControlCenterView({
   return (
     <div className="flex min-h-full flex-col sm:h-full sm:min-h-0">
       <div className="sm:min-h-0 sm:flex-1">
-        {controlTab === "organization" && (
+        {controlTab === "agents" && (
           <div
             className="flex min-h-full flex-col overflow-x-hidden overflow-y-auto sm:h-full"
             style={{
@@ -300,15 +321,15 @@ export default function ControlCenterView({
             {compactControlHeader}
             <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
-                title={t("조직", "Organization")}
-                description={organizationPaneSummary}
+                title={t("에이전트", "Agents")}
+                description={agentsPaneSummary}
                 actions={(
                   <>
-                    {organizationSections.map((section) => (
+                    {agentSections.map((section) => (
                       <SurfaceSegmentButton
                         key={section.id}
-                        onClick={() => onOrganizationPaneChange(section.id)}
-                        active={organizationPane === section.id}
+                        onClick={() => onAgentsPaneChange(section.id)}
+                        active={agentsPane === section.id}
                         tone={section.id === "dispatch" ? "success" : "info"}
                       >
                         {isKo ? section.labelKo : section.labelEn}
@@ -318,20 +339,20 @@ export default function ControlCenterView({
                 )}
                 className="rounded-[28px] p-4 sm:p-5"
                 style={{
-                  borderColor: organizationPane === "dispatch"
+                  borderColor: agentsPane === "dispatch"
                     ? "color-mix(in srgb, var(--th-accent-primary) 20%, var(--th-border) 80%)"
                     : "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-                  background: organizationPane === "dispatch"
+                  background: agentsPane === "dispatch"
                     ? "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-accent-primary-soft) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
                     : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
                 }}
               >
                 <div className="mt-4 flex flex-wrap items-start gap-2">
-                  {activeOrganizationSection ? (
+                  {activeAgentSection ? (
                     <SurfaceMetricPill
                       label={t("현재 섹션", "Current Focus")}
-                      value={isKo ? activeOrganizationSection.labelKo : activeOrganizationSection.labelEn}
-                      tone={organizationPane === "dispatch" ? "success" : "info"}
+                      value={isKo ? activeAgentSection.labelKo : activeAgentSection.labelEn}
+                      tone={agentsPane === "dispatch" ? "success" : "info"}
                     />
                   ) : null}
                   <SurfaceMetricPill
@@ -360,7 +381,7 @@ export default function ControlCenterView({
               </SurfaceSection>
             </div>
 
-            {organizationPane === "dispatch" && (
+            {agentsPane === "dispatch" && (
               <div
                 className="mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6"
                 style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
@@ -374,7 +395,7 @@ export default function ControlCenterView({
               </div>
             )}
 
-            {organizationPane === "agents" && (
+            {agentsPane === "directory" && (
               <AgentManagerView
                 agents={agents}
                 departments={departments}
@@ -391,31 +412,84 @@ export default function ControlCenterView({
                 scrollable={false}
               />
             )}
+          </div>
+        )}
 
-            {organizationPane === "departments" && (
-              <AgentManagerView
-                agents={agents}
-                departments={departments}
-                language={language}
-                officeId={officeId}
-                onAgentsChange={onAgentsChange}
-                onDepartmentsChange={onDepartmentsChange}
-                activeTab="departments"
-                showTabBar={false}
-                title={t("조직 · 부서", "Organization · Departments")}
-                subtitle={t("부서 순서, 프롬프트, 테마를 관리합니다.", "Manage department order, prompts, and visual themes.")}
-              />
-            )}
+        {controlTab === "departments" && (
+          <AgentManagerView
+            agents={agents}
+            departments={departments}
+            language={language}
+            officeId={officeId}
+            onAgentsChange={onAgentsChange}
+            onDepartmentsChange={onDepartmentsChange}
+            activeTab="departments"
+            showTabBar={false}
+            title={t("조직 · 부서", "Organization · Departments")}
+            subtitle={t("부서 순서, 프롬프트, 테마를 관리합니다.", "Manage department order, prompts, and visual themes.")}
+          />
+        )}
 
-            {organizationPane === "offices" && (
-              <OfficeManagerView
-                offices={offices}
-                allAgents={allAgents}
-                selectedOfficeId={selectedOfficeId}
-                isKo={isKo}
-                onChanged={onOfficesChange}
-              />
-            )}
+        {controlTab === "offices" && (
+          <OfficeManagerView
+            offices={offices}
+            allAgents={allAgents}
+            selectedOfficeId={selectedOfficeId}
+            isKo={isKo}
+            onChanged={onOfficesChange}
+          />
+        )}
+
+        {controlTab === "meetings" && (
+          <div
+            className="flex min-h-full flex-col overflow-x-hidden overflow-y-auto sm:h-full"
+            style={{
+              WebkitOverflowScrolling: "touch",
+              touchAction: "pan-y",
+            }}
+          >
+            {compactControlHeader}
+            <div className="mx-auto flex w-full max-w-5xl min-w-0 flex-col gap-4 px-4 py-4 sm:px-6">
+              <SurfaceSection
+                title={t("회의 후속", "Meeting Follow-up")}
+                description={t(
+                  "최근 회의 기록과 후속 이슈 상태를 점검합니다.",
+                  "Review recent meeting records and follow-up issue health.",
+                )}
+                actions={(
+                  <>
+                    {onRefreshMeetings ? (
+                      <SurfaceActionButton onClick={onRefreshMeetings} tone="neutral">
+                        {t("새로고침", "Refresh")}
+                      </SurfaceActionButton>
+                    ) : null}
+                    {onOpenMeetings ? (
+                      <SurfaceActionButton onClick={onOpenMeetings} tone="success">
+                        {t("회의록 열기", "Open Meetings")}
+                      </SurfaceActionButton>
+                    ) : null}
+                  </>
+                )}
+              >
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <SurfaceMetricPill
+                    label={t("전체 회의", "Total Meetings")}
+                    value={meetings.length}
+                    tone="neutral"
+                  />
+                  <SurfaceMetricPill
+                    label={t("진행 중", "Active")}
+                    value={meetingSummary.activeCount}
+                    tone="info"
+                  />
+                  <SurfaceMetricPill
+                    label={t("후속 미정리", "Unresolved")}
+                    value={meetingSummary.unresolvedCount}
+                    tone={meetingSummary.unresolvedCount > 0 ? "warn" : "success"}
+                  />
+                </div>
+              </SurfaceSection>
+            </div>
           </div>
         )}
 
