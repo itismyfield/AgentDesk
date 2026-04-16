@@ -86,7 +86,7 @@
 | `engine::ops::deploy_ops` | `src/engine/ops/deploy_ops.rs` | 122 |  |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 266 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 250 |  |
-| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 366 |  |
+| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 369 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 57 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 773 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 143 |  |
@@ -133,7 +133,7 @@
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3304 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3299 | giant-file |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3307 | giant-file |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1297 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 876 |  |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 67 |  |
@@ -264,7 +264,7 @@
 | `services::platform` | `src/services/platform/mod.rs` | 19 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 878 |  |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
-| `services::platform::shell` | `src/services/platform/shell.rs` | 1158 | giant-file |
+| `services::platform::shell` | `src/services/platform/shell.rs` | 1177 | giant-file |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 178 |  |
 | `services::process` | `src/services/process.rs` | 701 |  |
 | `services::provider` | `src/services/provider.rs` | 1962 | giant-file |
