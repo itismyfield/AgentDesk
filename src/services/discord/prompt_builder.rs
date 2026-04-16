@@ -15,6 +15,10 @@ const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CurrentTaskContext<'a> {
+    pub(crate) dispatch_id: Option<&'a str>,
+    pub(crate) card_id: Option<&'a str>,
+    pub(crate) dispatch_title: Option<&'a str>,
+    pub(crate) dispatch_context: Option<&'a str>,
     pub(crate) card_title: Option<&'a str>,
     pub(crate) github_issue_url: Option<&'a str>,
     pub(crate) issue_body: Option<&'a str>,
@@ -94,8 +98,324 @@ fn deferred_dod_items(value: &serde_json::Value) -> Vec<DodItem> {
         .collect()
 }
 
-fn render_current_task_section(current_task: &CurrentTaskContext<'_>) -> Option<String> {
+fn parse_dispatch_context(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
+    dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+}
+
+fn json_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|items| items.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn render_string_list(label: &str, items: &[String], limit: usize) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut lines = items
+        .iter()
+        .take(limit)
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>();
+    if items.len() > limit {
+        lines.push(format!("- ... {} more", items.len() - limit));
+    }
+    Some(format!("{label}:\n{}", lines.join("\n")))
+}
+
+fn render_dispatch_context_section(
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> Option<String> {
+    let context = parse_dispatch_context(dispatch_context)?;
     let mut sections = Vec::new();
+
+    if let Some(value) = context.get("resumed_from").and_then(|value| value.as_str()) {
+        sections.push(format!("Dispatch Trigger: resume from {value}"));
+    } else if context
+        .get("retry")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        sections.push("Dispatch Trigger: retry".to_string());
+    } else if context
+        .get("redispatch")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        sections.push("Dispatch Trigger: redispatch".to_string());
+    } else if context
+        .get("auto_queue")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        sections.push("Dispatch Trigger: auto-queue".to_string());
+    }
+
+    if context
+        .get("force_new_session")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        sections.push("Session Strategy: force a fresh session before working".to_string());
+    }
+
+    let review_branch = context
+        .get("branch")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            context
+                .get("worktree_branch")
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let reviewed_commit = context
+        .get("reviewed_commit")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let merge_base = context
+        .get("merge_base")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if dispatch_type == Some("review")
+        || review_branch.is_some()
+        || reviewed_commit.is_some()
+        || context.get("review_mode").is_some()
+    {
+        if let Some(review_mode) = context.get("review_mode").and_then(|value| value.as_str()) {
+            sections.push(format!("Review Mode: {review_mode}"));
+        }
+        if let Some(branch) = review_branch {
+            sections.push(format!("Review Branch: {branch}"));
+        }
+        if let Some(commit) = reviewed_commit {
+            sections.push(format!("Reviewed Commit: {commit}"));
+        }
+        if let Some(base) = merge_base {
+            sections.push(format!("Merge Base: {base}"));
+        }
+        if let Some(warning) = context
+            .get("review_target_warning")
+            .and_then(|value| value.as_str())
+        {
+            sections.push(format!("Review Target Warning: {warning}"));
+        }
+        if let Some(noop_reason) = context
+            .get("noop_reason")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                context
+                    .get("noop_result")
+                    .and_then(|value| value.get("notes"))
+                    .and_then(|value| value.as_str())
+            })
+        {
+            sections.push(format!("Noop Reason:\n{noop_reason}"));
+        }
+        if let Some(scope_reminder) = context
+            .get("review_quality_scope_reminder")
+            .and_then(|value| value.as_str())
+        {
+            sections.push(format!("Review Scope Reminder: {scope_reminder}"));
+        }
+        let quality_checklist = json_string_list(context.get("review_quality_checklist"));
+        if let Some(rendered) =
+            render_string_list("Review Quality Checklist", &quality_checklist, 8)
+        {
+            sections.push(rendered);
+        }
+        if let Some(guidance) = context
+            .get("review_verdict_guidance")
+            .and_then(|value| value.as_str())
+        {
+            sections.push(format!("Review Verdict Guidance: {guidance}"));
+        }
+    }
+
+    if let Some(verdict) = context.get("verdict").and_then(|value| value.as_str()) {
+        sections.push(format!("Review Verdict: {verdict}"));
+    }
+
+    if let Some(phase_gate) = context
+        .get("phase_gate")
+        .and_then(|value| value.as_object())
+    {
+        if let Some(run_id) = phase_gate.get("run_id").and_then(|value| value.as_str()) {
+            sections.push(format!("Phase Gate Run: {run_id}"));
+        }
+        if let Some(batch_phase) = phase_gate
+            .get("batch_phase")
+            .and_then(|value| value.as_i64())
+        {
+            sections.push(format!("Phase Gate Batch Phase: {batch_phase}"));
+        }
+        if let Some(next_phase) = phase_gate
+            .get("next_phase")
+            .and_then(|value| value.as_i64())
+        {
+            sections.push(format!("Phase Gate Next Phase: {next_phase}"));
+        }
+        if phase_gate
+            .get("final_phase")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            sections.push("Phase Gate Final Phase: true".to_string());
+        }
+        if let Some(pass_verdict) = phase_gate
+            .get("pass_verdict")
+            .and_then(|value| value.as_str())
+        {
+            sections.push(format!("Phase Gate Pass Verdict: {pass_verdict}"));
+        }
+        let checks = json_string_list(phase_gate.get("checks"));
+        if let Some(rendered) = render_string_list("Phase Gate Checks", &checks, 8) {
+            sections.push(rendered);
+        }
+        let work_items = json_string_list(phase_gate.get("work_items"));
+        if let Some(rendered) = render_string_list("Phase Gate Work Items", &work_items, 8) {
+            sections.push(rendered);
+        }
+        let issues = phase_gate
+            .get("issue_numbers")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.as_i64())
+            .map(|issue| format!("#{issue}"))
+            .collect::<Vec<_>>();
+        if !issues.is_empty() {
+            sections.push(format!("Phase Gate Issues: {}", issues.join(", ")));
+        }
+    }
+
+    if let Some(ci_recovery) = context
+        .get("ci_recovery")
+        .and_then(|value| value.as_object())
+    {
+        if let Some(job_name) = ci_recovery.get("job_name").and_then(|value| value.as_str()) {
+            sections.push(format!("CI Recovery Job: {job_name}"));
+        }
+        if let Some(reason) = ci_recovery.get("reason").and_then(|value| value.as_str()) {
+            sections.push(format!("CI Failure Reason: {reason}"));
+        }
+        if let Some(run_url) = ci_recovery.get("run_url").and_then(|value| value.as_str()) {
+            sections.push(format!("CI Run URL: {run_url}"));
+        }
+        if let Some(log_excerpt) = ci_recovery
+            .get("log_excerpt")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("CI Log Excerpt:\n{log_excerpt}"));
+        }
+    }
+
+    (!sections.is_empty()).then(|| format!("Dispatch Context:\n{}", sections.join("\n\n")))
+}
+
+fn render_dispatch_contract(
+    dispatch_type: Option<&str>,
+    current_task: &CurrentTaskContext<'_>,
+) -> Option<String> {
+    match dispatch_type {
+        Some("implementation") | Some("rework") => Some(
+            "[Dispatch Contract]\n\
+             - 구현이 불필요하고 현재 worktree에 tracked 변경이 전혀 없을 때만 응답 첫 줄에 `OUTCOME: noop`를 적고 근거를 설명한다.\n\
+             - tracked 변경이 남아 있으면 noop를 사용하지 않는다.\n\
+             - 커밋 메시지에 반드시 GitHub 이슈 번호를 포함한다.\n\
+             - 변경 후 관련 검증을 직접 실행하고 결과를 최종 응답에 포함한다."
+                .to_string(),
+        ),
+        Some("review") => {
+            let dispatch_id = current_task.dispatch_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 응답 첫 줄에 반드시 `VERDICT: pass|improve|reject|rework` 중 하나를 적는다.\n\
+                 - 리뷰 결과는 GitHub issue 코멘트로 남긴다.\n\
+                 - verdict 제출 경로: `POST /api/review-verdict` (`dispatch_id={dispatch_id}`).\n\
+                 - `improve`/`reject`/`rework`면 구체적 `notes`와 `items`를 포함한다."
+            ))
+        }
+        Some("review-decision") => {
+            let card_id = current_task.card_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 카운터 리뷰 피드백을 읽고 `accept|dispute|dismiss` 중 하나를 고른다.\n\
+                 - decision 제출 경로: `POST /api/review-decision` (`card_id={card_id}`).\n\
+                 - accept는 피드백 수용 후 rework, dispute는 반박 후 재리뷰, dismiss는 무시 후 done 경로다."
+            ))
+        }
+        Some("e2e-test") | Some("consultation") | Some("phase-gate") | Some("pm-decision") => {
+            let dispatch_id = current_task.dispatch_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                 - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"summary\":\"결과 요약\"}}}}`\n\
+                 - review verdict API는 사용하지 않는다."
+            ))
+        }
+        _ => Some(
+            current_task.dispatch_id.map_or_else(
+                || {
+                    "[Dispatch Contract]\n\
+                     - 작업 완료 후 해당 dispatch의 종료 경로를 확인하고 상태를 마무리한다.\n\
+                     - review verdict/review-decision 전용 dispatch가 아니라면 일반 dispatch 종료 경로를 사용한다."
+                        .to_string()
+                },
+                |dispatch_id| {
+                    format!(
+                        "[Dispatch Contract]\n\
+                         - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                         - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"summary\":\"결과 요약\"}}}}`\n\
+                         - 별도 review verdict/review-decision 규칙이 없으면 이 경로를 기본으로 사용한다."
+                    )
+                },
+            ),
+        ),
+    }
+}
+
+fn render_current_task_section(
+    current_task: &CurrentTaskContext<'_>,
+    dispatch_type: Option<&str>,
+) -> Option<String> {
+    let mut sections = Vec::new();
+
+    if let Some(dispatch_id) = current_task
+        .dispatch_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Dispatch ID: {dispatch_id}"));
+    }
+    if let Some(card_id) = current_task
+        .card_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Card ID: {card_id}"));
+    }
+
+    let card_title = current_task
+        .card_title
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let dispatch_title = current_task
+        .dispatch_title
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     if let Some(title) = current_task
         .card_title
@@ -103,6 +423,9 @@ fn render_current_task_section(current_task: &CurrentTaskContext<'_>) -> Option<
         .filter(|s| !s.is_empty())
     {
         sections.push(format!("Title: {title}"));
+    }
+    if let Some(dispatch_title) = dispatch_title.filter(|title| Some(*title) != card_title) {
+        sections.push(format!("Dispatch Brief:\n{dispatch_title}"));
     }
     if let Some(url) = current_task
         .github_issue_url
@@ -128,6 +451,16 @@ fn render_current_task_section(current_task: &CurrentTaskContext<'_>) -> Option<
 
     if let Some(dod_items) = dod_items {
         sections.push(format!("DoD:\n{}", render_dod_markdown(&dod_items)));
+    }
+
+    if let Some(dispatch_context_section) =
+        render_dispatch_context_section(dispatch_type, current_task.dispatch_context)
+    {
+        sections.push(dispatch_context_section);
+    }
+
+    if let Some(dispatch_contract) = render_dispatch_contract(dispatch_type, current_task) {
+        sections.push(dispatch_contract);
     }
 
     (!sections.is_empty()).then(|| format!("[Current Task]\n{}", sections.join("\n\n")))
@@ -409,7 +742,9 @@ pub(super) fn build_system_prompt(
              If the latest user message asks for an exact literal output, return exactly that literal output and nothing else.",
         );
     }
-    if let Some(current_task_section) = current_task.and_then(render_current_task_section) {
+    if let Some(current_task_section) =
+        current_task.and_then(|task| render_current_task_section(task, dispatch_type))
+    {
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&current_task_section);
     }
@@ -894,6 +1229,10 @@ mod tests {
             "verified": ["ship tests"]
         });
         let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-570"),
+            card_id: Some("card-570"),
+            dispatch_title: Some("[Rework] fix: prompt context"),
+            dispatch_context: None,
             card_title: Some("fix: prompt context"),
             github_issue_url: Some("https://github.com/itismyfield/AgentDesk/issues/570"),
             issue_body: Some("## 배경\n\ncompact에서 사라짐\n\n## DoD\n- [ ] old item"),
@@ -919,14 +1258,70 @@ mod tests {
         let queued_index = prompt.find("[Queued Turn Rules]").unwrap();
         let task_index = prompt.find("[Current Task]").unwrap();
         assert!(task_index > queued_index);
+        assert!(prompt.contains("Dispatch ID: dispatch-570"));
+        assert!(prompt.contains("Card ID: card-570"));
+        assert!(prompt.contains("Dispatch Brief:\n[Rework] fix: prompt context"));
         assert!(prompt.contains("GitHub URL: https://github.com/itismyfield/AgentDesk/issues/570"));
         assert!(prompt.contains("Title: fix: prompt context"));
         assert!(prompt.contains("- [x] ship tests"));
+        assert!(prompt.contains("`OUTCOME: noop`"));
         assert!(!prompt.contains("## DoD"));
     }
 
     #[test]
-    fn test_build_system_prompt_omits_current_task_when_context_empty() {
+    fn test_build_system_prompt_renders_dispatch_context_and_completion_contract() {
+        let dispatch_context = serde_json::json!({
+            "review_mode": "noop_verification",
+            "branch": "wt/671-dispatch",
+            "reviewed_commit": "abc12345deadbeef",
+            "merge_base": "1122334455667788",
+            "noop_reason": "feature already exists",
+            "review_quality_checklist": ["edge case", "error handling"],
+            "review_verdict_guidance": "quality issue가 보이면 improve",
+            "ci_recovery": {
+                "job_name": "dashboard-build",
+                "reason": "Code job failed: dashboard-build",
+                "run_url": "https://github.com/example/actions/runs/1"
+            }
+        });
+        let dispatch_context_raw = dispatch_context.to_string();
+        let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-review-671"),
+            card_id: Some("card-671"),
+            dispatch_title: Some("[Review R2] card-671"),
+            dispatch_context: Some(&dispatch_context_raw),
+            card_title: Some("fix: dispatch message"),
+            github_issue_url: None,
+            issue_body: None,
+            deferred_dod: None,
+        };
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            Some(&current_task),
+            None,
+            None,
+            None,
+        );
+
+        assert!(prompt.contains("Review Mode: noop_verification"));
+        assert!(prompt.contains("Review Branch: wt/671-dispatch"));
+        assert!(prompt.contains("Reviewed Commit: abc12345deadbeef"));
+        assert!(prompt.contains("CI Recovery Job: dashboard-build"));
+        assert!(prompt.contains("`POST /api/review-verdict` (`dispatch_id=dispatch-review-671`)"));
+        assert!(prompt.contains("Review Quality Checklist"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_keeps_dispatch_contract_when_context_is_otherwise_empty() {
         let current_task = CurrentTaskContext::default();
         let prompt = build_system_prompt(
             "ctx",
@@ -945,7 +1340,39 @@ mod tests {
             None,
         );
 
-        assert!(!prompt.contains("[Current Task]"));
+        assert!(prompt.contains("[Current Task]"));
+        assert!(prompt.contains("[Dispatch Contract]"));
+        assert!(prompt.contains("`OUTCOME: noop`"));
+        assert!(!prompt.contains("Dispatch ID:"));
+        assert!(!prompt.contains("GitHub URL:"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_uses_default_dispatch_contract_for_unknown_dispatch_type() {
+        let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-generic-1"),
+            ..CurrentTaskContext::default()
+        };
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            Some(&current_task),
+            None,
+            None,
+            None,
+        );
+
+        assert!(prompt.contains("[Dispatch Contract]"));
+        assert!(prompt.contains("PATCH /api/dispatches/dispatch-generic-1"));
+        assert!(prompt.contains("별도 review verdict/review-decision 규칙이 없으면"));
     }
 
     #[test]
