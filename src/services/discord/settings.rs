@@ -1421,7 +1421,7 @@ agents:
     }
 
     #[test]
-    fn test_save_bot_settings_preserves_existing_yaml_owner_id() {
+    fn test_save_bot_settings_prefers_yaml_owner_id_over_legacy_alias() {
         with_temp_home(|temp_home: &TempDir| {
             let token = "test-token";
             write_agentdesk_yaml(
@@ -1542,6 +1542,50 @@ agents:
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.owner_user_id, Some(42));
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_preserves_existing_yaml_owner_id() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  owner_id: 1469509284508340276\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
+
+            let path = settings_dir.join("bot_settings.json");
+            let json = serde_json::json!({
+                "legacy_alias": {
+                    "token": token,
+                    "owner_user_id": 7
+                }
+            });
+            fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+            let mut settings = load_bot_settings(token);
+            settings.owner_user_id = Some(7);
+            settings.allowed_channel_ids = vec![555];
+            save_bot_settings(token, &settings);
+
+            let yaml_after = fs::read_to_string(
+                temp_home
+                    .path()
+                    .join(".adk")
+                    .join("config")
+                    .join("agentdesk.yaml"),
+            )
+            .unwrap();
+            assert!(yaml_after.contains("owner_id: 1469509284508340276"));
+            assert!(!yaml_after.contains("owner_id: 7"));
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(loaded.owner_user_id, Some(1469509284508340276));
+            assert_eq!(loaded.allowed_channel_ids, vec![555]);
         });
     }
 
