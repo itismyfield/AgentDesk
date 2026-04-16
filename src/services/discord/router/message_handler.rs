@@ -937,56 +937,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
 
-    let reset_session_for_model_change = super::super::commands::reset_provider_session_if_pending(
-        &ctx.http, shared, &provider, channel_id,
-    )
-    .await;
-    let prompt_prep_started = std::time::Instant::now();
-
-    // Resolve channel/tmux session name from current session state. We need the
-    // persisted provider session_id before recall so Mem0 can scope search by run_id.
-    let (channel_name, tmux_session_name) = {
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
-        (channel_name, tmux_session_name)
-    };
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-    let mut session_id =
-        resolve_session_id_for_current_turn(session_id, reset_session_for_model_change);
-    let memento_context_loaded = if reset_session_for_model_change {
-        false
-    } else {
-        memento_context_loaded
-    };
-    if session_id.is_none() && !reset_session_for_model_change {
-        if let Some(ref key) = adk_session_key {
-            let restored = super::super::adk_session::fetch_provider_session_id(
-                key,
-                &provider,
-                shared.api_port,
-            )
-            .await;
-            if restored.is_some() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                    key
-                );
-                let mut data = shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.restore_provider_session(restored.clone());
-                }
-            }
-            session_id = restored;
-        }
-    }
-
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
         RecallResponse::default()
@@ -3022,7 +2972,6 @@ mod tests {
             external_recall: Some("[External Recall]".to_string()),
             warnings: Vec::new(),
             token_usage: crate::services::memory::TokenUsage::default(),
-            memento_context_loaded: false,
         }
     }
 

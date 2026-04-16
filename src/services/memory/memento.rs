@@ -1062,7 +1062,6 @@ impl MemoryBackend for MementoBackend {
                 Ok(Ok(result)) => RecallResponse {
                     external_recall: result.external_recall,
                     token_usage: result.token_usage,
-                    memento_context_loaded: true,
                     ..RecallResponse::default()
                 },
                 Ok(Err(err)) => {
@@ -1407,7 +1406,6 @@ mod tests {
         assert!(recall.shared_knowledge.is_none());
         assert!(recall.longterm_catalog.is_none());
         assert!(recall.warnings.is_empty());
-        assert!(recall.memento_context_loaded);
         assert_eq!(
             recall.token_usage,
             crate::services::memory::TokenUsage {
@@ -1443,7 +1441,6 @@ mod tests {
         restore_memento_runtime(previous_root, previous_key, previous_workspace);
 
         assert!(recall.external_recall.is_none());
-        assert!(!recall.memento_context_loaded);
         assert!(
             recall
                 .warnings
@@ -1469,7 +1466,6 @@ mod tests {
 
         assert!(recall.external_recall.is_none());
         assert!(recall.warnings.is_empty());
-        assert!(!recall.memento_context_loaded);
     }
 
     #[tokio::test]
