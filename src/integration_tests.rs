@@ -6004,6 +6004,150 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scenario_211_terminal_direct_merge_push_rejected_falls_back_to_pr_and_resets_main() {
+        let (repo, remote, gh) = setup_test_repo_with_origin_and_mock_gh(&[
+            MockGhReply {
+                key: "pr:create",
+                contains: Some("--head wt/card-211-push-rejected"),
+                stdout: "https://github.com/test/repo/pull/904",
+            },
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "feature-sha-211-push-rejected",
+            },
+        ]);
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        run_git(repo.path(), &["branch", "wt/card-211-push-rejected"]);
+
+        let worktree_path = worktrees_dir.join("card-211-push-rejected");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                "wt/card-211-push-rejected",
+            ],
+        );
+        fs::write(worktree_path.join("feature.txt"), "feature\n").unwrap();
+        run_git(worktree_path.as_path(), &["add", "feature.txt"]);
+        run_git(
+            worktree_path.as_path(),
+            &["commit", "-m", "feat: push rejected fallback #211"],
+        );
+        let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+
+        let remote_clone = tempfile::tempdir().unwrap();
+        let clone_output = Command::new("git")
+            .args([
+                "clone",
+                remote.path().to_str().unwrap(),
+                remote_clone.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            clone_output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+        run_git(
+            remote_clone.path(),
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(remote_clone.path(), &["config", "user.name", "Remote Test"]);
+        fs::write(remote_clone.path().join("remote-only.txt"), "remote\n").unwrap();
+        run_git(remote_clone.path(), &["add", "remote-only.txt"]);
+        run_git(
+            remote_clone.path(),
+            &["commit", "-m", "remote main advance"],
+        );
+        run_git(remote_clone.path(), &["push", "origin", "main"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-211-push-rejected",
+            "done",
+            "test/repo",
+            217,
+            None,
+        );
+        set_kv(&db, "merge_automation_enabled", "true");
+        seed_completed_work_dispatch_target(
+            &db,
+            "impl-211-push-rejected",
+            "card-211-push-rejected",
+            "implementation",
+            worktree_path.to_str().unwrap(),
+            "wt/card-211-push-rejected",
+            &feature_commit,
+        );
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-211-push-rejected"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(get_card_status(&db, "card-211-push-rejected"), "done");
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-push-rejected").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(
+            pr_tracking_pr_number(&db, "card-211-push-rejected"),
+            Some(904)
+        );
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-push-rejected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+        drop(conn);
+
+        run_git(repo.path(), &["fetch", "origin", "main"]);
+        let merged = Command::new("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                &feature_commit,
+                "origin/main",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(
+            !merged.success(),
+            "push-rejected fallback must leave the feature commit out of origin/main"
+        );
+        assert_eq!(
+            run_git_output(repo.path(), &["rev-list", "--count", "origin/main..main"]),
+            "0",
+            "local main must be reset after a rejected direct push"
+        );
+
+        let log = gh_log(&gh._gh);
+        assert!(
+            log.contains("pr create --repo test/repo --base main --head wt/card-211-push-rejected"),
+            "push-rejected direct merge must fall back to PR creation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scenario_211_pr_always_creates_pr_without_direct_merge_and_waits_for_codex_approval() {
         let (repo, _remote, gh) = setup_test_repo_with_origin_and_mock_gh(&[
             MockGhReply {
@@ -6359,6 +6503,119 @@ mod tests {
         assert!(
             log.contains("pr create --repo test/repo --base main --head wt/card-211-conflict"),
             "conflict fallback must create a PR for the tracked branch"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_tick5min_retries_create_pr_rows_until_wait_ci() {
+        let (repo, _remote, gh) = setup_test_repo_with_origin_and_mock_gh(&[
+            MockGhReply {
+                key: "pr:create",
+                contains: Some("--head wt/card-211-create-pr-retry"),
+                stdout: "https://github.com/test/repo/pull/905",
+            },
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "feature-sha-211-create-pr-retry",
+            },
+        ]);
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        run_git(repo.path(), &["branch", "wt/card-211-create-pr-retry"]);
+
+        let worktree_path = worktrees_dir.join("card-211-create-pr-retry");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                "wt/card-211-create-pr-retry",
+            ],
+        );
+        fs::write(worktree_path.join("feature.txt"), "retry\n").unwrap();
+        run_git(worktree_path.as_path(), &["add", "feature.txt"]);
+        run_git(
+            worktree_path.as_path(),
+            &["commit", "-m", "feat: create-pr retry path #211"],
+        );
+        let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-211-create-pr-retry",
+            "done",
+            "test/repo",
+            218,
+            None,
+        );
+        set_kv(&db, "merge_automation_enabled", "true");
+        seed_completed_work_dispatch_target(
+            &db,
+            "impl-211-create-pr-retry",
+            "card-211-create-pr-retry",
+            "implementation",
+            worktree_path.to_str().unwrap(),
+            "wt/card-211-create-pr-retry",
+            &feature_commit,
+        );
+        seed_pr_tracking(
+            &db,
+            "card-211-create-pr-retry",
+            "test/repo",
+            Some(worktree_path.to_str().unwrap()),
+            "wt/card-211-create-pr-retry",
+            None,
+            Some(feature_commit.as_str()),
+            "create-pr",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed' WHERE id = 'card-211-create-pr-retry'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(get_card_status(&db, "card-211-create-pr-retry"), "done");
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-create-pr-retry").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(
+            pr_tracking_pr_number(&db, "card-211-create-pr-retry"),
+            Some(905)
+        );
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-create-pr-retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+        drop(conn);
+
+        let log = gh_log(&gh._gh);
+        assert!(
+            log.contains(
+                "pr create --repo test/repo --base main --head wt/card-211-create-pr-retry"
+            ),
+            "create-pr rows must be retried on OnTick5min"
         );
     }
 
