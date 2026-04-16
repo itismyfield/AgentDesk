@@ -126,12 +126,12 @@
 | `PATCH` | `/api/offices/{id}/agents/{agentId}` | `offices::update_office_agent` | `src/server/routes/offices.rs:381` | `src/server/routes/domains/admin.rs:28` |
 | `GET` | `/api/onboarding/channels` | `onboarding::channels` | `src/server/routes/onboarding.rs:650` | `src/server/routes/domains/onboarding.rs:22` |
 | `POST` | `/api/onboarding/channels` | `onboarding::channels_post` | `src/server/routes/onboarding.rs:659` | `src/server/routes/domains/onboarding.rs:22` |
-| `POST` | `/api/onboarding/check-provider` | `onboarding::check_provider` | `src/server/routes/onboarding.rs:4154` | `src/server/routes/domains/onboarding.rs:27` |
+| `POST` | `/api/onboarding/check-provider` | `onboarding::check_provider` | `src/server/routes/onboarding.rs:4140` | `src/server/routes/domains/onboarding.rs:27` |
 | `POST` | `/api/onboarding/complete` | `onboarding::complete` | `src/server/routes/onboarding.rs:2123` | `src/server/routes/domains/onboarding.rs:26` |
 | `DELETE` | `/api/onboarding/draft` | `onboarding::draft_delete` | `src/server/routes/onboarding.rs:477` | `src/server/routes/domains/onboarding.rs:12` |
 | `GET` | `/api/onboarding/draft` | `onboarding::draft_get` | `src/server/routes/onboarding.rs:379` | `src/server/routes/domains/onboarding.rs:12` |
 | `PUT` | `/api/onboarding/draft` | `onboarding::draft_put` | `src/server/routes/onboarding.rs:435` | `src/server/routes/domains/onboarding.rs:12` |
-| `POST` | `/api/onboarding/generate-prompt` | `onboarding::generate_prompt` | `src/server/routes/onboarding.rs:4262` | `src/server/routes/domains/onboarding.rs:31` |
+| `POST` | `/api/onboarding/generate-prompt` | `onboarding::generate_prompt` | `src/server/routes/onboarding.rs:4248` | `src/server/routes/domains/onboarding.rs:31` |
 | `GET` | `/api/onboarding/status` | `onboarding::status` | `src/server/routes/onboarding.rs:214` | `src/server/routes/domains/onboarding.rs:11` |
 | `POST` | `/api/onboarding/validate-token` | `onboarding::validate_token` | `src/server/routes/onboarding.rs:509` | `src/server/routes/domains/onboarding.rs:18` |
 | `GET` | `/api/pipeline/cards/{cardId}` | `pipeline::get_card_pipeline` | `src/server/routes/pipeline.rs:249` | `src/server/routes/domains/ops.rs:37` |
