@@ -370,7 +370,6 @@ fn update_entry_status_with_current_on_conn(
             )?;
 
             if matches!(normalized, ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED) {
-                release_completed_group_slots_for_run(conn, &current.run_id)?;
                 maybe_finalize_run_after_terminal_entry(conn, &current.run_id, normalized)?;
             }
 
@@ -498,14 +497,24 @@ pub fn rebind_slot_for_group_agent(
         return Ok(0);
     }
 
+    bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
+}
+
+fn bind_slot_index_for_group_entries(
+    conn: &Connection,
+    run_id: &str,
+    agent_id: &str,
+    thread_group: i64,
+    slot_index: i64,
+) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE auto_queue_entries
          SET slot_index = ?1
          WHERE run_id = ?2
            AND agent_id = ?3
            AND COALESCE(thread_group, 0) = ?4
-           AND status = 'dispatched'
-           AND COALESCE(slot_index, -1) != ?1",
+           AND status IN ('pending', 'dispatched')
+           AND (slot_index IS NULL OR slot_index != ?1)",
         rusqlite::params![slot_index, run_id, agent_id, thread_group],
     )
 }
@@ -945,59 +954,6 @@ pub fn clear_inactive_slot_assignments(conn: &Connection) {
         [],
     )
     .ok();
-}
-
-pub fn completed_group_slots(conn: &Connection, run_id: &str) -> Vec<(String, i64)> {
-    let mut stmt = match conn.prepare(
-        "SELECT agent_id, slot_index, assigned_thread_group
-         FROM auto_queue_slots
-         WHERE assigned_run_id = ?1",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    let assigned: Vec<(String, i64, i64)> = stmt
-        .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        .unwrap_or_default();
-    drop(stmt);
-
-    let mut released = Vec::new();
-    for (agent_id, slot_index, thread_group) in assigned {
-        let still_active: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND agent_id = ?2
-                   AND COALESCE(thread_group, 0) = ?3
-                   AND status IN ('pending', 'dispatched')",
-                rusqlite::params![run_id, agent_id, thread_group],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if still_active {
-            continue;
-        }
-        released.push((agent_id, slot_index));
-    }
-
-    released
-}
-
-pub fn release_group_slots(conn: &Connection, slots: &[(String, i64)]) -> rusqlite::Result<()> {
-    for (agent_id, slot_index) in slots {
-        conn.execute(
-            "UPDATE auto_queue_slots
-             SET assigned_run_id = NULL,
-                 assigned_thread_group = NULL,
-                 updated_at = datetime('now')
-             WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
-        )?;
-    }
-    Ok(())
 }
 
 pub fn release_run_slots(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
@@ -1500,15 +1456,7 @@ pub fn allocate_slot_for_group_agent(
                 SlotAllocationError::Sql(error)
             })?;
         if let Some(slot_index) = existing {
-            conn.execute(
-                "UPDATE auto_queue_entries
-                 SET slot_index = ?1
-                 WHERE run_id = ?2
-                   AND agent_id = ?3
-                   AND COALESCE(thread_group, 0) = ?4
-                   AND slot_index IS NULL",
-                rusqlite::params![slot_index, run_id, agent_id, thread_group],
-            )
+            bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
             .map_err(|error| {
                 crate::auto_queue_log!(
                     warn,
@@ -1518,6 +1466,96 @@ pub fn allocate_slot_for_group_agent(
                 );
                 SlotAllocationError::Sql(error)
             })?;
+            return Ok(Some((slot_index, false)));
+        }
+
+        let reusable_slot: Option<i64> = conn
+            .query_row(
+                "SELECT s.slot_index
+                 FROM auto_queue_slots s
+                 WHERE s.agent_id = ?1
+                   AND s.assigned_run_id = ?2
+                   AND COALESCE(s.assigned_thread_group, -1) != ?3
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM auto_queue_entries e
+                       WHERE e.run_id = ?2
+                         AND e.agent_id = s.agent_id
+                         AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                         AND e.status IN ('pending', 'dispatched')
+                   )
+                 ORDER BY s.slot_index ASC
+                 LIMIT 1",
+                rusqlite::params![agent_id, run_id, thread_group],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                crate::auto_queue_log!(
+                    warn,
+                    "slot_allocate_reusable_lookup_failed",
+                    log_ctx.clone(),
+                    "[auto-queue] failed to inspect reusable slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                );
+                SlotAllocationError::Sql(error)
+            })?;
+        if let Some(slot_index) = reusable_slot {
+            let rebound = conn
+                .execute(
+                    "UPDATE auto_queue_slots
+                     SET assigned_thread_group = ?1,
+                         updated_at = datetime('now')
+                     WHERE agent_id = ?2
+                       AND slot_index = ?3
+                       AND assigned_run_id = ?4
+                       AND COALESCE(assigned_thread_group, -1) != ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM auto_queue_entries e
+                           WHERE e.run_id = ?4
+                             AND e.agent_id = auto_queue_slots.agent_id
+                             AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
+                             AND e.status IN ('pending', 'dispatched')
+                       )",
+                    rusqlite::params![thread_group, agent_id, slot_index, run_id],
+                )
+                .map_err(|error| {
+                    crate::auto_queue_log!(
+                        warn,
+                        "slot_allocate_rebind_failed",
+                        log_ctx.clone().slot_index(slot_index),
+                        "[auto-queue] failed to rebind slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                    );
+                    SlotAllocationError::Sql(error)
+                })?;
+            if rebound == 0 {
+                if attempt == SLOT_ALLOCATION_MAX_RETRIES {
+                    crate::auto_queue_log!(
+                        warn,
+                        "slot_allocate_rebind_retry_limit_reached",
+                        log_ctx.clone().slot_index(slot_index),
+                        "[auto-queue] slot rebind retry limit reached for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
+                    );
+                    return Err(SlotAllocationError::RetryLimitExceeded {
+                        run_id: run_id.to_string(),
+                        agent_id: agent_id.to_string(),
+                        thread_group,
+                        attempts: attempt,
+                    });
+                }
+                continue;
+            }
+
+            bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
+                .map_err(|error| {
+                    crate::auto_queue_log!(
+                        warn,
+                        "slot_allocate_rebind_bind_failed",
+                        log_ctx.clone().slot_index(slot_index),
+                        "[auto-queue] failed to bind rebound slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                    );
+                    SlotAllocationError::Sql(error)
+                })?;
             return Ok(Some((slot_index, false)));
         }
 
@@ -1584,15 +1622,7 @@ pub fn allocate_slot_for_group_agent(
             continue;
         }
 
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET slot_index = ?1
-             WHERE run_id = ?2
-               AND agent_id = ?3
-               AND COALESCE(thread_group, 0) = ?4
-               AND slot_index IS NULL",
-            rusqlite::params![slot_index, run_id, agent_id, thread_group],
-        )
+        bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
         .map_err(|error| {
             crate::auto_queue_log!(
                 warn,
@@ -1761,14 +1791,6 @@ fn entry_status_row_matches_target(
         ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => true,
         _ => false,
     }
-}
-
-fn release_completed_group_slots_for_run(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
-    let completed_slots = completed_group_slots(conn, run_id);
-    if !completed_slots.is_empty() {
-        release_group_slots(conn, &completed_slots)?;
-    }
-    Ok(())
 }
 
 fn maybe_finalize_run_after_terminal_entry(
@@ -2048,7 +2070,7 @@ mod tests {
         ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocationError,
         allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
-        reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn,
+        reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn, release_run_slots,
         release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
     use rusqlite::{Connection, OpenFlags};
@@ -2315,6 +2337,66 @@ mod tests {
         assert_eq!(target, "channel:123");
         assert_eq!(bot, "notify");
         assert!(content.contains("자동큐 완료: repo-1 / run run-1 / 1개"));
+    }
+
+    #[test]
+    fn entry_transition_done_keeps_slot_assignment_until_multi_phase_run_finishes() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, batch_phase
+             ) VALUES ('entry-phase-0', 'run-1', 'card-phase-0', 'agent-1', 'pending', NULL, 0, 0, 0)",
+            [],
+        )
+        .expect("seed phase 0 entry");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+             ) VALUES ('entry-phase-1', 'run-1', 'card-phase-1', 'agent-1', 'pending', 1, 1)",
+            [],
+        )
+        .expect("seed phase 1 entry");
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-phase-0",
+            ENTRY_STATUS_DISPATCHED,
+            "test_phase_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-phase-0".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("dispatch phase 0 entry");
+        update_entry_status_on_conn(
+            &conn,
+            "entry-phase-0",
+            ENTRY_STATUS_DONE,
+            "test_phase_done",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("complete phase 0 entry");
+
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run status");
+        assert_eq!(run_status, "active");
+
+        let slot: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("slot row");
+        assert_eq!(slot.0.as_deref(), Some("run-1"));
+        assert_eq!(slot.1, Some(0));
     }
 
     #[test]
@@ -2767,6 +2849,101 @@ mod tests {
             1,
             "only one group entry must receive the single slot"
         );
+    }
+
+    #[test]
+    fn allocate_slot_for_group_agent_rebinds_completed_same_run_slot_without_reset() {
+        let conn = setup_conn();
+        conn.execute(
+            "UPDATE auto_queue_slots
+             SET thread_id_map = '{\"123\":\"thread-slot-0\"}'
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+            [],
+        )
+        .expect("seed slot thread map");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, slot_index, thread_group, batch_phase, completed_at
+             ) VALUES ('entry-complete', 'run-1', 'card-complete', 'agent-1', 'done', 0, 0, 0, datetime('now'))",
+            [],
+        )
+        .expect("seed completed entry");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+             ) VALUES ('entry-next', 'run-1', 'card-next', 'agent-1', 'pending', 1, 1)",
+            [],
+        )
+        .expect("seed next phase entry");
+
+        let allocation = allocate_slot_for_group_agent(&conn, "run-1", 1, "agent-1")
+            .expect("same-run rebind must succeed");
+        assert_eq!(allocation, Some((0, false)));
+
+        let slot: (Option<String>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group, thread_id_map
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("slot row");
+        assert_eq!(slot.0.as_deref(), Some("run-1"));
+        assert_eq!(slot.1, Some(1));
+        assert_eq!(slot.2, "{\"123\":\"thread-slot-0\"}");
+
+        let slot_index: Option<i64> = conn
+            .query_row(
+                "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("next entry slot");
+        assert_eq!(slot_index, Some(0));
+    }
+
+    #[test]
+    fn allocate_slot_for_group_agent_marks_cross_run_reclaim_as_new_assignment() {
+        let conn = setup_conn();
+        conn.execute(
+            "UPDATE auto_queue_slots
+             SET thread_id_map = '{\"123\":\"thread-slot-0\"}'
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+            [],
+        )
+        .expect("seed slot thread map");
+        release_run_slots(&conn, "run-1").expect("release first run slots");
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-2', 'repo-1', 'agent-1', 'active')",
+            [],
+        )
+        .expect("seed second run");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group
+             ) VALUES ('entry-run-2', 'run-2', 'card-run-2', 'agent-1', 'pending', 0)",
+            [],
+        )
+        .expect("seed second run entry");
+
+        let allocation = allocate_slot_for_group_agent(&conn, "run-2", 0, "agent-1")
+            .expect("cross-run claim must succeed");
+        assert_eq!(allocation, Some((0, true)));
+
+        let slot: (Option<String>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group, thread_id_map
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("slot row");
+        assert_eq!(slot.0.as_deref(), Some("run-2"));
+        assert_eq!(slot.1, Some(0));
+        assert_eq!(slot.2, "{\"123\":\"thread-slot-0\"}");
     }
 
     #[test]
