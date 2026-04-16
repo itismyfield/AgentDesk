@@ -174,6 +174,7 @@ async fn send_restore_notification(
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DispatchContextHints {
     worktree_path: Option<String>,
+    stale_worktree_path: Option<String>,
     force_new_session: bool,
 }
 
@@ -185,13 +186,17 @@ fn parse_dispatch_context_hints(
         dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
     let default_force_new_session =
         crate::dispatch::dispatch_type_force_new_session_default(dispatch_type).unwrap_or(false);
+    let requested_worktree_path = parsed
+        .as_ref()
+        .and_then(|v| v.get("worktree_path"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
     DispatchContextHints {
-        worktree_path: parsed
-            .as_ref()
-            .and_then(|v| v.get("worktree_path"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .filter(|p| std::path::Path::new(p).exists()),
+        worktree_path: requested_worktree_path
+            .as_deref()
+            .filter(|p| std::path::Path::new(p).exists())
+            .map(str::to_string),
+        stale_worktree_path: requested_worktree_path.filter(|p| !std::path::Path::new(p).exists()),
         force_new_session: parsed
             .as_ref()
             .and_then(|v| v.get("force_new_session"))
@@ -517,6 +522,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         dispatch_type_str.as_deref(),
     );
     let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
+    let dispatch_stale_worktree_path = dispatch_context_hints.stale_worktree_path.clone();
     let dispatch_force_new_session = dispatch_context_hints.force_new_session;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -530,10 +536,21 @@ pub(in crate::services::discord) async fn handle_text_message(
         .unwrap_or_else(|| dispatch_default_path.clone());
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
-            dispatch_effective_path
-        );
+        if let (Some(stale_path), Some(did)) = (
+            dispatch_stale_worktree_path.as_deref(),
+            dispatch_id_for_thread.as_deref(),
+        ) {
+            tracing::warn!(
+                "  [{ts}] ⚠ Dispatch {did}: context worktree_path no longer exists: {} — falling back to {}",
+                stale_path,
+                dispatch_effective_path
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
+                dispatch_effective_path
+            );
+        }
     }
     let dispatch_uses_thread_routing =
         crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
@@ -2091,17 +2108,22 @@ mod tests {
         let hints = parse_dispatch_context_hints(Some(&raw), Some("review-decision"));
 
         assert_eq!(hints.worktree_path.as_deref(), temp.path().to_str());
+        assert!(hints.stale_worktree_path.is_none());
         assert!(hints.force_new_session);
     }
 
     #[test]
-    fn parse_dispatch_context_hints_ignores_missing_path_but_keeps_reset_flag() {
+    fn parse_dispatch_context_hints_tracks_missing_path_but_keeps_reset_flag() {
         let hints = parse_dispatch_context_hints(
             Some(r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#),
             Some("review-decision"),
         );
 
         assert!(hints.worktree_path.is_none());
+        assert_eq!(
+            hints.stale_worktree_path.as_deref(),
+            Some("/definitely/missing")
+        );
         assert!(hints.force_new_session);
     }
 
