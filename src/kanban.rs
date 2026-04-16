@@ -77,8 +77,7 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
     conn.execute(
         "UPDATE kanban_cards \
          SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
-             review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
-             updated_at = datetime('now') \
+             review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
          WHERE id = ?1",
         [card_id],
     )?;
@@ -102,6 +101,17 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
             session_reset_round = NULL,
             review_entered_at = NULL,
             updated_at = datetime('now')",
+        [card_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn clear_manual_intervention_state_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
         [card_id],
     )?;
     clear_escalation_alert_state_on_conn(conn, card_id)?;
