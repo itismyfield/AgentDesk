@@ -199,6 +199,16 @@ fn onboarding_resume_state(
     }
 }
 
+fn sanitize_legacy_owner_id(owner_id: Option<String>) -> Option<String> {
+    let value = owner_id?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_owner_id(Some(trimmed)).ok().flatten()?;
+    Some(trimmed.to_string())
+}
+
 fn onboarding_draft_secret_policy_value() -> serde_json::Value {
     json!({
         "stores_raw_tokens": true,
@@ -244,13 +254,14 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         )
         .ok();
 
-    let owner_id: Option<String> = conn
-        .query_row(
+    let owner_id = sanitize_legacy_owner_id(
+        conn.query_row(
             "SELECT value FROM kv_meta WHERE key = 'onboarding_owner_id'",
             [],
             |row| row.get(0),
         )
-        .ok();
+        .ok(),
+    );
 
     let agent_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
@@ -3714,6 +3725,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_channel, "1001");
+    }
+
+    #[tokio::test]
+    async fn status_omits_invalid_legacy_owner_id_from_rerun_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params!["onboarding_owner_id", "42"],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status_code, Json(status_body)) = status(axum::extract::State(state)).await;
+
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(status_body["owner_id"], serde_json::Value::Null);
     }
 
     #[tokio::test]
