@@ -218,10 +218,11 @@ async fn handle_reaction_remove(
     // to cancel turns via reaction removal. Bots (announce/notify) remove
     // reactions during dispatch status sync, which races with active turns
     // in the same thread (#670).
-    if let Some(cached_user) = ctx.cache.user(user_id) {
-        if cached_user.bot {
-            return Ok(());
-        }
+    // If user is not in cache, default to ignoring (safe direction).
+    match ctx.cache.user(user_id) {
+        Some(cached_user) if !cached_user.bot => {} // human — proceed
+        Some(_) => return Ok(()),                   // bot — ignore
+        None => return Ok(()),                      // unknown — ignore
     }
 
     let channel_id = removed_reaction.channel_id;
