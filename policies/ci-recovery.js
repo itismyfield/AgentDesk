@@ -360,11 +360,8 @@ function processWaitingCard(cardId, blockedReason) {
     var issueNum = card.github_issue_number || "?";
     var runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
 
-    // Truncate log for dispatch title
-    var logSnippet = classification.logExcerpt || "";
-    if (logSnippet.length > 1000) {
-      logSnippet = logSnippet.substring(logSnippet.length - 1000);
-    }
+    // CI log goes into dispatch context, NOT the title
+    var failedJobs = classification.reason || "unknown";
 
     try {
       agentdesk.dispatch.create(
@@ -372,9 +369,8 @@ function processWaitingCard(cardId, blockedReason) {
         card.assigned_agent_id,
         "rework",
         "[CI Fix] #" + issueNum + " " + card.title +
-        "\n\nCI failed: " + classification.reason +
-        "\nRun: " + runUrl +
-        (logSnippet ? "\n\nLog excerpt:\n" + logSnippet : "")
+        "\n\nCI failed: " + failedJobs +
+        "\nRun: " + runUrl
       );
       agentdesk.log.info("[ci-recovery] Rework dispatch created for card " + cardId);
     } catch (e) {
