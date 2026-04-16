@@ -187,7 +187,6 @@ function EntryRow({
   moveControls,
   showThreadGroup,
   showBatchPhase,
-  repo,
 }: {
   entry: DispatchQueueEntryType;
   idx: number;
@@ -198,7 +197,6 @@ function EntryRow({
   isDropTarget?: boolean;
   showThreadGroup?: boolean;
   showBatchPhase?: boolean;
-  repo?: string | null;
   dragHandlers?: {
     draggable: boolean;
     onDragStart: (e: React.DragEvent) => void;
@@ -295,9 +293,9 @@ function EntryRow({
               </span>
             )}
             {entry.github_issue_number && (
-              repo ? (
+              entry.github_repo ? (
                 <a
-                  href={`https://github.com/${repo}/issues/${entry.github_issue_number}`}
+                  href={`https://github.com/${entry.github_repo}/issues/${entry.github_issue_number}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mr-1 font-medium hover:underline"
@@ -910,16 +908,14 @@ export default function AutoQueuePanel({
     const isPending = !isPassed && !isFailed;
     const isActive = isPending && currentBatchPhase === phase;
 
-    const baseColor = isDeploy && !isFailed
-      ? "#60a5fa"
-      : isPassed
-        ? "#4ade80"
-        : isFailed
-          ? "#ef4444"
-          : isActive
-            ? "#f59e0b"
-            : "#6b7280";
-    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isDeploy ? "🚀" : isActive ? "⏳" : "○";
+    const baseColor = isPassed
+      ? "#4ade80"
+      : isFailed
+        ? "#ef4444"
+        : isActive
+          ? isDeploy ? "#60a5fa" : "#f59e0b"
+          : "#6b7280";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? (isDeploy ? "🚀" : "⏳") : "○";
     const statusLabel = isPassed
       ? tr("통과", "Passed")
       : isFailed
@@ -1065,7 +1061,7 @@ export default function AutoQueuePanel({
             locale={locale}
             onSkip={handleSkip}
             showBatchPhase={hasBatchPhases}
-            repo={run?.repo}
+
           />
         ))}
       </div>
@@ -1460,7 +1456,7 @@ export default function AutoQueuePanel({
                                 isDropTarget={allDrag.dropTargetId === entry.id}
                                 dragHandlers={allDrag.makeDragHandlers(entry)}
                                 moveControls={allDrag.makeMoveControls(entry)}
-                                repo={run?.repo}
+                    
                               />
                             </div>
                           </div>
@@ -1496,7 +1492,7 @@ export default function AutoQueuePanel({
                         isDropTarget={allDrag.dropTargetId === entry.id}
                         dragHandlers={allDrag.makeDragHandlers(entry)}
                         moveControls={allDrag.makeMoveControls(entry)}
-                        repo={run?.repo}
+            
                       />
                     </div>
                   </div>
@@ -1573,7 +1569,7 @@ export default function AutoQueuePanel({
                   onSkip={handleSkip}
                   onReorder={handleReorder}
                   showBatchPhase={hasBatchPhases}
-                  repo={run?.repo}
+      
                 />
               ),
             )}
@@ -1644,7 +1640,6 @@ function AgentSubQueue({
   onSkip,
   onReorder,
   showBatchPhase,
-  repo,
 }: {
   agentId: string;
   agentEntries: DispatchQueueEntryType[];
@@ -1654,7 +1649,6 @@ function AgentSubQueue({
   onSkip: (id: string) => void;
   onReorder: (orderedIds: string[], agentId?: string | null) => Promise<void>;
   showBatchPhase?: boolean;
-  repo?: string | null;
 }) {
   const drag = useDragReorder(agentEntries, onReorder, agentId);
 
@@ -1731,7 +1725,6 @@ function AgentSubQueue({
           locale={locale}
           onSkip={onSkip}
           showBatchPhase={showBatchPhase}
-          repo={repo}
           isDragging={drag.dragId === entry.id}
           isDropTarget={drag.dropTargetId === entry.id}
           dragHandlers={drag.makeDragHandlers(entry)}
