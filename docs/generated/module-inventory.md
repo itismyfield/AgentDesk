@@ -58,7 +58,7 @@
 | `config` | `src/config.rs` | 1479 | giant-file |
 | `crate` | `src/main.rs` | 42 |  |
 | `credential` | `src/credential.rs` | 19 |  |
-| `db` | `src/db/mod.rs` | 116 |  |
+| `db` | `src/db/mod.rs` | 117 |  |
 | `db::agents` | `src/db/agents.rs` | 539 |  |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 3160 | giant-file |
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
@@ -70,7 +70,7 @@
 | `db::turns` | `src/db/turns.rs` | 451 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 2658 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 904 |  |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 909 |  |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 626 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 438 |  |
 | `engine` | `src/engine/mod.rs` | 1492 | giant-file |
@@ -84,7 +84,7 @@
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 47 |  |
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 269 |  |
 | `engine::ops::deploy_ops` | `src/engine/ops/deploy_ops.rs` | 122 |  |
-| `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 237 |  |
+| `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 266 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 250 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 366 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 57 |  |
@@ -163,7 +163,7 @@
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 139 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1122 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 17 |  |
-| `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 1279 | giant-file |
+| `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 1282 | giant-file |
 | `server::routes::review_verdict::review_state_repo` | `src/server/routes/review_verdict/review_state_repo.rs` | 21 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 360 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 396 |  |
@@ -274,7 +274,7 @@
 | `services::qwen` | `src/services/qwen.rs` | 2220 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1047 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
-| `services::retrospectives` | `src/services/retrospectives.rs` | 635 |  |
+| `services::retrospectives` | `src/services/retrospectives.rs` | 637 |  |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 890 |  |
 | `services::settings` | `src/services/settings.rs` | 280 |  |
