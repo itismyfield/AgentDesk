@@ -393,15 +393,6 @@ fn patch_id_from_diff(diff: &[u8]) -> Result<Option<String>, String> {
         .map(str::to_string))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorktreeMergeStatus {
-    Reachable,
-    SquashMerged,
-    Unmerged,
-}
-
-const SQUASH_MERGE_PATCH_SCAN_MAX_COMMITS: usize = 256;
-
 fn branch_diff_patch_id(
     repo_path: &str,
     from_ref: &str,
@@ -450,17 +441,7 @@ fn worktree_is_squash_merged(
     };
 
     let commit_range = format!("{merge_base}..{base_ref}");
-    let max_count = SQUASH_MERGE_PATCH_SCAN_MAX_COMMITS.to_string();
-    let base_commits = git_command_stdout(
-        repo_path,
-        &[
-            "rev-list",
-            "--no-merges",
-            "--max-count",
-            &max_count,
-            &commit_range,
-        ],
-    )?;
+    let base_commits = git_command_stdout(repo_path, &["rev-list", "--no-merges", &commit_range])?;
     for commit_sha in base_commits
         .lines()
         .map(str::trim)
@@ -474,9 +455,6 @@ fn worktree_is_squash_merged(
         }
     }
 
-    tracing::debug!(
-        "No squash-merge patch-id match for branch {branch_name} against {base_ref} after scanning up to {SQUASH_MERGE_PATCH_SCAN_MAX_COMMITS} recent commits"
-    );
     Ok(false)
 }
 
@@ -496,7 +474,9 @@ fn disconnect_sessions_for_worktree_path(db: Option<&crate::db::Db>, worktree_pa
     match conn.execute(
         "UPDATE sessions
          SET cwd = NULL,
-             status = 'disconnected'
+             status = 'disconnected',
+             active_dispatch_id = NULL,
+             claude_session_id = NULL
          WHERE cwd = ?1",
         [worktree_path],
     ) {
@@ -513,7 +493,7 @@ fn disconnect_sessions_for_worktree_path(db: Option<&crate::db::Db>, worktree_pa
     }
 }
 
-fn worktree_merge_status(wt_info: &WorktreeInfo) -> Result<WorktreeMergeStatus, String> {
+fn worktree_has_unmerged_commits(wt_info: &WorktreeInfo) -> Result<bool, String> {
     let base_ref = git_upstream_base_ref(&wt_info.original_path);
     let range = format!("{base_ref}..{}", wt_info.branch_name);
     let diff = git_command_output(
@@ -525,46 +505,14 @@ fn worktree_merge_status(wt_info: &WorktreeInfo) -> Result<WorktreeMergeStatus, 
         return Err(format!("git log failed: {stderr}"));
     }
     if diff.stdout.is_empty() {
-        return Ok(WorktreeMergeStatus::Reachable);
+        return Ok(false);
     }
 
     if worktree_is_squash_merged(&wt_info.original_path, &base_ref, &wt_info.branch_name)? {
-        return Ok(WorktreeMergeStatus::SquashMerged);
+        return Ok(false);
     }
 
-    Ok(WorktreeMergeStatus::Unmerged)
-}
-
-fn delete_worktree_branch(
-    wt_info: &WorktreeInfo,
-    merge_status: WorktreeMergeStatus,
-) -> std::io::Result<std::process::Output> {
-    let delete = std::process::Command::new("git")
-        .args([
-            "-C",
-            &wt_info.original_path,
-            "branch",
-            "-d",
-            &wt_info.branch_name,
-        ])
-        .output()?;
-    if delete.status.success() || merge_status != WorktreeMergeStatus::SquashMerged {
-        return Ok(delete);
-    }
-
-    tracing::info!(
-        "Branch {} requires force delete after squash-merge cleanup; retrying with -D",
-        wt_info.branch_name
-    );
-    std::process::Command::new("git")
-        .args([
-            "-C",
-            &wt_info.original_path,
-            "branch",
-            "-D",
-            &wt_info.branch_name,
-        ])
-        .output()
+    Ok(true)
 }
 
 /// Clean up a git worktree after session ends.
@@ -583,7 +531,7 @@ pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &Worktre
         }
     };
 
-    let merge_status = match worktree_merge_status(wt_info) {
+    let has_commits = match worktree_has_unmerged_commits(wt_info) {
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(
@@ -594,7 +542,6 @@ pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &Worktre
             return;
         }
     };
-    let has_commits = merge_status == WorktreeMergeStatus::Unmerged;
 
     if has_changes || has_commits {
         tracing::info!(
@@ -635,7 +582,15 @@ pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &Worktre
             return;
         }
 
-        let branch_delete = delete_worktree_branch(wt_info, merge_status);
+        let branch_delete = std::process::Command::new("git")
+            .args([
+                "-C",
+                &wt_info.original_path,
+                "branch",
+                "-D",
+                &wt_info.branch_name,
+            ])
+            .output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
         disconnect_sessions_for_worktree_path(db, &wt_info.worktree_path);
         if let Ok(output) = branch_delete
@@ -1580,19 +1535,21 @@ mod tests {
             },
         );
 
-        let session_row: (Option<String>, String) = db
+        let session_row: (Option<String>, String, Option<String>, Option<String>) = db
             .lock()
             .unwrap()
             .query_row(
-                "SELECT cwd, status
+                "SELECT cwd, status, active_dispatch_id, claude_session_id
                  FROM sessions
                  WHERE session_key = ?1",
                 ["host:worktree-cleanup-session"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(session_row.0, None);
         assert_eq!(session_row.1, "disconnected");
+        assert_eq!(session_row.2, None);
+        assert_eq!(session_row.3, None);
     }
 
     #[test]
