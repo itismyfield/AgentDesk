@@ -391,6 +391,7 @@ fn rollback_cancelled_run_cards(
             }
 
             crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
+            crate::kanban::clear_manual_intervention_state_on_conn(conn, card_id)?;
             crate::kanban::log_audit_on_conn(
                 conn,
                 card_id,
