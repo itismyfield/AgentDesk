@@ -343,8 +343,10 @@ mod tests {
             globals.set("agentdesk", agentdesk).expect("set agentdesk");
             register_exec_ops(&ctx).expect("register exec ops");
 
+            // Use a generous timeout: `gh --version` can take several seconds on
+            // Windows CI runners due to cold-start overhead.
             let gh_version: String = ctx
-                .eval(r#"agentdesk.exec("gh", ["--version"], { timeout_ms: 1000 })"#)
+                .eval(r#"agentdesk.exec("gh", ["--version"], { timeout_ms: 10000 })"#)
                 .expect("gh exec");
 
             assert!(

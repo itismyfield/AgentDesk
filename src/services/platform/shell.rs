@@ -6,6 +6,30 @@
 
 use std::process::{Command, Output};
 
+/// Canonicalize a path, stripping the Windows `\\?\` extended-length prefix
+/// that `std::fs::canonicalize` adds on Windows.  Without stripping, these
+/// UNC-prefixed paths fail to match user-supplied or config-supplied paths
+/// and break repo directory lookups in tests and production on Windows.
+fn safe_canonicalize(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    strip_unc_prefix(canonical)
+}
+
+/// Strip the `\\?\` extended-length prefix from a Windows path.
+/// On non-Windows platforms this is a no-op.
+fn strip_unc_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        // `\\?\C:\foo` → `C:\foo`
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(stripped);
+        }
+    }
+    let _ = &path; // suppress unused on non-windows
+    path
+}
+
 /// Execute a shell command string using the platform's default shell.
 ///
 /// - **Unix**: `bash -c "<cmd>"`
@@ -203,12 +227,7 @@ fn configured_repo_dir(repo_id: &str) -> Option<String> {
         path
     };
 
-    Some(
-        std::fs::canonicalize(&resolved)
-            .unwrap_or(resolved)
-            .to_string_lossy()
-            .into_owned(),
-    )
+    Some(safe_canonicalize(&resolved).to_string_lossy().into_owned())
 }
 
 pub(crate) fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
@@ -306,7 +325,7 @@ pub fn resolve_repo_dir_for_target(target_repo: Option<&str>) -> Result<Option<S
         } else {
             path
         };
-        let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+        let canonical = safe_canonicalize(&resolved);
         let canonical_str = canonical.to_string_lossy().into_owned();
         ensure_git_worktree(&canonical_str)?;
         return Ok(Some(canonical_str));
