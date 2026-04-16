@@ -19,6 +19,22 @@ var prTracking = agentdesk.prTracking;
 
 var CI_MAX_RETRIES = 3;
 var CI_LOG_MAX_LINES = 50;
+var CI_DISPATCH_CARD_TITLE_MAX_CHARS = 120;
+var CI_DISPATCH_JOB_NAME_MAX_CHARS = 60;
+
+function truncateText(text, maxChars) {
+  var normalized = String(text || "");
+  if (maxChars <= 0) {
+    return "";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  if (maxChars === 1) {
+    return "…";
+  }
+  return normalized.substring(0, maxChars - 1) + "…";
+}
 
 // Transient failure patterns in CI logs
 var TRANSIENT_PATTERNS = [
@@ -359,18 +375,32 @@ function processWaitingCard(cardId, blockedReason) {
     var card = cards[0];
     var issueNum = card.github_issue_number || "?";
     var runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
+    var failedJobName = (classification.failedJobs && classification.failedJobs.length > 0)
+      ? classification.failedJobs[0]
+      : "unknown job";
+    var compactCardTitle = truncateText(card.title || "Untitled card", CI_DISPATCH_CARD_TITLE_MAX_CHARS);
+    var compactFailedJobName = truncateText(failedJobName, CI_DISPATCH_JOB_NAME_MAX_CHARS);
 
-    // CI log goes into dispatch context, NOT the title
-    var failedJobs = classification.reason || "unknown";
+    // Keep log excerpt in dispatch context, not in the Discord-visible title.
+    var logSnippet = classification.logExcerpt || "";
+    if (logSnippet.length > 1200) {
+      logSnippet = logSnippet.substring(logSnippet.length - 1200);
+    }
 
     try {
       agentdesk.dispatch.create(
         cardId,
         card.assigned_agent_id,
         "rework",
-        "[CI Fix] #" + issueNum + " " + card.title +
-        "\n\nCI failed: " + failedJobs +
-        "\nRun: " + runUrl
+        "[CI Fix] #" + issueNum + " " + compactCardTitle + " — " + compactFailedJobName,
+        {
+          ci_recovery: {
+            job_name: compactFailedJobName,
+            reason: classification.reason,
+            run_url: runUrl,
+            log_excerpt: logSnippet
+          }
+        }
       );
       agentdesk.log.info("[ci-recovery] Rework dispatch created for card " + cardId);
     } catch (e) {

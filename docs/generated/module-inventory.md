@@ -4,7 +4,7 @@
 
 - Production Rust modules: `249`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `60`
+- Giant files: `61`
 
 ## Namespace Summary
 
@@ -133,9 +133,9 @@
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3304 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3307 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1297 | giant-file |
-| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 876 |  |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3691 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1267 | giant-file |
+| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 901 |  |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 67 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 2042 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
@@ -215,7 +215,7 @@
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 424 |  |
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 984 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
-| `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 963 |  |
+| `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1390 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 1939 | giant-file |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
@@ -223,9 +223,9 @@
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 908 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 13 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1032 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 2209 | giant-file |
-| `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1041 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 2213 | giant-file |
+| `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1336 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1239 | giant-file |

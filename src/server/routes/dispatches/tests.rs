@@ -286,68 +286,53 @@ fn review_dispatch_uses_counter_model_channel() {
 }
 
 #[test]
-fn review_dispatch_message_includes_review_only_banner() {
+fn review_dispatch_message_includes_compact_metadata_and_issue_url() {
     let message = format_dispatch_message(
         "dispatch-1",
         "[Review R1] card-1",
         Some("https://github.com/itismyfield/AgentDesk/issues/19"),
         Some(19),
-        true,
-        Some("abc123"),
-        Some("codex"),
-        None,
         Some("review"),
         None,
     );
 
-    assert!(message.starts_with("DISPATCH:dispatch-1 [🔍 리뷰] - [Review R1] card-1"));
-    assert!(message.contains("⚠️ 검토 전용"));
-    assert!(message.contains("코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."));
-    assert!(
-        message.contains(
-            "[Review R1] card-1 #19](<https://github.com/itismyfield/AgentDesk/issues/19>)"
-        )
-    );
-    // Verdict API instructions must be present for counter-model reviewers
-    assert!(message.contains("review-verdict"));
-    assert!(message.contains("VERDICT: pass|improve|reject|rework"));
+    assert!(message.starts_with(
+        "── review dispatch ──\nDISPATCH:dispatch-1 [🔍 리뷰] - #19 [Review R1] card-1"
+    ));
+    assert!(message.contains("<https://github.com/itismyfield/AgentDesk/issues/19>"));
+    assert!(message.contains(
+        "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
     assert!(message.contains("dispatch-1"));
-    assert!(message.contains("abc123"));
-    // Provider must be included in the curl example
-    assert!(message.contains(r#""provider":"codex""#));
+    assert!(!message.contains("review-verdict"));
+    assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
+    assert!(message.chars().count() <= 500);
 }
 
 #[test]
-fn review_dispatch_message_with_branch() {
+fn review_dispatch_message_omits_branch_and_commit_details() {
     let message = format_dispatch_message(
         "dispatch-br",
         "[Review R1] card-1",
         Some("https://github.com/itismyfield/AgentDesk/issues/19"),
         Some(19),
-        true,
-        Some("abc12345deadbeef"),
-        Some("codex"),
-        Some("wt/feature-branch"),
         Some("review"),
         None,
     );
 
-    assert!(message.contains("리뷰 대상 브랜치: `wt/feature-branch`"));
-    assert!(message.contains("commit: `abc12345`"));
-    assert!(message.contains("main 브랜치가 아닙니다"));
+    assert!(message.contains("DISPATCH:dispatch-br [🔍 리뷰] - #19 [Review R1] card-1"));
+    assert!(!message.contains("wt/feature-branch"));
+    assert!(!message.contains("abc12345deadbeef"));
+    assert!(!message.contains("main 브랜치가 아닙니다"));
 }
 
 #[test]
-fn review_dispatch_message_includes_quality_checklist_and_improve_guidance() {
+fn review_dispatch_message_omits_verbose_quality_checklist_and_guidance() {
     let message = format_dispatch_message(
         "dispatch-quality",
         "[Review R1] card-1",
         Some("https://github.com/itismyfield/AgentDesk/issues/19"),
         Some(19),
-        true,
-        Some("abc12345deadbeef"),
-        Some("codex"),
-        Some("wt/feature-branch"),
         Some("review"),
         Some(
             &serde_json::json!({
@@ -359,33 +344,29 @@ fn review_dispatch_message_includes_quality_checklist_and_improve_guidance() {
         ),
     );
 
-    assert!(message.contains(crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER));
-    assert!(message.contains("race condition / 동시성 이슈"));
-    assert!(message.contains("에러 핸들링 누락"));
-    assert!(message.contains("리소스 정리 누락"));
-    assert!(message.contains(crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE));
+    assert!(message.contains("DISPATCH:dispatch-quality [🔍 리뷰] - #19 [Review R1] card-1"));
+    assert!(!message.contains(crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER));
+    assert!(!message.contains("race condition / 동시성 이슈"));
+    assert!(!message.contains("에러 핸들링 누락"));
+    assert!(!message.contains("리소스 정리 누락"));
+    assert!(!message.contains(crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE));
 }
 
 #[test]
-fn review_dispatch_message_with_merge_base_diff_instructions() {
+fn review_dispatch_message_omits_merge_base_diff_instructions() {
     let message = format_dispatch_message(
         "dispatch-merge-base",
         "[Review R1] card-1",
         Some("https://github.com/itismyfield/AgentDesk/issues/19"),
         Some(19),
-        true,
-        Some("abc12345deadbeef0011223344556677"),
-        Some("codex"),
-        Some("wt/feature-branch"),
         Some("review"),
         Some(r#"{"merge_base":"11223344556677889900aabbccddeeff00112233"}"#),
     );
 
-    assert!(message.contains("merge-base(main, `wt/feature-branch`)"));
-    assert!(message.contains("11223344556677889900aabbccddeeff00112233"));
-    assert!(message.contains(
-        "git diff 11223344556677889900aabbccddeeff00112233..abc12345deadbeef0011223344556677"
-    ));
+    assert!(message.contains("DISPATCH:dispatch-merge-base [🔍 리뷰] - #19 [Review R1] card-1"));
+    assert!(!message.contains("merge-base(main"));
+    assert!(!message.contains("11223344556677889900aabbccddeeff00112233"));
+    assert!(!message.contains("git diff"));
 }
 
 #[test]
@@ -395,31 +376,26 @@ fn review_dispatch_message_without_commit() {
         "[Review R1] card-1",
         None,
         None,
-        true,
-        None,
-        None,
-        None,
         Some("review"),
         None,
     );
 
-    assert!(message.contains("review-verdict"));
+    assert!(message.contains("DISPATCH:dispatch-no-commit [🔍 리뷰] - [Review R1] card-1"));
     assert!(message.contains("dispatch-no-commit"));
-    // No commit arg in the curl command
+    assert!(message.contains(
+        "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
     assert!(!message.contains(r#""commit""#));
+    assert!(!message.contains(r#""provider""#));
 }
 
 #[test]
-fn review_dispatch_message_includes_noop_verification_guidance() {
+fn review_dispatch_message_omits_noop_verification_details() {
     let message = format_dispatch_message(
         "dispatch-noop-review",
         "[Review R1] card-655",
         Some("https://github.com/itismyfield/AgentDesk/issues/655"),
         Some(655),
-        true,
-        Some("abc12345deadbeef"),
-        Some("codex"),
-        Some("wt/655-noop"),
         Some("review"),
         Some(
             &serde_json::json!({
@@ -433,23 +409,21 @@ fn review_dispatch_message_includes_noop_verification_guidance() {
         ),
     );
 
-    assert!(message.contains("리뷰 모드: `noop_verification`"));
-    assert!(message.contains("GitHub 이슈 본문과 현재 코드 상태를 대조"));
-    assert!(message.contains("noop 사유: OUTCOME: noop\\nfeature already exists"));
-    assert!(message.contains("이슈가 요구한 변경이 현재 코드에 이미 존재하는지"));
+    assert!(
+        message.contains("DISPATCH:dispatch-noop-review [🔍 리뷰] - #655 [Review R1] card-655")
+    );
+    assert!(!message.contains("Review Mode"));
+    assert!(!message.contains("noop_verification"));
+    assert!(!message.contains("OUTCOME: noop"));
     assert!(!message.contains("git diff"));
 }
 
 #[test]
-fn review_dispatch_message_includes_manual_lookup_warning_when_branch_is_missing() {
+fn review_dispatch_message_omits_manual_lookup_warning_when_branch_is_missing() {
     let message = format_dispatch_message(
         "dispatch-manual-review-target",
         "[Review R1] card-1",
         None,
-        None,
-        true,
-        None,
-        Some("codex"),
         None,
         Some("review"),
         Some(
@@ -461,7 +435,10 @@ fn review_dispatch_message_includes_manual_lookup_warning_when_branch_is_missing
         ),
     );
 
-    assert!(message.contains("리뷰 타겟 안내: 브랜치 정보 없음"));
+    assert!(message.contains(
+        "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
+    assert!(!message.contains("브랜치 정보 없음"));
     assert!(!message.contains("리뷰 대상 브랜치:"));
 }
 
@@ -472,69 +449,61 @@ fn implementation_dispatch_message_stays_compact() {
         "Implement feature",
         Some("https://github.com/itismyfield/AgentDesk/issues/24"),
         Some(24),
-        false,
-        None,
-        None,
-        None,
         Some("implementation"),
         None,
     );
 
-    assert!(message.contains("[📋 구현]"));
-    assert!(
-        message.contains(
-            "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
-        )
-    );
-    assert!(message.contains("`OUTCOME: noop`"));
+    assert!(message.starts_with(
+        "── implementation dispatch ──\nDISPATCH:dispatch-2 [📋 구현] - #24 Implement feature"
+    ));
+    assert!(message.contains("<https://github.com/itismyfield/AgentDesk/issues/24>"));
+    assert!(message.contains(
+        "한 줄 지시: 이 이슈를 구현하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
+    assert!(!message.contains("`OUTCOME: noop`"));
     assert!(!message.contains("검토 전용"));
-    // Implementation dispatches should NOT include verdict instructions
     assert!(!message.contains("review-verdict"));
+    assert!(message.chars().count() <= 500);
 }
 
 #[test]
-fn e2e_test_dispatch_message_uses_general_completion_contract() {
+fn e2e_test_dispatch_message_stays_compact() {
     let message = format_dispatch_message(
         "dispatch-e2e",
         "Run regression",
         Some("https://github.com/itismyfield/AgentDesk/issues/340"),
         Some(340),
-        true,
-        None,
-        Some("codex"),
-        None,
         Some("e2e-test"),
         None,
     );
 
     assert!(message.contains("[🧪 E2E 테스트]"));
-    assert!(message.contains("PATCH"));
-    assert!(message.contains("/api/dispatches/dispatch-e2e"));
-    assert!(!message.contains("검토 전용"));
+    assert!(message.contains(
+        "한 줄 지시: 검증만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
+    assert!(!message.contains("/api/dispatches/"));
     assert!(!message.contains("review-verdict"));
-    assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
+    assert!(message.chars().count() <= 500);
 }
 
 #[test]
-fn consultation_dispatch_message_uses_general_completion_contract() {
+fn consultation_dispatch_message_stays_compact() {
     let message = format_dispatch_message(
         "dispatch-consult",
         "Need investigation",
         Some("https://github.com/itismyfield/AgentDesk/issues/256"),
         Some(256),
-        true,
-        None,
-        Some("codex"),
-        None,
         Some("consultation"),
         None,
     );
 
-    assert!(message.contains("PATCH"));
-    assert!(message.contains("/api/dispatches/dispatch-consult"));
-    assert!(!message.contains("검토 전용"));
+    assert!(message.contains("[💬 상담]"));
+    assert!(message.contains(
+        "한 줄 지시: 필요한 조사/판단만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+    ));
+    assert!(!message.contains("/api/dispatches/"));
     assert!(!message.contains("review-verdict"));
-    assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
+    assert!(message.chars().count() <= 500);
 }
 
 #[test]
@@ -544,20 +513,16 @@ fn review_decision_primary_message_includes_action_instructions() {
         "[리뷰 검토] Test Card",
         Some("https://github.com/itismyfield/AgentDesk/issues/249"),
         Some(249),
-        false,
-        None,
-        None,
-        None,
         Some("review-decision"),
         Some(r#"{"verdict":"rework"}"#),
     );
 
     assert!(message.contains("[⚖️ 리뷰 검토]"));
-    assert!(message.contains("카운터모델 리뷰 결과: **rework**"));
-    assert!(message.contains("review-decision API에 `accept` 호출"));
-    assert!(message.contains("review-decision API에 `dispute` 호출"));
-    assert!(message.contains("review-decision API에 `dismiss` 호출"));
-    assert!(message.contains("#249](<https://github.com/itismyfield/AgentDesk/issues/249>)"));
+    assert!(message.contains(
+        "한 줄 지시: GitHub 리뷰 피드백을 확인하고 accept/dispute/dismiss 중 하나를 제출하세요."
+    ));
+    assert!(message.contains("<https://github.com/itismyfield/AgentDesk/issues/249>"));
+    assert!(!message.contains("카운터모델 리뷰 결과"));
     assert!(!message.contains("review-verdict"));
 }
 

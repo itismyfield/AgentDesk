@@ -81,10 +81,10 @@
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:1988` | `src/server/routes/domains/ops.rs:161` |
 | `DELETE` | `/api/hook/session` | `dispatched_sessions::delete_session` | `src/server/routes/dispatched_sessions.rs:544` | `src/server/routes/domains/ops.rs:79` |
 | `POST` | `/api/hook/session` | `dispatched_sessions::hook_session` | `src/server/routes/dispatched_sessions.rs:262` | `src/server/routes/domains/ops.rs:79` |
-| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:691` | `src/server/routes/domains/ops.rs:26` |
+| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:706` | `src/server/routes/domains/ops.rs:26` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1248` | `src/server/routes/domains/admin.rs:61` |
-| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:631` | `src/server/routes/domains/ops.rs:22` |
-| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:820` | `src/server/routes/domains/ops.rs:27` |
+| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:646` | `src/server/routes/domains/ops.rs:22` |
+| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:845` | `src/server/routes/domains/ops.rs:27` |
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:276` | `src/server/routes/domains/kanban.rs:11` |
 | `POST` | `/api/kanban-cards` | `kanban::create_card` | `src/server/routes/kanban.rs:323` | `src/server/routes/domains/kanban.rs:11` |
 | `POST` | `/api/kanban-cards/assign-issue` | `kanban::assign_issue` | `src/server/routes/kanban.rs:1444` | `src/server/routes/domains/kanban.rs:17` |

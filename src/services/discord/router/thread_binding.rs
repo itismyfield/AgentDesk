@@ -6,6 +6,7 @@ use serenity::ChannelId;
 pub(super) struct DispatchInfo {
     pub(super) card_id: Option<String>,
     pub(super) card_title: Option<String>,
+    pub(super) dispatch_title: Option<String>,
     pub(super) github_issue_url: Option<String>,
     pub(super) github_issue_number: Option<i64>,
     pub(super) issue_body: Option<String>,
@@ -35,6 +36,10 @@ pub(super) async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Op
             .map(|s| s.to_string()),
         card_title: body
             .get("card_title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        dispatch_title: body
+            .get("dispatch_title")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         github_issue_url: body
