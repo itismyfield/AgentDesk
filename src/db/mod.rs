@@ -36,9 +36,10 @@ impl DbPool {
     /// Open a new read-only connection for non-blocking reads.
     /// SQLite WAL mode allows concurrent readers without blocking writers.
     pub fn read_conn(&self) -> std::result::Result<Connection, rusqlite::Error> {
-        let conn =
-            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        let conn = Connection::open(&self.path)?;
+        conn.execute_batch(
+            "PRAGMA query_only=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
+        )?;
         Ok(conn)
     }
 

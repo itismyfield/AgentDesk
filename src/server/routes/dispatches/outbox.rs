@@ -1016,10 +1016,10 @@ pub(super) fn format_dispatch_message(
                     ));
                 }
             } else {
-                message.push_str(&format!(
+                message.push_str(
                     "\n\
-                     이번 리뷰는 diff 검토가 아니라 현재 브랜치 상태 검증입니다. `git diff`보다 이슈 본문과 실제 코드 상태 대조를 우선하세요."
-                ));
+                     이번 리뷰는 diff 검토가 아니라 현재 브랜치 상태 검증입니다. 이슈 본문과 실제 코드 상태 대조를 우선하세요.",
+                );
             }
         }
         if let Some(warning) = context_json

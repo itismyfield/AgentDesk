@@ -97,6 +97,29 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
         )?,
     )?;
 
+    // __has_active_work_raw(card_id) → json_string {"count":N}
+    // Checks if a card has active implementation/rework dispatches.
+    let db_aw = db.clone();
+    dispatch_obj.set(
+        "__has_active_work_raw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            let conn = match db_aw.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+            };
+            match conn.query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                     WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
+                     AND status IN ('pending', 'dispatched')",
+                rusqlite::params![card_id],
+                |row| row.get::<_, i64>(0),
+            ) {
+                Ok(cnt) => format!(r#"{{"count":{cnt}}}"#),
+                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+            }
+        })?,
+    )?;
+
     // __set_retry_count_raw(dispatch_id, count) → json_string
     // Updates retry_count for auto-retry tracking.
     let db_rc = db;
@@ -164,6 +187,12 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                     agentdesk.log.warn("[dispatch.setRetryCount] no rows affected for " + dispatchId + " — missing");
                 }
                 return result;
+            };
+            var rawActiveWork = agentdesk.dispatch.__has_active_work_raw;
+            agentdesk.dispatch.hasActiveWork = function(cardId) {
+                var result = JSON.parse(rawActiveWork(cardId));
+                if (result.error) throw new Error(result.error);
+                return result.count > 0;
             };
         })();
     "#,

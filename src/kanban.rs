@@ -1371,9 +1371,9 @@ mod tests {
         );
         seed_dispatch_with_type(
             &db,
-            "dispatch-impl-keep",
+            "dispatch-review-keep",
             "card-terminal-cleanup",
-            "implementation",
+            "review",
             "pending",
         );
 
@@ -1394,9 +1394,9 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        let impl_status: String = conn
+        let review_status: String = conn
             .query_row(
-                "SELECT status FROM task_dispatches WHERE id = 'dispatch-impl-keep'",
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-review-keep'",
                 [],
                 |row| row.get(0),
             )
@@ -1407,8 +1407,8 @@ mod tests {
         assert_eq!(rw_status, "cancelled");
         assert_eq!(rw_reason.as_deref(), Some(TERMINAL_DISPATCH_CLEANUP_REASON));
         assert_eq!(
-            impl_status, "pending",
-            "terminal cleanup must not cancel unrelated pending work dispatches"
+            review_status, "pending",
+            "terminal cleanup must not cancel pending review dispatches"
         );
     }
 
