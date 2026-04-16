@@ -1621,7 +1621,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(wt);
+                    cleanup_git_worktree(shared.db.as_ref(), wt);
                 }
             }
             data.sessions.remove(&ch);

@@ -337,27 +337,186 @@ fn worktree_has_local_changes(wt_info: &WorktreeInfo) -> Result<bool, String> {
     Ok(!status.stdout.is_empty())
 }
 
+fn git_command_output(repo_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    std::process::Command::new("git")
+        .args(["-C", repo_path])
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {:?} failed: {e}", args))
+}
+
+fn git_command_stdout(repo_path: &str, args: &[&str]) -> Result<String, String> {
+    let output = git_command_output(repo_path, args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git {:?} failed: {stderr}", args));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn patch_id_from_diff(diff: &[u8]) -> Result<Option<String>, String> {
+    if diff.is_empty() {
+        return Ok(None);
+    }
+
+    use std::io::Write as _;
+
+    let mut child = std::process::Command::new("git")
+        .args(["patch-id", "--stable"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git patch-id failed: {e}"))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "git patch-id stdin unavailable".to_string())?;
+        stdin
+            .write_all(diff)
+            .map_err(|e| format!("git patch-id stdin failed: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git patch-id failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git patch-id failed: {stderr}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
+}
+
+fn branch_diff_patch_id(
+    repo_path: &str,
+    from_ref: &str,
+    to_ref: &str,
+) -> Result<Option<String>, String> {
+    let range = format!("{from_ref}..{to_ref}");
+    let diff = git_command_output(repo_path, &["diff", "--binary", "--no-ext-diff", &range])?;
+    if !diff.status.success() {
+        let stderr = String::from_utf8_lossy(&diff.stderr).trim().to_string();
+        return Err(format!("git diff {range} failed: {stderr}"));
+    }
+    patch_id_from_diff(&diff.stdout)
+}
+
+fn commit_patch_id(repo_path: &str, commit_sha: &str) -> Result<Option<String>, String> {
+    let show = git_command_output(
+        repo_path,
+        &[
+            "show",
+            "--format=",
+            "--patch",
+            "--binary",
+            "--no-ext-diff",
+            commit_sha,
+        ],
+    )?;
+    if !show.status.success() {
+        let stderr = String::from_utf8_lossy(&show.stderr).trim().to_string();
+        return Err(format!("git show {commit_sha} failed: {stderr}"));
+    }
+    patch_id_from_diff(&show.stdout)
+}
+
+fn worktree_is_squash_merged(
+    repo_path: &str,
+    base_ref: &str,
+    branch_name: &str,
+) -> Result<bool, String> {
+    let merge_base = git_command_stdout(repo_path, &["merge-base", base_ref, branch_name])?;
+    if merge_base.is_empty() {
+        return Ok(false);
+    }
+
+    let Some(branch_patch_id) = branch_diff_patch_id(repo_path, &merge_base, branch_name)? else {
+        return Ok(false);
+    };
+
+    let commit_range = format!("{merge_base}..{base_ref}");
+    let base_commits = git_command_stdout(repo_path, &["rev-list", "--no-merges", &commit_range])?;
+    for commit_sha in base_commits
+        .lines()
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+    {
+        if commit_patch_id(repo_path, commit_sha)?.as_deref() == Some(branch_patch_id.as_str()) {
+            tracing::info!(
+                "Detected squash-merged worktree branch {branch_name} via patch-id match on {commit_sha}"
+            );
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn disconnect_sessions_for_worktree_path(db: Option<&crate::db::Db>, worktree_path: &str) {
+    let Some(db) = db else {
+        return;
+    };
+
+    let Ok(conn) = db.lock() else {
+        tracing::warn!(
+            "Failed to lock DB while disconnecting sessions for removed worktree {}",
+            worktree_path
+        );
+        return;
+    };
+
+    match conn.execute(
+        "UPDATE sessions
+         SET cwd = NULL,
+             status = 'disconnected',
+             active_dispatch_id = NULL,
+             claude_session_id = NULL
+         WHERE cwd = ?1",
+        [worktree_path],
+    ) {
+        Ok(updated) if updated > 0 => tracing::info!(
+            "Disconnected {updated} session(s) referencing removed worktree {}",
+            worktree_path
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            "Failed to disconnect sessions for removed worktree {}: {}",
+            worktree_path,
+            err
+        ),
+    }
+}
+
 fn worktree_has_unmerged_commits(wt_info: &WorktreeInfo) -> Result<bool, String> {
     let base_ref = git_upstream_base_ref(&wt_info.original_path);
-    let diff = std::process::Command::new("git")
-        .args([
-            "-C",
-            &wt_info.original_path,
-            "log",
-            "--oneline",
-            &format!("{base_ref}..{}", wt_info.branch_name),
-        ])
-        .output()
-        .map_err(|e| format!("git log failed: {e}"))?;
+    let range = format!("{base_ref}..{}", wt_info.branch_name);
+    let diff = git_command_output(
+        &wt_info.original_path,
+        &["log", "--oneline", range.as_str()],
+    )?;
     if !diff.status.success() {
         let stderr = String::from_utf8_lossy(&diff.stderr).trim().to_string();
         return Err(format!("git log failed: {stderr}"));
     }
-    Ok(!diff.stdout.is_empty())
+    if diff.stdout.is_empty() {
+        return Ok(false);
+    }
+
+    if worktree_is_squash_merged(&wt_info.original_path, &base_ref, &wt_info.branch_name)? {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 /// Clean up a git worktree after session ends.
-pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
+pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &WorktreeInfo) {
     let ts = chrono::Local::now().format("%H:%M:%S");
 
     let has_changes = match worktree_has_local_changes(wt_info) {
@@ -395,7 +554,7 @@ pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
             wt_info.original_path
         );
     } else {
-        let _ = std::process::Command::new("git")
+        let remove = std::process::Command::new("git")
             .args([
                 "-C",
                 &wt_info.original_path,
@@ -404,16 +563,47 @@ pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
                 &wt_info.worktree_path,
             ])
             .output();
-        let _ = std::process::Command::new("git")
+        let Ok(remove_output) = remove else {
+            tracing::warn!(
+                "  [{ts}] ⚠ Failed to remove worktree {}: unable to spawn git — preserving DB session path",
+                wt_info.worktree_path
+            );
+            return;
+        };
+        if !remove_output.status.success() {
+            let stderr = String::from_utf8_lossy(&remove_output.stderr)
+                .trim()
+                .to_string();
+            tracing::warn!(
+                "  [{ts}] ⚠ Failed to remove worktree {}: {} — preserving DB session path",
+                wt_info.worktree_path,
+                stderr
+            );
+            return;
+        }
+
+        let branch_delete = std::process::Command::new("git")
             .args([
                 "-C",
                 &wt_info.original_path,
                 "branch",
-                "-d",
+                "-D",
                 &wt_info.branch_name,
             ])
             .output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
+        disconnect_sessions_for_worktree_path(db, &wt_info.worktree_path);
+        if let Ok(output) = branch_delete
+            && !output.status.success()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            tracing::warn!(
+                "  [{ts}] ⚠ Removed worktree {} but could not delete branch {}: {}",
+                wt_info.worktree_path,
+                wt_info.branch_name,
+                stderr
+            );
+        }
         tracing::info!("  [{ts}] 🧹 Cleaned up worktree: {}", wt_info.worktree_path);
     }
 }
@@ -1108,11 +1298,14 @@ mod tests {
         // Simulate local main advancing before auto-merge pushes to origin.
         run_git(repo_dir, &["merge", "--ff-only", branch]);
 
-        cleanup_git_worktree(&WorktreeInfo {
-            original_path: repo_dir.to_string_lossy().to_string(),
-            worktree_path: worktree_dir.to_string_lossy().to_string(),
-            branch_name: branch.to_string(),
-        });
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
 
         assert!(worktree_dir.exists(), "worktree should be preserved");
         assert!(
@@ -1148,11 +1341,14 @@ mod tests {
         );
         assert_eq!(worktree_branch, branch_name);
 
-        cleanup_git_worktree(&WorktreeInfo {
-            original_path: repo_dir.to_string_lossy().to_string(),
-            worktree_path,
-            branch_name,
-        });
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path,
+                branch_name,
+            },
+        );
     }
 
     #[test]
@@ -1184,11 +1380,14 @@ mod tests {
         run_git(repo_dir, &["merge", "--ff-only", branch]);
         run_git(repo_dir, &["push", "origin", "main"]);
 
-        cleanup_git_worktree(&WorktreeInfo {
-            original_path: repo_dir.to_string_lossy().to_string(),
-            worktree_path: worktree_dir.to_string_lossy().to_string(),
-            branch_name: branch.to_string(),
-        });
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
 
         assert!(
             !worktree_dir.exists(),
@@ -1198,6 +1397,159 @@ mod tests {
             !branch_exists(repo_dir, branch),
             "merged branch should be deleted after cleanup"
         );
+    }
+
+    #[test]
+    fn cleanup_git_worktree_removes_squash_merged_branch() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-squash-merged");
+        let branch = "wt/fix-squash-merged";
+        let notes = worktree_dir.join("notes.txt");
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(&notes, "one\n").unwrap();
+        run_git(&worktree_dir, &["add", "notes.txt"]);
+        run_git(&worktree_dir, &["commit", "-m", "feat: add first note"]);
+        std::fs::write(&notes, "one\ntwo\n").unwrap();
+        run_git(&worktree_dir, &["add", "notes.txt"]);
+        run_git(&worktree_dir, &["commit", "-m", "feat: add second note"]);
+
+        run_git(repo_dir, &["merge", "--squash", branch]);
+        run_git(
+            repo_dir,
+            &["commit", "-m", "feat: squash merged worktree (#543)"],
+        );
+        run_git(repo_dir, &["push", "origin", "main"]);
+
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
+
+        assert!(
+            !worktree_dir.exists(),
+            "squash-merged worktree should be cleaned up"
+        );
+        assert!(
+            !branch_exists(repo_dir, branch),
+            "squash-merged branch should be deleted after cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_git_worktree_preserves_dirty_worktree() {
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-dirty");
+        let branch = "wt/fix-dirty";
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(worktree_dir.join("dirty.txt"), "keep me\n").unwrap();
+
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
+
+        assert!(worktree_dir.exists(), "dirty worktree should be preserved");
+        assert!(
+            branch_exists(repo_dir, branch),
+            "dirty branch should be preserved"
+        );
+    }
+
+    #[test]
+    fn cleanup_git_worktree_disconnects_sessions_referencing_removed_path() {
+        let db = crate::db::test_db();
+        let (repo, _origin) = setup_git_repo_with_origin();
+        let repo_dir = repo.path();
+        let worktree_dir = repo_dir.join("wt-session-cleanup");
+        let branch = "wt/fix-session-cleanup";
+        let worktree_path = worktree_dir.to_string_lossy().to_string();
+
+        run_git(
+            repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_dir.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &worktree_dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fix: merged worktree for session cleanup (#543)",
+            ],
+        );
+        run_git(repo_dir, &["merge", "--ff-only", branch]);
+        run_git(repo_dir, &["push", "origin", "main"]);
+
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, status, cwd, active_dispatch_id, claude_session_id, created_at)
+                 VALUES (?1, 'idle', ?2, 'dispatch-1', 'sid-1', datetime('now'))",
+                rusqlite::params!["host:worktree-cleanup-session", worktree_path],
+            )
+            .unwrap();
+
+        cleanup_git_worktree(
+            Some(&db),
+            &WorktreeInfo {
+                original_path: repo_dir.to_string_lossy().to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
+
+        let session_row: (Option<String>, String, Option<String>, Option<String>) = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cwd, status, active_dispatch_id, claude_session_id
+                 FROM sessions
+                 WHERE session_key = ?1",
+                ["host:worktree-cleanup-session"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(session_row.0, None);
+        assert_eq!(session_row.1, "disconnected");
+        assert_eq!(session_row.2, None);
+        assert_eq!(session_row.3, None);
     }
 
     #[test]
@@ -1218,14 +1570,17 @@ mod tests {
             ],
         );
 
-        cleanup_git_worktree(&WorktreeInfo {
-            original_path: repo_dir
-                .join("missing-parent")
-                .to_string_lossy()
-                .to_string(),
-            worktree_path: worktree_dir.to_string_lossy().to_string(),
-            branch_name: branch.to_string(),
-        });
+        cleanup_git_worktree(
+            None,
+            &WorktreeInfo {
+                original_path: repo_dir
+                    .join("missing-parent")
+                    .to_string_lossy()
+                    .to_string(),
+                worktree_path: worktree_dir.to_string_lossy().to_string(),
+                branch_name: branch.to_string(),
+            },
+        );
 
         assert!(
             worktree_dir.exists(),
