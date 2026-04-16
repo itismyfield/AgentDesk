@@ -1043,6 +1043,16 @@ mod tests {
         .ok()
     }
 
+    fn pr_tracking_last_error(db: &db::Db, card_id: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT last_error FROM pr_tracking WHERE card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
     fn count_dispatches_by_type(db: &db::Db, card_id: &str, dispatch_type: &str) -> i64 {
         let conn = db.lock().unwrap();
         conn.query_row(
@@ -6998,6 +7008,477 @@ mod tests {
             )
             .unwrap();
         assert_eq!(blocked_reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_dashboard_job_failure_becomes_code_rework() {
+        let repo = tempfile::tempdir().unwrap();
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-dashboard",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-dashboard"),
+                stdout: r#"[{"databaseId":6901,"status":"completed","conclusion":"failure","headSha":"sha-dashboard","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"Dashboard (Node 22)","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "dashboard build/test\nError: Vitest failed",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-dashboard", "review", "test/repo", 690, None);
+        seed_completed_review_dispatch(
+            &db,
+            "review-690-dashboard-pass",
+            "card-690-dashboard",
+            "pass",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-dashboard'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-dashboard",
+            "test/repo",
+            Some(repo.path().to_str().unwrap()),
+            "wt/card-690-dashboard",
+            Some(690),
+            Some("sha-dashboard"),
+            "wait-ci",
+        );
+
+        let (_, policy_logs) = capture_policy_logs(|| {
+            engine
+                .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+                .unwrap();
+            kanban::drain_hook_side_effects(&db, &engine);
+        });
+
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-dashboard", "rework"),
+            1,
+            "expected active rework dispatch; last_error={:?}; logs={}",
+            pr_tracking_last_error(&db, "card-690-dashboard"),
+            policy_logs
+        );
+        assert_eq!(get_card_status(&db, "card-690-dashboard"), "in_progress");
+        assert_eq!(
+            pr_tracking_state(&db, "card-690-dashboard").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(
+            latest_dispatch_title(&db, "card-690-dashboard", "rework").as_deref(),
+            Some("[CI Fix] #690 Codex Card — Dashboard (Node 22)")
+        );
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-690-dashboard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(blocked_reason.as_deref(), Some("ci:rework"));
+        assert!(
+            pr_tracking_last_error(&db, "card-690-dashboard")
+                .as_deref()
+                .unwrap_or_default()
+                .contains("code_job_match: failed jobs=Dashboard (Node 22)")
+        );
+
+        let log = gh_log(&gh);
+        assert!(
+            !log.contains("run rerun 6901"),
+            "dashboard failures must go to rework, not rerun"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_high_risk_recovery_job_failure_becomes_code_rework() {
+        let repo = tempfile::tempdir().unwrap();
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-recovery",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-recovery"),
+                stdout: r#"[{"databaseId":6902,"status":"completed","conclusion":"failure","headSha":"sha-recovery","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"High-risk recovery","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "cargo test --bin agentdesk high_risk_recovery::\nthread '...' panicked",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-recovery", "review", "test/repo", 691, None);
+        seed_completed_review_dispatch(
+            &db,
+            "review-690-recovery-pass",
+            "card-690-recovery",
+            "pass",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-recovery'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-recovery",
+            "test/repo",
+            Some(repo.path().to_str().unwrap()),
+            "wt/card-690-recovery",
+            Some(691),
+            Some("sha-recovery"),
+            "wait-ci",
+        );
+
+        let (_, policy_logs) = capture_policy_logs(|| {
+            engine
+                .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+                .unwrap();
+            kanban::drain_hook_side_effects(&db, &engine);
+        });
+
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-recovery", "rework"),
+            1,
+            "expected active rework dispatch; last_error={:?}; logs={}",
+            pr_tracking_last_error(&db, "card-690-recovery"),
+            policy_logs
+        );
+        assert_eq!(get_card_status(&db, "card-690-recovery"), "in_progress");
+        assert_eq!(
+            latest_dispatch_title(&db, "card-690-recovery", "rework").as_deref(),
+            Some("[CI Fix] #691 Codex Card — High-risk recovery")
+        );
+        assert!(
+            pr_tracking_last_error(&db, "card-690-recovery")
+                .as_deref()
+                .unwrap_or_default()
+                .contains("code_job_match: failed jobs=High-risk recovery")
+        );
+        assert!(
+            !gh_log(&gh).contains("run rerun 6902"),
+            "high-risk recovery failures must go to rework, not rerun"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_workflow_file_issue_escalates_with_manual_bucket() {
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-workflow",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-workflow"),
+                stdout: r#"[{"databaseId":6903,"status":"completed","conclusion":"failure","headSha":"sha-workflow","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "failed to get run log: log not found",
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: None,
+                stdout: "X wt/card-690-workflow CI test/repo#690 · 6903\nTriggered via push about 3 days ago\n\nX This run likely failed because of a workflow file issue.\n\nFor more information, see: https://github.com/test/repo/actions/runs/6903",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-workflow", "review", "test/repo", 692, None);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-workflow'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-workflow",
+            "test/repo",
+            None,
+            "wt/card-690-workflow",
+            Some(692),
+            Some("sha-workflow"),
+            "wait-ci",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-690-workflow").as_deref(),
+            Some("escalated")
+        );
+        assert_eq!(get_card_status(&db, "card-690-workflow"), "review");
+        assert_eq!(
+            review_state_value(&db, "card-690-workflow").as_deref(),
+            Some("dilemma_pending")
+        );
+        assert!(
+            pr_tracking_last_error(&db, "card-690-workflow")
+                .as_deref()
+                .unwrap_or_default()
+                .contains("CI manual intervention: workflow_file_issue: workflow file issue")
+        );
+
+        let conn = db.lock().unwrap();
+        let (blocked_reason, review_status): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT blocked_reason, review_status FROM kanban_cards WHERE id = 'card-690-workflow'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(review_status.as_deref(), Some("dilemma_pending"));
+        assert!(blocked_reason.as_deref().unwrap_or_default().contains(
+            "manual intervention required for run 6903: workflow_file_issue: workflow file issue"
+        ));
+        assert_eq!(
+            escalation_pending_reasons(&db, "card-690-workflow"),
+            vec![blocked_reason.unwrap()]
+        );
+        assert!(
+            !gh_log(&gh).contains("run rerun 6903"),
+            "workflow file issues must escalate directly without rerun"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_transient_failure_reruns_within_retry_budget() {
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-transient",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-transient"),
+                stdout: r#"[{"databaseId":6904,"status":"completed","conclusion":"failure","headSha":"sha-transient","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"mystery-job","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "error: dependency fetch failed\nconnection timed out while downloading crate index",
+            },
+            MockGhReply {
+                key: "run:rerun",
+                contains: Some("--failed"),
+                stdout: "rerun queued",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-transient", "review", "test/repo", 693, None);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-transient'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-transient",
+            "test/repo",
+            None,
+            "wt/card-690-transient",
+            Some(693),
+            Some("sha-transient"),
+            "wait-ci",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-690-transient'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(blocked_reason.as_deref(), Some("ci:rerunning"));
+        assert_eq!(
+            kv_value(&db, "ci:card-690-transient:retry_count").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            pr_tracking_state(&db, "card-690-transient").as_deref(),
+            Some("wait-ci")
+        );
+        assert!(
+            gh_log(&gh).contains("run rerun 6904"),
+            "transient failures must rerun failed jobs while budget remains"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_transient_failure_stops_at_retry_limit() {
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-transient-max",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-transient-max"),
+                stdout: r#"[{"databaseId":6905,"status":"completed","conclusion":"failure","headSha":"sha-transient-max","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"mystery-job","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "error: network unreachable while fetching dependency archive",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-690-transient-max",
+            "review",
+            "test/repo",
+            694,
+            None,
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-transient-max'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-transient-max",
+            "test/repo",
+            None,
+            "wt/card-690-transient-max",
+            Some(694),
+            Some("sha-transient-max"),
+            "wait-ci",
+        );
+        set_kv(&db, "ci:card-690-transient-max:retry_count", "3");
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-690-transient-max").as_deref(),
+            Some("escalated")
+        );
+        assert!(
+            pr_tracking_last_error(&db, "card-690-transient-max")
+                .as_deref()
+                .unwrap_or_default()
+                .contains("CI transient failure — max retries exhausted")
+        );
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-690-transient-max'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            blocked_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("max retries (3) exhausted for run 6905")
+        );
+        assert!(
+            !gh_log(&gh).contains("run rerun 6905"),
+            "transient failures must stop rerunning after CI_MAX_RETRIES"
+        );
     }
 
     #[cfg(unix)]

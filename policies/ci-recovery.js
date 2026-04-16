@@ -21,6 +21,7 @@ var CI_MAX_RETRIES = 3;
 var CI_LOG_MAX_LINES = 50;
 var CI_DISPATCH_CARD_TITLE_MAX_CHARS = 120;
 var CI_DISPATCH_JOB_NAME_MAX_CHARS = 60;
+var CI_RUN_SUMMARY_MAX_CHARS = 240;
 
 function truncateText(text, maxChars) {
   var normalized = String(text || "");
@@ -56,14 +57,74 @@ var TRANSIENT_PATTERNS = [
 
 // Job name patterns that indicate code-related failures
 var CODE_JOB_PATTERNS = [
+  "dashboard",
   "check",
   "test",
   "lint",
   "build",
   "compile",
   "clippy",
+  "high-risk",
+  "recovery",
   "scripts"
 ];
+
+var MANUAL_SUMMARY_PATTERNS = [
+  {
+    code: "workflow_file_issue",
+    pattern: "workflow file issue",
+    detail: "workflow file issue"
+  },
+  {
+    code: "workflow_invalid",
+    pattern: "workflow is not valid",
+    detail: "workflow is not valid"
+  },
+  {
+    code: "workflow_missing",
+    pattern: "workflow was not found",
+    detail: "workflow was not found"
+  },
+  {
+    code: "workflow_disabled",
+    pattern: "workflow does not exist or does not have a workflow_dispatch trigger",
+    detail: "workflow configuration does not permit rerun"
+  }
+];
+
+function compactCiDetail(text) {
+  var normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= CI_RUN_SUMMARY_MAX_CHARS) {
+    return normalized;
+  }
+  return normalized.substring(0, CI_RUN_SUMMARY_MAX_CHARS - 1) + "…";
+}
+
+function buildClassificationReason(code, detail) {
+  if (!detail) return code;
+  return code + ": " + detail;
+}
+
+function classifyManualFromSummary(summaryText) {
+  var normalized = compactCiDetail(summaryText);
+  var summaryLower = normalized.toLowerCase();
+  if (!summaryLower) return null;
+  for (var i = 0; i < MANUAL_SUMMARY_PATTERNS.length; i++) {
+    if (summaryLower.indexOf(MANUAL_SUMMARY_PATTERNS[i].pattern) >= 0) {
+      return {
+        type: "manual_intervention",
+        reasonCode: MANUAL_SUMMARY_PATTERNS[i].code,
+        reason: buildClassificationReason(
+          MANUAL_SUMMARY_PATTERNS[i].code,
+          MANUAL_SUMMARY_PATTERNS[i].detail
+        ),
+        summary: normalized
+      };
+    }
+  }
+  return null;
+}
 
 function getRepoForCard(cardId) {
   return prTracking.repoForCard(cardId);
@@ -103,7 +164,11 @@ function getCurrentPrSha(prNumber, repo) {
 function classifyFailure(runId, repo, conclusion) {
   // Cancelled or timed_out are always retryable
   if (conclusion === "cancelled" || conclusion === "timed_out") {
-    return { type: "retryable_transient", reason: "Run " + conclusion };
+    return {
+      type: "retryable_transient",
+      reasonCode: "run_" + conclusion,
+      reason: buildClassificationReason("run_" + conclusion, "run conclusion " + conclusion)
+    };
   }
 
   // Get failed jobs
@@ -114,6 +179,7 @@ function classifyFailure(runId, repo, conclusion) {
   ]);
 
   var failedJobs = [];
+  var jobsUnavailable = false;
   if (jobsJson && jobsJson.indexOf("ERROR") !== 0) {
     try {
       var parsed = JSON.parse(jobsJson);
@@ -124,12 +190,16 @@ function classifyFailure(runId, repo, conclusion) {
         }
       }
     } catch (e) {
+      jobsUnavailable = true;
       agentdesk.log.warn("[ci-recovery] Failed to parse jobs for run " + runId + ": " + e);
     }
+  } else {
+    jobsUnavailable = true;
   }
 
   // Get log excerpt (last CI_LOG_MAX_LINES lines of failed log)
   var logExcerpt = "";
+  var logUnavailable = false;
   var logResult = agentdesk.exec("gh", [
     "run", "view", String(runId),
     "--repo", repo,
@@ -143,6 +213,27 @@ function classifyFailure(runId, repo, conclusion) {
     if (logExcerpt.length > 2048) {
       logExcerpt = logExcerpt.substring(logExcerpt.length - 2048);
     }
+    if (logExcerpt.toLowerCase().indexOf("log not found") >= 0) {
+      logUnavailable = true;
+    }
+  } else {
+    logUnavailable = true;
+  }
+
+  var runSummary = "";
+  var runSummaryResult = agentdesk.exec("gh", [
+    "run", "view", String(runId),
+    "--repo", repo
+  ]);
+  if (runSummaryResult && runSummaryResult.indexOf("ERROR") !== 0) {
+    runSummary = compactCiDetail(runSummaryResult);
+  }
+
+  var manualSummary = classifyManualFromSummary(runSummary);
+  if (manualSummary) {
+    manualSummary.failedJobs = failedJobs;
+    manualSummary.logExcerpt = logExcerpt;
+    return manualSummary;
   }
 
   // Check if log matches transient patterns
@@ -156,7 +247,15 @@ function classifyFailure(runId, repo, conclusion) {
   }
 
   if (isTransient) {
-    return { type: "retryable_transient", reason: "Transient pattern in log", logExcerpt: logExcerpt };
+    return {
+      type: "retryable_transient",
+      reasonCode: "transient_log_pattern",
+      reason: buildClassificationReason(
+        "transient_log_pattern",
+        "matched transient failure pattern"
+      ),
+      logExcerpt: logExcerpt
+    };
   }
 
   // Check if failed jobs match code-related patterns
@@ -175,23 +274,45 @@ function classifyFailure(runId, repo, conclusion) {
   if (isCodeJob) {
     return {
       type: "code_failure",
-      reason: "Code job failed: " + failedJobs.join(", "),
+      reasonCode: "code_job_match",
+      reason: buildClassificationReason(
+        "code_job_match",
+        "failed jobs=" + failedJobs.join(", ")
+      ),
       failedJobs: failedJobs,
       logExcerpt: logExcerpt
     };
   }
 
-  // No failed jobs found — likely gh API issue or non-standard run; treat as transient
+  // No failed jobs found — keep this explicit so manual recovery gets the real cause.
   if (failedJobs.length === 0) {
-    return { type: "retryable_transient", reason: "No failed jobs found (gh API issue or non-standard run)", logExcerpt: logExcerpt };
+    var details = [];
+    if (jobsUnavailable) details.push("jobs unavailable");
+    if (logUnavailable) details.push("failed log unavailable");
+    if (runSummary) details.push("summary=" + runSummary);
+    return {
+      type: "manual_intervention",
+      reasonCode: "missing_failed_job_metadata",
+      reason: buildClassificationReason(
+        "missing_failed_job_metadata",
+        details.length > 0 ? details.join("; ") : "failed job metadata unavailable"
+      ),
+      logExcerpt: logExcerpt,
+      summary: runSummary
+    };
   }
 
-  // Ambiguous — neither clearly transient nor clearly code
+  // Unknown jobs should be escalated with the job list inline instead of a generic ambiguous bucket.
   return {
-    type: "ambiguous",
-    reason: "Cannot classify: jobs=" + failedJobs.join(", "),
+    type: "manual_intervention",
+    reasonCode: "unclassified_failed_jobs",
+    reason: buildClassificationReason(
+      "unclassified_failed_jobs",
+      "jobs=" + failedJobs.join(", ")
+    ),
     failedJobs: failedJobs,
-    logExcerpt: logExcerpt
+    logExcerpt: logExcerpt,
+    summary: runSummary
   };
 }
 
@@ -387,20 +508,29 @@ function processWaitingCard(cardId, blockedReason) {
       logSnippet = logSnippet.substring(logSnippet.length - 1200);
     }
 
+    var dispatchContext = {
+      ci_recovery: {
+        job_name: compactFailedJobName,
+        reason: classification.reason,
+        run_url: runUrl,
+        log_excerpt: logSnippet
+      },
+      target_repo: repo
+    };
+    if (pr.worktree_path) {
+      dispatchContext.worktree_path = pr.worktree_path;
+    }
+    if (branch) {
+      dispatchContext.worktree_branch = branch;
+    }
+
     try {
       agentdesk.dispatch.create(
         cardId,
         card.assigned_agent_id,
         "rework",
         "[CI Fix] #" + issueNum + " " + compactCardTitle + " — " + compactFailedJobName,
-        {
-          ci_recovery: {
-            job_name: compactFailedJobName,
-            reason: classification.reason,
-            run_url: runUrl,
-            log_excerpt: logSnippet
-          }
-        }
+        dispatchContext
       );
       agentdesk.log.info("[ci-recovery] Rework dispatch created for card " + cardId);
     } catch (e) {
@@ -426,8 +556,13 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.kv.delete("ci:" + cardId + ":retry_count");
     agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
 
+  } else if (classification.type === "manual_intervention") {
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI manual intervention: " + classification.reason);
+    escalateToManualDecision(cardId,
+      "CI failure — manual intervention required for run " + runId + ": " + classification.reason);
+
   } else {
-    // ambiguous — transition to escalated so tick loop stops re-processing
+    // Final fallback — keep ambiguous as a last-resort bucket only.
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI failure ambiguous: " + classification.reason);
     escalateToManualDecision(cardId,
       "CI failure — ambiguous classification for run " + runId + ": " + classification.reason);
