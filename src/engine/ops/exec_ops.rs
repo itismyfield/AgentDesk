@@ -333,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // gh CLI hangs or times out on Windows CI runners
     fn exec_wrapper_runs_gh_with_timeout() {
         let rt = rquickjs::Runtime::new().expect("runtime");
         let ctx = rquickjs::Context::full(&rt).expect("context");
