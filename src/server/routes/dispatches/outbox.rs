@@ -1145,16 +1145,21 @@ pub(super) fn prefix_dispatch_message(dispatch_type: &str, message: &str) -> Str
 /// Hard-truncate dispatch message to stay within Discord's 2000-char limit.
 /// Preserves the first line (DISPATCH:id header) and appends a truncation marker.
 fn truncate_dispatch_message(message: &str) -> String {
-    const DISCORD_LIMIT: usize = 1900; // leave margin for emoji/formatting
-    if message.len() <= DISCORD_LIMIT {
+    const DISCORD_LIMIT: usize = 1900;
+    if message.chars().count() <= DISCORD_LIMIT {
         return message.to_string();
     }
-    let truncated = &message[..message[..DISCORD_LIMIT]
+    let byte_boundary = message
+        .char_indices()
+        .nth(DISCORD_LIMIT)
+        .map(|(i, _)| i)
+        .unwrap_or(message.len());
+    let cut = message[..byte_boundary]
         .rfind('\n')
-        .unwrap_or(DISCORD_LIMIT)];
+        .unwrap_or(byte_boundary);
     format!(
         "{}\n\n[… truncated — full context in system prompt]",
-        truncated
+        &message[..cut]
     )
 }
 

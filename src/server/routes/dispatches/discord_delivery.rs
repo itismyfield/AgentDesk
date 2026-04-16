@@ -347,6 +347,21 @@ pub(super) async fn post_dispatch_message_to_channel(
     channel_id: &str,
     message: &str,
 ) -> Result<String, String> {
+    // Hard-truncate to stay within Discord's 2000 Unicode character limit.
+    // Discord counts chars (not bytes), so use .chars().count().
+    let message = if message.chars().count() > 1900 {
+        let char_boundary: usize = message
+            .char_indices()
+            .nth(1900)
+            .map(|(i, _)| i)
+            .unwrap_or(message.len());
+        let cut = message[..char_boundary]
+            .rfind('\n')
+            .unwrap_or(char_boundary);
+        format!("{}\n\n[… truncated]", &message[..cut])
+    } else {
+        message.to_string()
+    };
     let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
     let response = client
         .post(&message_url)
