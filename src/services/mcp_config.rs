@@ -36,10 +36,12 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
 
     match provider {
         ProviderKind::Claude => {
-            load_runtime_mcp_servers().contains_key(normalized)
+            runtime_config_contains_server(normalized)
                 || claude_global_mcp_config_contains_server(normalized)
         }
-        ProviderKind::Codex => codex_config_contains_server(normalized),
+        ProviderKind::Codex => {
+            runtime_config_contains_server(normalized) || codex_config_contains_server(normalized)
+        }
         _ => false,
     }
 }
@@ -183,6 +185,10 @@ fn load_runtime_mcp_servers() -> BTreeMap<String, ResolvedMcpServer> {
     load_runtime_config()
         .map(|config| resolved_mcp_servers(&config))
         .unwrap_or_default()
+}
+
+fn runtime_config_contains_server(server_name: &str) -> bool {
+    load_runtime_mcp_servers().contains_key(server_name)
 }
 
 fn load_runtime_config() -> Option<Config> {
@@ -368,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_has_memento_mcp_reflects_runtime_config_for_claude() {
+    fn provider_has_memento_mcp_reflects_runtime_config_for_claude_and_codex() {
         with_test_env(|temp_root| {
             let runtime_root = temp_root.join(".adk").join("release");
             let config_path = crate::runtime_layout::config_file_path(&runtime_root);
@@ -383,7 +389,7 @@ mod tests {
             crate::config::save_to_path(&config_path, &config).unwrap();
 
             assert!(provider_has_memento_mcp(&ProviderKind::Claude));
-            assert!(!provider_has_memento_mcp(&ProviderKind::Codex));
+            assert!(provider_has_memento_mcp(&ProviderKind::Codex));
         });
     }
 
@@ -399,6 +405,52 @@ mod tests {
             .unwrap();
 
             assert!(provider_has_memento_mcp(&ProviderKind::Claude));
+        });
+    }
+
+    #[test]
+    fn provider_has_mcp_server_falls_back_to_runtime_config_for_codex() {
+        with_test_env(|temp_root| {
+            let runtime_root = temp_root.join(".adk").join("release");
+            let config_path = crate::runtime_layout::config_file_path(&runtime_root);
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "manual".to_string(),
+                McpServerConfig {
+                    url: "http://manual.local/mcp".to_string(),
+                    auth: None,
+                },
+            );
+            crate::config::save_to_path(&config_path, &config).unwrap();
+
+            assert!(provider_has_mcp_server(&ProviderKind::Codex, "manual"));
+        });
+    }
+
+    #[test]
+    fn provider_has_memento_mcp_stays_false_for_codex_without_matching_config() {
+        with_test_env(|temp_root| {
+            let runtime_root = temp_root.join(".adk").join("release");
+            let config_path = crate::runtime_layout::config_file_path(&runtime_root);
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "manual".to_string(),
+                McpServerConfig {
+                    url: "http://manual.local/mcp".to_string(),
+                    auth: None,
+                },
+            );
+            crate::config::save_to_path(&config_path, &config).unwrap();
+
+            let codex_dir = temp_root.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            fs::write(
+                codex_dir.join("config.toml"),
+                "[mcp_servers.other]\nurl = \"http://other.local/mcp\"\n",
+            )
+            .unwrap();
+
+            assert!(!provider_has_memento_mcp(&ProviderKind::Codex));
         });
     }
 
