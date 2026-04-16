@@ -4362,6 +4362,7 @@ mod tests {
         assert_eq!(body["cancelled_runs"].as_u64(), Some(1));
         assert_eq!(body["cancelled_dispatches"].as_u64(), Some(1));
         assert_eq!(body["cancelled_entries"].as_u64(), Some(2));
+        assert_eq!(body["rolled_back_cards"].as_u64(), Some(1));
         assert_eq!(body["released_slots"].as_u64(), Some(1));
         assert_eq!(body["cleared_slot_sessions"].as_u64(), Some(1));
         drop(conn);
@@ -4372,6 +4373,13 @@ mod tests {
                 "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-cleanup'",
                 [],
                 |row| row.get(0),
+            )
+            .unwrap();
+        let (card_status, latest_dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-cancel-live'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         let entry_statuses: Vec<(String, String)> = conn
@@ -4416,11 +4424,184 @@ mod tests {
             "cancel should skip both in-flight and pending entries after cleanup"
         );
         assert_eq!(dispatch_status, "cancelled");
+        assert_eq!(
+            card_status, "ready",
+            "cancelled run should roll back an in-progress card to ready"
+        );
+        assert!(
+            latest_dispatch_id.is_none(),
+            "cancelled run rollback should clear latest_dispatch_id"
+        );
         assert!(assigned_run_id.is_none());
         assert!(assigned_thread_group.is_none());
         assert_eq!(session_status, "idle");
         assert!(active_dispatch_id.is_none());
         assert_eq!(session_info.as_deref(), Some("Slot thread reset"));
+    }
+
+    #[test]
+    fn auto_queue_cancel_rolls_back_requested_and_in_progress_cards_but_not_review() {
+        let db = test_db();
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-cancel-requested", "requested");
+        seed_card(&db, "card-cancel-progress", "in_progress");
+        seed_card(&db, "card-cancel-review", "review");
+        seed_dispatch(
+            &db,
+            "dispatch-cancel-requested",
+            "card-cancel-requested",
+            "implementation",
+            "dispatched",
+        );
+        seed_dispatch(
+            &db,
+            "dispatch-cancel-progress",
+            "card-cancel-progress",
+            "implementation",
+            "dispatched",
+        );
+        seed_dispatch(
+            &db,
+            "dispatch-cancel-review",
+            "card-cancel-review",
+            "review",
+            "dispatched",
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET review_status = 'pending', blocked_reason = 'manual:waiting'
+                 WHERE id IN ('card-cancel-requested', 'card-cancel-progress')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-cancel-rollback', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-cancel-requested', 'run-cancel-rollback', 'card-cancel-requested', 'agent-1', 'dispatched', 'dispatch-cancel-requested', 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-cancel-progress', 'run-cancel-rollback', 'card-cancel-progress', 'agent-1', 'dispatched', 'dispatch-cancel-progress', 1, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank, dispatched_at, created_at) \
+                 VALUES ('entry-cancel-review', 'run-cancel-rollback', 'card-cancel-review', 'agent-1', 'dispatched', 'dispatch-cancel-review', 2, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = db.separate_conn().expect("separate conn");
+        let body = crate::server::routes::auto_queue::cancel_with_conn(None, &conn);
+        assert_eq!(body["cancelled_runs"].as_u64(), Some(1));
+        assert_eq!(body["cancelled_dispatches"].as_u64(), Some(3));
+        assert_eq!(body["cancelled_entries"].as_u64(), Some(3));
+        assert_eq!(body["rolled_back_cards"].as_u64(), Some(2));
+        drop(conn);
+
+        let conn = db.lock().unwrap();
+        let requested_card: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, review_status, blocked_reason, latest_dispatch_id
+                 FROM kanban_cards WHERE id = 'card-cancel-requested'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let in_progress_card: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, review_status, blocked_reason, latest_dispatch_id
+                 FROM kanban_cards WHERE id = 'card-cancel-progress'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let review_card: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, review_status, blocked_reason, latest_dispatch_id
+                 FROM kanban_cards WHERE id = 'card-cancel-review'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let requested_live_dispatches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches
+                 WHERE kanban_card_id = 'card-cancel-requested' AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let in_progress_live_dispatches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches
+                 WHERE kanban_card_id = 'card-cancel-progress' AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            requested_card.0, "ready",
+            "cancelled requested card should roll back to ready"
+        );
+        assert_eq!(
+            in_progress_card.0, "ready",
+            "cancelled in-progress card should roll back to ready"
+        );
+        assert_eq!(
+            requested_card.1, None,
+            "rollback should clear requested-card review_status"
+        );
+        assert_eq!(
+            in_progress_card.1, None,
+            "rollback should clear in-progress-card review_status"
+        );
+        assert_eq!(
+            requested_card.2, None,
+            "rollback should clear requested-card blocked_reason"
+        );
+        assert_eq!(
+            in_progress_card.2, None,
+            "rollback should clear in-progress-card blocked_reason"
+        );
+        assert!(
+            requested_card.3.is_none(),
+            "rollback should clear requested-card latest_dispatch_id"
+        );
+        assert!(
+            in_progress_card.3.is_none(),
+            "rollback should clear in-progress-card latest_dispatch_id"
+        );
+        assert_eq!(
+            requested_live_dispatches, 0,
+            "requested card should not keep a live dispatch after run cancel"
+        );
+        assert_eq!(
+            in_progress_live_dispatches, 0,
+            "in-progress card should not keep a live dispatch after run cancel"
+        );
+        assert_eq!(
+            review_card.0, "review",
+            "review card must not be rolled back by run cancel"
+        );
+        assert!(
+            review_card.3.is_some(),
+            "review card should keep its latest_dispatch_id because rollback is skipped"
+        );
     }
 
     #[test]
