@@ -30,6 +30,9 @@ pub(super) struct InflightTurnState {
     pub output_path: Option<String>,
     pub input_fifo_path: Option<String>,
     pub last_offset: u64,
+    /// Stable start offset for the current turn's output JSONL slice.
+    #[serde(default)]
+    pub turn_start_offset: Option<u64>,
     pub full_response: String,
     pub response_sent_offset: usize,
     #[serde(default)]
@@ -89,6 +92,7 @@ impl InflightTurnState {
             output_path,
             input_fifo_path,
             last_offset,
+            turn_start_offset: Some(last_offset),
             full_response: String::new(),
             response_sent_offset: 0,
             current_tool_line: None,
@@ -317,6 +321,7 @@ mod tests {
         assert_eq!(loaded[0].channel_id, 123);
         assert_eq!(loaded[0].current_msg_id, 999);
         assert_eq!(loaded[0].last_offset, 42);
+        assert_eq!(loaded[0].turn_start_offset, Some(42));
     }
 
     #[test]

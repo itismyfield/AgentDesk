@@ -129,6 +129,26 @@ CREATE TABLE IF NOT EXISTS skill_usage (
     used_at             DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS turns (
+    turn_id              TEXT PRIMARY KEY,
+    session_key          TEXT,
+    thread_id            TEXT,
+    thread_title         TEXT,
+    channel_id           TEXT NOT NULL,
+    agent_id             TEXT,
+    provider             TEXT,
+    session_id           TEXT,
+    dispatch_id          TEXT,
+    started_at           TEXT NOT NULL,
+    finished_at          TEXT NOT NULL,
+    duration_ms          INTEGER,
+    input_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_create_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens        INTEGER NOT NULL DEFAULT 0,
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     sender_type         TEXT,
