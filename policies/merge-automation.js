@@ -334,8 +334,79 @@ function maybeResetDirectMergeHead(mainWorktreePath, originalHead) {
   return "main worktree reset to pre-merge HEAD";
 }
 
+function maybeAbortDirectMergeRebase(mainWorktreePath) {
+  var output = agentdesk.exec("git", ["-C", mainWorktreePath, "rebase", "--abort"]);
+  if (typeof output === "string" && output.indexOf("ERROR") === 0) {
+    var err = output.replace(/^ERROR:\s*/, "").trim();
+    return err
+      ? "rebase abort failed: " + err
+      : "rebase abort failed";
+  }
+  return "rebase aborted";
+}
+
 function isCherryPickConflict(errorText) {
   return /CONFLICT|could not apply|after resolving the conflicts|merge conflict/i.test(String(errorText || ""));
+}
+
+function isPushRejected(errorText) {
+  return /rejected|fetch first|non-fast-forward|failed to push some refs/i.test(String(errorText || ""));
+}
+
+function retryDirectMergePush(mainWorktreePath, mainBranch) {
+  var maxRetries = 3;
+  var attempts = 0;
+  var lastError = null;
+
+  while (attempts <= maxRetries) {
+    var pushOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "push", "origin", mainBranch]);
+    if (!(typeof pushOutput === "string" && pushOutput.indexOf("ERROR") === 0)) {
+      return {
+        ok: true,
+        attempts: attempts + 1
+      };
+    }
+
+    lastError = pushOutput.replace(/^ERROR:\s*/, "");
+    if (!isPushRejected(lastError) || attempts === maxRetries) {
+      return {
+        ok: false,
+        conflict: false,
+        error: lastError,
+        attempts: attempts + 1
+      };
+    }
+
+    attempts += 1;
+
+    var fetchOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "fetch", "origin", mainBranch]);
+    if (typeof fetchOutput === "string" && fetchOutput.indexOf("ERROR") === 0) {
+      return {
+        ok: false,
+        conflict: false,
+        error: fetchOutput.replace(/^ERROR:\s*/, ""),
+        attempts: attempts
+      };
+    }
+
+    var rebaseOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "rebase", "origin/" + mainBranch]);
+    if (typeof rebaseOutput === "string" && rebaseOutput.indexOf("ERROR") === 0) {
+      return {
+        ok: false,
+        conflict: isCherryPickConflict(rebaseOutput),
+        error: rebaseOutput.replace(/^ERROR:\s*/, ""),
+        attempts: attempts,
+        rebase_failed: true
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    conflict: false,
+    error: lastError || "direct merge push failed",
+    attempts: attempts
+  };
 }
 
 function parsePrNumberFromOutput(output) {
@@ -481,20 +552,23 @@ function attemptDirectMerge(candidate) {
     };
   }
 
-  try {
-    execGitOrThrow(["-C", mainWorktree.path, "push", "origin", mainBranch]);
-  } catch (e) {
+  var pushResult = retryDirectMergePush(mainWorktree.path, mainBranch);
+  if (!pushResult.ok) {
     var cleanupNotes = [];
+    if (pushResult.rebase_failed) {
+      var abortStatus = maybeAbortDirectMergeRebase(mainWorktree.path);
+      if (abortStatus) cleanupNotes.push(abortStatus);
+    }
     var resetStatus = maybeResetDirectMergeHead(mainWorktree.path, originalHead);
     if (resetStatus) cleanupNotes.push(resetStatus);
     var stashStatus = maybeRestoreMergeStash(mainWorktree.path, stashCreated);
     if (stashStatus) cleanupNotes.push(stashStatus);
     return {
       ok: false,
-      conflict: false,
+      conflict: !!pushResult.conflict,
       branch: candidate.branch,
       main_branch: mainBranch,
-      error: String(e),
+      error: pushResult.error,
       stash: cleanupNotes.length > 0 ? cleanupNotes.join("; ") : null
     };
   }
