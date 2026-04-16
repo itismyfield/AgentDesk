@@ -157,7 +157,7 @@
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 2210 | giant-file |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 192 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 458 |  |
-| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4373 | giant-file |
+| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4418 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 932 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 214 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 139 |  |
