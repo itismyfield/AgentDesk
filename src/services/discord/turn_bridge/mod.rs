@@ -126,6 +126,33 @@ fn total_model_input_tokens(
         .saturating_add(cache_read_tokens)
 }
 
+fn resolve_output_analytics_snapshot(
+    inflight_state: &InflightTurnState,
+    fallback_session_id: Option<&str>,
+    fallback_token_usage: TurnTokenUsage,
+) -> (Option<String>, TurnTokenUsage) {
+    let output_start_offset = inflight_state
+        .turn_start_offset
+        .unwrap_or(inflight_state.last_offset);
+    let (output_session_id, output_token_usage) = inflight_state
+        .output_path
+        .as_deref()
+        .map(|path| {
+            crate::services::session_backend::extract_turn_analytics_from_output(
+                path,
+                output_start_offset,
+            )
+        })
+        .unwrap_or((None, None));
+
+    (
+        output_session_id
+            .or_else(|| fallback_session_id.map(str::to_string))
+            .or_else(|| inflight_state.session_id.clone()),
+        output_token_usage.unwrap_or(fallback_token_usage),
+    )
+}
+
 pub(super) fn persist_turn_analytics_row(
     db: &crate::db::Db,
     provider: &ProviderKind,
@@ -149,30 +176,43 @@ pub(super) fn persist_turn_analytics_row(
                 .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
                 .map(|value| value.to_string())
         });
-    let entry = PersistTurnOwned {
-        turn_id: format!("discord:{}:{}", channel_id.get(), user_msg_id.get()),
-        session_key: session_key.map(str::to_string),
-        thread_id,
-        thread_title: inflight_state.thread_title.clone(),
-        channel_id: inflight_state
-            .logical_channel_id
-            .unwrap_or(channel_id.get())
-            .to_string(),
-        agent_id: role_binding.map(|binding| binding.role_id.clone()),
-        provider: Some(provider.as_str().to_string()),
-        session_id: session_id
-            .map(str::to_string)
-            .or_else(|| inflight_state.session_id.clone()),
-        dispatch_id: dispatch_id
-            .map(str::to_string)
-            .or_else(|| inflight_state.dispatch_id.clone()),
-        started_at: Some(inflight_state.started_at.clone()),
-        finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-        duration_ms: Some(duration_ms),
-        token_usage,
-    };
+    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+    let session_key = session_key.map(str::to_string);
+    let thread_title = inflight_state.thread_title.clone();
+    let persisted_channel_id = inflight_state
+        .logical_channel_id
+        .unwrap_or(channel_id.get())
+        .to_string();
+    let agent_id = role_binding.map(|binding| binding.role_id.clone());
+    let provider_name = provider.as_str().to_string();
+    let dispatch_id = dispatch_id
+        .map(str::to_string)
+        .or_else(|| inflight_state.dispatch_id.clone());
+    let started_at = inflight_state.started_at.clone();
+    let fallback_session_id = session_id.map(str::to_string);
+    let inflight_state = inflight_state.clone();
     let db = db.clone();
     let persist = move || {
+        let (resolved_session_id, resolved_token_usage) = resolve_output_analytics_snapshot(
+            &inflight_state,
+            fallback_session_id.as_deref(),
+            token_usage,
+        );
+        let entry = PersistTurnOwned {
+            turn_id,
+            session_key,
+            thread_id,
+            thread_title,
+            channel_id: persisted_channel_id,
+            agent_id,
+            provider: Some(provider_name),
+            session_id: resolved_session_id,
+            dispatch_id,
+            started_at: Some(started_at),
+            finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+            duration_ms: Some(duration_ms),
+            token_usage: resolved_token_usage,
+        };
         if let Err(error) = upsert_turn_owned_on_separate_conn(&db, &entry) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");

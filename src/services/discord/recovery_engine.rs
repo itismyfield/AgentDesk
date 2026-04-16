@@ -8,7 +8,6 @@ use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::session_backend::{StreamLineState, process_stream_line};
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 use crate::utils::format::tail_with_ellipsis;
@@ -139,32 +138,7 @@ fn extract_turn_analytics_from_output(
     output_path: &str,
     start_offset: u64,
 ) -> (Option<String>, Option<TurnTokenUsage>) {
-    let Ok(bytes) = std::fs::read(output_path) else {
-        return (None, None);
-    };
-    let start = usize::try_from(start_offset)
-        .ok()
-        .map(|offset| offset.min(bytes.len()))
-        .unwrap_or(bytes.len());
-
-    let (sender, _receiver) = std::sync::mpsc::channel::<StreamMessage>();
-    let mut state = StreamLineState::new();
-    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
-        let _ = process_stream_line(line, &sender, &mut state);
-    }
-
-    let usage = TurnTokenUsage {
-        input_tokens: state.accum_input_tokens,
-        cache_create_tokens: state.accum_cache_create_tokens,
-        cache_read_tokens: state.accum_cache_read_tokens,
-        output_tokens: state.accum_output_tokens,
-    };
-    let has_usage = usage.input_tokens > 0
-        || usage.cache_create_tokens > 0
-        || usage.cache_read_tokens > 0
-        || usage.output_tokens > 0;
-
-    (state.last_session_id, has_usage.then_some(usage))
+    crate::services::session_backend::extract_turn_analytics_from_output(output_path, start_offset)
 }
 
 fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
@@ -368,7 +342,12 @@ pub(super) async fn restore_inflight_turns(
                 );
                 let (recovered_session_id, recovered_usage) = output_path_for_check
                     .as_deref()
-                    .map(|path| extract_turn_analytics_from_output(path, state.last_offset))
+                    .map(|path| {
+                        extract_turn_analytics_from_output(
+                            path,
+                            state.turn_start_offset.unwrap_or(state.last_offset),
+                        )
+                    })
                     .unwrap_or((None, None));
                 let extracted = output_path_for_check
                     .as_deref()
@@ -884,7 +863,12 @@ pub(super) async fn restore_inflight_turns(
             );
             let (recovered_session_id, recovered_usage) = output_path
                 .as_deref()
-                .map(|path| extract_turn_analytics_from_output(path, state.last_offset))
+                .map(|path| {
+                    extract_turn_analytics_from_output(
+                        path,
+                        state.turn_start_offset.unwrap_or(state.last_offset),
+                    )
+                })
                 .unwrap_or((None, None));
             // Deliver the result to Discord before clearing the inflight state
             let extracted = output_path
@@ -1773,6 +1757,7 @@ mod tests {
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
             last_offset: 123,
+            turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
             current_tool_line: None,
@@ -1875,6 +1860,7 @@ mod tests {
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
             last_offset: 123,
+            turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
             current_tool_line: None,
