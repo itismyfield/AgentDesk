@@ -44,6 +44,8 @@ echo "═══ ADK Promote Dev → Release ═══"
 sign_binary_with_fallback() {
     local target="$1"
     local identity="${CODESIGN_IDENTITY:--}"
+    local signature_details=""
+    local current_authority=""
 
     if [ -z "$identity" ]; then
         if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
@@ -76,13 +78,18 @@ sign_binary_with_fallback() {
         fi
     fi
 
-    # Skip re-sign if already signed with the same identity (preserves TCC permissions)
+    # Only preserve TCC when the staged binary already carries the exact Developer ID
+    # signature. Ad-hoc signatures must always be replaced before release.
     if [ "$identity" != "-" ] && codesign -v "$target" 2>/dev/null; then
-        local current_authority
-        current_authority=$(codesign -dvv "$target" 2>&1 | grep "^Authority=" | head -1 || true)
-        if echo "$current_authority" | grep -qF "$identity" 2>/dev/null; then
-            echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
-            return 0
+        signature_details=$(codesign -dvv "$target" 2>&1 || true)
+        if printf '%s\n' "$signature_details" | grep -Eq '(^Signature=adhoc$|flags=.*\badhoc\b)'; then
+            echo "▸ Existing ad-hoc signature detected — re-signing with Developer ID"
+        else
+            current_authority=$(printf '%s\n' "$signature_details" | grep "^Authority=" | head -1 || true)
+            if printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+                echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
+                return 0
+            fi
         fi
     fi
 
@@ -96,6 +103,20 @@ sign_binary_with_fallback() {
         echo "✗ Codesign verification failed — aborting"
         exit 1
     fi
+
+    if [ "$identity" != "-" ]; then
+        signature_details=$(codesign -dvv "$target" 2>&1 || true)
+        current_authority=$(printf '%s\n' "$signature_details" | grep "^Authority=" | head -1 || true)
+        if ! printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+            echo "✗ Developer ID signature missing after codesign"
+            printf '%s\n' "$signature_details" | grep -E '^(Authority=|Signature=|flags=)' || true
+            exit 1
+        fi
+    fi
+}
+
+_staged_promote_binary_path() {
+    mktemp "$ADK_REL/bin/agentdesk.promote.XXXXXX"
 }
 
 _notify_channel() {
@@ -414,12 +435,13 @@ fi
 # In-place codesign can corrupt the OS signing cache if it fails mid-write,
 # causing SIGKILL on subsequent launches even though the binary is valid.
 echo "▸ Copying binary from dev..."
+STAGED_BINARY="$(_staged_promote_binary_path)"
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk.new"
-chmod +x "$ADK_REL/bin/agentdesk.new"
-xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk.new" 2>/dev/null || true
-sign_binary_with_fallback "$ADK_REL/bin/agentdesk.new"
-mv -f "$ADK_REL/bin/agentdesk.new" "$ADK_REL/bin/agentdesk"
+cp "$ADK_DEV/bin/agentdesk" "$STAGED_BINARY"
+chmod +x "$STAGED_BINARY"
+xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
+sign_binary_with_fallback "$STAGED_BINARY"
+mv -f "$STAGED_BINARY" "$ADK_REL/bin/agentdesk"
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_REL/bin/agentdesk"
 
