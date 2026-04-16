@@ -78,6 +78,7 @@ pub struct UpdateRunBody {
     pub status: Option<String>,
     pub unified_thread: Option<bool>,
     pub deploy_phases: Option<Vec<i64>>,
+    pub max_concurrent_threads: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +106,7 @@ pub struct DispatchBody {
 pub struct UpdateEntryBody {
     pub thread_group: Option<i64>,
     pub priority_rank: Option<i64>,
+    pub batch_phase: Option<i64>,
     pub status: Option<String>,
 }
 
@@ -261,8 +263,9 @@ fn slot_requires_thread_reset_before_reuse(
     agent_id: &str,
     slot_index: i64,
     newly_assigned: bool,
+    reassigned_from_other_group: bool,
 ) -> bool {
-    newly_assigned
+    (newly_assigned || reassigned_from_other_group)
         && (slot_thread_map_has_bindings(conn, agent_id, slot_index)
             || slot_has_dispatch_thread_history(conn, agent_id, slot_index))
 }
@@ -1033,9 +1036,11 @@ fn apply_restore_state_changes(
                         entry.entry_id
                     )
                 })?;
-                let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
-                if let Some((_, newly_assigned)) = slot_allocation {
-                    if newly_assigned {
+                let slot_index = slot_allocation
+                    .as_ref()
+                    .map(|allocation| allocation.slot_index);
+                if let Some(allocation) = slot_allocation {
+                    if allocation.newly_assigned || allocation.reassigned_from_other_group {
                         counts.rebound_slots += 1;
                     }
                 } else {
@@ -1135,10 +1140,12 @@ fn attempt_restore_dispatch(
                 entry.entry_id
             )
         })?;
-        let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+        let slot_index = slot_allocation
+            .as_ref()
+            .map(|allocation| allocation.slot_index);
         let mut result = RestoreDispatchAttemptResult::default();
-        if let Some((_, newly_assigned)) = slot_allocation {
-            if newly_assigned {
+        if let Some(allocation) = slot_allocation {
+            if allocation.newly_assigned || allocation.reassigned_from_other_group {
                 result.rebound_slot = true;
             }
         } else {
@@ -1179,23 +1186,25 @@ fn attempt_restore_dispatch(
             entry.entry_id
         )
     })?;
-    let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+    let slot_index = slot_allocation
+        .as_ref()
+        .map(|allocation| allocation.slot_index);
     let mut result = RestoreDispatchAttemptResult::default();
-    let reset_slot_thread_before_reuse =
-        if let Some((assigned_slot, newly_assigned)) = slot_allocation {
-            let reset = slot_requires_thread_reset_before_reuse(
-                &conn,
-                &entry.agent_id,
-                assigned_slot,
-                newly_assigned,
-            );
-            if newly_assigned {
-                result.rebound_slot = true;
-            }
-            reset
-        } else {
-            return Ok(result);
-        };
+    let reset_slot_thread_before_reuse = if let Some(allocation) = slot_allocation {
+        let reset = slot_requires_thread_reset_before_reuse(
+            &conn,
+            &entry.agent_id,
+            allocation.slot_index,
+            allocation.newly_assigned,
+            allocation.reassigned_from_other_group,
+        );
+        if allocation.newly_assigned || allocation.reassigned_from_other_group {
+            result.rebound_slot = true;
+        }
+        reset
+    } else {
+        return Ok(result);
+    };
     drop(conn);
 
     let dispatch_result = run_activate_blocking(|| {
@@ -4047,7 +4056,9 @@ pub(crate) fn activate_with_deps(
                 continue;
             }
         };
-        let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+        let slot_index = slot_allocation
+            .as_ref()
+            .map(|allocation| allocation.slot_index);
         let mut reset_slot_thread_before_reuse = false;
         if slot_allocation.is_none() {
             crate::auto_queue_log!(
@@ -4058,15 +4069,19 @@ pub(crate) fn activate_with_deps(
             );
             continue;
         }
-        if let Some((assigned_slot, _newly_assigned)) = slot_allocation {
+        if let Some(allocation) = slot_allocation {
             reset_slot_thread_before_reuse = slot_requires_thread_reset_before_reuse(
                 &conn,
                 &agent_id,
-                assigned_slot,
-                _newly_assigned,
+                allocation.slot_index,
+                allocation.newly_assigned,
+                allocation.reassigned_from_other_group,
             );
+            let assigned_slot = allocation.slot_index;
+            let clear_slot_session_before_dispatch =
+                reset_slot_thread_before_reuse || !allocation.newly_assigned;
             let slot_key = (agent_id.clone(), assigned_slot);
-            if reset_slot_thread_before_reuse && !cleared_slots.contains(&slot_key) {
+            if clear_slot_session_before_dispatch && !cleared_slots.contains(&slot_key) {
                 let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
                     deps.health_registry.clone(),
                     &conn,
@@ -4083,7 +4098,7 @@ pub(crate) fn activate_with_deps(
                 }
                 cleared_slots.insert(slot_key);
             }
-        }
+        };
 
         let conn = deps.db.separate_conn().unwrap();
         let reserve_result = crate::db::auto_queue::update_entry_status_on_conn(
@@ -4703,7 +4718,11 @@ pub async fn update_entry(
     Path(id): Path<String>,
     Json(body): Json<UpdateEntryBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if body.thread_group.is_none() && body.priority_rank.is_none() && body.status.is_none() {
+    if body.thread_group.is_none()
+        && body.priority_rank.is_none()
+        && body.batch_phase.is_none()
+        && body.status.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
@@ -4722,6 +4741,14 @@ pub async fn update_entry(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "priority_rank must be >= 0"})),
+            );
+        }
+    }
+    if let Some(batch_phase) = body.batch_phase {
+        if batch_phase < 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "batch_phase must be >= 0"})),
             );
         }
     }
@@ -4812,7 +4839,7 @@ pub async fn update_entry(
         }
     }
 
-    if body.thread_group.is_some() || body.priority_rank.is_some() {
+    if body.thread_group.is_some() || body.priority_rank.is_some() || body.batch_phase.is_some() {
         if effective_status != crate::db::auto_queue::ENTRY_STATUS_PENDING {
             return (
                 StatusCode::CONFLICT,
@@ -4824,10 +4851,11 @@ pub async fn update_entry(
             .execute(
                 "UPDATE auto_queue_entries
                  SET thread_group = COALESCE(?1, thread_group),
-                     priority_rank = COALESCE(?2, priority_rank)
-                 WHERE id = ?3
+                     priority_rank = COALESCE(?2, priority_rank),
+                     batch_phase = COALESCE(?3, batch_phase)
+                 WHERE id = ?4
                    AND status = 'pending'",
-                rusqlite::params![body.thread_group, body.priority_rank, id],
+                rusqlite::params![body.thread_group, body.priority_rank, body.batch_phase, id],
             )
             .unwrap_or(0);
         if changed == 0 {
@@ -5394,8 +5422,30 @@ pub async fn update_run(
         }
     }
 
+    if let Some(max_concurrent_threads) = body.max_concurrent_threads {
+        if max_concurrent_threads <= 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "max_concurrent_threads must be > 0"})),
+            );
+        }
+        changed += conn
+            .execute(
+                "UPDATE auto_queue_runs
+                 SET max_concurrent_threads = ?1
+                 WHERE id = ?2",
+                rusqlite::params![max_concurrent_threads, id],
+            )
+            .unwrap_or(0);
+    }
+
     let ignored_unified_thread = body.unified_thread.is_some();
-    if changed == 0 && body.status.is_none() && !ignored_unified_thread {
+    if changed == 0
+        && body.status.is_none()
+        && body.deploy_phases.is_none()
+        && body.max_concurrent_threads.is_none()
+        && !ignored_unified_thread
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
@@ -6084,12 +6134,16 @@ mod tests {
         .expect("seed slot binding");
 
         assert!(
-            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false),
+            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false, false),
             "same-run slot rebind must keep the existing thread binding"
         );
         assert!(
-            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true),
+            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true, false),
             "cross-run reclaim must reset preserved slot bindings"
+        );
+        assert!(
+            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false, true),
+            "different-group same-run reuse must also reset preserved slot bindings"
         );
     }
 

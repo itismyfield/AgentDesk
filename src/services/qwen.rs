@@ -1727,6 +1727,7 @@ fn track_session_id(state: &mut QwenAttemptState, session_id: Option<&str>) {
     {
         state.buffered_messages.push(StreamMessage::Init {
             session_id: session_id.to_string(),
+            raw_session_id: None,
         });
     }
 }
@@ -2209,7 +2210,7 @@ mod tests {
 
         assert!(matches!(
             state.buffered_messages.first(),
-            Some(StreamMessage::Init { session_id }) if session_id == "session-123"
+            Some(StreamMessage::Init { session_id, .. }) if session_id == "session-123"
         ));
         assert!(matches!(
             state.buffered_messages.last(),

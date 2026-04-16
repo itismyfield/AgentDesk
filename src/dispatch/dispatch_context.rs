@@ -901,16 +901,19 @@ pub(super) fn build_review_context(
     // to avoid repo-root dirty-check failures on noop completions.
     let is_noop_verification =
         ctx_val.get("review_mode").and_then(|v| v.as_str()) == Some("noop_verification");
+    let card_issue_number =
+        load_card_issue_repo(db, kanban_card_id).and_then(|(issue_number, _)| issue_number);
     if let Some(obj) = ctx_val.as_object_mut() {
         if !is_noop_verification && !obj.contains_key("reviewed_commit") {
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
             let validated_work_target = if let Some(target) = latest_work_target.as_ref() {
-                let valid = commit_belongs_to_card_issue(
-                    db,
-                    kanban_card_id,
-                    &target.reviewed_commit,
-                    target.target_repo.as_deref().or(target_repo.as_deref()),
-                );
+                let valid = card_issue_number.is_none()
+                    || commit_belongs_to_card_issue(
+                        db,
+                        kanban_card_id,
+                        &target.reviewed_commit,
+                        target.target_repo.as_deref().or(target_repo.as_deref()),
+                    );
                 if !valid {
                     tracing::warn!(
                         "[dispatch] Review dispatch for card {}: work target commit {} doesn't match card issue — skipping to next fallback",
@@ -919,7 +922,11 @@ pub(super) fn build_review_context(
                     );
                 }
                 if valid {
-                    refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
+                    if card_issue_number.is_none() {
+                        Some(target.clone())
+                    } else {
+                        refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
+                    }
                 } else {
                     None
                 }

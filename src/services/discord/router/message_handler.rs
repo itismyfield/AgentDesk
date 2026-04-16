@@ -32,7 +32,7 @@ fn build_memory_injection_plan<'a>(
     memory_recall: &'a RecallResponse,
 ) -> MemoryInjectionPlan<'a> {
     let should_inject_shared_knowledge =
-        !has_session_id && dispatch_profile == DispatchProfile::Full;
+        dispatch_profile == DispatchProfile::Full && !has_session_id;
     let shared_knowledge_for_context =
         if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
             memory_recall.shared_knowledge.as_deref()
@@ -40,7 +40,7 @@ fn build_memory_injection_plan<'a>(
             None
         };
     let shared_knowledge_for_system_prompt =
-        if should_inject_shared_knowledge && matches!(provider, ProviderKind::Claude) {
+        if dispatch_profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
             memory_recall.shared_knowledge.as_deref()
         } else {
             None
@@ -935,7 +935,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             ),
         )
         .await;
-        // Clean up: remove placeholder and reaction created before this check
         let _ = channel_id
             .delete_message(&ctx.http, placeholder_msg_id)
             .await;
@@ -1858,8 +1857,1124 @@ pub(super) async fn handle_text_command(
     channel_id: serenity::ChannelId,
     text: &str,
 ) -> Result<bool, Error> {
+    /* legacy inline text-command handler kept commented during upstream merge
+        let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();
+        let cmd = parts[0];
+        let arg1 = parts.get(1).unwrap_or(&"");
+        let arg2 = parts.get(2).unwrap_or(&"");
+
+        match cmd {
+            "!start" => {
+                let path_str = if arg1.is_empty() { "." } else { arg1 };
+
+                // Resolve path
+                let effective_path = if path_str == "." || path_str.is_empty() {
+                    // Use workspace root or current directory
+                    let Some(workspace_dir) = runtime_store::workspace_root() else {
+                        let _ = msg
+                            .reply(&ctx.http, "Error: cannot determine workspace root.")
+                            .await;
+                        return Ok(true);
+                    };
+                    // Create a random workspace for this channel
+                    use rand::Rng;
+                    let random_name: String = rand::thread_rng()
+                        .sample_iter(&rand::distributions::Alphanumeric)
+                        .take(8)
+                        .map(char::from)
+                        .collect();
+                    let ch_name = resolve_channel_category(ctx, channel_id)
+                        .await
+                        .0
+                        .unwrap_or_else(|| format!("ch-{}", channel_id));
+                    let dir = workspace_dir.join(format!("{}-{}", ch_name, random_name));
+                    std::fs::create_dir_all(&dir).ok();
+                    dir.to_string_lossy().to_string()
+                } else if path_str.starts_with('~') {
+                    dirs::home_dir()
+                        .map(|h| path_str.replacen('~', &h.to_string_lossy(), 1))
+                        .unwrap_or_else(|| path_str.to_string())
+                } else {
+                    path_str.to_string()
+                };
+
+                // Validate path exists
+                if !std::path::Path::new(&effective_path).exists() {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!("Error: path `{}` does not exist.", effective_path),
+                        )
+                        .await;
+                    return Ok(true);
+                }
+
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ◀ [{}] !start path={}",
+                    msg.author.name,
+                    effective_path
+                );
+
+                // Create session
+                let (ch_name, cat_name) = resolve_channel_category(ctx, channel_id).await;
+                {
+                    let mut d = data.shared.core.lock().await;
+                    let session = d
+                        .sessions
+                        .entry(channel_id)
+                        .or_insert_with(|| DiscordSession {
+                            session_id: None,
+                            memento_context_loaded: false,
+                            memento_reflected: false,
+                            current_path: None,
+                            history: Vec::new(),
+                            pending_uploads: Vec::new(),
+                            cleared: false,
+                            channel_name: None,
+                            category_name: None,
+                            remote_profile_name: None,
+                            channel_id: Some(channel_id.get()),
+                            last_active: tokio::time::Instant::now(),
+                            worktree: None,
+
+                            born_generation: runtime_store::load_generation(),
+                            assistant_turns: 0,
+                        });
+                    session.current_path = Some(effective_path.clone());
+                    session.channel_name = ch_name;
+                    session.category_name = cat_name;
+                    session.last_active = tokio::time::Instant::now();
+                }
+
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ▶ Session started: {}", effective_path);
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        format!("Session started at `{}`.", effective_path),
+                    )
+                    .await;
+                return Ok(true);
+            }
+
+            "!meeting" => {
+                let action = if arg1.is_empty() { "start" } else { arg1 };
+                let agenda = if arg2.is_empty() { arg1 } else { arg2 };
+
+                match action {
+                    "start" => {
+                        let agenda_text = if agenda.is_empty() || *agenda == "start" {
+                            let _ = msg
+                                .reply(
+                                    &ctx.http,
+                                    "사용법: `!meeting start <안건>` 또는 `!meeting <안건>`",
+                                )
+                                .await;
+                            return Ok(true);
+                        } else {
+                            agenda
+                        };
+
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ◀ [{}] !meeting start {}",
+                            msg.author.name,
+                            agenda_text
+                        );
+
+                        let http = ctx.http.clone();
+                        let shared = data.shared.clone();
+                        let provider = data.provider.clone();
+                        let reviewer = provider.counterpart();
+                        let agenda_owned = agenda_text.to_string();
+
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!(
+                                    "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
+                                    provider.display_name(),
+                                    reviewer.display_name()
+                                ),
+                            )
+                            .await;
+
+                        tokio::spawn(async move {
+                            match meeting::start_meeting(
+                                &*http,
+                                channel_id,
+                                &agenda_owned,
+                                provider,
+                                reviewer,
+                                &shared,
+                            )
+                            .await
+                            {
+                                Ok(Some(id)) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] ❌ Meeting error: {e}");
+                                }
+                            }
+                        });
+                        return Ok(true);
+                    }
+                    "stop" => {
+                        let _ = meeting::cancel_meeting(&ctx.http, channel_id, &data.shared).await;
+                        return Ok(true);
+                    }
+                    "status" => {
+                        let _ = meeting::meeting_status(&ctx.http, channel_id, &data.shared).await;
+                        return Ok(true);
+                    }
+                    _ => {
+                        // Treat unknown action as agenda text
+                        let full_agenda = text.trim_start_matches("!meeting").trim();
+                        if full_agenda.is_empty() {
+                            let _ = msg.reply(&ctx.http, "사용법: `!meeting <안건>`").await;
+                            return Ok(true);
+                        }
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!("  [{ts}] ◀ [{}] !meeting {}", msg.author.name, full_agenda);
+
+                        let http = ctx.http.clone();
+                        let shared = data.shared.clone();
+                        let provider = data.provider.clone();
+                        let reviewer = provider.counterpart();
+                        let agenda_owned = full_agenda.to_string();
+
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!(
+                                    "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
+                                    provider.display_name(),
+                                    reviewer.display_name()
+                                ),
+                            )
+                            .await;
+
+                        tokio::spawn(async move {
+                            match meeting::start_meeting(
+                                &*http,
+                                channel_id,
+                                &agenda_owned,
+                                provider,
+                                reviewer,
+                                &shared,
+                            )
+                            .await
+                            {
+                                Ok(Some(id)) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] ❌ Meeting error: {e}");
+                                }
+                            }
+                        });
+                        return Ok(true);
+                    }
+                }
+            }
+
+            "!stop" => {
+                // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
+                // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                // → mailbox_finish_turn canonical cleanup
+                let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+                match stop_lookup {
+                    TextStopLookup::Stop(token) => {
+                        super::super::turn_bridge::cancel_active_token(&token, true, "!stop");
+                    }
+                    TextStopLookup::AlreadyStopping => {
+                        let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                    }
+                    TextStopLookup::NoActiveTurn => {
+                        let _ = msg.reply(&ctx.http, "No active turn to stop.").await;
+                    }
+                }
+                return Ok(true);
+            }
+
+            "!clear" => {
+                super::super::commands::clear_channel_session_state(
+                    &ctx.http,
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    "!clear",
+                )
+                .await;
+                let _ = msg.reply(&ctx.http, "Session cleared.").await;
+                return Ok(true);
+            }
+
+            // ── Simple diagnostic / info commands ──
+            "!pwd" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !pwd", msg.author.name);
+
+                auto_restore_session(&data.shared, channel_id, ctx).await;
+
+                let (current_path, remote_name) = {
+                    let d = data.shared.core.lock().await;
+                    let session = d.sessions.get(&channel_id);
+                    (
+                        session.and_then(|s| s.current_path.clone()),
+                        session.and_then(|s| s.remote_profile_name.clone()),
+                    )
+                };
+                let reply = match current_path {
+                    Some(path) => {
+                        let remote_info = remote_name
+                            .map(|n| format!(" (remote: **{}**)", n))
+                            .unwrap_or_else(|| " (local)".to_string());
+                        format!("`{}`{}", path, remote_info)
+                    }
+                    None => "No active session. Use `!start <path>` first.".to_string(),
+                };
+                let _ = msg.reply(&ctx.http, &reply).await;
+                return Ok(true);
+            }
+
+            "!health" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !health", msg.author.name);
+
+                let text =
+                    commands::build_health_report(&data.shared, &data.provider, channel_id).await;
+                send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!status" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !status", msg.author.name);
+
+                let text =
+                    commands::build_status_report(&data.shared, &data.provider, channel_id).await;
+                send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!inflight" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !inflight", msg.author.name);
+
+                let text =
+                    commands::build_inflight_report(&data.shared, &data.provider, channel_id).await;
+                send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!queue" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !queue", msg.author.name);
+
+                let show_all = *arg1 == "all";
+                let text =
+                    commands::build_queue_report(&data.shared, &data.provider, channel_id, show_all)
+                        .await;
+                send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!metrics" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !metrics", msg.author.name);
+
+                let metrics_data = if arg1.is_empty() {
+                    metrics::load_today()
+                } else {
+                    metrics::load_date(arg1)
+                };
+                let label = if arg1.is_empty() { "today" } else { arg1 };
+                let text = metrics::build_metrics_report(&metrics_data, label);
+                send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!debug" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !debug", msg.author.name);
+
+                let new_state = claude::toggle_debug();
+                let status = if new_state { "ON" } else { "OFF" };
+                let _ = msg
+                    .reply(&ctx.http, format!("Debug logging: **{}**", status))
+                    .await;
+                tracing::info!("  [{ts}] ▶ Debug logging toggled to {status}");
+                return Ok(true);
+            }
+
+            "!escalation" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
+                tracing::info!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
+
+                if !check_owner(msg.author.id, &data.shared).await {
+                    let _ = msg
+                        .reply(&ctx.http, "Only the owner can change escalation settings.")
+                        .await;
+                    return Ok(true);
+                }
+
+                let mut settings = match fetch_escalation_settings_via_api().await {
+                    Ok(response) => response.current,
+                    Err(err) => {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!("Failed to load escalation settings: {err}"),
+                            )
+                            .await;
+                        return Ok(true);
+                    }
+                };
+
+                if rest.is_empty() || rest.eq_ignore_ascii_case("status") {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!(
+                                "**Escalation Settings**\n{}",
+                                format_escalation_settings_summary(&settings)
+                            ),
+                        )
+                        .await;
+                    return Ok(true);
+                }
+
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+                let value = parts.next().unwrap_or("").trim();
+
+                let usage = "Usage: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
+                let update_error = match subcommand.as_str() {
+                    "pm" => {
+                        settings.mode = crate::config::EscalationMode::Pm;
+                        None
+                    }
+                    "user" => {
+                        settings.mode = crate::config::EscalationMode::User;
+                        None
+                    }
+                    "scheduled" => {
+                        settings.mode = crate::config::EscalationMode::Scheduled;
+                        None
+                    }
+                    "schedule" => {
+                        if value.is_empty() {
+                            Some("schedule value is required")
+                        } else {
+                            settings.mode = crate::config::EscalationMode::Scheduled;
+                            settings.schedule.pm_hours = value.to_string();
+                            None
+                        }
+                    }
+                    "timezone" => {
+                        if value.is_empty() {
+                            Some("timezone value is required")
+                        } else {
+                            settings.schedule.timezone = value.to_string();
+                            None
+                        }
+                    }
+                    "owner" => match parse_discord_user_id(value) {
+                        Some(user_id) => {
+                            settings.owner_user_id = Some(user_id);
+                            None
+                        }
+                        None => Some("owner must be a numeric Discord user id or mention"),
+                    },
+                    "clear-owner" => {
+                        settings.owner_user_id = None;
+                        None
+                    }
+                    "pm-channel" => {
+                        if value.is_empty() {
+                            Some("pm-channel value is required")
+                        } else {
+                            settings.pm_channel_id = Some(value.to_string());
+                            None
+                        }
+                    }
+                    "clear-pm-channel" => {
+                        settings.pm_channel_id = None;
+                        None
+                    }
+                    _ => Some(usage),
+                };
+
+                if let Some(err) = update_error {
+                    let _ = msg.reply(&ctx.http, err).await;
+                    return Ok(true);
+                }
+
+                match save_escalation_settings_via_api(&settings).await {
+                    Ok(response) => {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!(
+                                    "**Escalation Settings Updated**\n{}",
+                                    format_escalation_settings_summary(&response.current)
+                                ),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!("Failed to save escalation settings: {err}"),
+                            )
+                            .await;
+                    }
+                }
+                return Ok(true);
+            }
+
+            "!help" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !help", msg.author.name);
+
+                let provider_name = data.provider.display_name();
+                let help = format!(
+                    "\
+**AgentDesk Discord Bot**
+Manage server files & chat with {p}.
+Each channel gets its own independent {p} session.
+
+**Session**
+`!start <path>` — Start session at directory
+`!pwd` — Show current working directory
+`!health` — Show runtime health summary
+`!status` — Show this channel session status
+`!inflight` — Show saved inflight turn state
+`!clear` — Clear AI conversation history
+`!stop` — Stop current AI request
+
+**File Transfer**
+`!down <file>` — Download file from server
+Send a file/photo — Upload to session directory
+
+**Shell**
+`!shell <command>` — Run shell command directly
+
+**AI Chat**
+Any other message is sent to {p}.
+
+**Tool Management**
+`!allowedtools` — Show currently allowed tools
+`!allowed +name` — Add tool (e.g. `!allowed +Bash`)
+`!allowed -name` — Remove tool
+
+**Skills**
+`!cc <skill>` — Run a provider skill
+
+**Settings**
+`/model` — Open the interactive model picker
+`!debug` — Toggle debug logging
+`!metrics [date]` — Show turn metrics
+`!queue [all]` — Show pending queue
+`!escalation status` — Show escalation routing mode
+
+**User Management** (owner only)
+`!allowall on|off|status` — Allow everyone or restrict to authorized users
+`!adduser <user_id>` — Allow a user to use the bot
+`!removeuser <user_id>` — Remove a user's access
+`!escalation pm|user|scheduled` — Change escalation routing mode
+`!escalation schedule <HH:MM-HH:MM>` — Set PM hours and switch to scheduled mode
+`!escalation timezone <IANA>` — Set scheduled timezone
+`!escalation owner <user_id>` — Override fallback owner user id
+`!escalation pm-channel <channel_id>` — Override PM channel
+`!help` — Show this help",
+                    p = provider_name
+                );
+                send_long_message_raw(&ctx.http, channel_id, &help, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!allowedtools" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !allowedtools", msg.author.name);
+
+                let tools = {
+                    let settings = data.shared.settings.read().await;
+                    settings.allowed_tools.clone()
+                };
+
+                let mut reply = String::from("**Allowed Tools**\n\n");
+                for tool in &tools {
+                    let (desc, destructive) = super::super::formatting::tool_info(tool);
+                    let badge = super::super::formatting::risk_badge(destructive);
+                    if badge.is_empty() {
+                        reply.push_str(&format!("`{}` — {}\n", tool, desc));
+                    } else {
+                        reply.push_str(&format!("`{}` {} — {}\n", tool, badge, desc));
+                    }
+                }
+                reply.push_str(&format!(
+                    "\n{} = destructive\nTotal: {}",
+                    super::super::formatting::risk_badge(true),
+                    tools.len()
+                ));
+                send_long_message_raw(&ctx.http, channel_id, &reply, &data.shared).await?;
+                return Ok(true);
+            }
+
+            // ── Commands with arguments ──
+            "!model" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !model {} {}", msg.author.name, arg1, arg2);
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        "Model picker text commands are deprecated. Use `/model`.",
+                    )
+                    .await;
+                return Ok(true);
+            }
+
+            "!allowed" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !allowed {}", msg.author.name, arg1);
+
+                let arg = arg1.trim();
+                let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
+                    ('+', name.trim())
+                } else if let Some(name) = arg.strip_prefix('-') {
+                    ('-', name.trim())
+                } else {
+                    let _ = msg.reply(&ctx.http, "Use `+toolname` to add or `-toolname` to remove.\nExample: `!allowed +Bash`").await;
+                    return Ok(true);
+                };
+
+                if raw_name.is_empty() {
+                    let _ = msg.reply(&ctx.http, "Tool name cannot be empty.").await;
+                    return Ok(true);
+                }
+
+                let Some(tool_name) =
+                    super::super::formatting::canonical_tool_name(raw_name).map(str::to_string)
+                else {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!(
+                                "Unknown tool `{}`. Use `!allowedtools` to see valid tool names.",
+                                raw_name
+                            ),
+                        )
+                        .await;
+                    return Ok(true);
+                };
+
+                let response_msg = {
+                    let mut settings = data.shared.settings.write().await;
+                    match op {
+                        '+' => {
+                            if settings.allowed_tools.iter().any(|t| t == &tool_name) {
+                                format!("`{}` is already in the list.", tool_name)
+                            } else {
+                                settings.allowed_tools.push(tool_name.clone());
+                                save_bot_settings(&data.token, &settings);
+                                format!("Added `{}`", tool_name)
+                            }
+                        }
+                        '-' => {
+                            let before_len = settings.allowed_tools.len();
+                            settings.allowed_tools.retain(|t| t != &tool_name);
+                            if settings.allowed_tools.len() < before_len {
+                                save_bot_settings(&data.token, &settings);
+                                format!("Removed `{}`", tool_name)
+                            } else {
+                                format!("`{}` is not in the list.", tool_name)
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                };
+                let _ = msg.reply(&ctx.http, &response_msg).await;
+                return Ok(true);
+            }
+
+            "!adduser" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !adduser {}", msg.author.name, arg1);
+
+                if !check_owner(msg.author.id, &data.shared).await {
+                    let _ = msg.reply(&ctx.http, "Only the owner can add users.").await;
+                    return Ok(true);
+                }
+
+                let raw_id = arg1
+                    .trim()
+                    .trim_start_matches("<@")
+                    .trim_end_matches('>')
+                    .trim_start_matches('!');
+                let target_id: u64 = match raw_id.parse() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        let _ = msg
+                            .reply(&ctx.http, "Usage: `!adduser <user_id>` or `!adduser @user`")
+                            .await;
+                        return Ok(true);
+                    }
+                };
+
+                {
+                    let mut settings = data.shared.settings.write().await;
+                    if settings.allowed_user_ids.contains(&target_id) {
+                        let _ = msg
+                            .reply(&ctx.http, format!("`{}` is already authorized.", target_id))
+                            .await;
+                        return Ok(true);
+                    }
+                    settings.allowed_user_ids.push(target_id);
+                    save_bot_settings(&data.token, &settings);
+                }
+
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        format!("Added `{}` as authorized user.", target_id),
+                    )
+                    .await;
+                tracing::info!("  [{ts}] ▶ Added user: {target_id}");
+                return Ok(true);
+            }
+
+            "!allowall" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
+
+                if !check_owner(msg.author.id, &data.shared).await {
+                    let _ = msg
+                        .reply(&ctx.http, "Only the owner can change public access.")
+                        .await;
+                    return Ok(true);
+                }
+
+                let action = arg1.trim().to_ascii_lowercase();
+                if action.is_empty() || action == "status" {
+                    let enabled = {
+                        let settings = data.shared.settings.read().await;
+                        settings.allow_all_users
+                    };
+                    let message = if enabled {
+                        "Public access is enabled. Any Discord user can talk to this bot in allowed channels."
+                    } else {
+                        "Public access is disabled. Only the owner and authorized users can talk to this bot."
+                    };
+                    let _ = msg.reply(&ctx.http, message).await;
+                    return Ok(true);
+                }
+
+                let enabled = match action.as_str() {
+                    "on" | "true" | "enable" | "enabled" => true,
+                    "off" | "false" | "disable" | "disabled" => false,
+                    _ => {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                "Usage: `!allowall on`, `!allowall off`, or `!allowall status`",
+                            )
+                            .await;
+                        return Ok(true);
+                    }
+                };
+
+                let response = {
+                    let mut settings = data.shared.settings.write().await;
+                    settings.allow_all_users = enabled;
+                    save_bot_settings(&data.token, &settings);
+                    if enabled {
+                        "Public access enabled. Any Discord user can talk to this bot in allowed channels."
+                    } else {
+                        "Public access disabled. Only the owner and authorized users can talk to this bot."
+                    }
+                };
+
+                let _ = msg.reply(&ctx.http, response).await;
+                tracing::info!("  [{ts}] ▶ {response}");
+                return Ok(true);
+            }
+
+            "!removeuser" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ◀ [{}] !removeuser {}", msg.author.name, arg1);
+
+                if !check_owner(msg.author.id, &data.shared).await {
+                    let _ = msg
+                        .reply(&ctx.http, "Only the owner can remove users.")
+                        .await;
+                    return Ok(true);
+                }
+
+                let raw_id = arg1
+                    .trim()
+                    .trim_start_matches("<@")
+                    .trim_end_matches('>')
+                    .trim_start_matches('!');
+                let target_id: u64 = match raw_id.parse() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                "Usage: `!removeuser <user_id>` or `!removeuser @user`",
+                            )
+                            .await;
+                        return Ok(true);
+                    }
+                };
+
+                {
+                    let mut settings = data.shared.settings.write().await;
+                    let before_len = settings.allowed_user_ids.len();
+                    settings.allowed_user_ids.retain(|&id| id != target_id);
+                    if settings.allowed_user_ids.len() == before_len {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!("`{}` is not in the authorized list.", target_id),
+                            )
+                            .await;
+                        return Ok(true);
+                    }
+                    save_bot_settings(&data.token, &settings);
+                }
+
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        format!("Removed `{}` from authorized users.", target_id),
+                    )
+                    .await;
+                tracing::info!("  [{ts}] ▶ Removed user: {target_id}");
+                return Ok(true);
+            }
+
+            "!down" => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let file_arg = text.strip_prefix("!down").unwrap_or("").trim();
+                tracing::info!("  [{ts}] ◀ [{}] !down {}", msg.author.name, file_arg);
+
+                if file_arg.is_empty() {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            "Usage: `!down <filepath>`\nExample: `!down /home/user/file.txt`",
+                        )
+                        .await;
+                    return Ok(true);
+                }
+
+                // Resolve relative path
+                let resolved_path = if std::path::Path::new(file_arg).is_absolute() {
+                    file_arg.to_string()
+                } else {
+                    let current_path = {
+                        let d = data.shared.core.lock().await;
+                        d.sessions
+                            .get(&channel_id)
+                            .and_then(|s| s.current_path.clone())
+                    };
+                    match current_path {
+                        Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_arg),
+                        None => {
+                            let _ = msg
+                                .reply(
+                                    &ctx.http,
+                                    "No active session. Use absolute path or `!start <path>` first.",
+                                )
+                                .await;
+                            return Ok(true);
+                        }
+                    }
+                };
+
+                let path = std::path::Path::new(&resolved_path);
+                if !path.exists() {
+                    let _ = msg
+                        .reply(&ctx.http, format!("File not found: {}", resolved_path))
+                        .await;
+                    return Ok(true);
+                }
+                if !path.is_file() {
+                    let _ = msg
+                        .reply(&ctx.http, format!("Not a file: {}", resolved_path))
+                        .await;
+                    return Ok(true);
+                }
+
+                let attachment = CreateAttachment::path(path).await?;
+                rate_limit_wait(&data.shared, channel_id).await;
+                let _ = channel_id
+                    .send_message(&ctx.http, CreateMessage::new().add_file(attachment))
+                    .await;
+                return Ok(true);
+            }
+
+            "!shell" => {
+                let cmd_str = text.strip_prefix("!shell").unwrap_or("").trim();
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let preview = truncate_str(cmd_str, 60);
+                tracing::info!("  [{ts}] ◀ [{}] !shell {}", msg.author.name, preview);
+
+                if cmd_str.is_empty() {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            "Usage: `!shell <command>`\nExample: `!shell ls -la`",
+                        )
+                        .await;
+                    return Ok(true);
+                }
+
+                let working_dir = {
+                    let d = data.shared.core.lock().await;
+                    d.sessions
+                        .get(&channel_id)
+                        .and_then(|s| s.current_path.clone())
+                        .unwrap_or_else(|| {
+                            dirs::home_dir()
+                                .map(|h| h.display().to_string())
+                                .unwrap_or_else(|| "/".to_string())
+                        })
+                };
+
+                let cmd_owned = cmd_str.to_string();
+                let working_dir_clone = working_dir.clone();
+
+                let result = tokio::task::spawn_blocking(move || {
+                    let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
+                        .current_dir(&working_dir_clone)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn();
+                    match child {
+                        Ok(child) => child.wait_with_output(),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await;
+
+                let response = match result {
+                    Ok(Ok(output)) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let exit_code = output.status.code().unwrap_or(-1);
+                        let mut parts = Vec::new();
+                        if !stdout.is_empty() {
+                            parts.push(format!("```\n{}\n```", stdout.trim_end()));
+                        }
+                        if !stderr.is_empty() {
+                            parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
+                        }
+                        if parts.is_empty() {
+                            parts.push(format!("(exit code: {})", exit_code));
+                        } else if exit_code != 0 {
+                            parts.push(format!("(exit code: {})", exit_code));
+                        }
+                        parts.join("\n")
+                    }
+                    Ok(Err(e)) => format!("Failed to execute: {}", e),
+                    Err(e) => format!("Task error: {}", e),
+                };
+
+                send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;
+                return Ok(true);
+            }
+
+            "!cc" => {
+                let skill = arg1.to_string();
+                let args_str = text
+                    .strip_prefix("!cc")
+                    .unwrap_or("")
+                    .trim()
+                    .strip_prefix(&skill)
+                    .unwrap_or("")
+                    .trim();
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ◀ [{}] !cc {} {}",
+                    msg.author.name,
+                    skill,
+                    args_str
+                );
+
+                if skill.is_empty() {
+                    let _ = msg.reply(&ctx.http, "Usage: `!cc <skill> [args]`").await;
+                    return Ok(true);
+                }
+
+                // Handle built-in shortcuts
+                match skill.as_str() {
+                    "clear" => {
+                        let _ = msg.reply(&ctx.http, "Use `!clear` instead.").await;
+                        return Ok(true);
+                    }
+                    "stop" => {
+                        // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
+                        // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                        // → mailbox_finish_turn canonical cleanup
+                        let stop_lookup =
+                            cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+                        match stop_lookup {
+                            TextStopLookup::Stop(token) => {
+                                super::super::turn_bridge::cancel_active_token(
+                                    &token, true, "!cc stop",
+                                );
+                                let _ = msg.reply(&ctx.http, "Stopping...").await;
+                            }
+                            TextStopLookup::AlreadyStopping => {
+                                let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                            }
+                            TextStopLookup::NoActiveTurn => {
+                                let _ = msg.reply(&ctx.http, "No active request to stop.").await;
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    "pwd" => {
+                        // Delegate to !pwd
+                        return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!pwd")).await;
+                    }
+                    "health" => {
+                        return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!health"))
+                            .await;
+                    }
+                    "status" => {
+                        return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!status"))
+                            .await;
+                    }
+                    "inflight" => {
+                        return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!inflight"))
+                            .await;
+                    }
+                    "help" => {
+                        return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!help"))
+                            .await;
+                    }
+                    _ => {}
+                }
+
+                // Auto-restore session
+                auto_restore_session(&data.shared, channel_id, ctx).await;
+
+                // Verify skill exists
+                let skill_exists = {
+                    let skills = data.shared.skills_cache.read().await;
+                    skills.iter().any(|(name, _)| name == &skill)
+                };
+
+                if !skill_exists {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!(
+                                "Unknown skill: `{}`. Use `!cc` to see available skills.",
+                                skill
+                            ),
+                        )
+                        .await;
+                    return Ok(true);
+                }
+
+                // Check session exists
+                let has_session = {
+                    let d = data.shared.core.lock().await;
+                    d.sessions
+                        .get(&channel_id)
+                        .and_then(|s| s.current_path.as_ref())
+                        .is_some()
+                };
+
+                if !has_session {
+                    let _ = msg
+                        .reply(&ctx.http, "No active session. Use `!start <path>` first.")
+                        .await;
+                    return Ok(true);
+                }
+
+                // Block if AI is in progress
+                if super::super::mailbox_has_active_turn(&data.shared, channel_id).await {
+                    let _ = msg
+                        .reply(&ctx.http, "AI request in progress. Use `!stop` to cancel.")
+                        .await;
+                    return Ok(true);
+                }
+
+                // Build the prompt
+                let skill_prompt = match super::super::commands::build_provider_skill_prompt(
+                    &data.provider,
+                    &skill,
+                    args_str,
+                ) {
+                    Ok(prompt) => prompt,
+                    Err(message) => {
+                        let _ = msg.reply(&ctx.http, message).await;
+                        return Ok(true);
+                    }
+                };
+
+                // Send confirmation and hand off to AI
+                rate_limit_wait(&data.shared, channel_id).await;
+                let confirm = channel_id
+                    .send_message(
+                        &ctx.http,
+                        CreateMessage::new().content(format!("Running skill: `/{skill}`")),
+                    )
+                    .await?;
+
+                handle_text_message(
+                    ctx,
+                    channel_id,
+                    confirm.id,
+                    msg.author.id,
+                    &msg.author.name,
+                    &skill_prompt,
+                    &data.shared,
+                    &data.token,
+                    false,
+                    false,
+                    false,
+                    false,
+                    None,
+                    false,
+                )
+                .await?;
+                return Ok(true);
+            }
+
+            _ => {}
+        }
+
+        Ok(false)
+    */
     super::super::commands::handle_text_command(ctx, msg, data, channel_id, text).await
 }
+
+fn resolve_session_id_for_current_turn(
+    session_id: Option<String>,
+    reset_applied: bool,
+) -> Option<String> {
+    if reset_applied { None } else { session_id }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
@@ -1902,34 +3017,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn session_path_is_usable_for_existing_local_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
-        assert!(session.validated_path("test-channel").is_some());
-    }
-
-    #[test]
-    fn session_path_is_not_usable_for_missing_local_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing_path = dir.path().to_str().unwrap().to_string();
-        drop(dir);
-        let mut session = make_session(Some(missing_path), None);
-        assert!(session.validated_path("test-channel").is_none());
-        // Verify current_path and worktree were cleared
-        assert!(session.current_path.is_none());
-        assert!(session.worktree.is_none());
-    }
-
-    #[test]
-    fn session_path_is_stale_for_remote_session_with_missing_local_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing_path = dir.path().to_str().unwrap().to_string();
-        drop(dir);
-        let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
-        // Remote sessions keep their CWD even when it is non-local to this machine.
-        assert!(session.validated_path("test-channel").is_some());
-        assert!(session.current_path.is_some());
+    fn make_shared_data_for_tests() -> Arc<SharedData> {
+        Arc::new(SharedData {
+            core: tokio::sync::Mutex::new(CoreState {
+                sessions: std::collections::HashMap::new(),
+                active_meetings: std::collections::HashMap::new(),
+            }),
+            mailboxes: ChannelMailboxRegistry::default(),
+            settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
+            api_timestamps: dashmap::DashMap::new(),
+            skills_cache: tokio::sync::RwLock::new(Vec::new()),
+            tmux_watchers: dashmap::DashMap::new(),
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: 0,
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: std::time::Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+            intake_dedup: dashmap::DashMap::new(),
+            dispatch_thread_parents: dashmap::DashMap::new(),
+            bot_connected: std::sync::atomic::AtomicBool::new(false),
+            last_turn_at: std::sync::Mutex::new(None),
+            model_overrides: dashmap::DashMap::new(),
+            model_session_reset_pending: dashmap::DashSet::new(),
+            model_picker_pending: dashmap::DashMap::new(),
+            dispatch_role_overrides: dashmap::DashMap::new(),
+            last_message_ids: dashmap::DashMap::new(),
+            turn_start_times: dashmap::DashMap::new(),
+            cached_serenity_ctx: tokio::sync::OnceCell::new(),
+            cached_bot_token: tokio::sync::OnceCell::new(),
+            token_hash: "test-token-hash".to_string(),
+            api_port: 9,
+            db: None,
+            engine: None,
+            health_registry: std::sync::Weak::new(),
+            known_slash_commands: tokio::sync::OnceCell::new(),
+        })
     }
 
     #[test]
@@ -2010,6 +3140,135 @@ mod tests {
     }
 
     #[test]
+    fn memory_injection_plan_keeps_shared_knowledge_for_claude_resumed_sessions() {
+        let recall = sample_recall();
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Claude,
+            true,
+            DispatchProfile::Full,
+            &recall,
+        );
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(
+            plan.shared_knowledge_for_system_prompt,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(plan.longterm_catalog_for_system_prompt, Some("- notes.md"));
+    }
+
+    #[test]
+    fn resolve_session_id_for_current_turn_drops_resume_after_model_reset() {
+        assert_eq!(
+            resolve_session_id_for_current_turn(Some("session-123".to_string()), true),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_session_id_for_current_turn_keeps_existing_session_when_not_reset() {
+        assert_eq!(
+            resolve_session_id_for_current_turn(Some("session-123".to_string()), false),
+            Some("session-123".to_string())
+        );
+    }
+
+    #[test]
+    fn memory_injection_plan_treats_model_reset_as_fresh_turn() {
+        let recall = sample_recall();
+        let session_id = resolve_session_id_for_current_turn(Some("session-123".to_string()), true);
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            session_id.is_some(),
+            DispatchProfile::Full,
+            &recall,
+        );
+
+        assert_eq!(
+            plan.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+    }
+
+    #[test]
+    fn session_path_is_usable_for_existing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
+        assert!(session.validated_path("test-channel").is_some());
+    }
+
+    #[test]
+    fn session_path_is_not_usable_for_missing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        let mut session = make_session(Some(missing_path), None);
+        assert!(session.validated_path("test-channel").is_none());
+        assert!(session.current_path.is_none());
+        assert!(session.worktree.is_none());
+    }
+
+    #[test]
+    fn session_path_is_stale_for_remote_session_with_missing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
+        assert!(session.validated_path("test-channel").is_some());
+        assert!(session.current_path.is_some());
+    }
+
+    #[test]
+    fn review_bypass_hint_detects_leading_pr_number_direct_merge_request() {
+        let hint =
+            detect_natural_language_control_intent("366은 기여자가 직접 머지가능하게 만들 것 같아")
+                .map(|intent| build_control_intent_system_reminder(&intent))
+                .expect("direct merge intent should be detected");
+
+        assert!(hint.contains("pr_number: 366"));
+        assert!(hint.contains("review_decision: dismiss"));
+    }
+
+    #[test]
+    fn review_bypass_hint_detects_explicit_pr_reference() {
+        let hint = detect_natural_language_control_intent("#366 리뷰 우회하고 직접 머지해도 돼")
+            .map(|intent| build_control_intent_system_reminder(&intent))
+            .expect("explicit PR reference should be detected");
+
+        assert!(hint.contains("PR #366"));
+    }
+
+    #[test]
+    fn review_bypass_hint_ignores_debug_discussion() {
+        assert_eq!(
+            detect_natural_language_control_intent("366 리뷰 우회 인식이 왜 안먹었는지 잡아줘"),
+            None
+        );
+    }
+
+    #[test]
+    fn review_bypass_hint_ignores_negative_direct_merge_request() {
+        assert_eq!(
+            detect_natural_language_control_intent("#366 리뷰 우회하면 안 돼"),
+            None
+        );
+        assert_eq!(
+            detect_natural_language_control_intent("366은 직접 머지하지 마"),
+            None
+        );
+    }
+
+    #[test]
+    fn review_bypass_hint_ignores_stray_non_pr_numbers() {
+        assert_eq!(
+            detect_natural_language_control_intent("2명만 직접 머지 가능하게 해줘"),
+            None
+        );
+    }
+
+    #[test]
     fn memento_recall_skip_only_triggers_for_loaded_memento_sessions() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
@@ -2045,6 +3304,7 @@ mod tests {
         let mut session = make_session(Some("/tmp/project".to_string()), None);
 
         session.restore_provider_session(Some("session-1".to_string()));
+        session.note_memento_context_loaded();
         assert!(should_skip_memento_recall(
             &memento,
             session.memento_context_loaded

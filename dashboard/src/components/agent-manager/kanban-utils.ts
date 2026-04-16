@@ -138,10 +138,7 @@ export function hasManualInterventionReason(card: Pick<KanbanCard, "blocked_reas
 export function isManualInterventionCard(
   card: Pick<KanbanCard, "review_status" | "blocked_reason">,
 ): boolean {
-  return (
-    MANUAL_INTERVENTION_REVIEW_STATUSES.has(card.review_status ?? "") ||
-    hasManualInterventionReason(card)
-  );
+  return MANUAL_INTERVENTION_REVIEW_STATUSES.has(card.review_status ?? "") || hasManualInterventionReason(card);
 }
 
 export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en: string) => string): string {

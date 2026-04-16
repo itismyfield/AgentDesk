@@ -28,7 +28,8 @@ pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
 pub(super) use diagnostics::{
-    cmd_debug, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_status,
+    cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_sessions,
+    cmd_status,
 };
 pub(super) use help::cmd_help;
 pub(super) use meeting_cmd::cmd_meeting;

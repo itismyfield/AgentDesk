@@ -235,7 +235,7 @@ fn update_entry_status_with_current_on_conn(
             .batch_phase(current.batch_phase)
             .maybe_slot_index(current.slot_index);
 
-        if !is_allowed_entry_transition(&current.status, normalized) {
+        if !is_allowed_entry_transition(&current.status, normalized, trigger_source) {
             crate::auto_queue_log!(
                 warn,
                 "entry_status_transition_blocked",
@@ -405,7 +405,7 @@ fn update_entry_status_with_current_on_conn(
                 });
             }
 
-            if !is_allowed_entry_transition(&latest.status, normalized) {
+            if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
                 let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
                     .run(&latest.run_id)
                     .entry(entry_id)
@@ -1413,12 +1413,19 @@ pub fn assigned_groups_with_pending_entries(
     .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotAllocation {
+    pub slot_index: i64,
+    pub newly_assigned: bool,
+    pub reassigned_from_other_group: bool,
+}
+
 pub fn allocate_slot_for_group_agent(
     conn: &Connection,
     run_id: &str,
     thread_group: i64,
     agent_id: &str,
-) -> Result<Option<(i64, bool)>, SlotAllocationError> {
+) -> Result<Option<SlotAllocation>, SlotAllocationError> {
     let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
         .run(run_id)
         .agent(agent_id)
@@ -1466,7 +1473,11 @@ pub fn allocate_slot_for_group_agent(
                 );
                 SlotAllocationError::Sql(error)
             })?;
-            return Ok(Some((slot_index, false)));
+            return Ok(Some(SlotAllocation {
+                slot_index,
+                newly_assigned: false,
+                reassigned_from_other_group: false,
+            }));
         }
 
         let reusable_slot: Option<i64> = conn
@@ -1556,7 +1567,11 @@ pub fn allocate_slot_for_group_agent(
                     );
                     SlotAllocationError::Sql(error)
                 })?;
-            return Ok(Some((slot_index, false)));
+            return Ok(Some(SlotAllocation {
+                slot_index,
+                newly_assigned: false,
+                reassigned_from_other_group: true,
+            }));
         }
 
         let free_slot: Option<i64> = conn
@@ -1632,7 +1647,11 @@ pub fn allocate_slot_for_group_agent(
             );
             SlotAllocationError::Sql(error)
         })?;
-        return Ok(Some((slot_index, true)));
+        return Ok(Some(SlotAllocation {
+            slot_index,
+            newly_assigned: true,
+            reassigned_from_other_group: false,
+        }));
     }
 
     unreachable!("slot allocation loop must return within bounded retries");
@@ -1750,8 +1769,15 @@ fn normalize_entry_status(status: &str) -> Result<&str, EntryStatusUpdateError> 
     }
 }
 
-fn is_allowed_entry_transition(from_status: &str, to_status: &str) -> bool {
+fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_source: &str) -> bool {
     if from_status == to_status {
+        return true;
+    }
+
+    if from_status == ENTRY_STATUS_DONE
+        && to_status == ENTRY_STATUS_DISPATCHED
+        && matches!(trigger_source, "pmd_reopen" | "rereview_dispatch")
+    {
         return true;
     }
 
@@ -2068,7 +2094,7 @@ mod tests {
     use super::{
         ConsultationDispatchRecordError, ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE,
         ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
-        EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocationError,
+        EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation, SlotAllocationError,
         allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
         reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn, release_run_slots,
         release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
@@ -2650,6 +2676,52 @@ mod tests {
     }
 
     #[test]
+    fn entry_transition_allows_done_restore_to_dispatched_for_recovery_sources() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, completed_at
+             ) VALUES ('entry-3b', 'run-1', 'card-3b', 'agent-1', 'done', 0, datetime('now'))",
+            [],
+        )
+        .expect("seed done entry");
+
+        let restored = update_entry_status_on_conn(
+            &conn,
+            "entry-3b",
+            ENTRY_STATUS_DISPATCHED,
+            "rereview_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-rereview".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("recovery transition");
+        assert!(restored.changed);
+        assert_eq!(restored.from_status, ENTRY_STATUS_DONE);
+        assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+
+        let (status, dispatch_id, slot_index, completed_at): (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-3b'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-rereview"));
+        assert_eq!(slot_index, Some(0));
+        assert!(completed_at.is_none());
+    }
+
+    #[test]
     fn entry_transition_blocks_invalid_done_to_pending_restore() {
         let conn = setup_conn();
         conn.execute(
@@ -2878,7 +2950,14 @@ mod tests {
 
         let allocation = allocate_slot_for_group_agent(&conn, "run-1", 1, "agent-1")
             .expect("same-run rebind must succeed");
-        assert_eq!(allocation, Some((0, false)));
+        assert_eq!(
+            allocation,
+            Some(SlotAllocation {
+                slot_index: 0,
+                newly_assigned: false,
+                reassigned_from_other_group: true,
+            })
+        );
 
         let slot: (Option<String>, Option<i64>, String) = conn
             .query_row(
@@ -2930,7 +3009,14 @@ mod tests {
 
         let allocation = allocate_slot_for_group_agent(&conn, "run-2", 0, "agent-1")
             .expect("cross-run claim must succeed");
-        assert_eq!(allocation, Some((0, true)));
+        assert_eq!(
+            allocation,
+            Some(SlotAllocation {
+                slot_index: 0,
+                newly_assigned: true,
+                reassigned_from_other_group: false,
+            })
+        );
 
         let slot: (Option<String>, Option<i64>, String) = conn
             .query_row(

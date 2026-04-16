@@ -8,9 +8,11 @@ use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
 pub(super) fn clear_local_session_state(
     new_session_id: &mut Option<String>,
+    new_raw_provider_session_id: &mut Option<String>,
     inflight_state: &mut InflightTurnState,
 ) {
     *new_session_id = None;
+    *new_raw_provider_session_id = None;
     inflight_state.session_id = None;
 }
 
@@ -90,6 +92,7 @@ pub(super) fn handle_gemini_retry_boundary(
     response_sent_offset: &mut usize,
     last_edit_text: &mut String,
     new_session_id: &mut Option<String>,
+    new_raw_provider_session_id: &mut Option<String>,
     inflight_state: &mut InflightTurnState,
 ) -> bool {
     let had_local_session = new_session_id.is_some() || inflight_state.session_id.is_some();
@@ -101,7 +104,7 @@ pub(super) fn handle_gemini_retry_boundary(
     );
 
     if had_local_session {
-        clear_local_session_state(new_session_id, inflight_state);
+        clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
     }
 
     if should_reset {
@@ -128,10 +131,11 @@ pub(super) async fn reset_session_for_auto_retry(
     cancel_token: &Arc<CancelToken>,
     adk_session_key: Option<&str>,
     new_session_id: &mut Option<String>,
+    new_raw_provider_session_id: &mut Option<String>,
     inflight_state: &mut InflightTurnState,
     reason: &str,
 ) {
-    clear_local_session_state(new_session_id, inflight_state);
+    clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
     let _ = save_inflight_state(inflight_state);
 
     let stale_sid = {

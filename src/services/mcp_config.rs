@@ -191,6 +191,18 @@ fn runtime_config_contains_server(server_name: &str) -> bool {
     load_runtime_mcp_servers().contains_key(server_name)
 }
 
+fn current_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(dirs::home_dir)
+}
+
 fn load_runtime_config() -> Option<Config> {
     let explicit = std::env::var_os("AGENTDESK_CONFIG")
         .filter(|value| !value.is_empty())
@@ -219,7 +231,7 @@ fn load_codex_sync_state_from_path(path: &Path) -> CodexMcpSyncState {
 }
 
 fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
-    let Some(path) = dirs::home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
+    let Some(path) = current_home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
         return false;
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -235,7 +247,7 @@ fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
 }
 
 fn codex_config_contains_server(server_name: &str) -> bool {
-    let Some(path) = dirs::home_dir().map(|home| home.join(".codex").join("config.toml")) else {
+    let Some(path) = current_home_dir().map(|home| home.join(".codex").join("config.toml")) else {
         return false;
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -314,10 +326,12 @@ mod tests {
         fs::create_dir_all(crate::runtime_layout::config_dir(&runtime_root)).unwrap();
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_path = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", &runtime_root);
             std::env::set_var("HOME", temp.path());
+            std::env::set_var("USERPROFILE", temp.path());
         }
         f(temp.path());
         match previous_root {
@@ -327,6 +341,10 @@ mod tests {
         match previous_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
         }
         match previous_path {
             Some(value) => unsafe { std::env::set_var("PATH", value) },

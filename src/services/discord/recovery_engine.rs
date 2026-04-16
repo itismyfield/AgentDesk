@@ -599,6 +599,38 @@ pub(super) async fn restore_inflight_turns(
             let session_alive = tmux_name
                 .as_deref()
                 .map_or(false, tmux_session_alive_with_retry);
+            // Derive channel_name from tmux session name if not in inflight state.
+            // Validate before mutating restart-report state so other same-provider
+            // bots do not log/clear reports for channels they do not own.
+            let effective_channel_name = state.channel_name.clone().or_else(|| {
+                tmux_name.as_deref().and_then(|name| {
+                    crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
+                        .map(|(_, ch)| ch)
+                })
+            });
+            let (allowlist_channel_id, provider_channel_name) =
+                if let Some((pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
+                    (pid, pname.or(effective_channel_name.clone()))
+                } else {
+                    (channel_id, effective_channel_name.clone())
+                };
+            if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
+                &settings_snapshot,
+                provider,
+                allowlist_channel_id,
+                effective_channel_name.as_deref(),
+                provider_channel_name.as_deref(),
+                is_dm,
+            ) {
+                if !reason.is_expected_cross_bot_skip() {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ⏭ inflight recovery skip for channel {} — {reason}",
+                        state.channel_id,
+                    );
+                }
+                continue;
+            }
 
             if session_alive {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -646,7 +678,7 @@ pub(super) async fn restore_inflight_turns(
                             .entry(channel_id)
                             .or_insert_with(|| DiscordSession {
                                 session_id: state.session_id.clone(),
-                                memento_context_loaded: state.session_id.is_some(),
+                                memento_context_loaded: false,
                                 memento_reflected: false,
                                 current_path: None,
                                 history: Vec::new(),
@@ -1215,7 +1247,7 @@ pub(super) async fn restore_inflight_turns(
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
                         session_id: state.session_id.clone(),
-                        memento_context_loaded: state.session_id.is_some(),
+                        memento_context_loaded: false,
                         memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
@@ -1330,7 +1362,7 @@ pub(super) async fn restore_inflight_turns(
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
                     session_id: state.session_id.clone(),
-                    memento_context_loaded: state.session_id.is_some(),
+                    memento_context_loaded: false,
                     memento_reflected: false,
                     current_path: None,
                     history: Vec::new(),
@@ -1769,6 +1801,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: Some("host:tmux-1".to_string()),
             dispatch_id: Some("dispatch-from-state".to_string()),
+            last_watcher_relayed_offset: None,
         };
 
         assert!(persist_recovered_transcript(
@@ -1872,6 +1905,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: None,
             dispatch_id: None,
+            last_watcher_relayed_offset: None,
         };
 
         save_missing_session_handoff(

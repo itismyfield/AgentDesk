@@ -3076,7 +3076,6 @@ async fn complete_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
     use std::path::Path;
     use std::sync::{
         Arc, MutexGuard,
@@ -3090,39 +3089,26 @@ mod tests {
         crate::services::discord::runtime_store::lock_test_env()
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set_path(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
     struct RuntimeRootGuard {
         _lock: MutexGuard<'static, ()>,
-        _env: EnvVarGuard,
+        previous: Option<std::path::PathBuf>,
     }
 
     impl RuntimeRootGuard {
         fn new(path: &Path) -> Self {
+            let lock = env_guard();
+            let previous = crate::config::current_test_runtime_root_override();
+            crate::config::set_test_runtime_root_override(Some(path.to_path_buf()));
             Self {
-                _lock: env_guard(),
-                _env: EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path),
+                _lock: lock,
+                previous,
             }
+        }
+    }
+
+    impl Drop for RuntimeRootGuard {
+        fn drop(&mut self) {
+            crate::config::set_test_runtime_root_override(self.previous.take());
         }
     }
 

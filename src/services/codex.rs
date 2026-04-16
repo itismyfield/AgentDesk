@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude;
@@ -13,7 +14,8 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid, tmux_followup_fallback_after_read_error,
+    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
+    tmux_followup_fallback_after_read_error,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -84,6 +86,22 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_cancellable(prompt, None)
 }
 
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    let prompt = prompt.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(execute_command_simple(&prompt));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
+    }
+}
+
 pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -93,7 +111,7 @@ pub fn execute_command_simple_cancellable(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt, None);
+    let args = base_exec_args(None, prompt, None, false);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut command = Command::new(&codex_bin);
@@ -180,6 +198,7 @@ pub fn execute_command_streaming(
     model: Option<&str>,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
+    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
     if let Some(profile) = remote_profile {
@@ -256,6 +275,7 @@ pub fn execute_command_streaming(
         cancel_token,
         report_channel_id,
         report_provider,
+        readonly_mode,
         compact_token_limit,
     )
 }
@@ -277,6 +297,7 @@ fn execute_streaming_direct(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    readonly_mode: bool,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let resolution = resolve_codex_binary();
@@ -284,7 +305,7 @@ fn execute_streaming_direct(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let mut args = base_exec_args(session_id, prompt, model);
+    let mut args = base_exec_args(session_id, prompt, model, readonly_mode);
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
         // Insert -c config before the "exec" subcommand.
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
@@ -888,7 +909,12 @@ fn execute_streaming_local_process_codex(
     Ok(())
 }
 
-fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -> Vec<String> {
+fn base_exec_args(
+    session_id: Option<&str>,
+    prompt: &str,
+    model: Option<&str>,
+    readonly_mode: bool,
+) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         args.push("-c".to_string());
@@ -901,12 +927,13 @@ fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -
         args.push("resume".to_string());
         args.push(existing_thread_id.to_string());
     }
-    args.extend([
-        "--skip-git-repo-check".to_string(),
-        "--json".to_string(),
-        "--dangerously-bypass-approvals-and-sandbox".to_string(),
-        prompt.to_string(),
-    ]);
+    args.extend(["--skip-git-repo-check".to_string(), "--json".to_string()]);
+    if readonly_mode {
+        args.extend(["--sandbox".to_string(), "read-only".to_string()]);
+    } else {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    args.extend(["--".to_string(), prompt.to_string()]);
     args
 }
 
@@ -1035,6 +1062,7 @@ fn handle_codex_json_line(
                 *current_thread_id = Some(thread_id.to_string());
                 let _ = sender.send(StreamMessage::Init {
                     session_id: thread_id.to_string(),
+                    raw_session_id: None,
                 });
             }
         }
@@ -1417,7 +1445,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_model_before_exec() {
-        let args = base_exec_args(None, "hello", Some("gpt-5-codex"));
+        let args = base_exec_args(None, "- starts like option", Some("gpt-5-codex"), false);
         assert!(args.starts_with(&[
             "-c".to_string(),
             r#"model_reasoning_effort="high""#.to_string(),
@@ -1425,11 +1453,25 @@ mod tests {
             "gpt-5-codex".to_string()
         ]));
         assert!(args.iter().any(|arg| arg == "exec"));
+        let separator_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("prompt separator should be present");
+        assert_eq!(
+            args.get(separator_index + 1).map(String::as_str),
+            Some("- starts like option")
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--skip-git-repo-check")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn test_base_exec_args_includes_resume_before_flags() {
-        let args = base_exec_args(Some("thread-123"), "hello", None);
+        let args = base_exec_args(Some("thread-123"), "hello", None, false);
         assert_eq!(
             args,
             vec![
@@ -1439,8 +1481,23 @@ mod tests {
                 "--skip-git-repo-check".to_string(),
                 "--json".to_string(),
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--".to_string(),
                 "hello".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_base_exec_args_uses_readonly_sandbox_when_requested() {
+        let args = base_exec_args(None, "readonly", None, true);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
         );
     }
 

@@ -207,6 +207,7 @@ pub struct TransitionConfig {
 pub enum TransitionType {
     Free,
     Gated,
+    ForceOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

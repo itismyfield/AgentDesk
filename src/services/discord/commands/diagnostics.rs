@@ -13,7 +13,9 @@ use super::super::{
     Context, Error, Intervention, PendingQueueItem, SharedData, check_auth,
     mailbox_queue_snapshots, mailbox_snapshot,
 };
+use super::config::current_working_dir;
 use crate::services::claude;
+use crate::services::gemini;
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{tmux_session_exists, tmux_session_has_live_pane};
@@ -25,6 +27,82 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
 #[cfg(not(unix))]
 fn tmux_session_exists(_name: &str) -> bool {
     false
+}
+
+fn shorten_session_identifier(value: &str) -> String {
+    if value.len() > 24 {
+        format!("{}...", &value[..24])
+    } else {
+        value.to_string()
+    }
+}
+
+async fn run_blocking_gemini_command<T, F>(label: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("{label} task failed: {error}"))?
+}
+
+async fn fetch_raw_provider_session_id(
+    session_key: Option<&str>,
+    provider: &ProviderKind,
+) -> Option<String> {
+    let session_key = session_key?;
+    super::super::internal_api::get_provider_session_id(session_key, Some(provider.as_str()))
+        .await
+        .ok()
+        .and_then(|json| {
+            json.get("raw_provider_session_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn normalized_pending_queue(queue: Vec<Intervention>) -> Vec<Intervention> {
+    normalized_pending_queue_at(queue, Instant::now())
+}
+
+fn normalized_pending_queue_at(mut queue: Vec<Intervention>, now: Instant) -> Vec<Intervention> {
+    if crate::services::discord::has_soft_intervention_at(&mut queue, now) {
+        queue
+    } else {
+        Vec::new()
+    }
+}
+
+fn pending_queue_len(queue: &[Intervention]) -> usize {
+    normalized_pending_queue(queue.to_vec()).len()
+}
+
+fn pending_queue_len_at(queue: &[Intervention], now: Instant) -> usize {
+    normalized_pending_queue_at(queue.to_vec(), now).len()
+}
+
+fn normalize_pending_queues(
+    queues: std::collections::HashMap<ChannelId, Vec<Intervention>>,
+) -> std::collections::HashMap<ChannelId, Vec<Intervention>> {
+    normalize_pending_queues_at(queues, Instant::now())
+}
+
+fn normalize_pending_queues_at(
+    queues: std::collections::HashMap<ChannelId, Vec<Intervention>>,
+    now: Instant,
+) -> std::collections::HashMap<ChannelId, Vec<Intervention>> {
+    queues
+        .into_iter()
+        .filter_map(|(channel_id, queue)| {
+            let queue = normalized_pending_queue_at(queue, now);
+            if queue.is_empty() {
+                None
+            } else {
+                Some((channel_id, queue))
+            }
+        })
+        .collect()
 }
 
 pub(in crate::services::discord) async fn build_health_report(
@@ -43,11 +121,11 @@ pub(in crate::services::discord) async fn build_health_report(
         .count();
     let queued_channel_count = mailbox_snapshots
         .values()
-        .filter(|snapshot| !snapshot.intervention_queue.is_empty())
+        .filter(|snapshot| pending_queue_len(&snapshot.intervention_queue) > 0)
         .count();
     let queued_total: usize = mailbox_snapshots
         .values()
-        .map(|snapshot| snapshot.intervention_queue.len())
+        .map(|snapshot| pending_queue_len(&snapshot.intervention_queue))
         .sum();
 
     let (session_path, session_id, session_channel_name, pending_uploads, session_count) = {
@@ -62,7 +140,7 @@ pub(in crate::services::discord) async fn build_health_report(
         )
     };
     let active_request = channel_snapshot.cancel_token.is_some();
-    let queued_count = channel_snapshot.intervention_queue.len();
+    let queued_count = pending_queue_len(&channel_snapshot.intervention_queue);
 
     let runtime_root = crate::cli::dcserver::agentdesk_runtime_root();
     let current_release = runtime_root
@@ -103,24 +181,23 @@ pub(in crate::services::discord) async fn build_health_report(
     let current_path_text =
         compact_path(session_path.unwrap_or_else(|| "(no session)".to_string()));
     let session_id_text = session_id.unwrap_or_else(|| "(none)".to_string());
-    let session_id_short = if session_id_text.len() > 24 {
-        format!("{}...", &session_id_text[..24])
-    } else {
-        session_id_text.clone()
-    };
+    let session_id_short = shorten_session_identifier(&session_id_text);
     let tmux_session_name =
         session_channel_name.map(|name| provider.build_tmux_session_name(&name));
     let queue_namespace = format!("{}/{}", provider.as_str(), shared.token_hash);
-    let session_key_text = tmux_session_name
-        .as_ref()
-        .map(|session_name| {
-            super::super::adk_session::build_namespaced_session_key(
-                &shared.token_hash,
-                provider,
-                session_name,
-            )
-        })
-        .unwrap_or_else(|| "(none)".to_string());
+    let session_key = tmux_session_name.as_ref().map(|session_name| {
+        super::super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            session_name,
+        )
+    });
+    let session_key_text = session_key.clone().unwrap_or_else(|| "(none)".to_string());
+    let raw_provider_session_id =
+        fetch_raw_provider_session_id(session_key.as_deref(), provider).await;
+    let raw_provider_session_id_text =
+        raw_provider_session_id.unwrap_or_else(|| "(none)".to_string());
+    let raw_provider_session_id_short = shorten_session_identifier(&raw_provider_session_id_text);
     let tmux_alive = if let Some(ref session_name) = tmux_session_name {
         if tmux_session_has_live_pane(session_name) {
             "alive"
@@ -159,6 +236,7 @@ pub(in crate::services::discord) async fn build_health_report(
 - namespace: `{}`
 - path: `{}`
 - session_id: `{}`
+- raw_provider_session_id: `{}`
 - session_key: `{}`
 - tmux: `{}`
 - bridge: active `{}`, watcher `{}`, inflight `{}`
@@ -179,6 +257,7 @@ pub(in crate::services::discord) async fn build_health_report(
         queue_namespace,
         current_path_text,
         session_id_short,
+        raw_provider_session_id_short,
         truncate_str(&session_key_text, 96),
         tmux_alive,
         if active_request { "yes" } else { "no" },
@@ -218,7 +297,7 @@ pub(in crate::services::discord) async fn build_status_report(
     };
     let active_request = channel_snapshot.cancel_token.is_some();
     let active_owner = channel_snapshot.active_request_owner;
-    let queued_count = channel_snapshot.intervention_queue.len();
+    let queued_count = pending_queue_len(&channel_snapshot.intervention_queue);
 
     let home_prefix = dirs::home_dir()
         .map(|p| p.display().to_string())
@@ -231,24 +310,23 @@ pub(in crate::services::discord) async fn build_status_report(
         }
     };
     let session_id_text = session_id.unwrap_or_else(|| "(none)".to_string());
-    let session_id_short = if session_id_text.len() > 24 {
-        format!("{}...", &session_id_text[..24])
-    } else {
-        session_id_text
-    };
+    let session_id_short = shorten_session_identifier(&session_id_text);
     let tmux_session_name =
         session_channel_name.map(|name| provider.build_tmux_session_name(&name));
     let queue_namespace = format!("{}/{}", provider.as_str(), shared.token_hash);
-    let session_key_text = tmux_session_name
-        .as_ref()
-        .map(|session_name| {
-            super::super::adk_session::build_namespaced_session_key(
-                &shared.token_hash,
-                provider,
-                session_name,
-            )
-        })
-        .unwrap_or_else(|| "(none)".to_string());
+    let session_key = tmux_session_name.as_ref().map(|session_name| {
+        super::super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            session_name,
+        )
+    });
+    let session_key_text = session_key.clone().unwrap_or_else(|| "(none)".to_string());
+    let raw_provider_session_id =
+        fetch_raw_provider_session_id(session_key.as_deref(), provider).await;
+    let raw_provider_session_id_text =
+        raw_provider_session_id.unwrap_or_else(|| "(none)".to_string());
+    let raw_provider_session_id_short = shorten_session_identifier(&raw_provider_session_id_text);
     let tmux_alive = if let Some(ref session_name) = tmux_session_name {
         if tmux_session_has_live_pane(session_name) {
             "alive"
@@ -285,6 +363,7 @@ pub(in crate::services::discord) async fn build_status_report(
 - state: `{}`
 - path: `{}`
 - session_id: `{}`
+- raw_provider_session_id: `{}`
 - session_key: `{}`
 - remote: `{}`
 - tmux: `{}`
@@ -297,6 +376,7 @@ pub(in crate::services::discord) async fn build_status_report(
         channel_state,
         path_text,
         session_id_short,
+        raw_provider_session_id_short,
         truncate_str(&session_key_text, 96),
         remote_text,
         tmux_alive,
@@ -581,7 +661,7 @@ pub(in crate::services::discord) async fn build_queue_report(
     current_channel: ChannelId,
     show_all: bool,
 ) -> String {
-    let queues = mailbox_queue_snapshots(shared).await;
+    let queues = normalize_pending_queues(mailbox_queue_snapshots(shared).await);
     build_queue_report_sync(
         &queues,
         provider,
@@ -589,6 +669,35 @@ pub(in crate::services::discord) async fn build_queue_report(
         current_channel,
         show_all,
     )
+}
+
+fn format_gemini_session_report(
+    working_dir: &str,
+    sessions: &[gemini::GeminiProjectSession],
+) -> String {
+    if sessions.is_empty() {
+        return format!(
+            "Gemini sessions for `{}`: none",
+            truncate_str(working_dir, 96)
+        );
+    }
+
+    let mut lines = vec![format!(
+        "Gemini sessions for `{}`:",
+        truncate_str(working_dir, 96)
+    )];
+    for session in sessions {
+        let current = if session.is_current_session {
+            " (current)"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "- `{}` {}{} — `{}` — `{}`",
+            session.index, session.title, current, session.relative_time, session.session_id
+        ));
+    }
+    lines.join("\n")
 }
 
 /// /metrics — Show turn metrics summary
@@ -634,6 +743,51 @@ pub(in crate::services::discord) async fn cmd_health(ctx: Context<'_>) -> Result
     Ok(())
 }
 
+/// /sessions — Show Gemini project sessions for the current working directory
+#[poise::command(slash_command, rename = "sessions")]
+pub(in crate::services::discord) async fn cmd_sessions(ctx: Context<'_>) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /sessions");
+
+    if ctx.data().provider != ProviderKind::Gemini {
+        ctx.say("`/sessions` is currently supported only when the active provider is Gemini.")
+            .await?;
+        return Ok(());
+    }
+
+    let Some(working_dir) = current_working_dir(&ctx.data().shared, ctx.channel_id()).await else {
+        ctx.say("No active working directory for this channel. Start or restore a session first.")
+            .await?;
+        return Ok(());
+    };
+
+    ctx.defer().await?;
+
+    let working_dir_for_list = working_dir.clone();
+    let sessions = match run_blocking_gemini_command("Gemini session list", move || {
+        gemini::list_project_sessions(&working_dir_for_list)
+    })
+    .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            ctx.say(format!("Gemini session list failed: `{}`", error))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let text = format_gemini_session_report(&working_dir, &sessions);
+    send_long_message_ctx(ctx, &text).await?;
+    Ok(())
+}
+
 /// /status — Show concise per-channel runtime state
 #[poise::command(slash_command, rename = "status")]
 pub(in crate::services::discord) async fn cmd_status(ctx: Context<'_>) -> Result<(), Error> {
@@ -649,6 +803,89 @@ pub(in crate::services::discord) async fn cmd_status(ctx: Context<'_>) -> Result
     let text =
         build_status_report(&ctx.data().shared, &ctx.data().provider, ctx.channel_id()).await;
     send_long_message_ctx(ctx, &text).await?;
+    Ok(())
+}
+
+/// /deletesession [identifier] — Delete a Gemini project session by index or UUID
+#[poise::command(slash_command, rename = "deletesession")]
+pub(in crate::services::discord) async fn cmd_deletesession(
+    ctx: Context<'_>,
+    #[description = "Gemini session index or UUID from /sessions"] identifier: String,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ◀ [{user_name}] /deletesession identifier={}",
+        identifier
+    );
+
+    if ctx.data().provider != ProviderKind::Gemini {
+        ctx.say("`/deletesession` is currently supported only when the active provider is Gemini.")
+            .await?;
+        return Ok(());
+    }
+
+    let Some(working_dir) = current_working_dir(&ctx.data().shared, ctx.channel_id()).await else {
+        ctx.say("No active working directory for this channel. Start or restore a session first.")
+            .await?;
+        return Ok(());
+    };
+
+    ctx.defer().await?;
+
+    let working_dir_for_list = working_dir.clone();
+    let sessions = match run_blocking_gemini_command("Gemini session list", move || {
+        gemini::list_project_sessions(&working_dir_for_list)
+    })
+    .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            ctx.say(format!("Gemini session list failed: `{}`", error))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let trimmed_identifier = identifier.trim();
+    let deleted_session_id = if trimmed_identifier.chars().all(|ch| ch.is_ascii_digit()) {
+        trimmed_identifier
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| sessions.iter().find(|session| session.index == index))
+            .map(|session| session.session_id.clone())
+    } else {
+        sessions
+            .iter()
+            .find(|session| session.session_id == trimmed_identifier)
+            .map(|session| session.session_id.clone())
+    };
+
+    let working_dir_for_delete = working_dir.clone();
+    let identifier_for_delete = trimmed_identifier.to_string();
+    let result = match run_blocking_gemini_command("Gemini session delete", move || {
+        gemini::delete_project_session(&working_dir_for_delete, &identifier_for_delete)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            ctx.say(format!("Gemini session delete failed: `{}`", error))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if let Some(session_id) = deleted_session_id.as_deref() {
+        let _ = super::super::internal_api::clear_stale_session_id(session_id).await;
+    }
+
+    ctx.say(result).await?;
     Ok(())
 }
 
@@ -714,4 +951,87 @@ pub(in crate::services::discord) async fn cmd_debug(ctx: Context<'_>) -> Result<
     ctx.say(format!("Debug logging: **{}**", status)).await?;
     tracing::info!("  [{ts}] ▶ Debug logging toggled to {status}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    use crate::services::discord::InterventionMode;
+    use poise::serenity_prelude::{MessageId, UserId};
+
+    fn intervention(
+        snapshot_now: Instant,
+        age_secs: u64,
+        message_id: u64,
+        text: &str,
+    ) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: snapshot_now
+                .checked_sub(Duration::from_secs(age_secs))
+                .expect("snapshot instant should be offset far enough for the requested age"),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        }
+    }
+
+    #[test]
+    fn pending_queue_len_prunes_expired_items() {
+        let snapshot_now = Instant::now() + Duration::from_secs(10 * 60 + 5);
+        let queue = vec![
+            intervention(snapshot_now, 10 * 60 + 5, 1, "expired"),
+            intervention(snapshot_now, 30, 2, "fresh"),
+        ];
+
+        assert_eq!(pending_queue_len_at(&queue, snapshot_now), 1);
+    }
+
+    #[test]
+    fn normalize_pending_queues_drops_channels_without_live_items() {
+        let snapshot_now = Instant::now() + Duration::from_secs(10 * 60 + 1);
+        let expired_channel = ChannelId::new(1);
+        let fresh_channel = ChannelId::new(2);
+        let queues = HashMap::from([
+            (
+                expired_channel,
+                vec![intervention(snapshot_now, 10 * 60 + 1, 1, "expired-only")],
+            ),
+            (
+                fresh_channel,
+                vec![intervention(snapshot_now, 15, 2, "fresh")],
+            ),
+        ]);
+
+        let normalized = normalize_pending_queues_at(queues, snapshot_now);
+
+        assert!(!normalized.contains_key(&expired_channel));
+        assert_eq!(
+            normalized.get(&fresh_channel).map(std::vec::Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn format_gemini_session_report_shows_full_session_id_for_copy_paste() {
+        let sessions = vec![gemini::GeminiProjectSession {
+            index: 1,
+            title: "Reply with exactly OK.".to_string(),
+            relative_time: "Just now".to_string(),
+            is_current_session: false,
+            session_id: "242215ad-7e7b-4008-a0a5-7ccba0bcd4a5".to_string(),
+        }];
+
+        let report = format_gemini_session_report("/tmp/project", &sessions);
+
+        assert!(report.contains("242215ad-7e7b-4008-a0a5-7ccba0bcd4a5"));
+        assert!(!report.contains("242215ad-7e7b-4008-a0a5..."));
+    }
 }

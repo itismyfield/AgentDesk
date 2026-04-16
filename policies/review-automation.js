@@ -45,12 +45,6 @@ var reviewAutomation = {
       return;
     }
 
-    // Guard: don't create review dispatch if implementation/rework is still active
-    if (agentdesk.dispatch.hasActiveWork(card.id)) {
-      agentdesk.log.info("[review] Card " + card.id + " has active work dispatch — deferring review");
-      return;
-    }
-
     // Check if review is enabled — if not, complete immediately
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
@@ -99,6 +93,14 @@ var reviewAutomation = {
 
     // #117: Update canonical card_review_state
     agentdesk.reviewState.sync(card.id, "reviewing", { review_round: newRound });
+
+    // Guard: don't create review dispatch if implementation/rework is still active.
+    // The card has already entered review canonically, so preserve the fresh
+    // round/state while deferring only the counter-model dispatch creation.
+    if (agentdesk.review.hasActiveWork(card.id)) {
+      agentdesk.log.info("[review] Card " + card.id + " has active work dispatch — deferring review dispatch creation");
+      return;
+    }
 
     // Check review round limit — exceed → dilemma_pending with deadlock-manager notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
@@ -450,6 +452,8 @@ function setNormalSuggestionPending(cardId, verdict) {
 
 function parseJsonObject(raw) {
   if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  if (typeof raw !== "string") return {};
   try {
     return JSON.parse(raw) || {};
   } catch (e) {
@@ -607,9 +611,6 @@ function processVerdict(cardId, verdict, result, options) {
   var terminalState = agentdesk.pipeline.terminalState(cfg);
   var initialState = agentdesk.pipeline.kickoffState(cfg);
   var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
-  var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
-  var reviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_passed", cfg) || terminalState;
-  var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
 
   var cardCheck = agentdesk.db.query(
     "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
@@ -618,6 +619,20 @@ function processVerdict(cardId, verdict, result, options) {
     agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already terminal");
     return;
   }
+
+  var fallbackReviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+  var currentState = cardCheck.length > 0 ? cardCheck[0].status : null;
+  var currentReviewPassTarget = currentState
+    ? agentdesk.pipeline.nextGatedTargetWithGate(currentState, "review_passed", cfg)
+    : null;
+  var currentReviewReworkTarget = currentState
+    ? agentdesk.pipeline.nextGatedTargetWithGate(currentState, "review_rework", cfg)
+    : null;
+  var reviewState = (currentReviewPassTarget || currentReviewReworkTarget)
+    ? currentState
+    : fallbackReviewState;
+  var reviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_passed", cfg) || terminalState;
+  var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
 
   var latestReviewContext = loadLatestReviewDispatchContext(cardId, opts.review_dispatch_id);
   var noopVerification = latestReviewContext.review_mode === "noop_verification";
@@ -795,6 +810,7 @@ function processVerdict(cardId, verdict, result, options) {
               "create-pr",
               "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
               {
+                sidecar_dispatch: true,
                 worktree_path: latestWorkTarget.worktree_path,
                 worktree_branch: latestWorkTarget.branch,
                 branch: latestWorkTarget.branch

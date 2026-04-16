@@ -306,6 +306,7 @@ pub async fn hook_session(
     // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
     // strings are never persisted — prevents invalid --resume attempts after restart.
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
+    let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
     // Check if session exists before upsert to determine new vs update for WS event
     let is_new_session: bool = conn
         .query_row(
@@ -316,8 +317,8 @@ pub async fn hook_session(
         .unwrap_or(true);
 
     let result = conn.execute(
-        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, claude_session_id, last_heartbeat)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
+        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, claude_session_id, raw_provider_session_id, last_heartbeat)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'))
          ON CONFLICT(session_key) DO UPDATE SET
            status = excluded.status,
            provider = excluded.provider,
@@ -333,6 +334,7 @@ pub async fn hook_session(
            agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
+           raw_provider_session_id = COALESCE(excluded.raw_provider_session_id, sessions.raw_provider_session_id),
            last_heartbeat = datetime('now')",
         rusqlite::params![
             body.session_key,
@@ -346,6 +348,7 @@ pub async fn hook_session(
             active_dispatch_id,
             thread_channel_id,
             claude_session_id,
+            raw_provider_session_id,
         ],
     );
 
@@ -610,26 +613,48 @@ pub async fn get_claude_session_id(
     let provider = params.provider.as_deref().filter(|s| !s.is_empty());
     let result = if let Some(provider) = provider {
         conn.query_row(
-            "SELECT claude_session_id FROM sessions WHERE session_key = ?1 AND provider = ?2",
+            "SELECT claude_session_id, raw_provider_session_id
+             FROM sessions
+             WHERE session_key = ?1 AND provider = ?2",
             rusqlite::params![&params.session_key, provider],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
     } else {
         conn.query_row(
-            "SELECT claude_session_id FROM sessions WHERE session_key = ?1",
+            "SELECT claude_session_id, raw_provider_session_id
+             FROM sessions
+             WHERE session_key = ?1",
             [&params.session_key],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
     };
 
     match result {
-        Ok(claude_session_id) => (
+        Ok((claude_session_id, raw_provider_session_id)) => (
             StatusCode::OK,
-            Json(json!({"claude_session_id": claude_session_id, "session_id": claude_session_id})),
+            Json(json!({
+                "claude_session_id": claude_session_id,
+                "session_id": claude_session_id,
+                "raw_provider_session_id": raw_provider_session_id,
+            })),
         ),
         Err(rusqlite::Error::QueryReturnedNoRows) => (
             StatusCode::OK,
-            Json(json!({"claude_session_id": null, "session_id": null})),
+            Json(json!({
+                "claude_session_id": null,
+                "session_id": null,
+                "raw_provider_session_id": null,
+            })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -665,7 +690,11 @@ pub async fn clear_stale_session_id(
     };
     let changes = conn
         .execute(
-            "UPDATE sessions SET claude_session_id = NULL WHERE claude_session_id = ?1",
+            "UPDATE sessions
+             SET claude_session_id = NULL,
+                 raw_provider_session_id = NULL
+             WHERE claude_session_id = ?1
+                OR raw_provider_session_id = ?1",
             [sid],
         )
         .unwrap_or(0);
@@ -696,7 +725,10 @@ pub async fn clear_session_id_by_key(
     };
     let changes = conn
         .execute(
-            "UPDATE sessions SET claude_session_id = NULL WHERE session_key = ?1",
+            "UPDATE sessions
+             SET claude_session_id = NULL,
+                 raw_provider_session_id = NULL
+             WHERE session_key = ?1",
             [key],
         )
         .unwrap_or(0);
@@ -865,7 +897,8 @@ pub fn gc_stale_fixed_working_sessions_db(conn: &rusqlite::Connection) -> usize 
         "UPDATE sessions
          SET status = 'disconnected',
              active_dispatch_id = NULL,
-             claude_session_id = NULL
+             claude_session_id = NULL,
+             raw_provider_session_id = NULL
          WHERE thread_channel_id IS NULL
            AND status = 'working'
            AND COALESCE(last_heartbeat, created_at) < datetime('now', ?1)",
@@ -900,7 +933,8 @@ fn disconnect_stale_fixed_session_by_key_db(
         "UPDATE sessions
          SET status = 'disconnected',
              active_dispatch_id = NULL,
-             claude_session_id = NULL
+             claude_session_id = NULL,
+             raw_provider_session_id = NULL
          WHERE session_key = ?1
            AND thread_channel_id IS NULL
            AND status = 'working'
@@ -1182,7 +1216,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
 
         conn.execute(
             "UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL, \
-             claude_session_id = NULL WHERE session_key = ?1",
+             claude_session_id = NULL, raw_provider_session_id = NULL WHERE session_key = ?1",
             [session_key],
         )
         .ok();

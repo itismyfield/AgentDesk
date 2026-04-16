@@ -574,6 +574,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 commands::cmd_model(),
                 commands::cmd_queue(),
                 commands::cmd_health(),
+                commands::cmd_sessions(),
+                commands::cmd_deletesession(),
                 commands::cmd_allowedtools(),
                 commands::cmd_allowed(),
                 commands::cmd_debug(),

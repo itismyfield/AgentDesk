@@ -1450,6 +1450,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memento_review_lite_does_not_mark_context_loaded() {
+        let backend = MementoBackend::new(memento_settings());
+
+        let recall = backend
+            .recall(RecallRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                session_id: "session-1".to_string(),
+                dispatch_profile: DispatchProfile::ReviewLite,
+                user_text: "Review this quickly".to_string(),
+            })
+            .await;
+
+        assert!(recall.external_recall.is_none());
+        assert!(recall.warnings.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_memento_reflect_calls_reflect_tool_over_mcp() {
         let reflect_content = serde_json::to_string(&json!({
             "success": true,

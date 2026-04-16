@@ -527,6 +527,14 @@ pub async fn submit_review_decision(
                                 true,
                             ) {
                                 Ok(_) => {
+                                    // Materialize any follow-up transitions queued by
+                                    // OnReviewEnter (for example, single-provider
+                                    // auto-approval to terminal) before checking
+                                    // whether a live review dispatch exists.
+                                    crate::kanban::drain_hook_side_effects(
+                                        &state.db,
+                                        &state.engine,
+                                    );
                                     let followups =
                                         active_accept_followups(&state.db, &body.card_id);
                                     if followups.review > 0 {
@@ -756,7 +764,10 @@ pub async fn submit_review_decision(
                                         })
                                 })
                                 .unwrap_or(false);
-                        if dispatch_consumed_by_terminal_cleanup {
+                        let dispatch_no_longer_active = terminal_auto_approved
+                            && active_accept_followups(&state.db, &body.card_id).review_decision
+                                == 0;
+                        if dispatch_consumed_by_terminal_cleanup || dispatch_no_longer_active {
                             tracing::info!(
                                 "[review-decision] #483 pending review-decision {} for card {} was already consumed by terminal auto-approval",
                                 rd_id,

@@ -544,7 +544,7 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
 interface RLBucket {
   id: string;
   label: string;
-  utilization: number;
+  utilization: number | null;
   level: "normal" | "warning" | "danger";
 }
 
@@ -552,6 +552,8 @@ interface RLProvider {
   provider: string;
   buckets: RLBucket[];
   stale: boolean;
+  unsupported: boolean;
+  reason: string | null;
 }
 
 interface RawRLBucket {
@@ -566,26 +568,55 @@ interface RawRLProvider {
   provider: string;
   buckets: RawRLBucket[];
   stale: boolean;
+  unsupported?: boolean;
+  reason?: string | null;
 }
 
 const RL_HIDDEN_PROVIDERS = new Set(["github"]);
 const RL_HIDDEN_BUCKETS = new Set(["7d Sonnet"]);
 
-function transformRLProviders(raw: RawRLProvider[]): RLProvider[] {
+export function normalizeMiniRateLimitProviderLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  switch (normalized) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "gemini":
+      return "Gemini";
+    case "qwen":
+      return "Qwen";
+    default:
+      return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : provider;
+  }
+}
+
+export function transformRLProviders(raw: RawRLProvider[]): RLProvider[] {
   return raw
     .filter((rp) => !RL_HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
     .map((rp) => ({
-      provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
+      provider: normalizeMiniRateLimitProviderLabel(rp.provider),
       stale: rp.stale,
+      unsupported: Boolean(rp.unsupported),
+      reason: typeof rp.reason === "string" ? rp.reason : null,
       buckets: rp.buckets
         .filter((b) => !RL_HIDDEN_BUCKETS.has(b.name))
         .map((b) => {
-          const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
+          const utilization =
+            b.limit > 0 && b.used >= 0 && b.remaining >= 0
+              ? Math.round((b.used / b.limit) * 100)
+              : null;
           return {
             id: b.name,
             label: b.name,
             utilization,
-            level: (utilization >= 95 ? "danger" : utilization >= 80 ? "warning" : "normal") as "normal" | "warning" | "danger",
+            level: (
+              utilization !== null && utilization >= 95
+                ? "danger"
+                : utilization !== null && utilization >= 80
+                  ? "warning"
+                  : "normal"
+            ) as "normal" | "warning" | "danger",
           };
         }),
     }));
@@ -595,6 +626,7 @@ const RL_COLORS: Record<string, { normal: string; warning: string; danger: strin
   Claude: { accent: "#f59e0b", normal: "#f59e0b", warning: "#ea580c", danger: "#ef4444" },
   Codex: { accent: "#34d399", normal: "#34d399", warning: "#fbbf24", danger: "#f87171" },
   Gemini: { accent: "#3b82f6", normal: "#3b82f6", warning: "#f59e0b", danger: "#ef4444" },
+  Qwen: { accent: "#8b5cf6", normal: "#8b5cf6", warning: "#f59e0b", danger: "#ef4444" },
   OpenCode: { accent: "#06b6d4", normal: "#06b6d4", warning: "#f59e0b", danger: "#ef4444" },
   Copilot: { accent: "#10b981", normal: "#10b981", warning: "#f59e0b", danger: "#ef4444" },
   Antigravity: { accent: "#f97316", normal: "#f97316", warning: "#f59e0b", danger: "#ef4444" },
@@ -604,6 +636,7 @@ const RL_ICONS: Record<string, string> = {
   Claude: "🤖",
   Codex: "⚡",
   Gemini: "🔮",
+  Qwen: "🧠",
   OpenCode: "🧩",
   Copilot: "🛩️",
   Antigravity: "🌀",
@@ -658,27 +691,60 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
                 </span>
               ) : null}
             </div>
-            {/* Buckets grid — fixed 2-column */}
-            <div className="flex-1 grid grid-cols-2 gap-x-2">
-              {visible.map((b) => (
-                <div key={b.id} className="flex items-center gap-1">
-                  <span className="text-xs font-bold shrink-0 w-[14px]" style={{ color: barColor(p.provider, b.level) }}>
-                    {b.label}
+            {p.unsupported || visible.length === 0 ? (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <span
+                    className="rounded px-1.5 py-0.5 text-[9px] font-semibold shrink-0"
+                    style={{
+                      color: "#cbd5f5",
+                      background: "rgba(148,163,184,0.12)",
+                      border: "1px solid rgba(148,163,184,0.2)",
+                    }}
+                  >
+                    {p.unsupported ? "N/A" : (isKo ? "비어있음" : "EMPTY")}
                   </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="relative h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
-                      <div
-                        className="absolute inset-y-0 left-0 rounded-full"
-                        style={{ width: `${Math.min(b.utilization, 100)}%`, background: barColor(p.provider, b.level) }}
-                      />
-                    </div>
-                  </div>
-                  <span className="text-xs font-mono font-bold shrink-0 w-[22px] text-right" style={{ color: barColor(p.provider, b.level) }}>
-                    {b.utilization}%
+                  <span className="truncate text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    {p.unsupported
+                      ? (p.reason ?? (isKo ? "한도 텔레메트리 미지원" : "Rate-limit telemetry unavailable"))
+                      : (isKo ? "표시할 버킷 데이터 없음" : "No bucket data")}
                   </span>
                 </div>
-              ))}
-            </div>
+              </div>
+            ) : (
+              <div className="flex-1 grid grid-cols-2 gap-x-2">
+                {visible.map((b) => (
+                  <div key={b.id} className="flex items-center gap-1">
+                    <span className="text-xs font-bold shrink-0 w-[14px]" style={{ color: barColor(p.provider, b.level) }}>
+                      {b.label}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="relative h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-full"
+                          style={{
+                            width: b.utilization === null ? "0%" : `${Math.min(b.utilization, 100)}%`,
+                            background:
+                              b.utilization === null ? "transparent" : barColor(p.provider, b.level),
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <span
+                      className="text-xs font-mono font-bold shrink-0 w-[28px] text-right"
+                      style={{
+                        color:
+                          b.utilization === null
+                            ? "var(--th-text-muted)"
+                            : barColor(p.provider, b.level),
+                      }}
+                    >
+                      {b.utilization === null ? "N/A" : `${b.utilization}%`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}

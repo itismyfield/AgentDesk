@@ -6,11 +6,20 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, process::Command};
+use std::{
+    collections::{BTreeMap, HashSet},
+    process::Command,
+};
 
 use super::{
     AppState, skill_usage_analytics::collect_skill_usage, skills_api::sync_skills_from_disk,
 };
+
+const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[(
+    "qwen",
+    "No Qwen rate-limit telemetry source is implemented yet.",
+)];
+const UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 fn sqlite_datetime_to_millis(value: &str) -> Option<i64> {
     if let Ok(ts) = DateTime::parse_from_rfc3339(value) {
@@ -594,15 +603,35 @@ pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<ser
         }
     };
 
+    let now = chrono::Utc::now().timestamp();
+    let providers = build_rate_limit_provider_payloads(&conn, now);
+
+    (StatusCode::OK, Json(json!({"providers": providers})))
+}
+
+fn build_rate_limit_provider_payloads(
+    conn: &rusqlite::Connection,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let stale_sec: i64 = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+
     let mut stmt = match conn
         .prepare("SELECT provider, data, fetched_at FROM rate_limit_cache ORDER BY provider")
     {
         Ok(s) => s,
-        Err(_) => return (StatusCode::OK, Json(json!({"providers": []}))),
+        Err(_) => return build_unsupported_rate_limit_entries(conn, now),
     };
 
-    let now = chrono::Utc::now().timestamp();
-    let providers: Vec<serde_json::Value> = stmt
+    let mut seen = HashSet::new();
+    let mut providers: Vec<serde_json::Value> = stmt
         .query_map([], |row| {
             let provider: String = row.get(0)?;
             let data: String = row.get(1)?;
@@ -614,30 +643,109 @@ pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<ser
             rows.filter_map(|r| r.ok())
                 .filter_map(|(provider, data, fetched_at)| {
                     let parsed: serde_json::Value = serde_json::from_str(&data).ok()?;
-                    let buckets = parsed.get("buckets")?.as_array()?.clone();
-                    // Read stale threshold from bot_settings (default 600s)
-                    let stale_sec: i64 = conn
-                        .query_row(
-                            "SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec'",
-                            [],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(600);
+                    let buckets = parsed
+                        .get("buckets")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let unsupported = parsed
+                        .get("unsupported")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let reason = parsed
+                        .get("reason")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
                     let stale = (now - fetched_at) > stale_sec;
+                    seen.insert(provider.to_lowercase());
                     Some(json!({
                         "provider": provider,
                         "buckets": buckets,
                         "fetched_at": fetched_at,
                         "stale": stale,
+                        "unsupported": unsupported,
+                        "reason": reason,
                     }))
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    (StatusCode::OK, Json(json!({"providers": providers})))
+    for (provider, reason) in UNSUPPORTED_RATE_LIMIT_PROVIDERS {
+        if seen.contains(*provider) {
+            continue;
+        }
+        if !provider_has_recent_session_usage(conn, provider, now) {
+            continue;
+        }
+        providers.push(json!({
+            "provider": provider,
+            "buckets": [],
+            "fetched_at": now,
+            "stale": false,
+            "unsupported": true,
+            "reason": reason,
+        }));
+    }
+
+    providers.sort_by_key(|entry| {
+        match entry
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "claude" => 0,
+            "codex" => 1,
+            "gemini" => 2,
+            "qwen" => 3,
+            _ => 9,
+        }
+    });
+    providers
+}
+
+fn provider_has_recent_session_usage(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    now: i64,
+) -> bool {
+    let threshold = now.saturating_sub(UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS);
+    conn.query_row(
+        "SELECT 1
+         FROM sessions
+         WHERE lower(provider) = lower(?1)
+           AND COALESCE(
+                 CAST(strftime('%s', last_heartbeat) AS INTEGER),
+                 CAST(strftime('%s', created_at) AS INTEGER),
+                 0
+               ) >= ?2
+         LIMIT 1",
+        rusqlite::params![provider, threshold],
+        |_row| Ok(()),
+    )
+    .is_ok()
+}
+
+fn build_unsupported_rate_limit_entries(
+    conn: &rusqlite::Connection,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    UNSUPPORTED_RATE_LIMIT_PROVIDERS
+        .iter()
+        .filter(|(provider, _reason)| provider_has_recent_session_usage(conn, provider, now))
+        .map(|(provider, reason)| {
+            json!({
+                "provider": provider,
+                "buckets": [],
+                "fetched_at": now,
+                "stale": false,
+                "unsupported": true,
+                "reason": reason,
+            })
+        })
+        .collect()
 }
 
 /// GET /api/skills-trend?days=30
@@ -684,4 +792,67 @@ pub async fn skills_trend(
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(json!({"trend": trend})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn build_rate_limit_provider_payloads_hides_unused_unsupported_qwen() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "claude",
+                serde_json::json!({
+                    "buckets": [{
+                        "name": "requests",
+                        "limit": 100,
+                        "used": 20,
+                        "remaining": 80,
+                        "reset": 1_700_000_000_i64
+                    }]
+                })
+                .to_string(),
+                1_700_000_000_i64
+            ],
+        )
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads(&conn, 1_700_000_100);
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("claude"));
+    }
+
+    #[test]
+    fn build_rate_limit_provider_payloads_shows_recent_unsupported_qwen_only_when_used() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
+             VALUES (?1, ?2, 'completed', ?3, ?4)",
+            rusqlite::params![
+                "qwen-session-1",
+                "qwen",
+                "2023-11-14 22:00:00",
+                "2023-11-14 22:10:00"
+            ],
+        )
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads(&conn, 1_700_000_100);
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("qwen"));
+        assert_eq!(providers[0]["unsupported"], json!(true));
+        assert_eq!(providers[0]["buckets"], json!([]));
+    }
 }

@@ -12,7 +12,7 @@ import {
 interface RateLimitBucket {
   id: string;
   label: string;
-  utilization: number;
+  utilization: number | null;
   resets_at: string | null;
   level: "normal" | "warning" | "danger";
 }
@@ -22,6 +22,8 @@ interface RateLimitProvider {
   buckets: RateLimitBucket[];
   fetched_at: number;
   stale: boolean;
+  unsupported: boolean;
+  reason: string | null;
 }
 
 interface RateLimitData {
@@ -42,6 +44,8 @@ interface RawProvider {
   buckets: RawBucket[];
   fetched_at: number;
   stale: boolean;
+  unsupported?: boolean;
+  reason?: string | null;
 }
 
 interface RawRateLimitData {
@@ -55,7 +59,23 @@ const HIDDEN_PROVIDERS = new Set(["github"]);
 const HIDDEN_BUCKETS = new Set(["7d Sonnet"]);
 const RATE_LIMIT_FETCH_TIMEOUT_MS = 15_000;
 
-function transformRawData(
+export function normalizeRateLimitProviderLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  switch (normalized) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "gemini":
+      return "Gemini";
+    case "qwen":
+      return "Qwen";
+    default:
+      return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : provider;
+  }
+}
+
+export function transformRawData(
   raw: RawRateLimitData,
   warningPct: number,
   dangerPct: number,
@@ -64,15 +84,24 @@ function transformRawData(
     providers: raw.providers
       .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
       .map((rp) => ({
-        provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
+        provider: normalizeRateLimitProviderLabel(rp.provider),
         fetched_at: rp.fetched_at,
         stale: rp.stale,
+        unsupported: Boolean(rp.unsupported),
+        reason: typeof rp.reason === "string" ? rp.reason : null,
         buckets: rp.buckets
           .filter((b) => !HIDDEN_BUCKETS.has(b.name))
           .map((b) => {
-            const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
+            const utilization =
+              b.limit > 0 && b.used >= 0 && b.remaining >= 0
+                ? Math.round((b.used / b.limit) * 100)
+                : null;
             const level: "normal" | "warning" | "danger" =
-              utilization >= dangerPct ? "danger" : utilization >= warningPct ? "warning" : "normal";
+              utilization !== null && utilization >= dangerPct
+                ? "danger"
+                : utilization !== null && utilization >= warningPct
+                  ? "warning"
+                  : "normal";
             return {
               id: b.name,
               label: b.name,
@@ -111,6 +140,12 @@ const PROVIDER_PALETTES: Record<string, ProviderPalette> = {
     warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
     danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
   },
+  Qwen: {
+    accent: "#8b5cf6",
+    normal: { bar: "#8b5cf6", text: "#a78bfa", glow: "rgba(139,92,246,0.3)" },
+    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
+    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
+  },
 };
 
 const DEFAULT_PALETTE: ProviderPalette = PROVIDER_PALETTES.Codex;
@@ -118,6 +153,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   Claude: "🤖",
   Codex: "⚡",
   Gemini: "🔮",
+  Qwen: "🧠",
 };
 
 function getColors(provider: string, level: string) {
@@ -162,12 +198,17 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(true);
-  const title = t({ ko: "프로바이더 상태", en: "Provider Status", ja: "プロバイダー状態", zh: "Provider 状态" });
+  const title = t({
+    ko: "프로바이더 상태",
+    en: "Provider Status",
+    ja: "プロバイダー状態",
+    zh: "Provider 状态",
+  });
   const tooltip = t({
-    ko: "Claude/Codex/Gemini provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. STALE은 최근 동기화 결과가 늦어졌다는 뜻입니다.",
-    en: "Quick view of Claude/Codex/Gemini provider bucket usage and cache freshness. STALE means the latest sync result is lagging.",
-    ja: "Claude/Codex/Gemini provider の bucket 使用量と cache freshness を素早く確認します。STALE は直近の同期結果が遅れている状態です。",
-    zh: "快速查看 Claude/Codex/Gemini provider bucket 使用量与缓存新鲜度。STALE 表示最近一次同步结果已落后。",
+    ko: "Claude/Codex/Gemini/Qwen provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. 지원되지 않는 provider 는 별도 상태로 표시됩니다.",
+    en: "Quick view of Claude/Codex/Gemini/Qwen provider bucket usage and cache freshness. Unsupported providers are shown with a separate state.",
+    ja: "Claude/Codex/Gemini/Qwen provider の bucket 使用量と cache freshness を素早く確認します。未対応 provider は別状態で表示します。",
+    zh: "快速查看 Claude/Codex/Gemini/Qwen provider bucket 使用量与缓存新鲜度。未支持的 provider 会以单独状态显示。",
   });
 
   useEffect(() => {
@@ -261,10 +302,10 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
       eyebrow={t({ ko: "운영", en: "Operations", ja: "運用", zh: "运营" })}
       title={title}
       description={t({
-        ko: "Claude/Codex/Gemini 버킷 사용량과 stale 캐시 상태를 한눈에 확인합니다.",
-        en: "Track Claude/Codex/Gemini bucket utilization and stale cache state at a glance.",
-        ja: "Claude/Codex/Gemini バケット使用量と stale キャッシュ状態をひと目で確認します。",
-        zh: "一眼查看 Claude/Codex/Gemini bucket 使用率与 stale cache 状态。",
+        ko: "Provider 버킷 사용량과 stale 캐시 상태를 한눈에 확인합니다.",
+        en: "Track provider bucket utilization, stale cache state, and unsupported telemetry at a glance.",
+        ja: "Provider バケット使用量、stale キャッシュ状態、未対応テレメトリをひと目で確認します。",
+        zh: "一眼查看 Provider bucket 使用率、stale cache 状态与未支持遥测。",
       })}
       actions={sectionActions}
     >
@@ -306,6 +347,12 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
         <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {providers.map((provider) => {
             const accent = getAccent(provider.provider);
+            const statusLabel = provider.unsupported
+              ? t({ ko: "미지원", en: "N/A", ja: "未対応", zh: "未支持" })
+              : provider.stale
+                ? t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })
+                : t({ ko: "정상", en: "FRESH", ja: "正常", zh: "正常" });
+
             return (
               <SurfaceCard
                 key={provider.provider}
@@ -324,81 +371,142 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                       {(PROVIDER_ICONS[provider.provider] ?? "•")} {provider.provider}
                     </div>
                     <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                      {provider.stale
-                        ? t({ ko: "캐시 지연 상태", en: "Stale cache", ja: "キャッシュ遅延", zh: "缓存延迟" })
-                        : t({ ko: "정상 수집 중", en: "Fresh cache", ja: "正常取得中", zh: "缓存正常" })}
+                      {provider.unsupported
+                        ? t({
+                            ko: "한도 텔레메트리 미지원",
+                            en: "Rate-limit telemetry unavailable",
+                            ja: "制限テレメトリ未対応",
+                            zh: "限额遥测未支持",
+                          })
+                        : provider.stale
+                          ? t({
+                              ko: "캐시 지연 상태",
+                              en: "Stale cache",
+                              ja: "キャッシュ遅延",
+                              zh: "缓存延迟",
+                            })
+                          : t({
+                              ko: "정상 수집 중",
+                              en: "Fresh cache",
+                              ja: "正常取得中",
+                              zh: "缓存正常",
+                            })}
                     </div>
                   </div>
                   <span
                     className="rounded-full px-2 py-1 text-[10px] font-medium"
                     style={{
-                      color: provider.stale ? "#fbbf24" : accent,
-                      border: `1px solid ${provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
-                      background: provider.stale
-                        ? "rgba(251,191,36,0.1)"
-                        : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
+                      color: provider.unsupported ? "#cbd5f5" : provider.stale ? "#fbbf24" : accent,
+                      border: `1px solid ${provider.unsupported ? "rgba(203,213,225,0.24)" : provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
+                      background: provider.unsupported
+                        ? "rgba(148,163,184,0.12)"
+                        : provider.stale
+                          ? "rgba(251,191,36,0.1)"
+                          : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
                     }}
                   >
-                    {provider.stale
-                      ? t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })
-                      : t({ ko: "정상", en: "FRESH", ja: "正常", zh: "正常" })}
+                    {statusLabel}
                   </span>
                 </div>
 
-                <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  {provider.buckets.map((bucket) => {
-                    const colors = getColors(provider.provider, bucket.level);
-                    const remaining = formatTimeRemaining(bucket.resets_at);
-                    return (
-                      <div key={bucket.id} className="relative">
-                        <div className="mb-1.5 flex items-center justify-between gap-2">
-                          <span
-                            className="text-xs font-bold"
-                            style={{ color: colors.text }}
-                          >
-                            {bucket.label}
-                          </span>
-                          <span
-                            className="text-xs font-mono font-bold"
-                            style={{
-                              color: colors.text,
-                              textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
-                            }}
-                          >
-                            {bucket.utilization}%
-                          </span>
-                        </div>
-                        <div style={{ minWidth: 60 }}>
-                          <div
-                            className="relative overflow-hidden rounded-full"
-                            style={{
-                              height: 10,
-                              background: "rgba(255,255,255,0.12)",
-                              border: "1px solid rgba(255,255,255,0.08)",
-                            }}
-                          >
-                            <div
-                              className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                              style={{
-                                width: `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
-                                background: colors.bar,
-                                boxShadow: `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
-                              }}
-                            />
-                          </div>
-                        </div>
-                        {remaining && (
-                          <span
-                            className="mt-1 inline-flex whitespace-nowrap text-[10px]"
-                            style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}
-                          >
-                            ↻ {remaining}
-                          </span>
-                        )}
+                {provider.unsupported || provider.buckets.length === 0 ? (
+                  <div
+                    className="mt-4 rounded-2xl border px-3 py-3"
+                    style={{
+                      borderColor: "rgba(148,163,184,0.16)",
+                      background:
+                        "color-mix(in srgb, var(--th-bg-surface) 94%, rgba(148,163,184,0.12) 6%)",
+                    }}
+                  >
+                    <div className="text-xs font-semibold" style={{ color: "var(--th-text)" }}>
+                      {provider.unsupported
+                        ? t({
+                            ko: "현재 이 provider 는 한도 버킷 집계를 제공하지 않습니다.",
+                            en: "This provider does not expose rate-limit bucket telemetry yet.",
+                            ja: "この provider はまだ制限バケットのテレメトリを提供していません。",
+                            zh: "该 provider 暂未提供限额 bucket 遥测。",
+                          })
+                        : t({
+                            ko: "표시할 버킷 데이터가 없습니다.",
+                            en: "No bucket data is available yet.",
+                            ja: "表示できるバケットデータがありません。",
+                            zh: "暂时没有可显示的 bucket 数据。",
+                          })}
+                    </div>
+                    {provider.reason ? (
+                      <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                        {provider.reason}
                       </div>
-                    );
-                  })}
-                </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    {provider.buckets.map((bucket) => {
+                      const colors = getColors(provider.provider, bucket.level);
+                      const remaining = formatTimeRemaining(bucket.resets_at);
+                      return (
+                        <div key={bucket.id} className="relative">
+                          <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold" style={{ color: colors.text }}>
+                              {bucket.label}
+                            </span>
+                            <span
+                              className="text-xs font-mono font-bold"
+                              style={{
+                                color:
+                                  bucket.utilization === null
+                                    ? "var(--th-text-muted)"
+                                    : colors.text,
+                                textShadow:
+                                  bucket.utilization !== null && bucket.level === "danger"
+                                    ? `0 0 6px ${colors.glow}`
+                                    : "none",
+                              }}
+                            >
+                              {bucket.utilization === null ? "N/A" : `${bucket.utilization}%`}
+                            </span>
+                          </div>
+                          <div style={{ minWidth: 60 }}>
+                            <div
+                              className="relative overflow-hidden rounded-full"
+                              style={{
+                                height: 10,
+                                background: "rgba(255,255,255,0.12)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                              }}
+                            >
+                              <div
+                                className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+                                style={{
+                                  width:
+                                    bucket.utilization === null
+                                      ? "0%"
+                                      : `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
+                                  background:
+                                    bucket.utilization === null
+                                      ? "transparent"
+                                      : colors.bar,
+                                  boxShadow:
+                                    bucket.utilization === null
+                                      ? "none"
+                                      : `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
+                                }}
+                              />
+                            </div>
+                          </div>
+                          {remaining && (
+                            <span
+                              className="mt-1 inline-flex whitespace-nowrap text-[10px]"
+                              style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}
+                            >
+                              ↻ {remaining}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </SurfaceCard>
             );
           })}
