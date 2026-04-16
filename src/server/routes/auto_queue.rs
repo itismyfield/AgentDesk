@@ -3188,33 +3188,7 @@ pub(crate) fn activate_with_deps(
     }
 
     crate::db::auto_queue::clear_inactive_slot_assignments(&conn);
-    let completed_slots = crate::db::auto_queue::completed_group_slots(&conn, &run_id);
     let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
-    for (agent_id, slot_index) in &completed_slots {
-        let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
-            deps.health_registry.clone(),
-            &conn,
-            agent_id,
-            *slot_index,
-        );
-        if cleared > 0 {
-            crate::auto_queue_log!(
-                info,
-                "activate_release_completed_slot",
-                run_log_ctx.clone().agent(agent_id).slot_index(*slot_index),
-                "[auto-queue] cleared {cleared} slot thread session(s) before releasing {agent_id} slot {slot_index}"
-            );
-        }
-        cleared_slots.insert((agent_id.clone(), *slot_index));
-    }
-    if let Err(error) = crate::db::auto_queue::release_group_slots(&conn, &completed_slots) {
-        crate::auto_queue_log!(
-            warn,
-            "activate_release_completed_slots_failed",
-            run_log_ctx.clone(),
-            "[auto-queue] failed to release completed slots for run {run_id}: {error}"
-        );
-    }
 
     // Stale empty run cleanup: after generate()/enqueue() fixes, normal paths never
     // leave an active run with 0 entries.  Any such run is legacy corruption — complete
@@ -3960,7 +3934,7 @@ pub(crate) fn activate_with_deps(
                 _newly_assigned,
             );
             let slot_key = (agent_id.clone(), assigned_slot);
-            if !cleared_slots.contains(&slot_key) {
+            if reset_slot_thread_before_reuse && !cleared_slots.contains(&slot_key) {
                 let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
                     deps.health_registry.clone(),
                     &conn,
@@ -5918,7 +5892,9 @@ mod tests {
     use super::{
         GenerateCandidate, QueueEntryOrder, build_group_plan, extract_dependency_numbers,
         extract_dependency_parse_result, reorder_entry_ids,
+        slot_requires_thread_reset_before_reuse,
     };
+    use rusqlite::Connection;
     use std::collections::HashMap;
 
     fn entry(id: &str, status: &str, agent_id: &str) -> QueueEntryOrder {
@@ -5943,6 +5919,46 @@ mod tests {
             metadata: metadata.map(str::to_string),
             github_issue_number: Some(issue_number),
         }
+    }
+
+    fn slot_reset_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE auto_queue_slots (
+                agent_id TEXT NOT NULL,
+                slot_index INTEGER NOT NULL,
+                thread_id_map TEXT,
+                PRIMARY KEY (agent_id, slot_index)
+            );
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                to_agent_id TEXT,
+                thread_id TEXT,
+                context TEXT
+            );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    #[test]
+    fn slot_thread_reset_requires_new_assignment() {
+        let conn = slot_reset_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ('agent-a', 0, '{\"123\":\"thread-1\"}')",
+            [],
+        )
+        .expect("seed slot binding");
+
+        assert!(
+            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false),
+            "same-run slot rebind must keep the existing thread binding"
+        );
+        assert!(
+            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true),
+            "cross-run reclaim must reset preserved slot bindings"
+        );
     }
 
     #[test]
