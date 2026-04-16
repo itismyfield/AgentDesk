@@ -42,6 +42,7 @@ struct MockDispatchSummaryState {
 struct MockDispatchTransportState {
     dispatch_calls: usize,
     review_followup_kinds: Vec<ReviewFollowupKind>,
+    review_followup_messages: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -85,13 +86,15 @@ impl DispatchTransport for MockDispatchTransport {
         _db: Db,
         _card_id: String,
         _channel_id_num: u64,
-        _message: String,
+        message: String,
         kind: ReviewFollowupKind,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send {
         let state = self.state.clone();
         let error = self.review_followup_error.clone();
         async move {
-            state.lock().unwrap().review_followup_kinds.push(kind);
+            let mut guard = state.lock().unwrap();
+            guard.review_followup_kinds.push(kind);
+            guard.review_followup_messages.push(message);
             match error {
                 Some(error) => Err(error),
                 None => Ok(()),
@@ -304,7 +307,7 @@ fn review_dispatch_message_includes_compact_metadata_and_issue_url() {
         "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
     ));
     assert!(message.contains("dispatch-1"));
-    assert!(!message.contains("review-verdict"));
+    assert!(message.contains("`POST /api/review-verdict` (`dispatch_id=dispatch-1`)"));
     assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
     assert!(message.chars().count() <= 500);
 }
@@ -514,13 +517,24 @@ fn review_decision_primary_message_includes_action_instructions() {
         Some("https://github.com/itismyfield/AgentDesk/issues/249"),
         Some(249),
         Some("review-decision"),
-        Some(r#"{"verdict":"rework"}"#),
+        Some(
+            r#"{
+                "verdict":"rework",
+                "repo":"owner/repo",
+                "issue_number":249,
+                "pr_number":366,
+                "reviewed_commit":"feedfacecafebeef",
+                "decision_endpoint":"POST /api/review-decision"
+            }"#,
+        ),
     );
 
     assert!(message.contains("[⚖️ 리뷰 검토]"));
     assert!(message.contains(
         "한 줄 지시: GitHub 리뷰 피드백을 확인하고 accept/dispute/dismiss 중 하나를 제출하세요."
     ));
+    assert!(message.contains("대상: repo=owner/repo, issue=#249, pr=#366, commit=feedfacecaf…"));
+    assert!(message.contains("제출: `POST /api/review-decision`"));
     assert!(message.contains("<https://github.com/itismyfield/AgentDesk/issues/249>"));
     assert!(!message.contains("카운터모델 리뷰 결과"));
     assert!(!message.contains("review-verdict"));
@@ -578,8 +592,26 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         )
         .unwrap();
         conn.execute(
+            "UPDATE kanban_cards SET github_issue_number = 692, repo_id = ?1 WHERE id = 'card-1'",
+            [std::env::current_dir().unwrap().display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pr_tracking (
+                card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at
+             ) VALUES (
+                'card-1', ?1, ?1, 'wt/692-followup', 366, 'feedfacecafebeef', 'review',
+                datetime('now'), datetime('now')
+             )",
+            [std::env::current_dir()
+                .unwrap()
+                .display()
+                .to_string()],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, context, created_at, updated_at)
-             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}', datetime('now'), datetime('now'))",
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\",\"notes\":\"missing null check\",\"items\":[\"handle null\"]}', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\",\"reviewed_commit\":\"feedfacecafebeef\"}', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -609,6 +641,77 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
     assert_eq!(dispatch_status, "pending");
     let context = context.expect("review-decision should persist provider routing context");
     assert!(context.contains("\"from_provider\":\"codex\""));
+    assert!(context.contains("\"reviewed_commit\":\"feedfacecafebeef\""));
+    assert!(context.contains("\"issue_number\":692"));
+    assert!(context.contains("\"pr_number\":366"));
+    assert!(context.contains("\"decision_endpoint\":\"POST /api/review-decision\""));
+    assert!(!context.contains("\"notes\""));
+    assert!(!context.contains("\"items\""));
+}
+
+#[tokio::test]
+async fn unknown_review_verdict_followup_includes_target_and_submission_hints() {
+    let db = test_db();
+    let transport = MockDispatchTransport::default();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, github_issue_url, latest_dispatch_id, created_at, updated_at
+            ) VALUES (
+                'card-unknown', 'Unknown verdict', 'review', 'agent-1',
+                'https://github.com/itismyfield/AgentDesk/issues/692', 'dispatch-review',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET github_issue_number = 692 WHERE id = 'card-unknown'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+            ) VALUES (
+                'dispatch-review', 'card-unknown', 'agent-1', 'review', 'completed',
+                '[Review R1] card-unknown',
+                '{\"repo\":\"owner/repo\",\"issue_number\":692,\"pr_number\":366,\"reviewed_commit\":\"feedfacecafebeef\",\"verdict_endpoint\":\"POST /api/review-verdict\"}',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    super::discord_delivery::send_review_result_to_primary_with_transport(
+        &db,
+        "card-unknown",
+        "dispatch-review",
+        "unknown",
+        &transport,
+    )
+    .await
+    .expect("unknown verdict followup should be sent");
+
+    let transport_state = transport.state.lock().unwrap();
+    assert_eq!(
+        transport_state.review_followup_kinds,
+        vec![ReviewFollowupKind::Unknown]
+    );
+    let message = transport_state
+        .review_followup_messages
+        .first()
+        .expect("followup message should be captured");
+    assert!(message.contains("대상: repo=owner/repo, issue=#692, pr=#366, commit=feedfacecaf…"));
+    assert!(message.contains("누락된 verdict 제출 경로 참고: 제출: `POST /api/review-verdict` (`dispatch_id=dispatch-review`)"));
+    assert!(message.contains("https://github.com/itismyfield/AgentDesk/issues/692"));
 }
 
 #[test]

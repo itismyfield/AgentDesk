@@ -17,7 +17,7 @@ use dispatch_channel::provider_from_channel_suffix;
 pub(crate) use dispatch_context::{
     REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER, REVIEW_VERDICT_IMPROVE_GUIDANCE,
     commit_belongs_to_card_issue, dispatch_type_force_new_session_default,
-    dispatch_type_uses_thread_routing, resolve_card_worktree,
+    dispatch_type_uses_thread_routing, inject_review_dispatch_identifiers, resolve_card_worktree,
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]

@@ -182,6 +182,58 @@ fn load_card_issue_repo(db: &Db, card_id: &str) -> Option<(Option<i64>, Option<S
     load_card_dispatch_info(db, card_id).map(|info| (info.issue_number, info.repo_id))
 }
 
+fn load_card_pr_number(db: &Db, card_id: &str) -> Option<i64> {
+    db.separate_conn().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT pr_number FROM pr_tracking WHERE card_id = ?1",
+            [card_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten()
+    })
+}
+
+pub(crate) fn inject_review_dispatch_identifiers(
+    db: &Db,
+    card_id: &str,
+    dispatch_type: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let snapshot = serde_json::Value::Object(obj.clone());
+    let repo = json_string_field(&snapshot, "repo")
+        .or_else(|| json_string_field(&snapshot, "target_repo"))
+        .map(str::to_string)
+        .or_else(|| resolve_card_target_repo_ref(db, card_id, Some(&snapshot)));
+    if let Some(repo) = repo {
+        obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
+    }
+
+    if let Some(issue_number) = load_card_issue_repo(db, card_id).and_then(|(issue, _)| issue) {
+        obj.entry("issue_number".to_string())
+            .or_insert_with(|| json!(issue_number));
+    }
+
+    if let Some(pr_number) = load_card_pr_number(db, card_id) {
+        obj.entry("pr_number".to_string())
+            .or_insert_with(|| json!(pr_number));
+    }
+
+    match dispatch_type {
+        "review" => {
+            obj.entry("verdict_endpoint".to_string())
+                .or_insert_with(|| json!("POST /api/review-verdict"));
+        }
+        "review-decision" => {
+            obj.entry("decision_endpoint".to_string())
+                .or_insert_with(|| json!("POST /api/review-decision"));
+        }
+        _ => {}
+    }
+}
+
 fn normalize_target_repo_token(raw: &str) -> Option<String> {
     let trimmed = raw
         .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'))
@@ -998,6 +1050,7 @@ pub(super) fn build_review_context(
 
         inject_review_merge_base_context(obj);
         inject_review_quality_context(obj);
+        inject_review_dispatch_identifiers(db, kanban_card_id, "review", obj);
 
         if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
             if let Ok(conn) = db.separate_conn() {
@@ -1140,6 +1193,15 @@ mod tests {
                 ?1, 'Test Card', ?2, ?3, datetime('now'), datetime('now')
              )",
             rusqlite::params![card_id, status, issue_number],
+        )
+        .unwrap();
+    }
+
+    fn set_card_repo_id(db: &Db, card_id: &str, repo_id: &str) {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
+            rusqlite::params![repo_id, card_id],
         )
         .unwrap();
     }
@@ -1305,5 +1367,51 @@ mod tests {
             refreshed.is_none(),
             "refresh must report failure when neither worktree nor repo dir has the commit"
         );
+    }
+
+    #[test]
+    fn review_context_injects_review_identifiers() {
+        let db = test_db();
+        seed_card(&db, "card-review-identifiers", 692, "review");
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let reviewed_commit = git_commit(repo_dir, "fix: review identifiers (#692)");
+        set_card_repo_id(&db, "card-review-identifiers", repo_dir);
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO pr_tracking (
+                card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at
+             ) VALUES (
+                'card-review-identifiers', ?1, ?2, 'wt/692-review', 901, ?3, 'review',
+                datetime('now'), datetime('now')
+             )",
+            rusqlite::params![repo_dir, repo_dir, reviewed_commit],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context = build_review_context(
+            &db,
+            "card-review-identifiers",
+            "agent-1",
+            &json!({
+                "worktree_path": repo_dir,
+                "branch": "wt/692-review",
+                "reviewed_commit": reviewed_commit,
+            }),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(
+            canonicalize_path(parsed["repo"].as_str().unwrap()),
+            canonicalize_path(repo_dir)
+        );
+        assert_eq!(parsed["issue_number"], 692);
+        assert_eq!(parsed["pr_number"], 901);
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(parsed["verdict_endpoint"], "POST /api/review-verdict");
     }
 }

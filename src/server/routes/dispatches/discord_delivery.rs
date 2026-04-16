@@ -1,5 +1,6 @@
 use super::outbox::{
     build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
+    review_submission_hint,
 };
 use super::resolve_channel_alias;
 use super::thread_reuse::{
@@ -2045,6 +2046,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         .ok()
         .flatten()
     };
+    let review_context_json = review_dispatch_context
+        .as_deref()
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
 
     // For improve/rework/reject: create a review-decision dispatch via the
     // authoritative path and let the outbox worker deliver the message.
@@ -2074,9 +2078,6 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             }
         }
 
-        let review_context_json = review_dispatch_context
-            .as_deref()
-            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
         let mut decision_context = serde_json::Map::new();
         decision_context.insert("verdict".to_string(), serde_json::json!(verdict));
         if let Some(provider) = review_context_json
@@ -2092,6 +2093,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             .and_then(|value| value.as_str())
         {
             decision_context.insert("target_provider".to_string(), serde_json::json!(provider));
+        }
+        if let Some(reviewed_commit) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("reviewed_commit"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert(
+                "reviewed_commit".to_string(),
+                serde_json::json!(reviewed_commit),
+            );
         }
 
         return match crate::dispatch::create_dispatch_core(
@@ -2162,6 +2173,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         )
     } else {
         let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+        let review_locator = review_context_json
+            .as_ref()
+            .and_then(|ctx| super::outbox::review_target_hint(None, ctx))
+            .map(|value| format!("\n대상: {value}"))
+            .unwrap_or_default();
+        let submission_hint = review_context_json
+            .as_ref()
+            .and_then(|ctx| review_submission_hint(Some("review"), review_dispatch_id, ctx))
+            .map(|value| format!("\n누락된 verdict 제출 경로 참고: {value}"))
+            .unwrap_or_default();
         (
             ReviewFollowupKind::Unknown,
             prefix_dispatch_message(
@@ -2170,7 +2191,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                     "⚠️ [리뷰 verdict 미제출] {title}\n\
                      ⛔ 코드 리뷰 금지 — 이것은 리뷰 결과 확인 요청입니다\n\
                      카운터모델이 verdict를 제출하지 않고 세션이 종료됐습니다.\n\
-                     GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{url_line}"
+                     GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{review_locator}{submission_hint}{url_line}"
                 ),
             ),
         )

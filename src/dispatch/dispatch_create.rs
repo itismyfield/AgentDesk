@@ -8,7 +8,8 @@ use crate::engine::PolicyEngine;
 use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
 use super::dispatch_context::{
     build_review_context, dispatch_context_with_session_strategy, dispatch_context_worktree_target,
-    resolve_card_target_repo_ref, resolve_card_worktree, resolve_parent_dispatch_context,
+    inject_review_dispatch_identifiers, resolve_card_target_repo_ref, resolve_card_worktree,
+    resolve_parent_dispatch_context,
 };
 use super::dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, record_dispatch_status_event_on_conn,
@@ -269,6 +270,13 @@ fn create_dispatch_core_internal(
                 );
                 base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
             }
+        }
+        if dispatch_type == "review-decision"
+            && let Ok(mut obj) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
+        {
+            inject_review_dispatch_identifiers(db, kanban_card_id, dispatch_type, &mut obj);
+            base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
         }
         base
     };

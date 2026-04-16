@@ -176,6 +176,14 @@ fn render_dispatch_context_section(
         })
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let review_repo = context
+        .get("repo")
+        .or_else(|| context.get("target_repo"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let review_issue = context.get("issue_number").and_then(|value| value.as_i64());
+    let review_pr = context.get("pr_number").and_then(|value| value.as_i64());
     let reviewed_commit = context
         .get("reviewed_commit")
         .and_then(|value| value.as_str())
@@ -186,12 +194,37 @@ fn render_dispatch_context_section(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let verdict_endpoint = context
+        .get("verdict_endpoint")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let decision_endpoint = context
+        .get("decision_endpoint")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     if dispatch_type == Some("review")
+        || dispatch_type == Some("review-decision")
+        || review_repo.is_some()
+        || review_issue.is_some()
+        || review_pr.is_some()
         || review_branch.is_some()
         || reviewed_commit.is_some()
         || context.get("review_mode").is_some()
+        || verdict_endpoint.is_some()
+        || decision_endpoint.is_some()
     {
+        if let Some(repo) = review_repo {
+            sections.push(format!("Review Repo: {repo}"));
+        }
+        if let Some(issue_number) = review_issue {
+            sections.push(format!("Review Issue: #{issue_number}"));
+        }
+        if let Some(pr_number) = review_pr {
+            sections.push(format!("Review PR: #{pr_number}"));
+        }
         if let Some(review_mode) = context.get("review_mode").and_then(|value| value.as_str()) {
             sections.push(format!("Review Mode: {review_mode}"));
         }
@@ -239,6 +272,12 @@ fn render_dispatch_context_section(
             .and_then(|value| value.as_str())
         {
             sections.push(format!("Review Verdict Guidance: {guidance}"));
+        }
+        if let Some(endpoint) = verdict_endpoint {
+            sections.push(format!("Verdict Endpoint: {endpoint}"));
+        }
+        if let Some(endpoint) = decision_endpoint {
+            sections.push(format!("Decision Endpoint: {endpoint}"));
         }
     }
 
@@ -1319,6 +1358,9 @@ mod tests {
     #[test]
     fn test_build_system_prompt_renders_dispatch_context_and_completion_contract() {
         let dispatch_context = serde_json::json!({
+            "repo": "owner/repo",
+            "issue_number": 671,
+            "pr_number": 812,
             "review_mode": "noop_verification",
             "branch": "wt/671-dispatch",
             "reviewed_commit": "abc12345deadbeef",
@@ -1326,6 +1368,7 @@ mod tests {
             "noop_reason": "feature already exists",
             "review_quality_checklist": ["edge case", "error handling"],
             "review_verdict_guidance": "quality issue가 보이면 improve",
+            "verdict_endpoint": "POST /api/review-verdict",
             "ci_recovery": {
                 "job_name": "dashboard-build",
                 "reason": "Code job failed: dashboard-build",
@@ -1361,12 +1404,82 @@ mod tests {
             false,
         );
 
+        assert!(prompt.contains("Review Repo: owner/repo"));
+        assert!(prompt.contains("Review Issue: #671"));
+        assert!(prompt.contains("Review PR: #812"));
         assert!(prompt.contains("Review Mode: noop_verification"));
         assert!(prompt.contains("Review Branch: wt/671-dispatch"));
         assert!(prompt.contains("Reviewed Commit: abc12345deadbeef"));
+        assert!(prompt.contains("Verdict Endpoint: POST /api/review-verdict"));
         assert!(prompt.contains("CI Recovery Job: dashboard-build"));
         assert!(prompt.contains("`POST /api/review-verdict` (`dispatch_id=dispatch-review-671`)"));
         assert!(prompt.contains("Review Quality Checklist"));
+    }
+
+    #[test]
+    fn test_review_decision_identifiers_render_in_current_task_but_not_rules_section() {
+        use super::super::settings::RoleBinding;
+
+        let dispatch_context = serde_json::json!({
+            "repo": "owner/repo",
+            "issue_number": 692,
+            "pr_number": 366,
+            "reviewed_commit": "feedfacecafebeef",
+            "decision_endpoint": "POST /api/review-decision",
+            "verdict": "rework"
+        });
+        let dispatch_context_raw = dispatch_context.to_string();
+        let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-decision-692"),
+            card_id: Some("card-692"),
+            dispatch_title: Some("[리뷰 검토] card-692"),
+            dispatch_context: Some(&dispatch_context_raw),
+            card_title: Some("refactor: self-contained review decision"),
+            github_issue_url: Some("https://github.com/itismyfield/AgentDesk/issues/692"),
+            issue_body: None,
+            deferred_dod: None,
+        };
+        let binding = RoleBinding {
+            role_id: "test-agent".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: true,
+            memory: Default::default(),
+        };
+
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            true,
+            Some(&binding),
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review-decision"),
+            Some(&current_task),
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let rules_start = prompt.find("[Review Decision Rules]").unwrap();
+        let task_start = prompt.find("[Current Task]").unwrap();
+        let rules_section = &prompt[rules_start..task_start];
+
+        assert!(prompt.contains("Review Repo: owner/repo"));
+        assert!(prompt.contains("Review Issue: #692"));
+        assert!(prompt.contains("Review PR: #366"));
+        assert!(prompt.contains("Reviewed Commit: feedfacecafebeef"));
+        assert!(prompt.contains("Decision Endpoint: POST /api/review-decision"));
+        assert!(rules_section.contains("POST /api/review-decision {card_id, decision, comment}"));
+        assert!(!rules_section.contains("owner/repo"));
+        assert!(!rules_section.contains("#366"));
+        assert!(!rules_section.contains("feedfacecafebeef"));
     }
 
     #[test]

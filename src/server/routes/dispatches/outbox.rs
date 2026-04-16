@@ -967,35 +967,145 @@ fn dispatch_reason_suffix(context_json: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-fn dispatch_instruction_line(dispatch_type: Option<&str>) -> &'static str {
+fn trim_context_string<'a>(context_json: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    context_json
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(super) fn review_target_hint(
+    issue_number: Option<i64>,
+    context_json: &serde_json::Value,
+) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(repo) = trim_context_string(context_json, "repo")
+        .or_else(|| trim_context_string(context_json, "target_repo"))
+    {
+        parts.push(format!("repo={repo}"));
+    }
+    if let Some(issue_number) = context_json
+        .get("issue_number")
+        .and_then(|value| value.as_i64())
+        .or(issue_number)
+    {
+        parts.push(format!("issue=#{issue_number}"));
+    }
+    if let Some(pr_number) = context_json
+        .get("pr_number")
+        .and_then(|value| value.as_i64())
+    {
+        parts.push(format!("pr=#{pr_number}"));
+    }
+    if let Some(commit) = trim_context_string(context_json, "reviewed_commit") {
+        parts.push(format!("commit={}", truncate_chars(commit, 12)));
+    }
+
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+pub(super) fn review_submission_hint(
+    dispatch_type: Option<&str>,
+    dispatch_id: &str,
+    context_json: &serde_json::Value,
+) -> Option<String> {
     match dispatch_type {
-        Some("review") => {
-            "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        Some("review-decision") => {
-            "한 줄 지시: GitHub 리뷰 피드백을 확인하고 accept/dispute/dismiss 중 하나를 제출하세요."
-        }
-        Some("implementation") => {
-            "한 줄 지시: 이 이슈를 구현하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        Some("rework") => {
-            "한 줄 지시: 기존 결과를 수정하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        Some("e2e-test") => {
-            "한 줄 지시: 검증만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        Some("consultation") => {
-            "한 줄 지시: 필요한 조사/판단만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        Some("phase-gate") => {
-            "한 줄 지시: phase gate 판정만 수행하고 체크 항목과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
-        }
-        _ => "한 줄 지시: 상세 요구사항은 시스템 프롬프트의 [Current Task]를 따르세요.",
+        Some("review") => Some(format!(
+            "제출: `{}` (`dispatch_id={dispatch_id}`)",
+            trim_context_string(context_json, "verdict_endpoint")
+                .unwrap_or("POST /api/review-verdict")
+        )),
+        Some("review-decision") => Some(format!(
+            "제출: `{}`",
+            trim_context_string(context_json, "decision_endpoint")
+                .unwrap_or("POST /api/review-decision")
+        )),
+        _ => None,
     }
 }
 
-fn minimal_dispatch_instruction_line() -> &'static str {
-    "상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+fn dispatch_instruction_line(
+    dispatch_type: Option<&str>,
+    dispatch_id: &str,
+    issue_number: Option<i64>,
+    context_json: &serde_json::Value,
+) -> String {
+    match dispatch_type {
+        Some("review") => {
+            let mut line =
+                "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                    .to_string();
+            if let Some(target) = review_target_hint(issue_number, context_json) {
+                line.push_str(&format!(" 대상: {target}."));
+            }
+            if let Some(submission) = review_submission_hint(dispatch_type, dispatch_id, context_json)
+            {
+                line.push_str(&format!(" {submission}."));
+            }
+            line
+        }
+        Some("review-decision") => {
+            let mut line =
+                "한 줄 지시: GitHub 리뷰 피드백을 확인하고 accept/dispute/dismiss 중 하나를 제출하세요."
+                    .to_string();
+            if let Some(target) = review_target_hint(issue_number, context_json) {
+                line.push_str(&format!(" 대상: {target}."));
+            }
+            if let Some(submission) = review_submission_hint(dispatch_type, dispatch_id, context_json)
+            {
+                line.push_str(&format!(" {submission}."));
+            }
+            line
+        }
+        Some("implementation") => {
+            "한 줄 지시: 이 이슈를 구현하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("rework") => {
+            "한 줄 지시: 기존 결과를 수정하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("e2e-test") => {
+            "한 줄 지시: 검증만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("consultation") => {
+            "한 줄 지시: 필요한 조사/판단만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("phase-gate") => {
+            "한 줄 지시: phase gate 판정만 수행하고 체크 항목과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        _ => "한 줄 지시: 상세 요구사항은 시스템 프롬프트의 [Current Task]를 따르세요."
+            .to_string(),
+    }
+}
+
+fn minimal_dispatch_instruction_line(
+    dispatch_type: Option<&str>,
+    dispatch_id: &str,
+    issue_number: Option<i64>,
+    context_json: &serde_json::Value,
+) -> String {
+    match dispatch_type {
+        Some("review") | Some("review-decision") => {
+            let mut line =
+                "상세 요구사항은 시스템 프롬프트의 [Current Task]를 따르세요.".to_string();
+            if let Some(target) = review_target_hint(issue_number, context_json) {
+                line.push_str(&format!(" 대상: {target}."));
+            }
+            if let Some(submission) =
+                review_submission_hint(dispatch_type, dispatch_id, context_json)
+            {
+                line.push_str(&format!(" {submission}."));
+            }
+            line
+        }
+        _ => "상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요.".to_string(),
+    }
 }
 
 fn render_dispatch_message(
@@ -1050,7 +1160,7 @@ pub(super) fn build_minimal_dispatch_message(
         &context_json,
         DISPATCH_TITLE_MINIMAL_LIMIT,
         false,
-        minimal_dispatch_instruction_line(),
+        &minimal_dispatch_instruction_line(dispatch_type, dispatch_id, issue_number, &context_json),
     );
     truncate_chars(&message, DISPATCH_MESSAGE_HARD_LIMIT)
 }
@@ -1076,7 +1186,7 @@ pub(super) fn format_dispatch_message(
         &context_json,
         DISPATCH_TITLE_PRIMARY_LIMIT,
         true,
-        dispatch_instruction_line(dispatch_type),
+        &dispatch_instruction_line(dispatch_type, dispatch_id, issue_number, &context_json),
     );
     if primary.chars().count() <= DISPATCH_MESSAGE_TARGET_LEN {
         return primary;
@@ -1091,7 +1201,7 @@ pub(super) fn format_dispatch_message(
         &context_json,
         DISPATCH_TITLE_COMPACT_LIMIT,
         true,
-        minimal_dispatch_instruction_line(),
+        &minimal_dispatch_instruction_line(dispatch_type, dispatch_id, issue_number, &context_json),
     );
     if compact.chars().count() <= DISPATCH_MESSAGE_HARD_LIMIT {
         return compact;
