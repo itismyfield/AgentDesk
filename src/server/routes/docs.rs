@@ -147,7 +147,9 @@ fn category_description(category: &str) -> &'static str {
         "github-dashboard" => "Dashboard-oriented GitHub read models and issue actions.",
         "health" => "Health and liveness endpoints.",
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
-        "kanban" => "Kanban cards, review recovery, PMD transitions, and DoD operations.",
+        "kanban" => {
+            "Kanban cards, review recovery, administrative transitions, and DoD operations."
+        }
         "kanban-repos" => "Kanban repository settings and ownership metadata.",
         "meetings" => "Round-table meeting lifecycle and issue generation.",
         "messages" => "Message log read/write APIs.",
@@ -197,6 +199,24 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/onboarding/status",
             "onboarding",
             "Get onboarding status",
+        ),
+        ep(
+            "GET",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Get onboarding resume draft",
+        ),
+        ep(
+            "PUT",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Persist onboarding resume draft",
+        ),
+        ep(
+            "DELETE",
+            "/api/onboarding/draft",
+            "onboarding",
+            "Clear onboarding resume draft",
         ),
         ep(
             "POST",
@@ -579,8 +599,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "card-1"}, "body": {"reason": "pm reopen", "reset_full": true}}),
-            json!({"card": {"id": "card-1", "status": "ready"}, "reopened": true, "reset_full": true, "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1, "from": "done", "to": "ready", "reason": "pm reopen"}),
+            json!({"path": {"id": "card-1"}, "body": {"reason": "manual reopen", "reset_full": true}}),
+            json!({"card": {"id": "card-1", "status": "ready"}, "reopened": true, "reset_full": true, "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1, "from": "done", "to": "ready", "reason": "manual reopen"}),
         ),
         ep(
             "POST",
@@ -1775,7 +1795,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/auto-queue/runs/{id}/order",
             "auto-queue",
-            "Submit ordered cards for a pending PM-assisted run",
+            "Submit ordered cards for a pending run",
         )
         .with_params([
             ("id", path_param("Auto-queue run ID")),
@@ -1789,7 +1809,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "rationale",
-                body_param("string", false, "PM rationale for this order"),
+                body_param("string", false, "Ordering rationale for this run"),
             ),
             (
                 "reasoning",

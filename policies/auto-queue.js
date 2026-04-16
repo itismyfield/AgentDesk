@@ -90,6 +90,57 @@ function autoQueueLog(level, message, context) {
   agentdesk.log[level]("[auto-queue] " + message + _formatAutoQueueLogContext(merged));
 }
 
+var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
+var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
+
+function phaseGateFailureKey(cardId, phase) {
+  return "phase_gate_failure:" + cardId + ":" + phase;
+}
+
+function incrementPhaseGateFailureCount(cardId, phase) {
+  if (!cardId) return 0;
+  var key = phaseGateFailureKey(cardId, phase);
+  var current = parseInt(agentdesk.kv.get(key) || "0", 10);
+  if (!current || current < 0) current = 0;
+  var next = current + 1;
+  agentdesk.kv.set(key, String(next), PHASE_GATE_FAILURE_TTL_SEC);
+  return next;
+}
+
+function resetPhaseGateFailureCount(cardId, phase) {
+  if (!cardId) return;
+  agentdesk.kv.delete(phaseGateFailureKey(cardId, phase));
+}
+
+function loadPhaseGateCardLabel(cardId) {
+  if (!cardId) return "unknown card";
+  var rows = agentdesk.db.query(
+    "SELECT COALESCE(title, id) as title, github_issue_number FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0) return cardId;
+  if (rows[0].github_issue_number) {
+    return "#" + rows[0].github_issue_number + " " + rows[0].title;
+  }
+  return rows[0].title || cardId;
+}
+
+function handlePhaseGateFailure(cardId, phase, reason, context) {
+  var failureCount = incrementPhaseGateFailureCount(cardId, phase);
+  notifyCardOwner(cardId, reason, "auto-queue");
+  if (failureCount >= PHASE_GATE_HUMAN_ESCALATION_THRESHOLD) {
+    notifyHumanAlert(
+      "⚠️ [Phase Gate] " + loadPhaseGateCardLabel(cardId) + "\n" +
+        "phase " + phase + " 실패가 " + failureCount + "회 누적되었습니다.\n" +
+        reason + "\n" +
+        "사람 확인이 필요합니다.",
+      "auto-queue"
+    );
+  }
+  autoQueueLog("warn", "Phase gate failure recorded for card " + (cardId || "unknown") + " phase " + phase + " count=" + failureCount, context);
+  return failureCount;
+}
+
 var autoQueue = {
   name: "auto-queue",
   priority: 500,
@@ -205,7 +256,17 @@ var autoQueue = {
       state.failed_reason = result.summary || result.reason || ("expected " + passVerdict + ", got " + (verdict || "none"));
       savePhaseGateState(gate.run_id, phase, state);
       pauseRun(gate.run_id);
-      notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: " + state.failed_reason);
+      handlePhaseGateFailure(
+        state.anchor_card_id || dispatch.kanban_card_id,
+        phase,
+        "[phase-gate] phase " + phase + " failed: " + state.failed_reason,
+        {
+          run_id: gate.run_id,
+          dispatch_id: dispatch.id,
+          card_id: state.anchor_card_id || dispatch.kanban_card_id,
+          batch_phase: phase
+        }
+      );
       autoQueueLog("warn", "Phase gate failed for run " + gate.run_id + " phase " + phase + ": " + state.failed_reason, {
         run_id: gate.run_id,
         dispatch_id: dispatch.id,
@@ -222,7 +283,17 @@ var autoQueue = {
       state.failed_reason = "missing phase gate dispatch rows";
       savePhaseGateState(gate.run_id, phase, state);
       pauseRun(gate.run_id);
-      notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: missing gate dispatch rows");
+      handlePhaseGateFailure(
+        state.anchor_card_id || dispatch.kanban_card_id,
+        phase,
+        "[phase-gate] phase " + phase + " failed: missing gate dispatch rows",
+        {
+          run_id: gate.run_id,
+          dispatch_id: dispatch.id,
+          card_id: state.anchor_card_id || dispatch.kanban_card_id,
+          batch_phase: phase
+        }
+      );
       return;
     }
 
@@ -246,7 +317,17 @@ var autoQueue = {
         state.failed_reason = gateResult.summary || gateResult.reason || ("gate verdict mismatch for dispatch " + gateDispatch.id);
         savePhaseGateState(gate.run_id, phase, state);
         pauseRun(gate.run_id);
-        notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: " + state.failed_reason);
+        handlePhaseGateFailure(
+          state.anchor_card_id || dispatch.kanban_card_id,
+          phase,
+          "[phase-gate] phase " + phase + " failed: " + state.failed_reason,
+          {
+            run_id: gate.run_id,
+            dispatch_id: gateDispatch.id,
+            card_id: state.anchor_card_id || dispatch.kanban_card_id,
+            batch_phase: phase
+          }
+        );
         return;
       }
     }
@@ -262,6 +343,7 @@ var autoQueue = {
     }
 
     clearPhaseGateState(gate.run_id, phase);
+    resetPhaseGateFailureCount(state.anchor_card_id || dispatch.kanban_card_id, phase);
     if (state.final_phase || gate.final_phase) {
       completeRunAndNotify(gate.run_id);
       autoQueueLog("info", "Phase gate passed, completed run " + gate.run_id + " at phase " + phase, {
@@ -664,7 +746,8 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
 
   var remainingCount = remainingRunnableEntryCount(runId, null);
 
-  if ((donePhase || 0) > 0) {
+  var effectiveDonePhase = (donePhase !== null && donePhase !== undefined) ? donePhase : -1;
+  if (effectiveDonePhase >= 0) {
     var currentPhaseDone = remainingRunnableEntryCount(runId, donePhase) === 0;
     if (currentPhaseDone) {
       var nextPhaseRows = agentdesk.db.query(
@@ -903,7 +986,16 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
     state.status = "failed";
     state.failed_reason = "no phase gate targets found";
     savePhaseGateState(runId, phase, state);
-    notifyPMD(anchorCardId, "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " has no gate targets");
+    handlePhaseGateFailure(
+      anchorCardId,
+      phase,
+      "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " has no gate targets",
+      {
+        run_id: runId,
+        card_id: anchorCardId,
+        batch_phase: phase
+      }
+    );
     return state;
   }
 
@@ -955,7 +1047,16 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
     state.status = "failed";
     state.failed_reason = errors.join("; ") || "phase gate dispatch creation failed";
     savePhaseGateState(runId, phase, state);
-    notifyPMD(anchorCardId, "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " setup failed: " + state.failed_reason);
+    handlePhaseGateFailure(
+      anchorCardId,
+      phase,
+      "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " setup failed: " + state.failed_reason,
+      {
+        run_id: runId,
+        card_id: anchorCardId,
+        batch_phase: phase
+      }
+    );
     autoQueueLog("warn", "Phase gate setup failed for run " + runId + " phase " + phase + ": " + state.failed_reason, {
       run_id: runId,
       card_id: anchorCardId,

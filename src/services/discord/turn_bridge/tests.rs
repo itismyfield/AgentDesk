@@ -175,25 +175,56 @@ fn sample_session() -> DiscordSession {
 }
 
 #[test]
-fn turn_end_memory_plan_skips_cleared_and_prompt_too_long_surfaces() {
+fn turn_end_memory_plan_skips_only_cleared_sessions() {
     let mut cleared = sample_session();
     cleared.cleared = true;
     assert_eq!(
         plan_turn_end_memory(&cleared, MemoryBackendKind::File, false, false, false, true),
         None
     );
+}
 
+#[test]
+fn turn_end_memory_plan_keeps_memento_feedback_analysis_when_prompt_is_too_long() {
     let prompt_too_long = sample_session();
     assert_eq!(
         plan_turn_end_memory(
             &prompt_too_long,
-            MemoryBackendKind::Mem0,
+            MemoryBackendKind::Memento,
             true,
             false,
             false,
-            true,
+            false,
         ),
-        None
+        Some(TurnEndMemoryPlan {
+            session_end_reason: None,
+            clear_provider_session: false,
+            persist_transcript: false,
+            analyze_recall_feedback: true,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_prompt_too_long_does_not_clear_provider_session() {
+    let prompt_too_long = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &prompt_too_long,
+            MemoryBackendKind::Memento,
+            true,
+            true,
+            true,
+            false,
+        ),
+        Some(TurnEndMemoryPlan {
+            session_end_reason: None,
+            clear_provider_session: false,
+            persist_transcript: false,
+            analyze_recall_feedback: true,
+            spawn_capture: false,
+        })
     );
 }
 
@@ -206,7 +237,7 @@ fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
             session_end_reason: None,
             clear_provider_session: false,
             persist_transcript: true,
-            analyze_recall_feedback: true,
+            analyze_recall_feedback: false,
             spawn_capture: true,
         })
     );
@@ -244,6 +275,28 @@ fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_captur
             clear_provider_session: true,
             persist_transcript: false,
             analyze_recall_feedback: false,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_keeps_memento_feedback_analysis_on_resume_failure() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &session,
+            MemoryBackendKind::Memento,
+            false,
+            true,
+            false,
+            false
+        ),
+        Some(TurnEndMemoryPlan {
+            session_end_reason: None,
+            clear_provider_session: true,
+            persist_transcript: false,
+            analyze_recall_feedback: true,
             spawn_capture: false,
         })
     );
@@ -295,7 +348,7 @@ fn turn_end_memory_plan_clears_provider_session_at_turn_cap() {
             session_end_reason: Some(SessionEndReason::TurnCapReached),
             clear_provider_session: true,
             persist_transcript: true,
-            analyze_recall_feedback: true,
+            analyze_recall_feedback: false,
             spawn_capture: true,
         })
     );

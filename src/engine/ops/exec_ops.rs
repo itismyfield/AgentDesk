@@ -1,9 +1,15 @@
+use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use std::ffi::OsStr;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 // ── Exec ops ──────────────────────────────────────────────────────
 //
-// agentdesk.exec(command, args) → stdout string
-// Runs a local command synchronously. Limited to safe commands.
+// agentdesk.exec(command, args, options?) → stdout string
+// Runs a local command synchronously with a bounded timeout. Limited to safe commands.
+
+const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
 fn exec_override_env_var(cmd: &str) -> String {
     format!(
@@ -12,36 +18,78 @@ fn exec_override_env_var(cmd: &str) -> String {
     )
 }
 
+fn parse_exec_args(args_json: &str) -> Vec<String> {
+    if let Ok(args) = serde_json::from_str::<Vec<String>>(args_json) {
+        return args;
+    }
+
+    serde_json::from_str::<String>(args_json)
+        .ok()
+        .and_then(|inner| serde_json::from_str(&inner).ok())
+        .unwrap_or_default()
+}
+
+fn resolve_exec_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms
+        .filter(|timeout_ms| *timeout_ms > 0)
+        .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS)
+}
+
+fn run_exec_command(
+    label: &str,
+    command_path: &OsStr,
+    args: &[String],
+    timeout_ms: u64,
+) -> Result<Output, String> {
+    let mut command = Command::new(command_path);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process_group(&mut command);
+
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Failed to start {}: {}", label, error))?;
+    wait_with_output_timeout(child, Duration::from_millis(timeout_ms), label)
+}
+
 pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
 
     ad.set(
         "exec",
-        Function::new(ctx.clone(), |cmd: String, args_json: String| -> String {
-            // Only allow safe commands (tmux for read-only session queries)
-            let allowed = ["gh", "git", "tmux"];
-            if !allowed.contains(&cmd.as_str()) {
-                return format!("ERROR: command '{}' not allowed", cmd);
-            }
+        Function::new(
+            ctx.clone(),
+            |cmd: String, args_json: String, timeout_ms: Option<u64>| -> String {
+                // Only allow safe commands (tmux for read-only session queries)
+                let allowed = ["gh", "git", "tmux"];
+                if !allowed.contains(&cmd.as_str()) {
+                    return format!("ERROR: command '{}' not allowed", cmd);
+                }
 
-            let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-            let command_path = std::env::var_os(exec_override_env_var(&cmd))
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| std::ffi::OsString::from(&cmd));
-            match std::process::Command::new(&command_path)
-                .args(&args)
-                .output()
-            {
-                Ok(output) if output.status.success() => {
-                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                let args = parse_exec_args(&args_json);
+                let command_path = std::env::var_os(exec_override_env_var(&cmd))
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| std::ffi::OsString::from(&cmd));
+                match run_exec_command(
+                    &cmd,
+                    command_path.as_os_str(),
+                    &args,
+                    resolve_exec_timeout_ms(timeout_ms),
+                ) {
+                    Ok(output) if output.status.success() => {
+                        String::from_utf8_lossy(&output.stdout).trim().to_string()
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        format!("ERROR: {}", stderr.trim())
+                    }
+                    Err(error) => format!("ERROR: {}", error),
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    format!("ERROR: {}", stderr.trim())
-                }
-                Err(e) => format!("ERROR: {}", e),
-            }
-        })?,
+            },
+        )?,
     )?;
 
     // JS wrapper to accept array directly
@@ -49,8 +97,33 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         r#"
         (function() {
             var rawExec = agentdesk.exec;
-            agentdesk.exec = function(cmd, args) {
-                return rawExec(cmd, JSON.stringify(args || []));
+            function normalizeExecArgs(args) {
+                if (typeof args === "string") return args;
+                return JSON.stringify(args || []);
+            }
+
+            function normalizeExecTimeoutMs(options) {
+                if (typeof options === "number" && isFinite(options) && options > 0) {
+                    return Math.floor(options);
+                }
+                if (!options || typeof options !== "object") {
+                    return 30000;
+                }
+                var raw = options.timeout_ms;
+                if (!(typeof raw === "number" && isFinite(raw) && raw > 0)) {
+                    raw = options.timeoutMs;
+                }
+                if (!(typeof raw === "number" && isFinite(raw) && raw > 0)) {
+                    raw = options.timeout;
+                }
+                if (!(typeof raw === "number" && isFinite(raw) && raw > 0)) {
+                    return 30000;
+                }
+                return Math.floor(raw);
+            }
+
+            agentdesk.exec = function(cmd, args, options) {
+                return rawExec(cmd, normalizeExecArgs(args), normalizeExecTimeoutMs(options));
             };
         })();
     "#,
@@ -215,4 +288,79 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     ad.set("session", session_obj)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_exec_args_accepts_json_array_and_nested_json_string() {
+        assert_eq!(
+            parse_exec_args(r#"["--version"]"#),
+            vec!["--version".to_string()]
+        );
+        assert_eq!(
+            parse_exec_args(r#""[\"--version\"]""#),
+            vec!["--version".to_string()]
+        );
+    }
+
+    #[test]
+    fn exec_wrapper_accepts_array_and_stringified_args() {
+        let rt = rquickjs::Runtime::new().expect("runtime");
+        let ctx = rquickjs::Context::full(&rt).expect("context");
+
+        ctx.with(|ctx| {
+            let globals = ctx.globals();
+            let agentdesk = Object::new(ctx.clone()).expect("agentdesk object");
+            globals.set("agentdesk", agentdesk).expect("set agentdesk");
+            register_exec_ops(&ctx).expect("register exec ops");
+
+            let array_result: String = ctx
+                .eval(r#"agentdesk.exec("git", ["--version"], { timeout_ms: 1000 })"#)
+                .expect("array exec");
+            let string_result: String = ctx
+                .eval(r#"agentdesk.exec("git", JSON.stringify(["--version"]), { timeout: 1000 })"#)
+                .expect("string exec");
+
+            assert!(
+                array_result.contains("git version"),
+                "expected git version output, got: {array_result}"
+            );
+            assert_eq!(array_result, string_result);
+        });
+    }
+
+    #[test]
+    fn exec_wrapper_runs_gh_with_timeout() {
+        let rt = rquickjs::Runtime::new().expect("runtime");
+        let ctx = rquickjs::Context::full(&rt).expect("context");
+
+        ctx.with(|ctx| {
+            let globals = ctx.globals();
+            let agentdesk = Object::new(ctx.clone()).expect("agentdesk object");
+            globals.set("agentdesk", agentdesk).expect("set agentdesk");
+            register_exec_ops(&ctx).expect("register exec ops");
+
+            let gh_version: String = ctx
+                .eval(r#"agentdesk.exec("gh", ["--version"], { timeout_ms: 1000 })"#)
+                .expect("gh exec");
+
+            assert!(
+                gh_version.contains("gh version"),
+                "expected gh version output, got: {gh_version}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_exec_command_times_out() {
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        let error = run_exec_command("test child", OsStr::new("sh"), &args, 20)
+            .expect_err("expected timeout");
+
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+    }
 }

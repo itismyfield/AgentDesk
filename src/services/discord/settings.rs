@@ -1164,6 +1164,30 @@ agents:
         });
     }
 
+    #[test]
+    fn test_load_bot_settings_reads_require_mention_channel_ids() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "require_mention_channel_ids": ["123", 456]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.require_mention_channel_ids, vec![123, 456]);
+        });
+    }
+
     struct TestLogWriter {
         buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
@@ -1264,6 +1288,8 @@ discord:
           - "9"
         allowed_channel_ids:
           - "123"
+        require_mention_channel_ids:
+          - "456"
 agents:
   - id: project-agentdesk
     name: "AgentDesk"
@@ -1283,6 +1309,7 @@ agents:
                 assert!(!settings.allow_all_users);
                 assert_eq!(settings.allowed_bot_ids, vec![9]);
                 assert_eq!(settings.allowed_channel_ids, vec![123]);
+                assert_eq!(settings.require_mention_channel_ids, vec![456]);
             });
             assert!(
                 !log_output.contains("falling back to legacy bot_settings.json"),
@@ -1369,6 +1396,26 @@ agents:
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.allowed_channel_ids, vec![123, 456]);
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_require_mention_channel_ids() {
+        with_temp_home(|temp_home: &TempDir| {
+            let token = "test-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.require_mention_channel_ids = vec![123, 456];
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(loaded.require_mention_channel_ids, vec![123, 456]);
         });
     }
 

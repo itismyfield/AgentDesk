@@ -96,6 +96,92 @@ mod failure_recovery {
     }
 
     #[test]
+    fn scenario_667_restart_recovery_reconciles_duplicate_review_dispatches() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-s667", "review");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-loser', 'card-s667', 'agent-1', 'review', 'pending', 'Review Loser', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-winner', 'card-s667', 'agent-1', 'review', 'pending', 'Review Winner', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = 'review-loser' WHERE id = 'card-s667'",
+                [],
+            )
+            .unwrap();
+        }
+
+        {
+            let conn = db.lock().unwrap();
+            db::schema::migrate(&conn).unwrap();
+        }
+
+        {
+            let conn = db.lock().unwrap();
+            let active_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM task_dispatches \
+                     WHERE kanban_card_id = 'card-s667' AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                active_count, 1,
+                "reconciliation must leave exactly 1 active review dispatch"
+            );
+
+            let loser_status: String = conn
+                .query_row(
+                    "SELECT status FROM task_dispatches WHERE id = 'review-loser'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                loser_status, "cancelled",
+                "legacy duplicate review dispatch must be cancelled before the index is added"
+            );
+
+            let latest: String = conn
+                .query_row(
+                    "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-s667'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                latest, "review-winner",
+                "latest_dispatch_id must be re-pointed to the surviving active review dispatch"
+            );
+
+            let unique_violation = conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('review-blocked', 'card-s667', 'agent-1', 'review', 'pending', 'Review Blocked', datetime('now'), datetime('now'))",
+                [],
+            );
+            assert!(
+                unique_violation.is_err(),
+                "idx_single_active_review must block a second active review dispatch"
+            );
+        }
+    }
+
+    #[test]
     fn scenario_251_boot_reconcile_backfills_missing_notify_outbox() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -1087,6 +1173,46 @@ mod idle_session_cleanup {
         assert!(
             message_outbox_rows(&db).is_empty(),
             "idle safety TTL policy path must not enqueue a duplicate notify alert"
+        );
+    }
+
+    #[test]
+    fn scenario_632_idle_session_force_kill_response_with_dead_tmux_stays_silent() {
+        let policies_dir = setup_timeouts_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        let session_key = "host:idle-632-dead-tmux";
+
+        seed_agent(&db);
+        set_kv(&db, "server_port", "8791");
+        set_kv(&db, "test_force_kill_tmux_killed", "false");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1', 'codex', 'idle', datetime('now', '-181 minutes'), datetime('now', '-181 minutes'))",
+                [session_key],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        let url = http_last["url"].as_str().unwrap_or("");
+        assert!(url.contains("host%3Aidle-632-dead-tmux"));
+        assert!(url.ends_with("/force-kill"));
+        assert!(
+            message_outbox_rows(&db).is_empty(),
+            "idle cleanup must stay silent when force-kill reports tmux_killed=false"
         );
     }
 }

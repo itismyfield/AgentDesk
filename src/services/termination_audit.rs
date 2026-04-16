@@ -19,6 +19,31 @@ pub fn record_termination(
     tmux_alive: Option<bool>,
 ) {
     let Some(db) = AUDIT_DB.get() else { return };
+    record_termination_with_db(
+        db,
+        session_key,
+        dispatch_id,
+        killer_component,
+        reason_code,
+        reason_text,
+        probe_snapshot,
+        last_offset,
+        tmux_alive,
+    );
+}
+
+/// Record a session termination event against an explicit DB handle.
+pub fn record_termination_with_db(
+    db: &crate::db::Db,
+    session_key: &str,
+    dispatch_id: Option<&str>,
+    killer_component: &str,
+    reason_code: &str,
+    reason_text: Option<&str>,
+    probe_snapshot: Option<&str>,
+    last_offset: Option<u64>,
+    tmux_alive: Option<bool>,
+) {
     let conn = match db.separate_conn() {
         Ok(c) => c,
         Err(e) => {

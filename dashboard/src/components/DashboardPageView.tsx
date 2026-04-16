@@ -22,6 +22,10 @@ import {
   syncDashboardTabToUrl,
   type DashboardTab,
 } from "../app/dashboardTabs";
+import {
+  countOpenMeetingIssues,
+  summarizeMeetings,
+} from "../app/meetingSummary";
 import type {
   Agent,
   CompanySettings,
@@ -57,6 +61,7 @@ import {
 import HealthWidget from "./dashboard/HealthWidget";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
 import type { TFunction } from "./dashboard/model";
 import { formatProviderFlow } from "./MeetingProviderFlow";
 
@@ -314,10 +319,7 @@ export default function DashboardPageView({
     () => sessions.filter((session) => session.linked_agent_id && session.status === "disconnected"),
     [sessions],
   );
-  const activeMeetings = useMemo(
-    () => meetings.filter((meeting) => meeting.status === "in_progress"),
-    [meetings],
-  );
+  const meetingSummary = useMemo(() => summarizeMeetings(meetings), [meetings]);
   const recentMeetings = useMemo(
     () =>
       [...meetings]
@@ -329,10 +331,6 @@ export default function DashboardPageView({
         .slice(0, 4),
     [meetings],
   );
-  const openMeetingFollowUps = useMemo(
-    () => meetings.reduce((sum, meeting) => sum + countOpenMeetingIssues(meeting), 0),
-    [meetings],
-  );
 
   return (
     <div
@@ -342,15 +340,8 @@ export default function DashboardPageView({
       <DashboardHeroHeader companyName={settings.companyName} t={t} />
 
       <SurfaceSection
-        eyebrow={t({ ko: "Dashboard Layout", en: "Dashboard Layout", ja: "Dashboard Layout", zh: "Dashboard Layout" })}
-        title={t({ ko: "운영 / 토큰 / 자동화 / 업적 / 회의", en: "Operations / Tokens / Automation / Achievements / Meetings", ja: "運用 / トークン / 自動化 / 実績 / 会議", zh: "运营 / Token / 自动化 / 成就 / 会议" })}
-        description={t({
-          ko: "단일 장문 스크롤 대신 탭 전환으로 필요한 표면만 집중해서 봅니다.",
-          en: "Switch surfaces by tab instead of scrolling one long page.",
-          ja: "長い単一ページではなくタブ切り替えで必要な面だけに集中します。",
-          zh: "用标签切换代替超长滚动页面，只看当前需要的面板。",
-        })}
-        className="rounded-[28px] p-4 sm:p-5"
+        title={t({ ko: "대시보드", en: "Dashboard", ja: "ダッシュボード", zh: "仪表盘" })}
+        className="overflow-hidden rounded-[28px] p-4 sm:p-5"
         style={{
           borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
           background:
@@ -466,13 +457,13 @@ export default function DashboardPageView({
                 />
                 <PulseSignalCard
                   label={t({ ko: "회의 후속", en: "Meeting Follow-up", ja: "会議フォローアップ", zh: "会议后续" })}
-                  value={openMeetingFollowUps}
+                  value={meetingSummary.unresolvedCount}
                   accent="#22c55e"
                   sublabel={t({
-                    ko: `${activeMeetings.length} active / ${meetings.length} total`,
-                    en: `${activeMeetings.length} active / ${meetings.length} total`,
-                    ja: `${activeMeetings.length} active / ${meetings.length} total`,
-                    zh: `${activeMeetings.length} active / ${meetings.length} total`,
+                    ko: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    en: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    ja: `${meetingSummary.activeCount} active / ${meetings.length} total`,
+                    zh: `${meetingSummary.activeCount} active / ${meetings.length} total`,
                   })}
                   actionLabel={t({ ko: "회의록 열기", en: "Open Meetings", ja: "会議録を開く", zh: "打开会议记录" })}
                   onAction={() => setActiveTab("meetings")}
@@ -482,8 +473,8 @@ export default function DashboardPageView({
 
             <MeetingTimelineCard
               meetings={recentMeetings}
-              activeCount={activeMeetings.length}
-              followUpCount={openMeetingFollowUps}
+              activeCount={meetingSummary.activeCount}
+              followUpCount={meetingSummary.unresolvedCount}
               localeTag={localeTag}
               t={t}
               onOpenMeetings={() => setActiveTab("meetings")}
@@ -497,6 +488,7 @@ export default function DashboardPageView({
       </DashboardTabPanel>
 
       <DashboardTabPanel tab="tokens" activeTab={activeTab} t={t}>
+          <ReceiptWidget t={t} />
           <TokenAnalyticsSection
             agents={agents}
             t={t}
@@ -508,13 +500,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
             title={t({ ko: "자동화 / 스킬", en: "Automation / Skills", ja: "自動化 / スキル", zh: "自动化 / 技能" })}
-            subtitle={t({
-              ko: "크론 실행 흐름과 스킬 호출 지형을 분리된 섹션으로 유지합니다.",
-              en: "Keep cron execution flow and skill usage surfaces together.",
-              ja: "Cron 実行フローとスキル利用面をまとめて保持します。",
-              zh: "把 cron 执行流与技能使用面放在一起查看。",
-            })}
-            badge={t({ ko: "Automation", en: "Automation", ja: "Automation", zh: "Automation" })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-warn) 20%, var(--th-border) 80%)",
               background:
@@ -554,13 +541,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Achievement", en: "Achievement", ja: "Achievement", zh: "Achievement" })}
             title={t({ ko: "업적 / XP", en: "Achievements / XP", ja: "実績 / XP", zh: "成就 / XP" })}
-            subtitle={t({
-              ko: "랭킹과 실업적만 남기고 보상성 잡음을 제거했습니다.",
-              en: "Keep only ranking and concrete achievements while removing ornamental reward noise.",
-              ja: "ランキングと実績だけを残し、装飾的な報酬ノイズを取り除きました。",
-              zh: "只保留排行与真实成就，去掉装饰性奖励噪音。",
-            })}
-            badge={t({ ko: "Focused", en: "Focused", ja: "Focused", zh: "Focused" })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-primary) 18%, var(--th-border) 82%)",
               background:
@@ -634,13 +616,8 @@ export default function DashboardPageView({
           <PulseSectionShell
             eyebrow={t({ ko: "Meetings", en: "Meetings", ja: "Meetings", zh: "Meetings" })}
             title={t({ ko: "회의 기록 / 후속 일감", en: "Meeting Records / Follow-ups", ja: "会議記録 / フォローアップ", zh: "会议记录 / 后续事项" })}
-            subtitle={t({
-              ko: "라운드 테이블 결과와 후속 이슈 정리를 대시보드 안에서 바로 이어서 처리합니다.",
-              en: "Continue round-table review and follow-up issue cleanup directly from the dashboard.",
-              ja: "ラウンドテーブル結果と後続イシュー整理をダッシュボード内で続けて処理します。",
-              zh: "在仪表盘内直接继续处理圆桌结果与后续 issue 整理。",
-            })}
-            badge={t({ ko: `${meetings.length}개 기록`, en: `${meetings.length} records`, ja: `${meetings.length}件`, zh: `${meetings.length} 条` })}
+            subtitle=""
+            badge=""
             style={{
               borderColor: "color-mix(in srgb, var(--th-accent-success) 18%, var(--th-border) 82%)",
               background:
@@ -779,20 +756,6 @@ function PulseSectionShell({
       <div className="mt-4 space-y-4">{children}</div>
     </SurfaceSection>
   );
-}
-
-function countOpenMeetingIssues(meeting: RoundTableMeeting): number {
-  const totalIssues = meeting.proposed_issues?.length ?? 0;
-  if (meeting.status !== "completed" || totalIssues === 0) return 0;
-
-  const results = meeting.issue_creation_results ?? [];
-  if (results.length === 0) {
-    return Math.max(totalIssues - meeting.issues_created, 0);
-  }
-
-  const created = results.filter((result) => result.ok && result.discarded !== true).length;
-  const discarded = results.filter((result) => result.discarded === true).length;
-  return Math.max(totalIssues - created - discarded, 0);
 }
 
 function PulseSignalCard({

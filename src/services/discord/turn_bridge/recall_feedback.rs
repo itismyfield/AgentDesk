@@ -180,6 +180,23 @@ pub(super) async fn submit_pending_feedbacks(
     result
 }
 
+pub(super) fn transcript_contains_explicit_memento_tool_call(
+    events: &[SessionTranscriptEvent],
+) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.kind,
+            SessionTranscriptEventKind::ToolUse
+                | SessionTranscriptEventKind::ToolResult
+                | SessionTranscriptEventKind::Error
+        ) && event
+            .tool_name
+            .as_deref()
+            .and_then(explicit_memento_tool_kind)
+            .is_some()
+    })
+}
+
 fn completed_memento_tool_calls(
     events: &[SessionTranscriptEvent],
 ) -> Vec<CompletedMementoToolCall> {
@@ -346,11 +363,15 @@ fn canonical_memento_tool_kind(name: &str) -> Option<MementoToolKind> {
         _ => {}
     }
 
+    explicit_memento_tool_kind(&normalized)
+}
+
+fn explicit_memento_tool_kind(name: &str) -> Option<MementoToolKind> {
+    let normalized = name.trim().to_ascii_lowercase();
     let segments = normalized.split("__").collect::<Vec<_>>();
     if segments.len() < 2 || !segments.iter().any(|segment| *segment == "memento") {
         return None;
     }
-
     match segments.last().copied() {
         Some("context") | Some("recall") => Some(MementoToolKind::Recall),
         Some("tool_feedback") => Some(MementoToolKind::ToolFeedback),
@@ -654,5 +675,24 @@ mod tests {
                 .as_deref(),
             Some("session-keep")
         );
+    }
+
+    #[test]
+    fn transcript_contains_explicit_memento_tool_call_ignores_bare_context_names() {
+        let bare_context = vec![
+            tool_use("context", json!({"query":"foo"})),
+            tool_result("context", json!({"success": true})),
+        ];
+        assert!(!transcript_contains_explicit_memento_tool_call(
+            &bare_context
+        ));
+
+        let explicit_memento = vec![
+            tool_use("mcp__memento__context", json!({"query":"foo"})),
+            tool_result("mcp__memento__context", json!({"success": true})),
+        ];
+        assert!(transcript_contains_explicit_memento_tool_call(
+            &explicit_memento
+        ));
     }
 }

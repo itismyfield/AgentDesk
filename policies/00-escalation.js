@@ -83,6 +83,39 @@ function escalateToManualIntervention(cardId, reason, options) {
   }
 }
 
+function getConfiguredChannelTarget(configKey, purpose) {
+  var ch = agentdesk.config.get(configKey);
+  if (!ch) {
+    agentdesk.log.warn("[notify] No " + configKey + " configured, skipping " + purpose);
+    return null;
+  }
+  return "channel:" + ch;
+}
+
+function getHumanAlertChannel() {
+  return getConfiguredChannelTarget("kanban_human_alert_channel_id", "human alert");
+}
+
+function notifyHumanAlert(message, source) {
+  var target = getHumanAlertChannel();
+  if (!target) return false;
+  agentdesk.message.queue(target, message, "notify", source || "system");
+  return true;
+}
+
+function getDeadlockManagerChannel() {
+  return getConfiguredChannelTarget("deadlock_manager_channel_id", "deadlock alert");
+}
+
+function notifyDeadlockManager(message, source) {
+  var target = getDeadlockManagerChannel();
+  if (target) {
+    agentdesk.message.queue(target, message, "announce", source || "system");
+    return true;
+  }
+  return notifyHumanAlert(message, source || "system");
+}
+
 function escalationServerPort() {
   return agentdesk.config.get("server_port");
 }

@@ -34,6 +34,7 @@ use super::tmux_restart_handoff::{
 };
 use super::{SharedData, TmuxWatcherHandle, rate_limit_wait};
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WatcherLineOutcome {
@@ -185,6 +186,76 @@ fn load_restored_provider_session_id(
     })
 }
 
+// Tmux watcher output is activity, but reusing hook_session here would also
+// overwrite status/tokens defaults. Touch only last_heartbeat instead.
+fn refresh_session_heartbeat_from_tmux_output(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    thread_channel_id: Option<u64>,
+) -> bool {
+    let Some(db) = db else {
+        return false;
+    };
+    let Ok(conn) = db.lock() else {
+        return false;
+    };
+
+    let session_keys =
+        super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
+    let updated = conn
+        .execute(
+            "UPDATE sessions
+             SET last_heartbeat = datetime('now')
+             WHERE session_key = ?1 OR session_key = ?2",
+            rusqlite::params![session_keys[0].as_str(), session_keys[1].as_str()],
+        )
+        .unwrap_or(0);
+    if updated > 0 {
+        return true;
+    }
+
+    thread_channel_id.is_some_and(|thread_channel_id| {
+        conn.execute(
+            "UPDATE sessions
+             SET last_heartbeat = datetime('now')
+             WHERE provider = ?1
+               AND thread_channel_id = ?2
+               AND status IN ('idle', 'working')",
+            rusqlite::params![provider.as_str(), thread_channel_id.to_string()],
+        )
+        .unwrap_or(0)
+            > 0
+    })
+}
+
+fn maybe_refresh_watcher_activity_heartbeat(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    thread_channel_id: Option<u64>,
+    last_heartbeat_at: &mut Option<std::time::Instant>,
+) {
+    let now = std::time::Instant::now();
+    if last_heartbeat_at
+        .is_some_and(|last| now.duration_since(last) < WATCHER_ACTIVITY_HEARTBEAT_INTERVAL)
+    {
+        return;
+    }
+
+    if refresh_session_heartbeat_from_tmux_output(
+        db,
+        token_hash,
+        provider,
+        tmux_session_name,
+        thread_channel_id,
+    ) {
+        *last_heartbeat_at = Some(now);
+    }
+}
+
 async fn clear_provider_session_for_retry(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -323,12 +394,17 @@ pub(super) async fn tmux_output_watcher(
         "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
     );
 
-    let watcher_provider = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-        .map(|(provider, _)| provider)
-        .unwrap_or(crate::services::provider::ProviderKind::Claude);
+    let (watcher_provider, watcher_channel_name) =
+        parse_provider_and_channel_from_tmux_name(&tmux_session_name).unwrap_or((
+            crate::services::provider::ProviderKind::Claude,
+            String::new(),
+        ));
+    let watcher_thread_channel_id =
+        super::adk_session::parse_thread_channel_id_from_name(&watcher_channel_name);
     let mut current_offset = initial_offset;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
+    let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
     // the relay is suppressed.
@@ -486,6 +562,14 @@ pub(super) async fn tmux_output_watcher(
         // We got new data while not paused — this means terminal input triggered a response
         let data_start_offset = current_offset; // offset where this read batch started
         current_offset = new_offset;
+        maybe_refresh_watcher_activity_heartbeat(
+            shared.db.as_ref(),
+            &shared.token_hash,
+            &watcher_provider,
+            &tmux_session_name,
+            watcher_thread_channel_id,
+            &mut last_activity_heartbeat_at,
+        );
 
         // Collect the full turn: keep reading until we see a "result" event
         let mut all_data = String::from_utf8_lossy(&data).to_string();
@@ -563,6 +647,14 @@ pub(super) async fn tmux_output_watcher(
                 match read_more {
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
+                        maybe_refresh_watcher_activity_heartbeat(
+                            shared.db.as_ref(),
+                            &shared.token_hash,
+                            &watcher_provider,
+                            &tmux_session_name,
+                            watcher_thread_channel_id,
+                            &mut last_activity_heartbeat_at,
+                        );
                         ready_for_input_tracker.record_output();
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
                         let outcome = process_watcher_lines(
@@ -2602,7 +2694,7 @@ mod tests {
     use super::{
         DeadSessionCleanupPlan, WatcherToolState, dead_session_cleanup_plan,
         load_restored_provider_session_id, process_watcher_lines,
-        watcher_ready_for_input_turn_completed,
+        refresh_session_heartbeat_from_tmux_output, watcher_ready_for_input_turn_completed,
     };
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
@@ -2651,6 +2743,83 @@ mod tests {
                 .as_deref(),
             Some("legacy-sid-1")
         );
+    }
+
+    #[test]
+    fn watcher_output_activity_refreshes_namespaced_session_heartbeat() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let channel_name = "adk-cdx-t1485506232256168011";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz", &provider, &tmux_name,
+        );
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+                 VALUES (?1, ?2, 'idle', '1485506232256168011', '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+                rusqlite::params![session_key.as_str(), provider.as_str()],
+            )
+            .unwrap();
+
+        assert!(refresh_session_heartbeat_from_tmux_output(
+            Some(&db),
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some(1485506232256168011),
+        ));
+
+        let last_heartbeat: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT last_heartbeat FROM sessions WHERE session_key = ?1",
+                [session_key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
+    }
+
+    #[test]
+    fn watcher_output_activity_refreshes_legacy_session_heartbeat() {
+        let db = crate::db::test_db();
+        let provider = ProviderKind::Codex;
+        let channel_name = "adk-cdx-t1485506232256168011";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let session_key =
+            crate::services::discord::adk_session::build_legacy_session_key(&tmux_name);
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions
+                 (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+                 VALUES (?1, ?2, 'idle', '1485506232256168011', '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+                rusqlite::params![session_key.as_str(), provider.as_str()],
+            )
+            .unwrap();
+
+        assert!(refresh_session_heartbeat_from_tmux_output(
+            Some(&db),
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            Some(1485506232256168011),
+        ));
+
+        let last_heartbeat: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT last_heartbeat FROM sessions WHERE session_key = ?1",
+                [session_key.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
     }
 
     #[test]

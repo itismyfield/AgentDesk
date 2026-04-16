@@ -19,6 +19,7 @@ pub(crate) struct TurnLifecycleStopResult {
     pub inflight_cleared: bool,
     pub queue_depth: Option<usize>,
     pub queue_preserved: bool,
+    pub termination_recorded: bool,
 }
 
 pub(crate) async fn stop_turn_preserving_queue(
@@ -28,6 +29,8 @@ pub(crate) async fn stop_turn_preserving_queue(
 ) -> TurnLifecycleStopResult {
     let mut lifecycle_path = "direct-fallback";
     let mut queue_depth = None;
+    let mut termination_recorded = false;
+    let tmux_was_alive = crate::services::platform::tmux::has_session(&target.tmux_name);
 
     if let (Some(registry), Some(provider), Some(channel_id)) =
         (health_registry, target.provider.as_ref(), target.channel_id)
@@ -42,6 +45,7 @@ pub(crate) async fn stop_turn_preserving_queue(
         {
             lifecycle_path = runtime.lifecycle_path;
             queue_depth = Some(runtime.queue_depth);
+            termination_recorded = runtime.termination_recorded;
         }
     }
 
@@ -53,7 +57,7 @@ pub(crate) async fn stop_turn_preserving_queue(
     let tmux_killed = if crate::services::platform::tmux::has_session(&target.tmux_name) {
         crate::services::platform::tmux::kill_session(&target.tmux_name)
     } else {
-        true
+        tmux_was_alive
     };
 
     let inflight_cleared = target
@@ -67,6 +71,7 @@ pub(crate) async fn stop_turn_preserving_queue(
         inflight_cleared,
         queue_depth,
         queue_preserved: true,
+        termination_recorded,
     }
 }
 

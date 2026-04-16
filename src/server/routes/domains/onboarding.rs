@@ -10,6 +10,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
         Router::new()
             .route("/onboarding/status", get(onboarding::status))
             .route(
+                "/onboarding/draft",
+                get(onboarding::draft_get)
+                    .put(onboarding::draft_put)
+                    .delete(onboarding::draft_delete),
+            )
+            .route(
                 "/onboarding/validate-token",
                 post(onboarding::validate_token),
             )

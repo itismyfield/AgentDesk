@@ -22,26 +22,8 @@
  * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill
  */
 
-// Get PMD channel for alerts
-function getPMDChannel() {
-  var ch = agentdesk.config.get("kanban_manager_channel_id");
-  if (!ch) {
-    agentdesk.log.warn("[notify] No kanban_manager_channel_id configured, skipping");
-    return null;
-  }
-  return "channel:" + ch;
-}
-
-// Send deadlock alert via announce bot to deadlock-manager channel
 function sendDeadlockAlert(message) {
-  var ch = agentdesk.config.get("deadlock_manager_channel_id");
-  if (!ch) {
-    // Fallback to PMD channel via announce bot (actionable alert, not info-only)
-    var pmd = getPMDChannel();
-    if (pmd) agentdesk.message.queue(pmd, message, "announce", "system");
-    return;
-  }
-  agentdesk.message.queue("channel:" + ch, message, "announce", "system");
+  return notifyDeadlockManager(message, "timeouts");
 }
 
 // Shared constant used by sections [A] and [J]

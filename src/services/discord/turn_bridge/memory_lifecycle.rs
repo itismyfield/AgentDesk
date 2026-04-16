@@ -137,11 +137,21 @@ pub(super) fn plan_turn_end_memory(
     terminal_session_reset_required: bool,
     should_record_final_turn: bool,
 ) -> Option<TurnEndMemoryPlan> {
-    if session.cleared || is_prompt_too_long {
+    if session.cleared {
         return None;
     }
 
     let persist_transcript = should_record_final_turn;
+    if is_prompt_too_long {
+        return Some(TurnEndMemoryPlan {
+            session_end_reason: None,
+            clear_provider_session: false,
+            persist_transcript,
+            analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
+            spawn_capture: false,
+        });
+    }
+
     let assistant_turn_cap_reached = persist_transcript
         && assistant_turn_count(&session.history).saturating_add(1)
             >= PROVIDER_SESSION_ASSISTANT_TURN_CAP;
@@ -159,7 +169,7 @@ pub(super) fn plan_turn_end_memory(
         session_end_reason,
         clear_provider_session,
         persist_transcript,
-        analyze_recall_feedback: persist_transcript,
+        analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
         spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
     })
 }

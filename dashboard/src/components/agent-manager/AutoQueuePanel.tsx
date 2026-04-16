@@ -17,6 +17,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
+import { buildDiscordThreadLinks } from "./discord-routing";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -292,12 +293,25 @@ function EntryRow({
               </span>
             )}
             {entry.github_issue_number && (
-              <span
-                className="mr-1 font-medium"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                #{entry.github_issue_number}
-              </span>
+              entry.github_repo ? (
+                <a
+                  href={`https://github.com/${entry.github_repo}/issues/${entry.github_issue_number}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mr-1 font-medium hover:underline"
+                  style={{ color: "#60a5fa" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  #{entry.github_issue_number}
+                </a>
+              ) : (
+                <span
+                  className="mr-1 font-medium"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  #{entry.github_issue_number}
+                </span>
+              )
             )}
             {entry.card_title ?? entry.card_id.slice(0, 8)}
           </div>
@@ -334,10 +348,11 @@ function EntryRow({
                 );
 
                 if (link.url) {
+                  const { deepLink } = buildDiscordThreadLinks(link);
                   return (
                     <a
                       key={key}
-                      href={link.url}
+                      href={deepLink ?? link.url}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(event) => event.stopPropagation()}
@@ -882,77 +897,68 @@ export default function AutoQueuePanel({
     );
   };
 
-  const renderPhaseGateIndicator = (
-    fromPhase: number,
-    toPhase: number,
-  ) => {
-    const gates = [
-      ...(gatesByPhase.get(fromPhase) ?? []),
-      ...(gatesByPhase.get(toPhase) ?? []),
-    ];
-    const hasDeploy = deployPhases.has(fromPhase) || deployPhases.has(toPhase);
-    if (gates.length === 0 && !hasDeploy) return null;
+  const renderPhaseGateIndicator = (phase: number) => {
+    const gates = gatesByPhase.get(phase) ?? [];
+    const isDeploy = deployPhases.has(phase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
-    const statusColor =
-      gateStatus === "passed"
-        ? "#4ade80"
-        : gateStatus === "failed"
-          ? "#ef4444"
-          : "#f59e0b";
-    const statusLabel =
-      gateStatus === "passed"
-        ? tr("통과", "Passed")
-        : gateStatus === "failed"
-          ? tr("실패", "Failed")
+    const isPassed = gateStatus === "passed";
+    const isFailed = gateStatus === "failed";
+    const isPending = !isPassed && !isFailed;
+    const isActive = isPending && currentBatchPhase === phase;
+
+    const baseColor = isPassed
+      ? "#4ade80"
+      : isFailed
+        ? "#ef4444"
+        : isActive
+          ? isDeploy ? "#60a5fa" : "#f59e0b"
+          : "#6b7280";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? (isDeploy ? "🚀" : "⏳") : "○";
+    const statusLabel = isPassed
+      ? tr("통과", "Passed")
+      : isFailed
+        ? tr("실패", "Failed")
+        : isActive
+          ? tr("진행중", "In Progress")
           : tr("대기", "Pending");
+    const gateLabel = isDeploy ? tr("배포 게이트", "Deploy Gate") : tr("게이트", "Gate");
 
     return (
       <div
-        key={`gate-${fromPhase}-${toPhase}`}
+        key={`gate-${phase}`}
         className="flex items-center gap-2 px-3 py-1.5"
       >
         <div
           className="flex-1 h-px"
-          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+          style={{ backgroundColor: `${baseColor}40` }}
         />
         <div
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border${isActive ? " animate-pulse" : ""}`}
           style={{
-            borderColor: `${statusColor}40`,
-            backgroundColor: `${statusColor}10`,
+            borderColor: `${baseColor}40`,
+            backgroundColor: `${baseColor}10`,
           }}
         >
-          <span style={{ color: statusColor, fontSize: 14 }}>
-            {gateStatus === "passed" ? "✓" : gateStatus === "failed" ? "✗" : "⏳"}
+          <span style={{ color: baseColor, fontSize: 14 }}>
+            {statusIcon}
           </span>
           <span
             className="text-xs font-mono font-semibold"
-            style={{ color: statusColor }}
+            style={{ color: baseColor }}
           >
-            {tr("게이트", "Gate")}
+            {gateLabel}
           </span>
           {gate && (
             <span
               className="text-xs px-1.5 py-0.5 rounded"
               style={{
-                backgroundColor: `${statusColor}18`,
-                color: statusColor,
+                backgroundColor: `${baseColor}18`,
+                color: baseColor,
               }}
             >
               {statusLabel}
-            </span>
-          )}
-          {hasDeploy && (
-            <span
-              className="text-xs px-1.5 py-0.5 rounded"
-              style={{
-                backgroundColor: "rgba(96,165,250,0.18)",
-                color: "#60a5fa",
-              }}
-            >
-              🚀 {tr("배포", "Deploy")}
             </span>
           )}
           {gate?.failure_reason && (
@@ -967,7 +973,7 @@ export default function AutoQueuePanel({
         </div>
         <div
           className="flex-1 h-px"
-          style={{ backgroundColor: "rgba(148,163,184,0.25)" }}
+          style={{ backgroundColor: `${baseColor}40` }}
         />
       </div>
     );
@@ -1055,6 +1061,7 @@ export default function AutoQueuePanel({
             locale={locale}
             onSkip={handleSkip}
             showBatchPhase={hasBatchPhases}
+
           />
         ))}
       </div>
@@ -1419,13 +1426,8 @@ export default function AutoQueuePanel({
           {viewMode === "all" && (
             hasBatchPhases ? (
               <div className="space-y-3">
-                {phaseSections.map(([phase, phaseEntries], sectionIdx) => (
+                {phaseSections.map(([phase, phaseEntries]) => (
                   <div key={`phase-section-${phase}`}>
-                    {sectionIdx > 0 &&
-                      renderPhaseGateIndicator(
-                        phaseSections[sectionIdx - 1][0],
-                        phase,
-                      )}
                     {renderPhaseBlock(
                       phase,
                       phaseEntries,
@@ -1454,12 +1456,14 @@ export default function AutoQueuePanel({
                                 isDropTarget={allDrag.dropTargetId === entry.id}
                                 dragHandlers={allDrag.makeDragHandlers(entry)}
                                 moveControls={allDrag.makeMoveControls(entry)}
+                    
                               />
                             </div>
                           </div>
                         ))}
                       </div>,
                     )}
+                    {renderPhaseGateIndicator(phase)}
                   </div>
                 ))}
               </div>
@@ -1488,6 +1492,7 @@ export default function AutoQueuePanel({
                         isDropTarget={allDrag.dropTargetId === entry.id}
                         dragHandlers={allDrag.makeDragHandlers(entry)}
                         moveControls={allDrag.makeMoveControls(entry)}
+            
                       />
                     </div>
                   </div>
@@ -1517,7 +1522,7 @@ export default function AutoQueuePanel({
                 </div>
               )}
               {hasBatchPhases
-                ? phaseSections.map(([phase, phaseEntries], sectionIdx) => {
+                ? phaseSections.map(([phase, phaseEntries]) => {
                     const groupsInPhase = new Map<number, DispatchQueueEntryType[]>();
                     for (const entry of phaseEntries) {
                       const groupNum = entry.thread_group ?? 0;
@@ -1527,11 +1532,6 @@ export default function AutoQueuePanel({
                     }
                     return (
                       <div key={`phase-section-${phase}`}>
-                        {sectionIdx > 0 &&
-                          renderPhaseGateIndicator(
-                            phaseSections[sectionIdx - 1][0],
-                            phase,
-                          )}
                         {renderPhaseBlock(
                           phase,
                           phaseEntries,
@@ -1543,6 +1543,7 @@ export default function AutoQueuePanel({
                               )}
                           </div>,
                         )}
+                        {renderPhaseGateIndicator(phase)}
                       </div>
                     );
                   })
@@ -1568,6 +1569,7 @@ export default function AutoQueuePanel({
                   onSkip={handleSkip}
                   onReorder={handleReorder}
                   showBatchPhase={hasBatchPhases}
+      
                 />
               ),
             )}

@@ -1,14 +1,17 @@
 use super::super::model_picker_interaction::build_model_picker_close_response;
 use super::super::should_process_allowed_bot_turn_text;
 use super::intake_gate::{
-    RemovedControlReaction, classify_removed_control_reaction, is_model_picker_component_custom_id,
-    should_process_turn_message,
+    RemovedControlReaction, classify_removed_control_reaction, content_has_explicit_user_mention,
+    is_model_picker_component_custom_id, should_process_turn_message,
+    should_skip_for_missing_required_mention,
 };
 use super::message_handler::{TextStopLookup, lookup_text_stop_token};
+use crate::services::discord::DiscordBotSettings;
 use crate::services::provider::CancelToken;
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use serenity::model::channel::{MessageType, ReactionType};
+use serenity::model::id::UserId;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -83,6 +86,56 @@ fn allowed_bot_turn_text_accepts_all_messages() {
     // Agent-to-agent messages without DISPATCH: also trigger turns
     assert!(should_process_allowed_bot_turn_text(
         "completion_guard 수정에 OUTCOME: noop 처리도 포함해줘."
+    ));
+}
+
+#[test]
+fn explicit_user_mention_detects_only_real_mention_tokens() {
+    let bot_id = UserId::new(42);
+
+    assert!(content_has_explicit_user_mention("<@42> hello", bot_id));
+    assert!(content_has_explicit_user_mention("hello <@!42>", bot_id));
+    assert!(!content_has_explicit_user_mention("hello 42", bot_id));
+    assert!(!content_has_explicit_user_mention(
+        "reply context only",
+        bot_id
+    ));
+}
+
+#[test]
+fn require_mention_guard_skips_unmentioned_messages_in_configured_channels() {
+    let settings = DiscordBotSettings {
+        require_mention_channel_ids: vec![777],
+        ..Default::default()
+    };
+
+    assert!(should_skip_for_missing_required_mention(
+        &settings,
+        ChannelId::new(777),
+        false,
+        "hello",
+        UserId::new(42),
+    ));
+    assert!(!should_skip_for_missing_required_mention(
+        &settings,
+        ChannelId::new(777),
+        false,
+        "hello <@42>",
+        UserId::new(42),
+    ));
+    assert!(!should_skip_for_missing_required_mention(
+        &settings,
+        ChannelId::new(555),
+        false,
+        "hello",
+        UserId::new(42),
+    ));
+    assert!(!should_skip_for_missing_required_mention(
+        &settings,
+        ChannelId::new(777),
+        true,
+        "hello",
+        UserId::new(42),
     ));
 }
 

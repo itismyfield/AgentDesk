@@ -124,7 +124,7 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 return "backlog";
             };
 
-            // kickoffState: the first gated-inbound state (dispatch entry, e.g. "requested").
+            // kickoffState: the first dispatchable state (dispatch entry, e.g. "requested").
             agentdesk.pipeline.kickoffState = function(config) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 if (!cfg || !cfg.states || !cfg.transitions) return "requested";
@@ -138,10 +138,7 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                         if (t.to === s.id && t.type !== "free") allInboundFree = false;
                     }
                     if (hasGatedOut && allInboundFree) {
-                        for (var ti2 = 0; ti2 < cfg.transitions.length; ti2++) {
-                            var t2 = cfg.transitions[ti2];
-                            if (t2.from === s.id && t2.type === "gated") return t2.to;
-                        }
+                        return s.id;
                     }
                 }
                 return "requested";

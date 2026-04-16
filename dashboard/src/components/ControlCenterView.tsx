@@ -41,6 +41,7 @@ interface ControlCenterViewProps {
   onNotify: (message: string, type?: Notification["type"]) => string | void;
   onUpdateNotification: (id: string, message: string, type?: Notification["type"]) => void;
   onDismissNotification: (id: string) => void;
+  onOpenMeetings?: () => void;
 }
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {

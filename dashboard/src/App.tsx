@@ -34,6 +34,7 @@ import {
 } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import type { DashboardTab } from "./app/dashboardTabs";
+import { syncDashboardTabToUrl } from "./app/dashboardTabs";
 import {
   Building2,
   KanbanSquare,
@@ -341,6 +342,7 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
       }
 
       if (routeId === "dashboard_meetings") {
+        syncDashboardTabToUrl("meetings");
         setDashboardRequestedTab("meetings");
         handleNavigate("dashboard");
         return;
@@ -387,6 +389,12 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
   const clearRequestedDashboardTab = useCallback(() => {
     setDashboardRequestedTab(null);
   }, []);
+
+  const openDashboardMeetings = useCallback(() => {
+    syncDashboardTabToUrl("meetings");
+    setDashboardRequestedTab("meetings");
+    handleNavigate("dashboard");
+  }, [handleNavigate]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -568,6 +576,7 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
                 agents={agents}
                 departments={departments}
                 sessions={visibleDispatchedSessions}
+                meetings={roundTableMeetings}
                 onAssign={async (id, patch) => {
                   const updated = await api.assignDispatchedSession(id, patch);
                   setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
@@ -583,7 +592,6 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
                   refreshOffices();
                 }}
                 onOfficesChange={handleOfficeChanged}
-                meetings={roundTableMeetings}
                 onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
                 settings={settings}
                 onSaveSettings={async (patch) => {
@@ -597,6 +605,7 @@ function AppShell({ wsConnected, notifications, pushNotification, updateNotifica
                 onNotify={pushNotification}
                 onUpdateNotification={updateNotification}
                 onDismissNotification={dismissNotification}
+                onOpenMeetings={openDashboardMeetings}
               />
             )}
           </Suspense>

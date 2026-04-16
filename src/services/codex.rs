@@ -937,6 +937,111 @@ fn base_exec_args(
     args
 }
 
+fn codex_reasoning_summary(item: &Value) -> Option<String> {
+    item.get("summary")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|s| s.get("text"))
+        .and_then(|v| v.as_str())
+        .and_then(|t| t.lines().find(|line| !line.trim().is_empty()))
+        .map(|line| line.trim().to_string())
+}
+
+fn normalize_codex_mcp_segment(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn codex_mcp_invocation(json: &Value) -> Option<&Value> {
+    json.get("invocation")
+        .or_else(|| json.get("item").and_then(|item| item.get("invocation")))
+}
+
+fn codex_mcp_tool_name(invocation: &Value) -> Option<String> {
+    let server = invocation.get("server").and_then(Value::as_str)?;
+    let tool = invocation.get("tool").and_then(Value::as_str)?;
+    Some(format!(
+        "mcp__{}__{}",
+        normalize_codex_mcp_segment(server)?,
+        normalize_codex_mcp_segment(tool)?,
+    ))
+}
+
+fn codex_mcp_arguments(invocation: &Value) -> String {
+    match invocation.get("arguments") {
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| Value::String(text.clone()).to_string()),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()),
+        None => "{}".to_string(),
+    }
+}
+
+fn codex_mcp_error_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+fn codex_mcp_payload_content(payload: &Value) -> String {
+    if let Some(structured) = payload
+        .get("structuredContent")
+        .or_else(|| payload.get("structured_content"))
+        .filter(|value| !value.is_null())
+    {
+        return serde_json::to_string(structured).unwrap_or_default();
+    }
+
+    if let Some(content_items) = payload.get("content").and_then(Value::as_array) {
+        let text_items = content_items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        if text_items.len() == 1 && serde_json::from_str::<Value>(&text_items[0]).is_ok() {
+            return text_items[0].clone();
+        }
+        if !text_items.is_empty() {
+            return text_items.join("\n\n");
+        }
+        if !content_items.is_empty() {
+            return serde_json::to_string(content_items).unwrap_or_default();
+        }
+    }
+
+    serde_json::to_string(payload).unwrap_or_default()
+}
+
+fn codex_mcp_result(result: &Value) -> (String, bool) {
+    if let Some(error) = result.get("Err").or_else(|| result.get("err")) {
+        return (codex_mcp_error_text(error), true);
+    }
+
+    let payload = result
+        .get("Ok")
+        .or_else(|| result.get("ok"))
+        .unwrap_or(result);
+    let is_error = payload
+        .get("isError")
+        .or_else(|| payload.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (codex_mcp_payload_content(payload), is_error)
+}
+
 fn handle_codex_json_line(
     line: &str,
     sender: &Sender<StreamMessage>,
@@ -972,20 +1077,26 @@ fn handle_codex_json_line(
                         });
                     }
                     "reasoning" => {
-                        // Codex reasoning: extract summary text if available
-                        let summary = item
-                            .get("summary")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|s| s.get("text"))
-                            .and_then(|v| v.as_str())
-                            .and_then(|t| t.lines().find(|l| !l.trim().is_empty()))
-                            .map(|l| l.trim().to_string());
+                        let summary = codex_reasoning_summary(item);
                         let _ = sender.send(StreamMessage::Thinking { summary });
                     }
                     _ => {}
                 }
             }
+        }
+        "mcp_tool_call_begin" => {
+            if let Some(invocation) = codex_mcp_invocation(&json)
+                && let Some(name) = codex_mcp_tool_name(invocation)
+            {
+                let _ = sender.send(StreamMessage::ToolUse {
+                    name,
+                    input: codex_mcp_arguments(invocation),
+                });
+            }
+        }
+        "mcp_tool_call_end" => {
+            let (content, is_error) = codex_mcp_result(json.get("result").unwrap_or(&Value::Null));
+            let _ = sender.send(StreamMessage::ToolResult { content, is_error });
         }
         "item.completed" => {
             if let Some(item) = json.get("item") {
@@ -1016,14 +1127,7 @@ fn handle_codex_json_line(
                         let _ = sender.send(StreamMessage::ToolResult { content, is_error });
                     }
                     "reasoning" => {
-                        let summary = item
-                            .get("summary")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|s| s.get("text"))
-                            .and_then(|v| v.as_str())
-                            .and_then(|t| t.lines().find(|l| !l.trim().is_empty()))
-                            .map(|l| l.trim().to_string());
+                        let summary = codex_reasoning_summary(item);
                         let _ = sender.send(StreamMessage::Thinking { summary });
                     }
                     _ => {}
@@ -1084,6 +1188,7 @@ mod tests {
     };
     use crate::services::provider::ProviderKind;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use serde_json::Value;
 
     #[test]
     fn test_tmux_launch_env_lines_include_exec_path_and_report_envs() {
@@ -1209,6 +1314,119 @@ mod tests {
                 assert_eq!(summary.as_deref(), Some("Analyzing the code structure"));
             }
             _ => panic!("Expected Thinking with summary"),
+        }
+    }
+
+    #[test]
+    fn test_codex_mcp_tool_events_map_to_tool_use_and_result() {
+        let (tx, rx) = mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started_at = std::time::Instant::now();
+
+        let _ = handle_codex_json_line(
+            r#"{"type":"mcp_tool_call_begin","call_id":"call-1","invocation":{"server":"memento","tool":"context","arguments":{"query":"foo","sessionId":"session-1"}}}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+        let _ = handle_codex_json_line(
+            r#"{"type":"mcp_tool_call_end","call_id":"call-1","result":{"Ok":{"structuredContent":{"_searchEventId":"search-1","fragments":[{"id":"frag-1"}]}}}}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+
+        let items: Vec<StreamMessage> = rx.try_iter().collect();
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            StreamMessage::ToolUse { name, input } => {
+                assert_eq!(name, "mcp__memento__context");
+                assert_eq!(
+                    serde_json::from_str::<Value>(input).unwrap(),
+                    serde_json::json!({
+                        "query": "foo",
+                        "sessionId": "session-1",
+                    })
+                );
+            }
+            other => panic!("Expected ToolUse, got {:?}", other),
+        }
+        match &items[1] {
+            StreamMessage::ToolResult { content, is_error } => {
+                assert!(!is_error);
+                assert_eq!(
+                    serde_json::from_str::<Value>(content).unwrap(),
+                    serde_json::json!({
+                        "_searchEventId": "search-1",
+                        "fragments": [{"id": "frag-1"}],
+                    })
+                );
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_codex_mcp_tool_end_uses_text_payload_and_error_flag() {
+        let (tx, rx) = mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started_at = std::time::Instant::now();
+
+        let _ = handle_codex_json_line(
+            r#"{"type":"mcp_tool_call_end","call_id":"call-1","result":{"Ok":{"content":[{"type":"text","text":"{\"success\":false,\"message\":\"boom\"}"}],"isError":true}}}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+
+        let items: Vec<StreamMessage> = rx.try_iter().collect();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            StreamMessage::ToolResult { content, is_error } => {
+                assert!(*is_error);
+                assert_eq!(
+                    serde_json::from_str::<Value>(content).unwrap(),
+                    serde_json::json!({
+                        "success": false,
+                        "message": "boom",
+                    })
+                );
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_codex_mcp_tool_name_preserves_double_underscore_segments() {
+        let (tx, rx) = mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started_at = std::time::Instant::now();
+
+        let _ = handle_codex_json_line(
+            r#"{"type":"mcp_tool_call_begin","call_id":"call-2","invocation":{"server":"memento__beta","tool":"context","arguments":{}}}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+
+        let items: Vec<StreamMessage> = rx.try_iter().collect();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            StreamMessage::ToolUse { name, .. } => {
+                assert_eq!(name, "mcp__memento__beta__context");
+            }
+            other => panic!("Expected ToolUse, got {:?}", other),
         }
     }
 

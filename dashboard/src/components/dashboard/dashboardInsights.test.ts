@@ -171,8 +171,9 @@ describe("dashboardInsights", () => {
       }),
       makeCard({
         id: "card-rework",
-        status: "in_progress",
+        status: "done",
         review_round: REWORK_ALERT_THRESHOLD + 1,
+        completed_at: now,
       }),
       makeCard({
         id: "card-blocked",

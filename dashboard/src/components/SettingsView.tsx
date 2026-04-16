@@ -8,6 +8,10 @@ import {
   SettingsSection,
   SettingsSubsection,
 } from "./common/SettingsPrimitives";
+import {
+  SurfaceSection,
+  SurfaceSegmentButton,
+} from "./common/SurfacePrimitives";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 
@@ -291,6 +295,10 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
   deadlock_manager_channel_id: {
     ko: "교착 상태나 멈춤 감지를 보고하는 Discord 채널입니다.",
     en: "Discord channel that receives deadlock and stalled-work alerts.",
+  },
+  kanban_human_alert_channel_id: {
+    ko: "에이전트 fallback이나 수동 개입이 사람에게 라우팅될 Discord 채널입니다.",
+    en: "Discord channel used when alerts must be routed to a human instead of an agent.",
   },
   review_enabled: {
     ko: "리뷰 단계를 전체 파이프라인에 적용할지 결정합니다.",
@@ -1716,108 +1724,42 @@ export default function SettingsView({
 
   return (
     <div
-      className="mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
+      className="mx-auto w-full max-w-5xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <a
-        href="#settings-panel-content"
-        className="sr-only rounded-lg px-3 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50"
-        style={{
-          background: "var(--th-card-bg)",
-          color: "var(--th-text)",
-          border: "1px solid color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
-        }}
-      >
-        {tr("설정 본문으로 건너뛰기", "Skip to settings content")}
-      </a>
-      <div className="flex min-h-0 flex-col gap-4 lg:flex-row">
-        <aside
-          className="hidden lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-2rem)] lg:w-56 lg:self-start lg:shrink-0 lg:flex-col lg:gap-2 lg:rounded-[28px] lg:border lg:p-3"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-          }}
-        >
-          <div className="rounded-2xl px-2 py-3">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-              {tr("설정", "Settings")}
-            </div>
-            <div className="mt-2 text-lg font-semibold tracking-tight" style={{ color: "var(--th-text)" }}>
-              {tr("운영 설정 카탈로그", "Operations settings catalog")}
-            </div>
-            <div className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-              {tr("큰 화면에서는 왼쪽에서 섹션 선택기를 고정하고, 본문은 한 흐름으로 이어서 탐색합니다.", "Keep the section picker fixed on large screens while the content flows as one continuous page.")}
-            </div>
-          </div>
-
-          <nav aria-label={tr("설정 섹션", "Settings sections")} className="space-y-2">
+      <SurfaceSection
+        title={tr("설정", "Settings")}
+        actions={(
+          <>
             {navItems.map((item) => (
-              <PanelNavButton
+              <SurfaceSegmentButton
                 key={item.id}
                 active={activePanel === item.id}
-                title={item.title}
-                detail={item.detail}
-                count={item.count}
-                ariaControls="settings-panel-content"
+                tone="info"
                 onClick={() => handlePanelChange(item.id)}
-              />
+              >
+                {item.title}
+              </SurfaceSegmentButton>
             ))}
-          </nav>
-        </aside>
+          </>
+        )}
+        className="rounded-[28px] p-4 sm:p-5"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
+          background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        }}
+      >
+      </SurfaceSection>
 
-        <div className="min-w-0 flex-1 lg:min-h-0">
-          <div className="flex flex-col gap-4">
-            <div className="flex items-start justify-between gap-3 lg:hidden">
-              <div className="min-w-0">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                  {tr("설정", "Settings")}
-                </div>
-                <div className="mt-1 text-xl font-semibold tracking-tight" style={{ color: "var(--th-text)" }}>
-                  {tr("운영 설정", "Operations settings")}
-                </div>
-              </div>
-            </div>
-
-            <div
-              className="relative flex gap-2 overflow-x-auto pb-1 after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-10 after:bg-gradient-to-l after:from-[color:var(--th-bg-surface)] after:to-transparent lg:hidden"
-              role="tablist"
-              aria-label={tr("설정 패널", "Settings panels")}
-            >
-              {navItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  id={`settings-tab-${item.id}`}
-                  role="tab"
-                  aria-selected={activePanel === item.id}
-                  aria-controls="settings-panel-content"
-                  onClick={() => handlePanelChange(item.id)}
-                  className="shrink-0 rounded-full border px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-bg-surface)]"
-                  style={{
-                    borderColor: activePanel === item.id
-                      ? "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)"
-                      : "color-mix(in srgb, var(--th-border) 72%, transparent)",
-                    background: activePanel === item.id
-                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 68%, transparent)"
-                      : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                    color: activePanel === item.id ? "var(--th-text)" : "var(--th-text-muted)",
-                  }}
-                >
-                  {item.title}
-                </button>
-              ))}
-            </div>
-
-            <div
-              id="settings-panel-content"
-              role="tabpanel"
-              aria-labelledby={`settings-tab-${activePanel}`}
-              tabIndex={-1}
-              className="min-w-0 lg:pr-1"
-            >
-              {renderActivePanel()}
-            </div>
-          </div>
+      <div className="mt-4">
+        <div
+          id="settings-panel-content"
+          role="tabpanel"
+          aria-labelledby={`settings-tab-${activePanel}`}
+          tabIndex={-1}
+          className="min-w-0"
+        >
+          {renderActivePanel()}
         </div>
       </div>
 

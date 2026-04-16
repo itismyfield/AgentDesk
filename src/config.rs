@@ -90,6 +90,12 @@ pub struct DiscordBotAuthConfig {
         deserialize_with = "deserialize_optional_u64_vec",
         skip_serializing_if = "Option::is_none"
     )]
+    pub require_mention_channel_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allowed_user_ids: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
@@ -106,6 +112,7 @@ pub struct DiscordBotAuthConfig {
 impl DiscordBotAuthConfig {
     pub fn is_empty(&self) -> bool {
         self.allowed_channel_ids.is_none()
+            && self.require_mention_channel_ids.is_none()
             && self.allowed_user_ids.is_none()
             && self.allowed_tools.is_none()
             && self.allow_all_users.is_none()
@@ -469,6 +476,8 @@ pub struct KanbanConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadlock_manager_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_alert_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pm_decision_gate_enabled: Option<bool>,
 }
 
@@ -476,6 +485,7 @@ impl KanbanConfig {
     pub fn is_empty(&self) -> bool {
         self.manager_channel_id.is_none()
             && self.deadlock_manager_channel_id.is_none()
+            && self.human_alert_channel_id.is_none()
             && self.pm_decision_gate_enabled.is_none()
     }
 }
@@ -1205,6 +1215,7 @@ mod tests {
                 agent: Some("agent-1".to_string()),
                 auth: DiscordBotAuthConfig {
                     allowed_channel_ids: Some(vec![123456789012345678]),
+                    require_mention_channel_ids: Some(vec![223456789012345678]),
                     allowed_user_ids: Some(vec![343742347365974026]),
                     allowed_tools: Some(vec!["Bash".to_string(), "WebFetch".to_string()]),
                     allow_all_users: Some(false),
@@ -1230,6 +1241,7 @@ mod tests {
         config.kanban = KanbanConfig {
             manager_channel_id: Some("123456789012345678".to_string()),
             deadlock_manager_channel_id: Some("223456789012345678".to_string()),
+            human_alert_channel_id: Some("323456789012345678".to_string()),
             pm_decision_gate_enabled: Some(true),
         };
         config.review = ReviewConfig {
@@ -1319,6 +1331,13 @@ mod tests {
         assert_eq!(
             loaded.discord.bots["announce"]
                 .auth
+                .require_mention_channel_ids
+                .as_deref(),
+            Some(&[223456789012345678][..])
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
                 .allowed_user_ids
                 .as_deref(),
             Some(&[343742347365974026][..])
@@ -1355,6 +1374,10 @@ mod tests {
         assert_eq!(
             loaded.kanban.deadlock_manager_channel_id.as_deref(),
             Some("223456789012345678")
+        );
+        assert_eq!(
+            loaded.kanban.human_alert_channel_id.as_deref(),
+            Some("323456789012345678")
         );
         assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
         assert_eq!(loaded.review.enabled, Some(true));

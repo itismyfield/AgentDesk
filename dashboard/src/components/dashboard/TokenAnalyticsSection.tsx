@@ -1177,11 +1177,11 @@ function DailyTrendCard({
                       </div>
                     </div>
                     <span
-                      className="min-h-[1.8rem] text-center text-[9px] leading-3 sm:min-h-0 sm:text-[10px]"
+                      className="min-h-[1.8rem] whitespace-nowrap text-center text-[9px] leading-3 sm:min-h-[1rem] sm:text-[10px]"
                       style={{ color: "var(--th-text-muted)" }}
                     >
                       <span className="hidden sm:inline">
-                        {day.date.slice(5)}
+                        {compactLabel ? day.date.slice(5) : ""}
                       </span>
                       <span className="sm:hidden">
                         {compactLabel ? day.date.slice(5) : ""}
@@ -1350,11 +1350,11 @@ function DailyCacheHitTrendCard({
                       />
                     </div>
                     <span
-                      className="min-h-[1.8rem] text-center text-[9px] leading-3 sm:min-h-0 sm:text-[10px]"
+                      className="min-h-[1.8rem] whitespace-nowrap text-center text-[9px] leading-3 sm:min-h-[1rem] sm:text-[10px]"
                       style={{ color: "var(--th-text-muted)" }}
                     >
                       <span className="hidden sm:inline">
-                        {day.date.slice(5)}
+                        {compactLabel ? day.date.slice(5) : ""}
                       </span>
                       <span className="sm:hidden">
                         {compactLabel ? day.date.slice(5) : ""}

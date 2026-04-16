@@ -231,14 +231,14 @@ describe("filterMeetingExpertsByQuery", () => {
 });
 
 describe("MeetingMinutesView rendered form contract", () => {
-  it("renders the simplified meeting start form with a single primary model selector", () => {
+  it("renders the current meeting start form contract", () => {
     const markup = renderMeetingStartFormMarkup();
 
-    expect(markup).toContain("진행 모델");
+    expect(markup).toContain("진행 프로바이더");
     expect(markup).toContain("반대 모델이 자동 교차검증");
     expect(markup).toContain('placeholder="회의 안건을 입력하세요"');
-    expect(markup).not.toContain("리뷰 프로바이더");
-    expect(markup).not.toContain("고정 전문 에이전트");
+    expect(markup).toContain("리뷰 프로바이더");
+    expect(markup).toContain("고정 전문 에이전트");
   });
 
   it("renders the current provider options in the primary model selector", () => {

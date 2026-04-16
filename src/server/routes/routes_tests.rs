@@ -740,11 +740,13 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
 }
 
 #[tokio::test]
+#[ignore = "requires tmux"]
 async fn stop_agent_turn_force_kills_matching_tmux_session() {
     let _env_lock = env_lock();
-    if Command::new("tmux").arg("-V").output().is_err() {
-        return;
-    }
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .expect("tmux must be installed for this test");
 
     let temp = tempfile::tempdir().unwrap();
     let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -787,11 +789,11 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
     let tmux_started = Command::new("tmux")
         .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !tmux_started {
-        return;
-    }
+        .expect("tmux session should start for this test");
+    assert!(
+        tmux_started.success(),
+        "tmux session should start for this test"
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -945,11 +947,13 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
 }
 
 #[tokio::test]
+#[ignore = "requires tmux"]
 async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     let _env_lock = env_lock();
-    if Command::new("tmux").arg("-V").output().is_err() {
-        return;
-    }
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .expect("tmux must be installed for this test");
 
     let tmux_name = format!("AgentDesk-codex-turn-cancel-{}", std::process::id());
     let session_key = format!("mac-mini:{tmux_name}");
@@ -958,11 +962,11 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     let tmux_started = Command::new("tmux")
         .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !tmux_started {
-        return;
-    }
+        .expect("tmux session should start for this test");
+    assert!(
+        tmux_started.success(),
+        "tmux session should start for this test"
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -2665,7 +2669,7 @@ async fn api_docs_flat_format_omits_removed_legacy_routes() {
         endpoints
             .iter()
             .any(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/runs/{id}/order"),
-        "flat docs must keep the PM-assisted submit_order callback route"
+        "flat docs must keep the submit_order callback route"
     );
 }
 
@@ -5547,7 +5551,7 @@ async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() 
 }
 
 #[tokio::test]
-async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
+async fn reopen_skips_preflight_already_applied_for_api_reopen() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -5597,7 +5601,7 @@ async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
                 .uri("/kanban-cards/card-reopen-skip/reopen")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(r#"{"reason":"skip preflight on PMD reopen"}"#))
+                .body(Body::from(r#"{"reason":"skip preflight on API reopen"}"#))
                 .unwrap(),
         )
         .await
@@ -5621,12 +5625,12 @@ async fn reopen_skips_preflight_already_applied_for_pmd_reopen() {
         .unwrap();
     assert_eq!(
         status, reopen_target,
-        "PMD reopen must skip already_applied preflight and keep card reopened"
+        "API reopen must skip already_applied preflight and keep card reopened"
     );
     let metadata: serde_json::Value =
         serde_json::from_str(metadata_raw.as_deref().unwrap_or("{}")).unwrap();
     assert_eq!(metadata["preflight_status"], "skipped");
-    assert_eq!(metadata["preflight_summary"], "Skipped for PMD reopen");
+    assert_eq!(metadata["preflight_summary"], "Skipped for API reopen");
     assert!(
         metadata.get("skip_preflight_once").is_none(),
         "skip_preflight_once must be consumed during reopen transition"
@@ -5751,6 +5755,12 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-reopen-reset-history', 'test-repo', 'agent-reopen-reset', 'completed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at
             ) VALUES (
@@ -5764,7 +5774,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, completed_at
             ) VALUES (
-                'entry-reopen-done', 'run-reopen-reset', 'card-reopen-reset', 'agent-reopen-reset',
+                'entry-reopen-done', 'run-reopen-reset-history', 'card-reopen-reset', 'agent-reopen-reset',
                 'done', datetime('now', '-30 minutes')
             )",
             [],
@@ -7327,6 +7337,267 @@ async fn auto_queue_restore_run_rejects_active_run() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_restore_run_retries_from_restoring_after_partial_failure() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restore-retry");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-restore-retry-ok",
+        1811,
+        "ready",
+        "agent-restore-retry",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-restore-retry-fail",
+        1812,
+        "ready",
+        "agent-restore-retry",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-restore-retry', 'test-repo', 'agent-restore-retry', 'cancelled', 2, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-retry-ok', 'run-restore-retry', 'card-restore-retry-ok',
+                'agent-restore-retry', 'skipped', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-restore-retry-fail', 'run-restore-retry', 'card-restore-retry-fail',
+                'agent-restore-retry', 'skipped', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_restore_retry_entry
+             BEFORE UPDATE OF status ON auto_queue_entries
+             WHEN OLD.id = 'entry-restore-retry-fail'
+               AND NEW.status != OLD.status
+             BEGIN
+                 SELECT RAISE(ABORT, 'restore retry blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-retry/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["run_status"], "cancelled");
+    assert_eq!(json["restored_pending"], 0);
+    assert!(
+        json["errors"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|value| value
+                .as_str()
+                .unwrap_or_default()
+                .contains("entry-restore-retry-fail")),
+        "restore response must surface the skipped entry that still needs recovery"
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-restore-retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_status, "cancelled");
+
+        let restored_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-retry-ok'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_status, "skipped");
+
+        let missing_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-retry-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing_status, "skipped");
+        conn.execute("DROP TRIGGER fail_restore_retry_entry", [])
+            .unwrap();
+    }
+
+    let retry_app = test_api_router(db.clone(), test_engine(&db), None);
+    let retry_response = retry_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-retry/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_body = axum::body::to_bytes(retry_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let retry_json: serde_json::Value = serde_json::from_slice(&retry_body).unwrap();
+    assert_eq!(retry_json["ok"], true);
+    assert_eq!(retry_json["run_status"], "active");
+    assert_eq!(retry_json["restored_pending"], 2);
+
+    let conn = db.lock().unwrap();
+    let final_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-restore-retry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(final_run_status, "active");
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE run_id = 'run-restore-retry'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            (
+                "entry-restore-retry-fail".to_string(),
+                "pending".to_string(),
+            ),
+            ("entry-restore-retry-ok".to_string(), "pending".to_string()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_run_id_does_not_dispatch_restoring_runs() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-restoring-activate");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-restoring-activate",
+        1700,
+        "ready",
+        "agent-restoring-activate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-restoring-activate', 'test-repo', 'agent-restoring-activate', 'restoring', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-restoring-activate', 'run-restoring-activate', 'card-restoring-activate', 'agent-restoring-activate', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-restoring-activate",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["message"], "Run is restoring");
+
+    let conn = db.lock().unwrap();
+    let entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-restoring-activate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_status, "pending");
+
+    let dispatch_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM task_dispatches", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(dispatch_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
@@ -8405,6 +8676,121 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         ),
         "active sibling group must not be cleared while it is still reusing its own context"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_dispatch_create_failure_releases_reserved_slot() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-dispatch-fail");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-fail",
+        4170,
+        "ready",
+        "agent-dispatch-fail",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-dispatch-fail', 'test-repo', 'agent-dispatch-fail', 'active', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-fail', 'run-dispatch-fail', 'card-dispatch-fail',
+                'agent-dispatch-fail', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_task_dispatch_insert
+             BEFORE INSERT ON task_dispatches
+             BEGIN
+                 SELECT RAISE(ABORT, 'dispatch insert blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-dispatch-fail",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 0,
+        "failed create_dispatch must not report a dispatched group"
+    );
+
+    let conn = db.lock().unwrap();
+    let entry_row: (String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-dispatch-fail'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(entry_row.0, "pending");
+    assert!(entry_row.1.is_none());
+    assert!(entry_row.2.is_none());
+
+    let slot_row: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-dispatch-fail' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        slot_row,
+        (None, None),
+        "failed create_dispatch must release the reserved slot"
+    );
+
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-dispatch-fail'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11224,6 +11610,119 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
 }
 
 #[tokio::test]
+async fn auto_queue_cancel_includes_restoring_runs() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-restoring");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-restoring-pending",
+        4598,
+        "ready",
+        "agent-cancel-restoring",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-restoring-skipped",
+        4599,
+        "ready",
+        "agent-cancel-restoring",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-cancel-restoring', 'test-repo', 'agent-cancel-restoring', 'restoring', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-restoring-pending', 'run-cancel-restoring', 'card-cancel-restoring-pending',
+                'agent-cancel-restoring', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-restoring-skipped', 'run-cancel-restoring', 'card-cancel-restoring-skipped',
+                'agent-cancel-restoring', 'skipped', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-restoring'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
+
+    let entry_states: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status
+                 FROM auto_queue_entries
+                 WHERE run_id = 'run-cancel-restoring'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        entry_states,
+        vec![
+            (
+                "entry-cancel-restoring-pending".to_string(),
+                "skipped".to_string(),
+            ),
+            (
+                "entry-cancel-restoring-skipped".to_string(),
+                "skipped".to_string(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_cancel_targets_only_requested_run() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -11350,6 +11849,133 @@ async fn auto_queue_cancel_targets_only_requested_run() {
             ("entry-cancel-target-b".to_string(), "skipped".to_string()),
         ]
     );
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_surfaces_warning_when_slot_release_fails() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-cancel-warn");
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-warn-dispatched",
+        4603,
+        "in_progress",
+        "agent-cancel-warn",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-cancel-warn-pending",
+        4604,
+        "ready",
+        "agent-cancel-warn",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-cancel-warn', 'test-repo', 'agent-cancel-warn', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-cancel-warn', 0, 'run-cancel-warn', 0, ?1
+            )",
+            [json!({"111": "222000000000004603"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-cancel-warn', 'card-cancel-warn-dispatched', 'agent-cancel-warn',
+                'implementation', 'dispatched', 'Cancel warning dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-cancel-warn-dispatched', 'run-cancel-warn', 'card-cancel-warn-dispatched',
+                'agent-cancel-warn', 'dispatched', 'dispatch-cancel-warn', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-cancel-warn-pending', 'run-cancel-warn', 'card-cancel-warn-pending',
+                'agent-cancel-warn', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_cancel_initial_slot_release
+             BEFORE UPDATE OF assigned_run_id ON auto_queue_slots
+             WHEN OLD.assigned_run_id = 'run-cancel-warn'
+               AND NEW.assigned_run_id IS NULL
+               AND (
+                   SELECT COUNT(*)
+                   FROM auto_queue_entries
+                   WHERE run_id = 'run-cancel-warn'
+                     AND status IN ('pending', 'dispatched')
+               ) > 1
+             BEGIN
+                 SELECT RAISE(ABORT, 'cancel slot release blocked');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["released_slots"], 0);
+    assert!(
+        json["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to release slots for run run-cancel-warn"),
+        "cancel response must surface slot release failures"
+    );
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-cancel-warn'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
 }
 
 #[tokio::test]

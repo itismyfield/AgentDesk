@@ -45,7 +45,10 @@ use memory_lifecycle::{
     optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
     spawn_memory_reflect_task, take_memento_reflect_request,
 };
-use recall_feedback::{analyze_recall_feedback_turn, submit_pending_feedbacks};
+use recall_feedback::{
+    analyze_recall_feedback_turn, submit_pending_feedbacks,
+    transcript_contains_explicit_memento_tool_call,
+};
 use retry_state::{
     clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
     reset_session_for_auto_retry, sync_response_delivery_state,
@@ -1595,11 +1598,15 @@ pub(super) fn spawn_turn_bridge(
             .await;
         }
 
-        let turn_id = should_persist_transcript
-            .then(|| format!("discord:{}:{}", channel_id.get(), user_msg_id.get()));
+        let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
         let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
-        let recall_feedback_analysis = should_analyze_recall_feedback
-            .then(|| analyze_recall_feedback_turn(&transcript_events));
+        let recall_feedback_analysis = if should_analyze_recall_feedback
+            || transcript_contains_explicit_memento_tool_call(&transcript_events)
+        {
+            Some(analyze_recall_feedback_turn(&transcript_events))
+        } else {
+            None
+        };
         let model_token_usage = TurnTokenUsage {
             input_tokens: accumulated_input_tokens,
             cache_create_tokens: accumulated_cache_create_tokens,
@@ -1612,7 +1619,7 @@ pub(super) fn spawn_turn_bridge(
             if let Err(e) = crate::db::session_transcripts::persist_turn(
                 db,
                 crate::db::session_transcripts::PersistSessionTranscript {
-                    turn_id: turn_id.as_deref().unwrap_or_default(),
+                    turn_id: turn_id.as_str(),
                     session_key: adk_session_key.as_deref(),
                     channel_id: Some(channel_id_text.as_str()),
                     agent_id: role_binding
@@ -1717,14 +1724,12 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        if let (Some(db), Some(turn_id), Some(analysis)) = (
-            shared_owned.db.as_ref(),
-            turn_id.as_deref(),
-            recall_feedback_analysis.as_ref(),
-        ) && analysis.recall_count > 0
+        if let (Some(db), Some(analysis)) =
+            (shared_owned.db.as_ref(), recall_feedback_analysis.as_ref())
+            && analysis.recall_count > 0
         {
             let stat = crate::db::memento_feedback_stats::MementoFeedbackTurnStat {
-                turn_id: turn_id.to_string(),
+                turn_id: turn_id.clone(),
                 stat_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
                 agent_id: memory_role_id.clone(),
                 provider: provider.as_str().to_string(),

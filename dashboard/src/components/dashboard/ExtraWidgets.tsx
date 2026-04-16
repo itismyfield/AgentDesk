@@ -367,13 +367,13 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
           <BottleneckColumn
             title={t({ ko: "반복 리워크", en: "Repeat Rework", ja: "反復リワーク", zh: "重复返工" })}
             hint={t({
-              ko: `${thresholds.rework_alert_threshold}회 이상 rework`,
-              en: `${thresholds.rework_alert_threshold}+ reworks`,
-              ja: `${thresholds.rework_alert_threshold}回以上リワーク`,
-              zh: `${thresholds.rework_alert_threshold} 次以上返工`,
+              ko: `오늘 완료, ${thresholds.rework_alert_threshold}회 이상 rework`,
+              en: `Closed today, ${thresholds.rework_alert_threshold}+ reworks`,
+              ja: `本日完了、${thresholds.rework_alert_threshold}回以上リワーク`,
+              zh: `今日完成、${thresholds.rework_alert_threshold} 次以上返工`,
             })}
             rows={groups.repeat_rework}
-            emptyLabel={t({ ko: "반복 리워크 카드는 없습니다", en: "No repeat rework cards", ja: "反復リワークカードはありません", zh: "暂无重复返工卡片" })}
+            emptyLabel={t({ ko: "오늘 완료된 반복 리워크 카드가 없습니다", en: "No repeat rework cards closed today", ja: "本日完了の反復リワークカードはありません", zh: "今日暂无完成的重复返工卡片" })}
             accent="#a78bfa"
             t={t}
           />

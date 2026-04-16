@@ -231,6 +231,8 @@ export function buildBottleneckGroups(
   const repeatRework: BottleneckRow[] = [];
   const longBlocked: BottleneckRow[] = [];
 
+  const todayStart = now - (now % DAY_MS);
+
   for (const card of cards) {
     const ageDays = resolveBottleneckAgeDays(card, now);
     const reworkCount = estimateReworkCount(card);
@@ -238,8 +240,14 @@ export function buildBottleneckGroups(
     if (card.status === "review" && ageDays >= thresholds.review_delay_days) {
       reviewDelay.push(buildBottleneckRow(card, ageDays));
     }
-    if (reworkCount >= thresholds.rework_alert_threshold) {
-      repeatRework.push(buildBottleneckRow(card, ageDays));
+    const completedTs = parseDashboardTimestamp(card.completed_at);
+    if (
+      reworkCount >= thresholds.rework_alert_threshold &&
+      card.status === "done" &&
+      completedTs != null &&
+      completedTs >= todayStart
+    ) {
+      repeatRework.push(buildBottleneckRow(card, 0));
     }
     if (card.status === "blocked" && ageDays >= thresholds.long_blocked_days) {
       longBlocked.push(buildBottleneckRow(card, ageDays));

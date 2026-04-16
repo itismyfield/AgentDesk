@@ -1,7 +1,9 @@
+use super::discord_delivery::{DispatchTransport, ReviewFollowupKind};
 use super::outbox::{
     DispatchFollowupConfig, extract_review_verdict, format_dispatch_message,
     handle_completed_dispatch_followups, handle_completed_dispatch_followups_with_config,
-    prefix_dispatch_message, use_counter_model_channel,
+    handle_completed_dispatch_followups_with_config_and_transport, prefix_dispatch_message,
+    use_counter_model_channel,
 };
 use crate::db::Db;
 use crate::engine::PolicyEngine;
@@ -34,6 +36,68 @@ struct MockDispatchSummaryState {
     calls: Vec<String>,
     patch_payloads: Vec<serde_json::Value>,
     messages: Vec<String>,
+}
+
+#[derive(Default)]
+struct MockDispatchTransportState {
+    dispatch_calls: usize,
+    review_followup_kinds: Vec<ReviewFollowupKind>,
+}
+
+#[derive(Clone, Default)]
+struct MockDispatchTransport {
+    state: Arc<Mutex<MockDispatchTransportState>>,
+    send_dispatch_error: Option<String>,
+    review_followup_error: Option<String>,
+}
+
+impl MockDispatchTransport {
+    fn failing_dispatch(error: &str) -> Self {
+        Self {
+            send_dispatch_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+}
+
+impl DispatchTransport for MockDispatchTransport {
+    fn send_dispatch(
+        &self,
+        _db: Db,
+        _agent_id: String,
+        _title: String,
+        _card_id: String,
+        _dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let state = self.state.clone();
+        let error = self.send_dispatch_error.clone();
+        async move {
+            state.lock().unwrap().dispatch_calls += 1;
+            match error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn send_review_followup(
+        &self,
+        _db: Db,
+        _card_id: String,
+        _channel_id_num: u64,
+        _message: String,
+        kind: ReviewFollowupKind,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let state = self.state.clone();
+        let error = self.review_followup_error.clone();
+        async move {
+            state.lock().unwrap().review_followup_kinds.push(kind);
+            match error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
 }
 
 struct SummaryRepoFixture {
@@ -736,7 +800,7 @@ async fn impl_dispatch_followup_detects_new_review_dispatch() {
 }
 
 #[tokio::test]
-async fn thread_not_archived_when_card_not_done() {
+async fn active_thread_id_preserved_when_card_not_done() {
     // When an implementation dispatch completes but card is in "review" (not done),
     // the thread should NOT be archived — it may be reused for rework/review-decision.
     let db = test_db();
@@ -778,7 +842,7 @@ async fn thread_not_archived_when_card_not_done() {
 }
 
 #[tokio::test]
-async fn thread_archived_and_cleared_when_card_done() {
+async fn active_thread_id_cleared_when_card_done() {
     // When a card reaches "done", active_thread_id should be cleared.
     // (Thread archiving requires Discord API call, but we verify the DB cleanup.)
     let db = test_db();
@@ -916,9 +980,14 @@ async fn completed_work_dispatch_posts_summary_before_archiving_thread() {
 /// and sets review_followup_handled=true, preventing duplicate resend
 /// via the generic latest_dispatch_id check.
 #[tokio::test]
-#[ignore] // CI: send_review_result_to_primary early-returns without local ADK runtime
 async fn review_followup_skips_generic_resend_for_explicit_verdict() {
     let db = test_db();
+    let transport = MockDispatchTransport::default();
+    let config = DispatchFollowupConfig {
+        discord_api_base: "http://127.0.0.1:9".to_string(),
+        notify_bot_token: None,
+        announce_bot_token: None,
+    };
     {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -940,9 +1009,14 @@ async fn review_followup_skips_generic_resend_for_explicit_verdict() {
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-review")
-        .await
-        .expect("explicit review verdict followup should succeed");
+    handle_completed_dispatch_followups_with_config_and_transport(
+        &db,
+        "dispatch-review",
+        &config,
+        &transport,
+    )
+    .await
+    .expect("explicit review verdict followup should succeed");
 
     let conn = db.lock().unwrap();
     // A review-decision dispatch should have been created
@@ -979,6 +1053,16 @@ async fn review_followup_skips_generic_resend_for_explicit_verdict() {
         .unwrap();
     assert_eq!(dt, "review-decision");
     assert_eq!(ds, "pending");
+
+    let transport_state = transport.state.lock().unwrap();
+    assert_eq!(
+        transport_state.dispatch_calls, 0,
+        "explicit verdict followup must not re-send the original dispatch"
+    );
+    assert!(
+        transport_state.review_followup_kinds.is_empty(),
+        "explicit verdict followup should enqueue review-decision instead of posting a message"
+    );
 }
 
 /// When the agent's discord_channel_id points to a non-existent channel,
@@ -986,9 +1070,9 @@ async fn review_followup_skips_generic_resend_for_explicit_verdict() {
 /// This ensures that Discord send failures leave the dispatch recoverable
 /// by timeouts.js [I-0].
 #[tokio::test]
-#[ignore] // CI: send_dispatch_to_discord early-returns without local ADK runtime
 async fn no_notified_marker_when_discord_send_fails() {
     let db = test_db();
+    let transport = MockDispatchTransport::failing_dispatch("mock dispatch transport failure");
     {
         let conn = db.lock().unwrap();
         // Use a bogus numeric channel ID that will fail at Discord API
@@ -1014,17 +1098,18 @@ async fn no_notified_marker_when_discord_send_fails() {
     // Channel ID "1" is a valid u64 but not a real Discord channel.
     // Thread creation and fallback will both fail with Discord API errors.
     // No notified marker should be written.
-    let send_result = super::discord_delivery::send_dispatch_to_discord(
+    let send_result = super::discord_delivery::send_dispatch_to_discord_with_transport(
         &db,
         "agent-1",
         "Test card",
         "card-1",
         "dispatch-1",
+        &transport,
     )
     .await;
     assert!(
         send_result.is_err(),
-        "bogus Discord channel should fail delivery"
+        "mock transport failure should fail delivery"
     );
 
     let conn = db.lock().unwrap();
@@ -1052,6 +1137,21 @@ async fn no_notified_marker_when_discord_send_fails() {
         thread_id.is_none(),
         "thread_id must not be saved when thread message POST fails"
     );
+
+    let reserving_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kv_meta WHERE key = 'dispatch_reserving:dispatch-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reserving_count, 0,
+        "dispatch_reserving marker must be released when delivery fails"
+    );
+
+    let transport_state = transport.state.lock().unwrap();
+    assert_eq!(transport_state.dispatch_calls, 1);
 }
 
 /// send_review_result_to_primary must not create a review-decision dispatch
