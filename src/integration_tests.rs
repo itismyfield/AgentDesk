@@ -1565,6 +1565,12 @@ mod tests {
             )
             .unwrap();
             conn.execute(
+                "INSERT OR REPLACE INTO card_review_state (card_id, state, review_round) \
+                 VALUES ('card-retro-e2e', 'reviewing', 2)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
                 "INSERT INTO task_dispatches (
                     id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
                     created_at, updated_at, completed_at
@@ -5525,17 +5531,12 @@ mod tests {
             ],
             "transitions": [
                 {"from": "backlog", "to": "ready", "type": "free"},
-                {"from": "ready", "to": "requested", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "ready", "to": "requested", "type": "free"},
                 {"from": "requested", "to": "in_progress", "type": "gated", "gates": ["active_dispatch"]},
                 {"from": "in_progress", "to": "review", "type": "gated", "gates": ["active_dispatch"]},
                 {"from": "review", "to": "qa_test", "type": "gated", "gates": ["review_passed"]},
                 {"from": "review", "to": "in_progress", "type": "gated", "gates": ["review_rework"]},
-                {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]},
-                {"from": "qa_test", "to": "in_progress", "type": "force_only"},
-                {"from": "requested", "to": "done", "type": "force_only"},
-                {"from": "in_progress", "to": "requested", "type": "force_only"},
-                {"from": "review", "to": "requested", "type": "force_only"},
-                {"from": "qa_test", "to": "requested", "type": "force_only"}
+                {"from": "qa_test", "to": "done", "type": "gated", "gates": ["active_dispatch"]}
             ],
             "gates": {
                 "active_dispatch": {"type": "builtin", "check": "has_active_dispatch"},

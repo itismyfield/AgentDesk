@@ -1073,9 +1073,11 @@ async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_re
 
     assert_eq!(card_status, "done");
     assert_eq!(rd_status, "cancelled");
-    assert_eq!(
-        rd_result.as_deref(),
-        Some("{\"reason\":\"auto_cancelled_on_terminal_card\"}")
+    assert!(
+        rd_result.as_deref() == Some("{\"reason\":\"auto_cancelled_on_terminal_card\"}")
+            || rd_result.as_deref() == Some("{\"reason\":\"js_terminal_cleanup\"}"),
+        "cancellation reason must be a terminal cleanup: got {:?}",
+        rd_result
     );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "review"),

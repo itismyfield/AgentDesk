@@ -143,6 +143,15 @@ function _runPreflight(cardId) {
     }
   }
 
+  // Check 2: Already has terminal dispatch?
+  var terminalDispatch = agentdesk.db.query(
+    "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+    [cardId]
+  );
+  if (terminalDispatch.length > 0) {
+    return { status: "already_applied", summary: "Implementation dispatch already completed" };
+  }
+
   // Check 3: Description/body too short or empty?
   var body = c.description || "";
   if (body.trim().length < 30) {

@@ -775,8 +775,13 @@ pub(super) fn build_review_context(
         }
     }
     let ctx_snapshot = ctx_val.clone();
+    // #655: Noop verification reviews don't need a commit target — they verify the
+    // noop justification, not code changes. Skip the entire reviewed_commit resolution
+    // to avoid repo-root dirty-check failures on noop completions.
+    let is_noop_verification =
+        ctx_val.get("review_mode").and_then(|v| v.as_str()) == Some("noop_verification");
     if let Some(obj) = ctx_val.as_object_mut() {
-        if !obj.contains_key("reviewed_commit") {
+        if !is_noop_verification && !obj.contains_key("reviewed_commit") {
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
             let validated_work_target = latest_work_target.as_ref().filter(|t| {
                 let valid = commit_belongs_to_card_issue(

@@ -38,7 +38,7 @@ function loadManualInterventionState(cardId) {
   );
   if (cards.length === 0) return null;
   var card = cards[0];
-  var cfg = agentdesk.pipeline.config();
+  var cfg = agentdesk.pipeline.getConfig();
   if (agentdesk.pipeline.isTerminal(card.status, cfg)) {
     return {
       status: card.status,

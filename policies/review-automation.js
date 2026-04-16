@@ -46,13 +46,7 @@ var reviewAutomation = {
     }
 
     // Guard: don't create review dispatch if implementation/rework is still active
-    var activeWork = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM task_dispatches " +
-      "WHERE kanban_card_id = ? AND dispatch_type IN ('implementation', 'rework') " +
-      "AND status IN ('pending', 'dispatched')",
-      [card.id]
-    );
-    if (activeWork.length > 0 && activeWork[0].cnt > 0) {
+    if (agentdesk.dispatch.hasActiveWork(card.id)) {
       agentdesk.log.info("[review] Card " + card.id + " has active work dispatch — deferring review");
       return;
     }
@@ -232,10 +226,27 @@ var reviewAutomation = {
       );
       var completeCfg = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
       var completeTerminalState = agentdesk.pipeline.terminalState(completeCfg);
-      var completeInitialState = agentdesk.pipeline.kickoffState(completeCfg);
-      var completeInProgressState = agentdesk.pipeline.nextGatedTarget(completeInitialState, completeCfg);
-      var completeReviewState = agentdesk.pipeline.nextGatedTarget(completeInProgressState, completeCfg);
-      var completeReviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(completeReviewState, "review_passed", completeCfg) || completeTerminalState;
+      // Find review state by scanning for the state with a review_passed gated
+      // outbound transition, rather than assuming a fixed 2-hop shape from kickoff.
+      var completeReviewState = null;
+      var completeReviewPassTarget = completeTerminalState;
+      if (completeCfg && completeCfg.transitions) {
+        for (var ti = 0; ti < completeCfg.transitions.length; ti++) {
+          var tr = completeCfg.transitions[ti];
+          if (tr.type === "gated" && tr.gates && tr.gates.indexOf("review_passed") >= 0) {
+            completeReviewState = tr.from;
+            completeReviewPassTarget = tr.to;
+            break;
+          }
+        }
+      }
+      if (!completeReviewState) {
+        // Fallback: 2-hop walk from kickoff (legacy behavior)
+        var completeInitialState = agentdesk.pipeline.kickoffState(completeCfg);
+        var completeInProgressState = agentdesk.pipeline.nextGatedTarget(completeInitialState, completeCfg);
+        completeReviewState = agentdesk.pipeline.nextGatedTarget(completeInProgressState, completeCfg);
+        completeReviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(completeReviewState, "review_passed", completeCfg) || completeTerminalState;
+      }
       var lifecycleRows = agentdesk.db.query(
         "SELECT status FROM kanban_cards WHERE id = ?",
         [dispatch.kanban_card_id]
@@ -255,13 +266,15 @@ var reviewAutomation = {
         return;
       }
 
+      if (currentStatus === completeReviewState) {
+        agentdesk.kanban.setStatus(dispatch.kanban_card_id, completeReviewPassTarget, true);
+      }
+      // Set blocked_reason AFTER setStatus — terminal transitions clear
+      // blocked_reason as part of cleanup, so this must come last.
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
         [dispatch.kanban_card_id]
       );
-      if (currentStatus === completeReviewState) {
-        agentdesk.kanban.setStatus(dispatch.kanban_card_id, completeReviewPassTarget, true);
-      }
       agentdesk.log.info(
         "[review] Create-PR completed for card " + dispatch.kanban_card_id +
         " → wait-ci on PR #" + pr.number +
@@ -579,7 +592,7 @@ function loadLatestReviewDispatchContext(cardId, dispatchId) {
     "SELECT context FROM task_dispatches " +
     "WHERE kanban_card_id = ? AND dispatch_type = 'review' " +
     "ORDER BY CASE WHEN status IN ('pending', 'dispatched') THEN 0 ELSE 1 END ASC, " +
-    "COALESCE(dispatched_at, completed_at, updated_at, created_at) DESC, rowid DESC LIMIT 1",
+    "COALESCE(completed_at, updated_at, created_at) DESC, rowid DESC LIMIT 1",
     [cardId]
   );
   if (rows.length === 0) return {};
