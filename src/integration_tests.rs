@@ -65,6 +65,12 @@ mod tests {
         crate::config::shared_test_env_lock()
     }
 
+    fn lock_repo_dir_env() -> std::sync::MutexGuard<'static, ()> {
+        repo_dir_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     struct RepoDirOverride {
         _guard: std::sync::MutexGuard<'static, ()>,
         previous: Option<OsString>,
@@ -72,7 +78,7 @@ mod tests {
 
     impl RepoDirOverride {
         fn new(path: &std::path::Path) -> Self {
-            let guard = repo_dir_env_lock().lock().unwrap();
+            let guard = lock_repo_dir_env();
             let previous = std::env::var_os("AGENTDESK_REPO_DIR");
             unsafe { std::env::set_var("AGENTDESK_REPO_DIR", path) };
             Self {
@@ -98,7 +104,7 @@ mod tests {
 
     impl RuntimeRootOverride {
         fn new(path: &std::path::Path) -> Self {
-            let guard = repo_dir_env_lock().lock().unwrap();
+            let guard = lock_repo_dir_env();
             let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
             unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
             Self {
@@ -197,7 +203,7 @@ mod tests {
 
     impl RepoAndRuntimeOverride {
         fn new(repo_path: &std::path::Path, runtime_root: &std::path::Path) -> Self {
-            let guard = repo_dir_env_lock().lock().unwrap();
+            let guard = lock_repo_dir_env();
             let previous_repo = std::env::var_os("AGENTDESK_REPO_DIR");
             let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
             unsafe {
@@ -292,7 +298,7 @@ mod tests {
         run_git(repo.path(), &["config", "user.name", "Test"]);
         run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
 
-        let lock = repo_dir_env_lock().lock().unwrap();
+        let lock = lock_repo_dir_env();
         let previous_repo_dir = std::env::var_os("AGENTDESK_REPO_DIR");
         unsafe { std::env::set_var("AGENTDESK_REPO_DIR", repo.path()) };
 
@@ -323,7 +329,7 @@ mod tests {
         run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
         run_git(repo.path(), &["push", "-u", "origin", "main"]);
 
-        let lock = repo_dir_env_lock().lock().unwrap();
+        let lock = lock_repo_dir_env();
         let previous_repo_dir = std::env::var_os("AGENTDESK_REPO_DIR");
         unsafe { std::env::set_var("AGENTDESK_REPO_DIR", repo.path()) };
 

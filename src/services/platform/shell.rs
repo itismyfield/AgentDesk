@@ -170,6 +170,15 @@ pub(crate) fn looks_like_explicit_repo_path(raw: &str) -> bool {
         return false;
     }
 
+    if trimmed.starts_with(r"\\?\UNC\") || trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
+        return true;
+    }
+
+    let trimmed = trimmed
+        .strip_prefix(r"\\?\")
+        .or_else(|| trimmed.strip_prefix(r"\\.\"))
+        .unwrap_or(trimmed);
+
     if trimmed.starts_with('/')
         || trimmed.starts_with("~/")
         || trimmed.starts_with("./")
@@ -849,6 +858,12 @@ mod tests {
         // In CI/dev environments, should always resolve to *something*
         let dir = resolve_repo_dir();
         assert!(dir.is_some(), "resolve_repo_dir should return Some");
+    }
+
+    #[test]
+    fn looks_like_explicit_repo_path_accepts_windows_verbatim_paths() {
+        assert!(looks_like_explicit_repo_path(r"\\?\C:\tmp\repo"));
+        assert!(looks_like_explicit_repo_path(r"\\?\UNC\server\share\repo"));
     }
 
     #[test]

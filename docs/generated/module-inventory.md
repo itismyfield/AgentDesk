@@ -48,7 +48,7 @@
 | `cli::direct` | `src/cli/direct.rs` | 1463 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 2412 | giant-file |
-| `cli::init` | `src/cli/init.rs` | 1164 | giant-file |
+| `cli::init` | `src/cli/init.rs` | 1125 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 319 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
@@ -59,7 +59,7 @@
 | `crate` | `src/main.rs` | 42 |  |
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 129 |  |
-| `db::agents` | `src/db/agents.rs` | 717 |  |
+| `db::agents` | `src/db/agents.rs` | 539 |  |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 3390 | giant-file |
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
@@ -86,7 +86,7 @@
 | `engine::ops::deploy_ops` | `src/engine/ops/deploy_ops.rs` | 122 |  |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 266 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 250 |  |
-| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 369 |  |
+| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 370 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 57 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 779 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 143 |  |
@@ -184,18 +184,18 @@
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 235 |  |
 | `services::claude` | `src/services/claude.rs` | 2295 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1538 | giant-file |
-| `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 572 |  |
+| `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 525 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 2099 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 978 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 41 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1157 | giant-file |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 535 |  |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 534 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1007 | giant-file |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 59 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
-| `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 481 |  |
+| `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 161 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 369 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 353 |  |
@@ -219,7 +219,7 @@
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 1959 | giant-file |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
-| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 507 |  |
+| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 488 |  |
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 908 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 13 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
@@ -256,16 +256,16 @@
 | `services::dispatches` | `src/services/dispatches.rs` | 331 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 145 |  |
-| `services::memory` | `src/services/memory/mod.rs` | 347 |  |
-| `services::memory::local` | `src/services/memory/local.rs` | 114 |  |
-| `services::memory::mem0` | `src/services/memory/mem0.rs` | 1009 | giant-file |
+| `services::memory` | `src/services/memory/mod.rs` | 346 |  |
+| `services::memory::local` | `src/services/memory/local.rs` | 113 |  |
+| `services::memory::mem0` | `src/services/memory/mem0.rs` | 1011 | giant-file |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 1870 | giant-file |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 572 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 19 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 878 |  |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
-| `services::platform::shell` | `src/services/platform/shell.rs` | 1224 | giant-file |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 184 |  |
+| `services::platform::shell` | `src/services/platform/shell.rs` | 1239 | giant-file |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 178 |  |
 | `services::process` | `src/services/process.rs` | 706 |  |
 | `services::provider` | `src/services/provider.rs` | 1962 | giant-file |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 355 |  |
@@ -283,7 +283,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 333 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 665 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 111 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2016 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2007 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 571 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 103 |  |

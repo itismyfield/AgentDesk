@@ -208,8 +208,6 @@ pub(super) fn build_model_picker_option_specs(
         Some(value) => Some(value),
         None => override_model,
     };
-    let clearing_override = pending_model.is_some_and(is_default_picker_value);
-
     let resolved_models = resolved_models(provider, working_dir);
     let mut options = Vec::with_capacity(resolved_models.len());
     options.extend(
@@ -223,7 +221,7 @@ pub(super) fn build_model_picker_option_specs(
                     .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
             }),
     );
-    if options.is_empty() && !clearing_override {
+    if options.is_empty() {
         options.push(ModelPickerOptionSpec {
             value: DEFAULT_PICKER_VALUE.to_string(),
             label: default_picker_option_label(),
@@ -397,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn build_model_picker_option_specs_clearing_missing_override_leaves_nothing_selected() {
+    fn build_model_picker_option_specs_clearing_missing_override_keeps_fallback_option() {
         with_temp_qwen_env(|_temp_home, _temp_project| {
             let options = build_model_picker_option_specs(
                 &ProviderKind::Qwen,
@@ -413,11 +411,16 @@ mod tests {
                 "no option should be selected when pending value is the default sentinel"
             );
             assert!(
-                !options
+                options
                     .iter()
                     .any(|e| e.value
                         == crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
-                "default sentinel must not appear as a dropdown option"
+                "empty catalogs must still expose one fallback option so the required select menu stays valid"
+            );
+            assert_eq!(
+                options.len(),
+                1,
+                "empty catalog should collapse to a single fallback option"
             );
         });
     }
