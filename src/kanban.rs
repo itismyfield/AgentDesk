@@ -54,6 +54,71 @@ fn clear_escalation_alert_state_on_conn(
     Ok(())
 }
 
+pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+
+    execute_intent_on_conn(
+        conn,
+        &TransitionIntent::SetLatestDispatchId {
+            card_id: card_id.to_string(),
+            dispatch_id: None,
+        },
+    )?;
+    execute_intent_on_conn(
+        conn,
+        &TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    )?;
+    conn.execute(
+        "UPDATE kanban_cards \
+         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
+             review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
+             updated_at = datetime('now') \
+         WHERE id = ?1",
+        [card_id],
+    )?;
+    conn.execute(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
+         ) VALUES (
+            ?1, 0, 'idle', NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL, datetime('now')
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            review_round = 0,
+            state = 'idle',
+            pending_dispatch_id = NULL,
+            last_verdict = NULL,
+            last_decision = NULL,
+            decided_by = NULL,
+            decided_at = NULL,
+            approach_change_round = NULL,
+            session_reset_round = NULL,
+            review_entered_at = NULL,
+            updated_at = datetime('now')",
+        [card_id],
+    )?;
+    clear_escalation_alert_state_on_conn(conn, card_id)?;
+    Ok(())
+}
+
+pub(crate) fn log_audit_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    from: &str,
+    to: &str,
+    source: &str,
+    result: &str,
+) {
+    log_audit(conn, card_id, from, to, source, result);
+}
+
 fn transition_status_with_opts_inner<F>(
     db: &Db,
     engine: &PolicyEngine,

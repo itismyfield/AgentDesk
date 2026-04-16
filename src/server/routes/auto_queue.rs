@@ -307,6 +307,133 @@ fn load_live_dispatch_ids_for_runs(
         .collect::<Result<Vec<_>, _>>()
 }
 
+fn load_dispatched_card_ids_for_runs(
+    conn: &rusqlite::Connection,
+    run_ids: &[String],
+) -> rusqlite::Result<Vec<String>> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT kanban_card_id
+         FROM auto_queue_entries
+         WHERE run_id IN ({placeholders})
+           AND status = 'dispatched'
+           AND kanban_card_id IS NOT NULL
+           AND TRIM(kanban_card_id) != ''"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn rollback_cancelled_run_cards(
+    conn: &rusqlite::Connection,
+    card_ids: &[String],
+    source: &str,
+) -> usize {
+    let mut rolled_back = 0usize;
+
+    for card_id in card_ids {
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(status) = status else {
+            continue;
+        };
+        if !matches!(status.as_str(), "requested" | "in_progress") {
+            continue;
+        }
+
+        let has_active_dispatch: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+                [card_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if has_active_dispatch {
+            continue;
+        }
+
+        if let Err(error) = conn.execute_batch("SAVEPOINT auto_queue_run_cancel_card_rollback") {
+            crate::auto_queue_log!(
+                warn,
+                "run_cancel_card_rollback_savepoint_failed",
+                AutoQueueLogContext::new().card(card_id),
+                "[auto-queue] failed to open rollback savepoint for card {} during run cancel: {}",
+                card_id,
+                error
+            );
+            continue;
+        }
+
+        let rollback_result = (|| -> anyhow::Result<bool> {
+            let changed = conn.execute(
+                "UPDATE kanban_cards
+                 SET status = 'ready', updated_at = datetime('now')
+                 WHERE id = ?1 AND status IN ('requested', 'in_progress')",
+                [card_id],
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+
+            crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
+            crate::kanban::log_audit_on_conn(
+                conn,
+                card_id,
+                &status,
+                "ready",
+                source,
+                "OK (run cancel rollback)",
+            );
+            Ok(true)
+        })();
+
+        match rollback_result {
+            Ok(true) => {
+                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
+                    .ok();
+                rolled_back += 1;
+            }
+            Ok(false) => {
+                conn.execute_batch("ROLLBACK TO SAVEPOINT auto_queue_run_cancel_card_rollback")
+                    .ok();
+                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
+                    .ok();
+            }
+            Err(error) => {
+                conn.execute_batch("ROLLBACK TO SAVEPOINT auto_queue_run_cancel_card_rollback")
+                    .ok();
+                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
+                    .ok();
+                crate::auto_queue_log!(
+                    warn,
+                    "run_cancel_card_rollback_failed",
+                    AutoQueueLogContext::new().card(card_id),
+                    "[auto-queue] failed to roll back card {} during run cancel: {}",
+                    card_id,
+                    error
+                );
+            }
+        }
+    }
+
+    rolled_back
+}
+
 fn delete_phase_gate_rows_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> usize {
     if run_ids.is_empty() {
         return 0;
@@ -487,6 +614,8 @@ fn cancel_selected_runs_with_conn(
     target_run_ids: &[String],
     reason: &str,
 ) -> serde_json::Value {
+    let rollback_candidate_card_ids =
+        load_dispatched_card_ids_for_runs(conn, target_run_ids).unwrap_or_default();
     let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, target_run_ids, reason);
     let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, target_run_ids);
     let slot_cleanup = clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
@@ -547,6 +676,8 @@ fn cancel_selected_runs_with_conn(
             ),
         }
     }
+    let rolled_back_cards =
+        rollback_cancelled_run_cards(conn, &rollback_candidate_card_ids, reason);
     let remaining_live_dispatches = count_live_dispatches_for_runs(conn, &target_run_ids);
     if remaining_live_dispatches > 0 {
         let log_ctx = target_run_ids
@@ -569,6 +700,7 @@ fn cancel_selected_runs_with_conn(
         "cancelled_runs": cancelled_runs,
         "cancelled_dispatches": cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
+        "rolled_back_cards": rolled_back_cards,
         "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": slot_cleanup.released_slots,
         "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,

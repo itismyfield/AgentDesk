@@ -3081,50 +3081,7 @@ fn cleanup_force_transition_revert_on_conn(
         crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
     let skipped_auto_queue_entries =
         crate::engine::ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
-
-    crate::engine::transition::execute_intent_on_conn(
-        conn,
-        &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
-            card_id: card_id.to_string(),
-            dispatch_id: None,
-        },
-    )?;
-    crate::engine::transition::execute_intent_on_conn(
-        conn,
-        &crate::engine::transition::TransitionIntent::SetReviewStatus {
-            card_id: card_id.to_string(),
-            review_status: None,
-        },
-    )?;
-    conn.execute(
-        "UPDATE kanban_cards \
-         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
-             review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
-         WHERE id = ?1",
-        [card_id],
-    )?;
-    conn.execute(
-        "INSERT INTO card_review_state (
-            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
-            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
-         ) VALUES (
-            ?1, 0, 'idle', NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, NULL, datetime('now')
-         )
-         ON CONFLICT(card_id) DO UPDATE SET
-            review_round = 0,
-            state = 'idle',
-            pending_dispatch_id = NULL,
-            last_verdict = NULL,
-            last_decision = NULL,
-            decided_by = NULL,
-            decided_at = NULL,
-            approach_change_round = NULL,
-            session_reset_round = NULL,
-            review_entered_at = NULL,
-            updated_at = datetime('now')",
-        [card_id],
-    )?;
+    crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
 
     Ok((cancelled_dispatches, skipped_auto_queue_entries))
 }
