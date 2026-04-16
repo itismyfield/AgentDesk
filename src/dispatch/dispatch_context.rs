@@ -329,6 +329,126 @@ pub(crate) fn commit_belongs_to_card_issue(
     subject.contains(&pattern)
 }
 
+fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{commit_sha}^{{commit}}")])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+fn resolve_review_target_branch(
+    db: &Db,
+    card_id: &str,
+    dir: &str,
+    reviewed_commit: &str,
+    preferred_branch: Option<&str>,
+) -> Option<String> {
+    let issue_branch_hint = load_card_issue_repo(db, card_id)
+        .and_then(|(issue_number, _)| issue_number.map(|value| value.to_string()));
+    crate::services::platform::shell::git_branch_containing_commit(
+        dir,
+        reviewed_commit,
+        preferred_branch,
+        issue_branch_hint.as_deref(),
+    )
+    .or_else(|| preferred_branch.map(str::to_string))
+    .or_else(|| crate::services::platform::shell::git_branch_name(dir))
+}
+
+fn refresh_review_target_worktree(
+    db: &Db,
+    card_id: &str,
+    context: &serde_json::Value,
+    target: &DispatchExecutionTarget,
+) -> Result<Option<DispatchExecutionTarget>> {
+    if target
+        .worktree_path
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path).is_dir())
+    {
+        return Ok(Some(target.clone()));
+    }
+
+    if let Some(stale_path) = target.worktree_path.as_deref() {
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer exists — attempting fallback",
+            card_id,
+            stale_path
+        );
+    }
+
+    if let Some((wt_path, wt_branch, _wt_commit)) =
+        resolve_card_worktree(db, card_id, Some(context))?
+    {
+        if git_commit_exists(&wt_path, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch(
+                db,
+                card_id,
+                &wt_path,
+                &target.reviewed_commit,
+                target.branch.as_deref().or(Some(wt_branch.as_str())),
+            )
+            .or(Some(wt_branch));
+            tracing::info!(
+                "[dispatch] Review dispatch for card {}: refreshed worktree path to active issue worktree '{}' for commit {}",
+                card_id,
+                wt_path,
+                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: Some(wt_path),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: active issue worktree does not contain commit {} — skipping path refresh",
+            card_id,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+    }
+
+    if let Some(repo_dir) = resolve_card_repo_dir_with_context(
+        db,
+        card_id,
+        Some(context),
+        "recover review target repo",
+    )? {
+        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch(
+                db,
+                card_id,
+                &repo_dir,
+                &target.reviewed_commit,
+                target.branch.as_deref(),
+            );
+            tracing::info!(
+                "[dispatch] Review dispatch for card {}: falling back to repo dir '{}' for commit {} after stale worktree cleanup",
+                card_id,
+                repo_dir,
+                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: Some(repo_dir),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+    }
+
+    tracing::warn!(
+        "[dispatch] Review dispatch for card {}: no usable worktree or repo path contains commit {} after stale worktree cleanup",
+        card_id,
+        &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+    );
+    Ok(None)
+}
+
 fn latest_completed_work_dispatch_target(
     db: &Db,
     kanban_card_id: &str,
@@ -783,24 +903,30 @@ pub(super) fn build_review_context(
     if let Some(obj) = ctx_val.as_object_mut() {
         if !is_noop_verification && !obj.contains_key("reviewed_commit") {
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
-            let validated_work_target = latest_work_target.as_ref().filter(|t| {
+            let validated_work_target = if let Some(target) = latest_work_target.as_ref() {
                 let valid = commit_belongs_to_card_issue(
                     db,
                     kanban_card_id,
-                    &t.reviewed_commit,
-                    t.target_repo.as_deref().or(target_repo.as_deref()),
+                    &target.reviewed_commit,
+                    target.target_repo.as_deref().or(target_repo.as_deref()),
                 );
                 if !valid {
                     tracing::warn!(
                         "[dispatch] Review dispatch for card {}: work target commit {} doesn't match card issue — skipping to next fallback",
                         kanban_card_id,
-                        &t.reviewed_commit[..8.min(t.reviewed_commit.len())]
+                        &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                     );
                 }
-                valid
-            });
+                if valid {
+                    refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if let Some(target) = validated_work_target {
-                apply_review_target_context(target, obj);
+                apply_review_target_context(&target, obj);
                 tracing::info!(
                     "[dispatch] Review dispatch for card {}: reusing latest work target (commit {}, branch: {:?}, path: {:?})",
                     kanban_card_id,

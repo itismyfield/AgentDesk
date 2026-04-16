@@ -2115,6 +2115,101 @@ mod tests {
     }
 
     #[test]
+    fn review_context_refreshes_deleted_completed_worktree_to_active_issue_worktree() {
+        let db = test_db();
+        seed_card(&db, "card-review-stale-worktree", "review");
+        set_card_issue_number(&db, "card-review-stale-worktree", 682);
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let stale_wt_dir = repo.path().join("wt-682-stale");
+        let stale_wt_path = stale_wt_dir.to_str().unwrap();
+
+        run_git(
+            repo_dir,
+            &["worktree", "add", "-b", "wt/682-stale", stale_wt_path],
+        );
+        let reviewed_commit = git_commit(stale_wt_path, "fix: stale review target (#682)");
+        run_git(repo_dir, &["worktree", "remove", "--force", stale_wt_path]);
+        run_git(repo_dir, &["branch", "-D", "wt/682-stale"]);
+
+        let live_wt_dir = repo.path().join("wt-682-live");
+        let live_wt_path = live_wt_dir.to_str().unwrap();
+        run_git(repo_dir, &["branch", "wt/682-live", &reviewed_commit]);
+        run_git(repo_dir, &["worktree", "add", live_wt_path, "wt/682-live"]);
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-stale-worktree', 'card-review-stale-worktree', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_wt_path,
+                    "completed_branch": "wt/682-stale",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-stale-worktree", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(parsed["worktree_path"], live_wt_path);
+        assert_eq!(parsed["branch"], "wt/682-live");
+    }
+
+    #[test]
+    fn review_context_falls_back_to_repo_dir_when_completed_worktree_was_deleted() {
+        let db = test_db();
+        seed_card(&db, "card-review-stale-repo", "review");
+        set_card_issue_number(&db, "card-review-stale-repo", 683);
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let reviewed_commit = git_commit(repo_dir, "fix: repo fallback review target (#683)");
+        let stale_wt_path = repo.path().join("wt-683-missing");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-stale-repo', 'card-review-stale-repo', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_wt_path,
+                    "completed_branch": "wt/683-missing",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-stale-repo", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(parsed["worktree_path"], repo_dir);
+        assert_eq!(parsed["branch"], "main");
+    }
+
+    #[test]
     fn review_context_includes_merge_base_for_branch_review() {
         let db = test_db();
         seed_card(&db, "card-review-merge-base", "review");
