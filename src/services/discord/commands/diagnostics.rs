@@ -684,11 +684,7 @@ fn format_gemini_session_report(
         };
         lines.push(format!(
             "- `{}` {}{} — `{}` — `{}`",
-            session.index,
-            session.title,
-            current,
-            session.relative_time,
-            shorten_session_identifier(&session.session_id)
+            session.index, session.title, current, session.relative_time, session.session_id
         ));
     }
     lines.join("\n")
@@ -991,5 +987,21 @@ mod tests {
             normalized.get(&fresh_channel).map(std::vec::Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn format_gemini_session_report_shows_full_session_id_for_copy_paste() {
+        let sessions = vec![gemini::GeminiProjectSession {
+            index: 1,
+            title: "Reply with exactly OK.".to_string(),
+            relative_time: "Just now".to_string(),
+            is_current_session: false,
+            session_id: "242215ad-7e7b-4008-a0a5-7ccba0bcd4a5".to_string(),
+        }];
+
+        let report = format_gemini_session_report("/tmp/project", &sessions);
+
+        assert!(report.contains("242215ad-7e7b-4008-a0a5-7ccba0bcd4a5"));
+        assert!(!report.contains("242215ad-7e7b-4008-a0a5..."));
     }
 }

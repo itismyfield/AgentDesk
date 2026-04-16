@@ -1018,7 +1018,7 @@ fn parse_qwen(
         let Some(usage) = v.get("usageMetadata") else {
             continue;
         };
-        let input_tokens = usage
+        let prompt_tokens = usage
             .get("promptTokenCount")
             .and_then(|value| value.as_u64())
             .unwrap_or(0);
@@ -1030,6 +1030,7 @@ fn parse_qwen(
             .get("cachedContentTokenCount")
             .and_then(|value| value.as_u64())
             .unwrap_or(0);
+        let input_tokens = prompt_tokens.saturating_sub(cache_read_tokens);
         let cache_creation_tokens = usage
             .get("thoughtsTokenCount")
             .and_then(|value| value.as_u64())
@@ -2048,7 +2049,7 @@ mod tests {
         assert_eq!(records[0].provider, "Qwen");
         assert_eq!(records[0].agent, "uza2qoqz");
         assert_eq!(records[0].model, "qwen");
-        assert_eq!(records[0].input_tokens, 15_599);
+        assert_eq!(records[0].input_tokens, 2_557);
         assert_eq!(records[0].output_tokens, 76);
         assert_eq!(records[0].cache_read_tokens, 13_042);
         assert_eq!(records[0].cache_creation_tokens, 26);

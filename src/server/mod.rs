@@ -668,6 +668,35 @@ mod tests {
     }
 
     #[test]
+    fn extract_gemini_quota_limits_accepts_string_effective_limits() {
+        let payload = json!({
+            "metrics": [{
+                "metric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "consumerQuotaLimits": [
+                    {
+                        "unit": "1/min/{project}",
+                        "quotaBuckets": [
+                            {"effectiveLimit": "200"},
+                            {"effectiveLimit": "180"}
+                        ]
+                    },
+                    {
+                        "unit": "1/d/{project}",
+                        "quotaBuckets": [
+                            {"effectiveLimit": "30000"},
+                            {"effectiveLimit": "20000"}
+                        ]
+                    }
+                ]
+            }]
+        });
+
+        let (rpm_limit, rpd_limit) = extract_gemini_quota_limits(&payload);
+        assert_eq!(rpm_limit, 180);
+        assert_eq!(rpd_limit, 20000);
+    }
+
+    #[test]
     fn build_gemini_rate_limit_buckets_uses_non_negative_usage_placeholders() {
         let buckets = build_gemini_rate_limit_buckets(15, 1500);
 
@@ -1498,7 +1527,10 @@ fn extract_gemini_quota_limits(data: &serde_json::Value) -> (i64, i64) {
                         // this reflects the tightest constraint a user is likely to hit.
                         let min_positive = buckets
                             .iter()
-                            .filter_map(|b| b.get("effectiveLimit").and_then(|v| v.as_i64()))
+                            .filter_map(|b| {
+                                b.get("effectiveLimit")
+                                    .and_then(parse_gemini_effective_limit_value)
+                            })
                             .filter(|&v| v > 0)
                             .min();
 
@@ -1518,6 +1550,12 @@ fn extract_gemini_quota_limits(data: &serde_json::Value) -> (i64, i64) {
     }
 
     (rpm_limit.unwrap_or(15), rpd_limit.unwrap_or(1500))
+}
+
+fn parse_gemini_effective_limit_value(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
 }
 
 fn build_gemini_rate_limit_buckets(rpm_limit: i64, rpd_limit: i64) -> Vec<serde_json::Value> {
