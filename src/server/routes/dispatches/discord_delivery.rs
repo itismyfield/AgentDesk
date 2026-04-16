@@ -1,4 +1,6 @@
-use super::outbox::{format_dispatch_message, prefix_dispatch_message, use_counter_model_channel};
+use super::outbox::{
+    build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
+};
 use super::resolve_channel_alias;
 use super::thread_reuse::{
     clear_thread_for_channel, get_thread_for_channel, set_thread_for_channel, try_reuse_thread,
@@ -86,6 +88,36 @@ pub(crate) enum ReviewFollowupKind {
     Pass,
     Unknown,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DispatchMessagePostErrorKind {
+    MessageTooLong,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DispatchMessagePostError {
+    kind: DispatchMessagePostErrorKind,
+    detail: String,
+}
+
+impl DispatchMessagePostError {
+    pub(super) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
+        Self { kind, detail }
+    }
+
+    pub(super) fn is_length_error(&self) -> bool {
+        self.kind == DispatchMessagePostErrorKind::MessageTooLong
+    }
+}
+
+impl std::fmt::Display for DispatchMessagePostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for DispatchMessagePostError {}
 
 /// Discord delivery side-effects boundary.
 /// Keep business rules local and swap transport behavior in tests.
@@ -340,13 +372,25 @@ async fn apply_dispatch_status_reaction_state(
     }
 }
 
-pub(super) async fn post_dispatch_message_to_channel(
+fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    body.contains("BASE_TYPE_MAX_LENGTH")
+        || lowered.contains("2000 or fewer in length")
+        || lowered.contains("100 or fewer in length")
+        || lowered.contains("string value is too long")
+        || (body.contains("50035") && lowered.contains("length"))
+}
+
+async fn post_dispatch_message_once_to_channel(
     client: &reqwest::Client,
     token: &str,
     base_url: &str,
     channel_id: &str,
     message: &str,
-) -> Result<String, String> {
+) -> Result<String, DispatchMessagePostError> {
     // Hard-truncate to stay within Discord's 2000 Unicode character limit.
     // Discord counts chars (not bytes), so use .chars().count().
     let message = if message.chars().count() > 1900 {
@@ -369,26 +413,77 @@ pub(super) async fn post_dispatch_message_to_channel(
         .json(&serde_json::json!({"content": message}))
         .send()
         .await
-        .map_err(|error| format!("failed to post dispatch message to {channel_id}: {error}"))?;
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to post dispatch message to {channel_id}: {error}"),
+            )
+        })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "failed to post dispatch message to {channel_id}: {status} {body}"
+        let kind = if is_discord_length_error(status, &body) {
+            DispatchMessagePostErrorKind::MessageTooLong
+        } else {
+            DispatchMessagePostErrorKind::Other
+        };
+        return Err(DispatchMessagePostError::new(
+            kind,
+            format!("failed to post dispatch message to {channel_id}: {status} {body}"),
         ));
     }
     let body = response
         .json::<serde_json::Value>()
         .await
         .map_err(|error| {
-            format!("failed to parse dispatch message response for {channel_id}: {error}")
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to parse dispatch message response for {channel_id}: {error}"),
+            )
         })?;
     body.get("id")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
-        .ok_or_else(|| format!("dispatch message response for {channel_id} omitted message id"))
+        .ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("dispatch message response for {channel_id} omitted message id"),
+            )
+        })
+}
+
+pub(super) async fn post_dispatch_message_to_channel(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message: &str,
+    minimal_message: &str,
+) -> Result<String, DispatchMessagePostError> {
+    match post_dispatch_message_once_to_channel(client, token, base_url, channel_id, message).await
+    {
+        Ok(message_id) => Ok(message_id),
+        Err(error)
+            if error.is_length_error()
+                && !minimal_message.trim().is_empty()
+                && minimal_message != message =>
+        {
+            tracing::warn!(
+                "[dispatch] Message too long for channel {channel_id}; retrying with minimal fallback"
+            );
+            post_dispatch_message_once_to_channel(
+                client,
+                token,
+                base_url,
+                channel_id,
+                minimal_message,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
@@ -1340,9 +1435,6 @@ async fn send_dispatch_to_discord_inner_with_context(
         return Ok(());
     }
 
-    // For review dispatches, use the alternate channel (counter-model)
-    let use_alt = use_counter_model_channel(dispatch_type.as_deref());
-
     // Look up agent's discord channel
     let channel_id: Option<String> = {
         let conn = match db.lock() {
@@ -1406,49 +1498,25 @@ async fn send_dispatch_to_discord_inner_with_context(
     let dispatch_context_json = dispatch_context_value(dispatch_context.as_deref());
 
     // For review dispatches, look up reviewed commit SHA, branch, and target provider from context
-    let (reviewed_commit, target_provider, review_branch): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = if use_alt {
-        let ctx_val = dispatch_context_json
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
-        (
-            ctx_val
-                .get("reviewed_commit")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            ctx_val
-                .get("target_provider")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            ctx_val
-                .get("branch")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        )
-    } else {
-        (None, None, None)
-    };
-
     let message = format_dispatch_message(
         dispatch_id,
         title,
         issue_url.as_deref(),
         issue_number,
-        use_alt,
-        reviewed_commit.as_deref(),
-        target_provider.as_deref(),
-        review_branch.as_deref(),
+        dispatch_type.as_deref(),
+        dispatch_context.as_deref(),
+    );
+    let minimal_message = build_minimal_dispatch_message(
+        dispatch_id,
+        title,
+        issue_url.as_deref(),
+        issue_number,
         dispatch_type.as_deref(),
         dispatch_context.as_deref(),
     );
 
     // ── Thread reuse: every dispatch now resolves into a slot thread ──
     let client = reqwest::Client::new();
-    let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
-    let message = prefix_dispatch_message(dispatch_type_label, &message);
     if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type.as_deref()) {
         let channel_id_text = channel_id_num.to_string();
         let message_id = post_dispatch_message_to_channel(
@@ -1457,8 +1525,10 @@ async fn send_dispatch_to_discord_inner_with_context(
             &discord_api_base,
             &channel_id_text,
             &message,
+            &minimal_message,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         persist_dispatch_message_target_and_add_pending_reaction(
             db,
             &client,
@@ -1550,7 +1620,7 @@ async fn send_dispatch_to_discord_inner_with_context(
         .unwrap_or_default();
 
     for existing_tid in &existing_thread_ids {
-        if let Some(reused) = try_reuse_thread(
+        match try_reuse_thread(
             &client,
             &token,
             discord_api_base,
@@ -1558,45 +1628,50 @@ async fn send_dispatch_to_discord_inner_with_context(
             channel_id_num,
             &thread_name,
             &message,
+            &minimal_message,
             dispatch_id,
             card_id,
             db,
         )
         .await
         {
-            if reused {
-                if let Ok(conn) = db.lock() {
-                    set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
-                    if let Some(binding) = slot_binding.as_ref() {
-                        upsert_slot_thread_id(
-                            &conn,
-                            &binding.agent_id,
-                            binding.slot_index,
-                            channel_id_num,
-                            existing_tid,
-                        );
+            Ok(Some(reused)) => {
+                if reused {
+                    if let Ok(conn) = db.lock() {
+                        set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
+                        if let Some(binding) = slot_binding.as_ref() {
+                            upsert_slot_thread_id(
+                                &conn,
+                                &binding.agent_id,
+                                binding.slot_index,
+                                channel_id_num,
+                                existing_tid,
+                            );
+                        }
                     }
+                    archive_duplicate_slot_threads(
+                        &client,
+                        &token,
+                        discord_api_base,
+                        channel_id_num,
+                        existing_tid,
+                        &existing_thread_ids,
+                    )
+                    .await;
+                    maybe_add_owner_to_dispatch_thread(
+                        &client,
+                        &token,
+                        &discord_api_base,
+                        existing_tid,
+                        dispatch_id,
+                        thread_owner_user_id,
+                    )
+                    .await;
+                    return Ok(());
                 }
-                archive_duplicate_slot_threads(
-                    &client,
-                    &token,
-                    discord_api_base,
-                    channel_id_num,
-                    existing_tid,
-                    &existing_thread_ids,
-                )
-                .await;
-                maybe_add_owner_to_dispatch_thread(
-                    &client,
-                    &token,
-                    &discord_api_base,
-                    existing_tid,
-                    dispatch_id,
-                    thread_owner_user_id,
-                )
-                .await;
-                return Ok(());
             }
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
         }
     }
 
@@ -1636,6 +1711,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                         &discord_api_base,
                         thread_id,
                         &message,
+                        &minimal_message,
                     )
                     .await
                     {
@@ -1696,7 +1772,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                                 "[dispatch] Thread message POST failed for dispatch {dispatch_id}: {}",
                                 error
                             );
-                            return Err(error);
+                            return Err(error.to_string());
                         }
                     }
                 }
@@ -1707,6 +1783,12 @@ async fn send_dispatch_to_discord_inner_with_context(
         Ok(tr) => {
             // Thread creation failed — fall back to sending directly to the channel
             let status = tr.status();
+            let body = tr.text().await.unwrap_or_default();
+            if is_discord_length_error(status, &body) {
+                return Err(format!(
+                    "thread creation rejected for dispatch {dispatch_id} due to Discord length limits: {status} {body}"
+                ));
+            }
             tracing::warn!(
                 "[dispatch] Thread creation failed ({status}), falling back to channel message"
             );
@@ -1717,6 +1799,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                 &discord_api_base,
                 &channel_id_text,
                 &message,
+                &minimal_message,
             )
             .await
             {
@@ -1738,7 +1821,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                 }
                 Err(e) => {
                     tracing::warn!("[dispatch] Fallback dispatch message failed: {e}");
-                    return Err(e);
+                    return Err(e.to_string());
                 }
             }
         }
@@ -2221,7 +2304,10 @@ mod tests {
     struct MockDiscordState {
         archived: bool,
         unarchive_failures_remaining: usize,
+        message_length_failures_remaining: usize,
+        message_length_failure_min_chars: Option<usize>,
         calls: Vec<String>,
+        posted_messages: Vec<(String, String)>,
         thread_names: HashMap<String, String>,
         thread_parents: HashMap<String, String>,
     }
@@ -2233,12 +2319,49 @@ mod tests {
         Arc<Mutex<MockDiscordState>>,
         tokio::task::JoinHandle<()>,
     ) {
-        spawn_mock_discord_server_with_failures(initial_archived, 0).await
+        spawn_mock_discord_server_with_config(initial_archived, 0, 0, None).await
     }
 
     async fn spawn_mock_discord_server_with_failures(
         initial_archived: bool,
         unarchive_failures_remaining: usize,
+    ) -> (
+        String,
+        Arc<Mutex<MockDiscordState>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        spawn_mock_discord_server_with_config(
+            initial_archived,
+            unarchive_failures_remaining,
+            0,
+            None,
+        )
+        .await
+    }
+
+    async fn spawn_mock_discord_server_with_message_length_failures(
+        initial_archived: bool,
+        message_length_failures_remaining: usize,
+        message_length_failure_min_chars: usize,
+    ) -> (
+        String,
+        Arc<Mutex<MockDiscordState>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        spawn_mock_discord_server_with_config(
+            initial_archived,
+            0,
+            message_length_failures_remaining,
+            Some(message_length_failure_min_chars),
+        )
+        .await
+    }
+
+    async fn spawn_mock_discord_server_with_config(
+        initial_archived: bool,
+        unarchive_failures_remaining: usize,
+        message_length_failures_remaining: usize,
+        message_length_failure_min_chars: Option<usize>,
     ) -> (
         String,
         Arc<Mutex<MockDiscordState>>,
@@ -2335,11 +2458,45 @@ mod tests {
         async fn post_message(
             State(state): State<Arc<Mutex<MockDiscordState>>>,
             Path(channel_id): Path<String>,
+            Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
             let mut state = state.lock().unwrap();
             state
                 .calls
                 .push(format!("POST /channels/{channel_id}/messages"));
+            let content = body
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            state
+                .posted_messages
+                .push((channel_id.clone(), content.clone()));
+            if state.message_length_failures_remaining > 0
+                && state
+                    .message_length_failure_min_chars
+                    .map(|limit| content.chars().count() >= limit)
+                    .unwrap_or(false)
+            {
+                state.message_length_failures_remaining -= 1;
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "code": 50035,
+                        "message": "Invalid Form Body",
+                        "errors": {
+                            "content": {
+                                "_errors": [
+                                    {
+                                        "code": "BASE_TYPE_MAX_LENGTH",
+                                        "message": "Must be 2000 or fewer in length."
+                                    }
+                                ]
+                            }
+                        }
+                    })),
+                );
+            }
             (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({"id": format!("message-{channel_id}")})),
@@ -2380,7 +2537,10 @@ mod tests {
         let state = Arc::new(Mutex::new(MockDiscordState {
             archived: initial_archived,
             unarchive_failures_remaining,
+            message_length_failures_remaining,
+            message_length_failure_min_chars,
             calls: Vec::new(),
+            posted_messages: Vec::new(),
             thread_names: HashMap::new(),
             thread_parents: HashMap::new(),
         }));
@@ -2427,6 +2587,123 @@ mod tests {
                 "PUT /channels/thread-1/thread-members/42",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn post_dispatch_message_retries_with_minimal_fallback_after_length_error() {
+        let (base_url, state, server_handle) =
+            spawn_mock_discord_server_with_message_length_failures(false, 1, 120).await;
+        let client = reqwest::Client::new();
+        let primary_message = "A".repeat(180);
+        let minimal_message = "minimal fallback message";
+
+        let message_id = post_dispatch_message_to_channel(
+            &client,
+            "announce-token",
+            &base_url,
+            "123",
+            &primary_message,
+            minimal_message,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        assert_eq!(message_id, "message-123");
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec!["POST /channels/123/messages", "POST /channels/123/messages",]
+        );
+        assert_eq!(
+            state.posted_messages,
+            vec![
+                ("123".to_string(), primary_message),
+                ("123".to_string(), minimal_message.to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reused_thread_length_error_does_not_fall_back_to_creating_new_thread() {
+        let (base_url, state, server_handle) =
+            spawn_mock_discord_server_with_message_length_failures(false, 2, 10).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, channel_thread_map, active_thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-length', 'Length card', 'requested', 'agent-1', 'dispatch-length',
+                    '{\"123\":\"thread-existing\"}', 'thread-existing',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-length', 'card-length', 'agent-1', 'implementation', 'pending', 'Length card',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let error = send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "Length card",
+            "card-length",
+            "dispatch-length",
+            "announce-token",
+            &base_url,
+            None,
+        )
+        .await
+        .expect_err("length error after minimal retry should fail closed");
+
+        server_handle.abort();
+        assert!(error.contains("BASE_TYPE_MAX_LENGTH"));
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-existing",
+                "PATCH /channels/thread-existing",
+                "POST /channels/thread-existing/messages",
+                "POST /channels/thread-existing/messages",
+            ]
+        );
+        assert!(
+            !state
+                .calls
+                .contains(&"POST /channels/123/threads".to_string()),
+            "length errors on a reused thread must not trigger new thread fallback"
+        );
+
+        let conn = db.lock().unwrap();
+        let thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-length'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_id, None);
     }
 
     #[tokio::test]

@@ -1052,6 +1052,10 @@ pub(in crate::services::discord) async fn handle_text_message(
     let narrate_progress = settings::load_narrate_progress(shared.db.as_ref());
     let current_task_context = active_dispatch_info.as_ref().map(|info| {
         super::super::prompt_builder::CurrentTaskContext {
+            dispatch_id: active_dispatch_id_for_prompt.as_deref(),
+            card_id: info.card_id.as_deref(),
+            dispatch_title: info.dispatch_title.as_deref(),
+            dispatch_context: info.context.as_deref(),
             card_title: info.card_title.as_deref(),
             github_issue_url: info.github_issue_url.as_deref(),
             issue_body: info.issue_body.as_deref(),

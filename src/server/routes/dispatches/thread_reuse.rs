@@ -368,10 +368,11 @@ pub(super) async fn try_reuse_thread(
     expected_parent: u64,
     desired_thread_name: &str,
     message: &str,
+    minimal_message: &str,
     dispatch_id: &str,
     card_id: &str,
     db: &crate::db::Db,
-) -> Option<bool> {
+) -> Result<Option<bool>, super::discord_delivery::DispatchMessagePostError> {
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
     let thread_info_url = format!(
         "{}/channels/{}",
@@ -383,7 +384,12 @@ pub(super) async fn try_reuse_thread(
         .header("Authorization", format!("Bot {}", token))
         .send()
         .await
-        .ok()?;
+        .map_err(|error| {
+            super::discord_delivery::DispatchMessagePostError::new(
+                super::discord_delivery::DispatchMessagePostErrorKind::Other,
+                format!("failed to inspect reusable thread {thread_id}: {error}"),
+            )
+        })?;
 
     if !resp.status().is_success() {
         tracing::info!("[dispatch] Thread {thread_id} no longer accessible, will create new");
@@ -391,10 +397,15 @@ pub(super) async fn try_reuse_thread(
         if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, expected_parent);
         }
-        return None;
+        return Ok(None);
     }
 
-    let body: serde_json::Value = resp.json().await.ok()?;
+    let body: serde_json::Value = resp.json().await.map_err(|error| {
+        super::discord_delivery::DispatchMessagePostError::new(
+            super::discord_delivery::DispatchMessagePostErrorKind::Other,
+            format!("failed to parse reusable thread {thread_id}: {error}"),
+        )
+    })?;
 
     // Check parent_id — only reuse threads from the same channel.
     // Each channel independently manages its own thread per card.
@@ -420,7 +431,7 @@ pub(super) async fn try_reuse_thread(
             )
             .ok();
         }
-        return None;
+        return Ok(None);
     }
 
     // Check if thread is locked — locked threads cannot be reused
@@ -435,7 +446,7 @@ pub(super) async fn try_reuse_thread(
         if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, expected_parent);
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // Unarchive if needed
@@ -458,7 +469,7 @@ pub(super) async fn try_reuse_thread(
                 tracing::warn!(
                     "[dispatch] Failed to unarchive thread {thread_id}, will create new"
                 );
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -480,6 +491,7 @@ pub(super) async fn try_reuse_thread(
         discord_api_base,
         thread_id,
         message,
+        minimal_message,
     )
     .await
     {
@@ -516,14 +528,17 @@ pub(super) async fn try_reuse_thread(
                 );
             }
             tracing::info!("[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}");
-            Some(true)
+            Ok(Some(true))
         }
         Err(error) => {
             tracing::warn!(
                 "[dispatch] Failed to send message to reused thread {thread_id}: {}",
                 error
             );
-            None
+            if error.is_length_error() {
+                return Err(error);
+            }
+            Ok(None)
         }
     }
 }
@@ -721,31 +736,39 @@ pub async fn get_card_thread(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
         Option<String>,
     )> = conn
         .query_row(
-            "SELECT kc.id, kc.title, kc.github_issue_url, kc.github_issue_number, \
-                    kc.description, kc.deferred_dod_json, \
-                    kc.active_thread_id, td.dispatch_type, \
-                    td.to_agent_id, \
-                    td.context \
+            "SELECT kc.id AS card_id, \
+                    kc.title AS card_title, \
+                    kc.github_issue_url AS github_issue_url, \
+                    kc.github_issue_number AS github_issue_number, \
+                    kc.description AS issue_body, \
+                    kc.deferred_dod_json AS deferred_dod_json, \
+                    kc.active_thread_id AS legacy_thread_id, \
+                    td.dispatch_type AS dispatch_type, \
+                    td.title AS dispatch_title, \
+                    td.to_agent_id AS dispatch_agent_id, \
+                    td.context AS dispatch_context \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [dispatch_id],
             |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
+                    row.get("card_id")?,
+                    row.get("card_title")?,
+                    row.get("github_issue_url")?,
+                    row.get("github_issue_number")?,
+                    row.get("issue_body")?,
+                    row.get("deferred_dod_json")?,
+                    row.get("legacy_thread_id")?,
+                    row.get("dispatch_type")?,
+                    row.get("dispatch_title")?,
+                    row.get("dispatch_agent_id")?,
+                    row.get("dispatch_context")?,
                 ))
             },
         )
@@ -761,6 +784,7 @@ pub async fn get_card_thread(
             deferred_dod_json,
             _legacy_thread_id,
             dispatch_type,
+            dispatch_title,
             to_agent_id,
             dispatch_context,
         )) => {
@@ -797,6 +821,7 @@ pub async fn get_card_thread(
                     "deferred_dod": deferred_dod,
                     "active_thread_id": thread_id,
                     "dispatch_type": dispatch_type,
+                    "dispatch_title": dispatch_title,
                     "discord_channel_id": primary_channel,
                     "discord_channel_alt": counter_model_channel,
                     "discord_channel_target": target_channel,

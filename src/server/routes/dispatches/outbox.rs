@@ -877,67 +877,57 @@ pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     )
 }
 
-fn review_quality_checklist(context_json: &serde_json::Value) -> Vec<String> {
-    let checklist = context_json
-        .get("review_quality_checklist")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+// ── Message formatting ──────────────────────────────────────────
 
-    if checklist.is_empty() {
-        crate::dispatch::REVIEW_QUALITY_CHECKLIST
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect()
+const DISPATCH_MESSAGE_TARGET_LEN: usize = 500;
+pub(super) const DISPATCH_MESSAGE_HARD_LIMIT: usize = 1800;
+const DISPATCH_TITLE_PRIMARY_LIMIT: usize = 160;
+const DISPATCH_TITLE_COMPACT_LIMIT: usize = 96;
+const DISPATCH_TITLE_MINIMAL_LIMIT: usize = 72;
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    let total = value.chars().count();
+    if total <= limit {
+        return value.to_string();
+    }
+    if limit <= 1 {
+        return "…".chars().take(limit).collect();
+    }
+
+    let mut truncated: String = value.chars().take(limit - 1).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn compact_dispatch_title(title: &str, limit: usize) -> String {
+    let first_line = title
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(title);
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        "Untitled dispatch".to_string()
     } else {
-        checklist
+        truncate_chars(trimmed, limit)
     }
 }
 
-// ── Message formatting ──────────────────────────────────────────
-
-pub(super) fn format_dispatch_message(
-    dispatch_id: &str,
-    title: &str,
-    issue_url: Option<&str>,
-    issue_number: Option<i64>,
-    use_alt: bool,
-    reviewed_commit: Option<&str>,
-    target_provider: Option<&str>,
-    review_branch: Option<&str>,
-    dispatch_type: Option<&str>,
-    dispatch_context: Option<&str>,
-) -> String {
-    let context_json = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    // Format issue link as markdown hyperlink with angle brackets to suppress embed
-    let issue_link = match (issue_url, issue_number) {
-        (Some(url), Some(num)) => format!("[{title} #{num}](<{url}>)"),
-        (Some(url), None) => format!("[{title}](<{url}>)"),
-        _ => String::new(),
-    };
-
-    // Build dispatch type label and reason line
-    let type_label = match dispatch_type {
+fn dispatch_type_label(dispatch_type: Option<&str>) -> &'static str {
+    match dispatch_type {
         Some("implementation") => "📋 구현",
         Some("review") => "🔍 리뷰",
         Some("rework") => "🔧 리워크",
         Some("review-decision") => "⚖️ 리뷰 검토",
         Some("pm-decision") => "🎯 PM 판단",
         Some("e2e-test") => "🧪 E2E 테스트",
-        Some(other) => other,
-        None => "dispatch",
-    };
+        Some("consultation") => "💬 상담",
+        Some("phase-gate") => "🚦 Phase Gate",
+        _ => "dispatch",
+    }
+}
 
-    // Extract reason from context JSON
+fn dispatch_reason_suffix(context_json: &serde_json::Value) -> String {
     let reason = context_json
         .get("resumed_from")
         .and_then(|r| r.as_str())
@@ -972,169 +962,149 @@ pub(super) fn format_dispatch_message(
             }
         });
 
-    let reason_suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-    let review_verdict = context_json
-        .get("verdict")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let review_mode = context_json
-        .get("review_mode")
-        .and_then(|value| value.as_str());
-    let noop_verification = review_mode == Some("noop_verification");
+    reason
+        .map(|value| format!(" ({value})"))
+        .unwrap_or_default()
+}
 
-    if dispatch_type == Some("review") {
-        let mut message = format!(
-            "DISPATCH:{dispatch_id} [{type_label}] - {title}\n\
-             ⚠️ 검토 전용 — 작업 착수 금지\n\
-             코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
-        );
-        if !issue_link.is_empty() {
-            message.push('\n');
-            message.push_str(&issue_link);
+fn dispatch_instruction_line(dispatch_type: Option<&str>) -> &'static str {
+    match dispatch_type {
+        Some("review") => {
+            "한 줄 지시: 코드 리뷰만 수행하고 상세 범위와 verdict 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
         }
-        // #193: Include branch info so reviewer inspects the correct code
-        if let Some(branch) = review_branch {
-            let short_commit = reviewed_commit.map(|c| &c[..8.min(c.len())]).unwrap_or("?");
-            message.push_str(&format!(
-                "\n\n리뷰 대상 브랜치: `{branch}` (commit: `{short_commit}`)\n\
-                 반드시 해당 브랜치를 checkout하여 리뷰하세요. main 브랜치가 아닙니다."
-            ));
-            if !noop_verification {
-                if let (Some(merge_base), Some(reviewed_commit)) = (
-                    context_json
-                        .get("merge_base")
-                        .and_then(|value| value.as_str()),
-                    reviewed_commit,
-                ) {
-                    message.push_str(&format!(
-                        "\n\
-                         merge-base(main, `{branch}`): `{merge_base}`\n\
-                         정확한 변경 범위는 아래 명령으로 확인하세요:\n\
-                         ```bash\n\
-                         git diff {merge_base}..{reviewed_commit}\n\
-                         ```"
-                    ));
-                }
-            } else {
-                message.push_str(
-                    "\n\
-                     이번 리뷰는 diff 검토가 아니라 현재 브랜치 상태 검증입니다. 이슈 본문과 실제 코드 상태 대조를 우선하세요.",
-                );
-            }
+        Some("review-decision") => {
+            "한 줄 지시: GitHub 리뷰 피드백을 확인하고 accept/dispute/dismiss 중 하나를 제출하세요."
         }
-        if let Some(warning) = context_json
-            .get("review_target_warning")
-            .and_then(|value| value.as_str())
-        {
-            message.push_str(&format!("\n\n리뷰 타겟 안내: {warning}"));
+        Some("implementation") => {
+            "한 줄 지시: 이 이슈를 구현하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
         }
-        if noop_verification {
-            let noop_reason = context_json
-                .get("noop_reason")
-                .and_then(|value| value.as_str())
-                .or_else(|| {
-                    context_json
-                        .get("noop_result")
-                        .and_then(|value| value.get("notes"))
-                        .and_then(|value| value.as_str())
-                })
-                .unwrap_or("noop 사유가 제공되지 않았습니다.");
-            message.push_str(&format!(
-                "\n\n리뷰 모드: `noop_verification`\n\
-                 이번 리뷰는 코드 diff 대신 GitHub 이슈 본문과 현재 코드 상태를 대조하는 검증입니다.\n\
-                 noop 사유: {noop_reason}\n\
-                 반드시 아래 항목을 판정하세요:\n\
-                 - 이슈가 요구한 변경이 현재 코드에 이미 존재하는지\n\
-                 - noop 사유가 구체적이고 직접 검증 가능한지\n\
-                 둘 중 하나라도 아니면 `VERDICT: reject` 또는 `VERDICT: rework`로 판정하세요."
-            ));
+        Some("rework") => {
+            "한 줄 지시: 기존 결과를 수정하고 상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
         }
-        let review_scope_reminder = context_json
-            .get("review_quality_scope_reminder")
-            .and_then(|value| value.as_str())
-            .unwrap_or(crate::dispatch::REVIEW_QUALITY_SCOPE_REMINDER);
-        let review_verdict_guidance = context_json
-            .get("review_verdict_guidance")
-            .and_then(|value| value.as_str())
-            .unwrap_or(crate::dispatch::REVIEW_VERDICT_IMPROVE_GUIDANCE);
-        let quality_checklist = review_quality_checklist(&context_json);
-        message.push_str(&format!("\n\n{review_scope_reminder}"));
-        for item in quality_checklist {
-            message.push_str(&format!("\n- {item}"));
+        Some("e2e-test") => {
+            "한 줄 지시: 검증만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
         }
-        message.push_str(&format!("\n{review_verdict_guidance}"));
-        // Append verdict API call instructions for the counter-model reviewer
-        let commit_arg = reviewed_commit
-            .map(|c| format!(r#","commit":"{}""#, c))
-            .unwrap_or_default();
-        let provider_arg = target_provider
-            .map(|p| format!(r#","provider":"{}""#, p))
-            .unwrap_or_default();
-        let base_url = crate::config::local_api_url(crate::config::load_graceful().server.port, "");
-        message.push_str(&format!(
-            "\n---\n\
-             응답 첫 줄에 반드시 `VERDICT: pass|improve|reject|rework` 중 하나를 적으세요.\n\
-             verdict API가 200 OK로 호출되기 전까지 리뷰는 완료로 간주되지 않습니다.\n\
-             `improve`/`reject`/`rework` 시 반드시 `notes`에 구체적 피드백을, `items`에 개별 지적 사항을 포함하세요.\n\
-             리뷰 완료 후 verdict API를 호출하세요:\n\
-             `curl -sf -X POST {base_url}/api/review-verdict \
-             -H \"Content-Type: application/json\" \
-             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass|improve|reject|rework\",\
-             \"notes\":\"리뷰 피드백 요약\",\
-             \"items\":[{{\"category\":\"bug|style|perf|security|logic\",\"summary\":\"개별 지적 사항\"}}]\
-             {commit_arg}{provider_arg}}}'`"
-        ));
-        message
-    } else if dispatch_type == Some("review-decision") {
-        let mut message = format!(
-            "DISPATCH:{dispatch_id} [{type_label}] - {title}\n\
-             ⛔ 코드 리뷰 금지 — 이미 완료된 리뷰 결과를 검토하는 단계입니다\n\
-             📝 카운터모델 리뷰 결과: **{review_verdict}**\n\
-             GitHub 이슈 코멘트에서 피드백을 확인하고 다음 중 하나를 선택하세요:\n\
-             • **수용** → 피드백 반영 수정 후 review-decision API에 `accept` 호출\n\
-             • **반론** → GitHub 코멘트로 이의 제기 후 review-decision API에 `dispute` 호출\n\
-             • **무시** → review-decision API에 `dismiss` 호출"
-        );
-        if !issue_link.is_empty() {
-            message.push('\n');
-            message.push_str(&issue_link);
+        Some("consultation") => {
+            "한 줄 지시: 필요한 조사/판단만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
         }
-        message
-    } else if matches!(dispatch_type, Some("implementation") | Some("rework")) {
-        let mut message = if !issue_link.is_empty() {
-            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
-        } else {
-            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
-        };
-        message.push_str(
-            "\n\n구현이 불필요하고 현재 worktree에 tracked 변경이 전혀 없을 때만 응답 첫 줄에 반드시 `OUTCOME: noop`를 적고 근거를 설명하세요.\n\
-             tracked 변경이 남아 있으면 noop 완료가 거부되므로 먼저 commit 또는 정리를 해야 합니다.\n\
-             이 marker가 있으면 일반 완료 대신 non-implementation terminal path로 처리됩니다.\n\
-             \n\
-             커밋 메시지에 반드시 GitHub 이슈 번호를 포함하세요 (예: `#123 구현 내용`). 이슈-커밋 추적성을 위해 필수입니다.",
-        );
-        message
-    } else if use_alt {
-        let mut message = if !issue_link.is_empty() {
-            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
-        } else {
-            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
-        };
-        let base_url = crate::config::local_api_url(crate::config::load_graceful().server.port, "");
-        message.push_str(&format!(
-            "\n\n작업을 마치면 일반 dispatch 완료 API로 종료하세요.\n\
-             리뷰 전용 verdict 절차를 쓰지 말고 아래 완료 경로를 그대로 사용하세요.\n\
-             완료 예시:\n\
-             `curl -sf -X PATCH {base_url}/api/dispatches/{dispatch_id} \
-             -H \"Content-Type: application/json\" \
-             -d '{{\"status\":\"completed\",\"result\":{{\"summary\":\"결과 요약\"}}}}'`"
-        ));
-        message
-    } else if !issue_link.is_empty() {
-        format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
-    } else {
-        format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
+        Some("phase-gate") => {
+            "한 줄 지시: phase gate 판정만 수행하고 체크 항목과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+        }
+        _ => "한 줄 지시: 상세 요구사항은 시스템 프롬프트의 [Current Task]를 따르세요.",
     }
+}
+
+fn minimal_dispatch_instruction_line() -> &'static str {
+    "상세 요구사항과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+}
+
+fn render_dispatch_message(
+    dispatch_id: &str,
+    title: &str,
+    issue_url: Option<&str>,
+    issue_number: Option<i64>,
+    dispatch_type: Option<&str>,
+    context_json: &serde_json::Value,
+    title_limit: usize,
+    include_url: bool,
+    instruction_line: &str,
+) -> String {
+    let compact_title = compact_dispatch_title(title, title_limit);
+    let title_with_issue = match issue_number {
+        Some(number) if !compact_title.contains(&format!("#{number}")) => {
+            format!("#{number} {compact_title}")
+        }
+        _ => compact_title,
+    };
+    let mut lines = vec![format!(
+        "DISPATCH:{dispatch_id} [{}] - {}{}",
+        dispatch_type_label(dispatch_type),
+        title_with_issue,
+        dispatch_reason_suffix(context_json),
+    )];
+    if include_url && let Some(url) = issue_url.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(format!("<{url}>"));
+    }
+    lines.push(instruction_line.to_string());
+
+    prefix_dispatch_message(dispatch_type.unwrap_or("dispatch"), &lines.join("\n"))
+}
+
+pub(super) fn build_minimal_dispatch_message(
+    dispatch_id: &str,
+    title: &str,
+    issue_url: Option<&str>,
+    issue_number: Option<i64>,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> String {
+    let context_json = dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let message = render_dispatch_message(
+        dispatch_id,
+        title,
+        issue_url,
+        issue_number,
+        dispatch_type,
+        &context_json,
+        DISPATCH_TITLE_MINIMAL_LIMIT,
+        false,
+        minimal_dispatch_instruction_line(),
+    );
+    truncate_chars(&message, DISPATCH_MESSAGE_HARD_LIMIT)
+}
+
+pub(super) fn format_dispatch_message(
+    dispatch_id: &str,
+    title: &str,
+    issue_url: Option<&str>,
+    issue_number: Option<i64>,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> String {
+    let context_json = dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let primary = render_dispatch_message(
+        dispatch_id,
+        title,
+        issue_url,
+        issue_number,
+        dispatch_type,
+        &context_json,
+        DISPATCH_TITLE_PRIMARY_LIMIT,
+        true,
+        dispatch_instruction_line(dispatch_type),
+    );
+    if primary.chars().count() <= DISPATCH_MESSAGE_TARGET_LEN {
+        return primary;
+    }
+
+    let compact = render_dispatch_message(
+        dispatch_id,
+        title,
+        issue_url,
+        issue_number,
+        dispatch_type,
+        &context_json,
+        DISPATCH_TITLE_COMPACT_LIMIT,
+        true,
+        minimal_dispatch_instruction_line(),
+    );
+    if compact.chars().count() <= DISPATCH_MESSAGE_HARD_LIMIT {
+        return compact;
+    }
+
+    build_minimal_dispatch_message(
+        dispatch_id,
+        title,
+        issue_url,
+        issue_number,
+        dispatch_type,
+        dispatch_context,
+    )
 }
 
 pub(super) fn prefix_dispatch_message(dispatch_type: &str, message: &str) -> String {
