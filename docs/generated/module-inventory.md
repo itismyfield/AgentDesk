@@ -48,7 +48,7 @@
 | `cli::direct` | `src/cli/direct.rs` | 1463 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 2412 | giant-file |
-| `cli::init` | `src/cli/init.rs` | 1125 | giant-file |
+| `cli::init` | `src/cli/init.rs` | 1196 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 319 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
@@ -157,7 +157,7 @@
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 2210 | giant-file |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 192 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 458 |  |
-| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4298 | giant-file |
+| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4373 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 932 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 214 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 139 |  |
@@ -229,12 +229,12 @@
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1338 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1594 | giant-file |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 2328 | giant-file |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 2358 | giant-file |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 281 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 212 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 378 |  |
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 213 |  |
-| `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 311 |  |
+| `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 315 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 374 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 2996 | giant-file |

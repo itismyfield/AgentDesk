@@ -3152,6 +3152,9 @@ mod tests {
         crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap()
     }
 
+    const VALID_OWNER_ID: &str = "123456789012345678";
+    const VALID_OWNER_ID_U64: u64 = 123_456_789_012_345_678;
+
     fn sample_complete_body(
         channel_id: &str,
         channel_name: &str,
@@ -3164,7 +3167,7 @@ mod tests {
             command_token_2: None,
             command_provider_2: None,
             guild_id: "123".to_string(),
-            owner_id: Some("42".to_string()),
+            owner_id: Some(VALID_OWNER_ID.to_string()),
             provider: Some("codex".to_string()),
             channels: vec![ChannelMapping {
                 channel_id: channel_id.to_string(),
@@ -3260,7 +3263,7 @@ mod tests {
                 channel_id: "1234".to_string(),
                 channel_name: "dispatch-room".to_string(),
             }],
-            owner_id: "42".to_string(),
+            owner_id: VALID_OWNER_ID.to_string(),
             has_existing_setup: false,
             confirm_rerun_overwrite: false,
         }
@@ -3447,7 +3450,7 @@ mod tests {
             "claude",
             None,
             None,
-            Some("42"),
+            Some(VALID_OWNER_ID),
         )
         .unwrap();
 
@@ -3456,7 +3459,7 @@ mod tests {
             crate::config::load_from_path(&root.join("config").join("agentdesk.yaml")).unwrap();
         assert_eq!(config.server.port, 8791);
         assert_eq!(config.discord.guild_id.as_deref(), Some("guild-123"));
-        assert_eq!(config.discord.owner_id, Some(42));
+        assert_eq!(config.discord.owner_id, Some(VALID_OWNER_ID_U64));
         assert_eq!(
             config.discord.bots["command"].provider.as_deref(),
             Some("claude")
@@ -3479,7 +3482,7 @@ mod tests {
             "claude",
             Some("secondary-token"),
             Some("codex"),
-            Some("42"),
+            Some(VALID_OWNER_ID),
         )
         .unwrap();
         write_credential_token(root, "announce", Some("announce-token")).unwrap();
@@ -3488,7 +3491,7 @@ mod tests {
         let config =
             crate::config::load_from_path(&root.join("config").join("agentdesk.yaml")).unwrap();
         assert_eq!(config.discord.guild_id.as_deref(), Some("guild-123"));
-        assert_eq!(config.discord.owner_id, Some(42));
+        assert_eq!(config.discord.owner_id, Some(VALID_OWNER_ID_U64));
         assert_eq!(config.discord.bots.len(), 2);
         assert_eq!(
             config.discord.bots["command"].provider.as_deref(),
