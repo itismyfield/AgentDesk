@@ -229,7 +229,7 @@
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1338 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1594 | giant-file |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 2358 | giant-file |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 2402 | giant-file |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 281 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 212 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 378 |  |
