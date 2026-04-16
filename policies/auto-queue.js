@@ -440,6 +440,7 @@ var autoQueue = {
       finalizeRunWithoutPhaseGate(finishedRuns[fr].id);
     }
 
+    var phaseGateActivatedRuns = {};
     var pausedPhaseGates = agentdesk.db.query(
       "SELECT DISTINCT g.run_id, g.phase " +
       "FROM auto_queue_phase_gates g " +
@@ -451,7 +452,10 @@ var autoQueue = {
     for (var pg = 0; pg < pausedPhaseGates.length; pg++) {
       var gateRow = pausedPhaseGates[pg];
       try {
-        reevaluateTickPhaseGate(gateRow.run_id, gateRow.phase);
+        var gateResult = reevaluateTickPhaseGate(gateRow.run_id, gateRow.phase);
+        if (gateResult && gateResult.activated_run) {
+          phaseGateActivatedRuns[gateRow.run_id] = true;
+        }
       } catch (e) {
         autoQueueLog("warn", "onTick1min: phase gate reevaluation failed for run " + gateRow.run_id + " phase " + gateRow.phase + ": " + e, {
           run_id: gateRow.run_id,
@@ -471,6 +475,7 @@ var autoQueue = {
 
     for (var ri = 0; ri < activeRuns.length; ri++) {
       var run = activeRuns[ri];
+      if (phaseGateActivatedRuns[run.id]) continue;
       activateRun(run.id, null);
     }
 
@@ -953,6 +958,13 @@ function _evaluateTickPhaseGateCard(card) {
     ci: null
   };
 
+  var activeFix = _loadPhaseGateActiveFixDispatch(card.card_id);
+  if (activeFix && activeFix.dispatch_type === "rework") {
+    evaluation.active_fix_dispatch = activeFix;
+    evaluation.waiting_reason = "phase gate rework active";
+    return evaluation;
+  }
+
   var prInfo = _resolvePhaseGatePrInfo(card);
   if (!prInfo) {
     evaluation.waiting_reason = "PR tracking pending";
@@ -996,6 +1008,10 @@ function _evaluateTickPhaseGateCard(card) {
 
   if (!evaluation.merge_verified) {
     evaluation.waiting_reason = evaluation.waiting_reason || "merge pending";
+  }
+
+  if (!(evaluation.merge_verified && evaluation.build_passed)) {
+    return evaluation;
   }
 
   var issueClosed = _loadPhaseGateIssueClosed(card.github_issue_number, prInfo.repo || card.repo_id);
@@ -1046,6 +1062,16 @@ function _phaseGateReworkContext(runId, phase, evaluation) {
   };
 }
 
+function _phaseGateFailureSummary(evaluations) {
+  if (!evaluations || evaluations.length === 0) return "phase gate failed";
+  var first = evaluations[0];
+  var message = first && first.failure_message ? first.failure_message : "phase gate failed";
+  if (evaluations.length > 1) {
+    message += " 외 " + (evaluations.length - 1) + "건";
+  }
+  return message;
+}
+
 function _movePhaseGateCardToRework(evaluation) {
   var cfg = agentdesk.pipeline.resolveForCard(evaluation.card_id);
   var card = agentdesk.kanban.getCard(evaluation.card_id);
@@ -1087,57 +1113,16 @@ function _saveFinalFailedPhaseGate(runId, phase, state, cardId, reason, context)
   autoQueueLog("warn", "Phase gate finalized as failed: " + reason, context);
 }
 
-function _handleConfirmedTickPhaseGateFailure(runId, phase, state, evaluation) {
-  var activeFix = evaluation.active_fix_dispatch;
-  if (activeFix) {
-    if ((state.rework_count || 0) === 0 && activeFix.dispatch_type === "rework") {
-      state.rework_count = 1;
-      savePhaseGateState(runId, phase, state);
-    }
-    autoQueueLog("info", "Phase gate waiting for active fix dispatch " + activeFix.id + " on card " + evaluation.card_id, {
-      run_id: runId,
-      card_id: evaluation.card_id,
-      dispatch_id: activeFix.id,
-      batch_phase: phase
-    });
-    return;
-  }
-
-  var limit = phaseGateMaxReworkRetries();
-  if ((state.rework_count || 0) >= limit) {
-    _saveFinalFailedPhaseGate(
-      runId,
-      phase,
-      state,
-      evaluation.card_id,
-      "phase " + phase + " 자동 재작업 한도(" + limit + ")를 초과했습니다. " + evaluation.failure_message,
-      {
-        run_id: runId,
-        card_id: evaluation.card_id,
-        batch_phase: phase
-      }
-    );
-    return;
-  }
-
+function _createPhaseGateReworkDispatch(runId, phase, evaluation) {
   var cardRows = agentdesk.db.query(
     "SELECT assigned_agent_id FROM kanban_cards WHERE id = ? LIMIT 1",
     [evaluation.card_id]
   );
   if (cardRows.length === 0 || !cardRows[0].assigned_agent_id) {
-    _saveFinalFailedPhaseGate(
-      runId,
-      phase,
-      state,
-      evaluation.card_id,
-      "phase " + phase + " 재작업을 보낼 담당 에이전트가 없습니다. " + evaluation.failure_message,
-      {
-        run_id: runId,
-        card_id: evaluation.card_id,
-        batch_phase: phase
-      }
-    );
-    return;
+    return {
+      ok: false,
+      reason: "phase " + phase + " 재작업을 보낼 담당 에이전트가 없습니다. " + evaluation.failure_message
+    };
   }
 
   try {
@@ -1149,37 +1134,100 @@ function _handleConfirmedTickPhaseGateFailure(runId, phase, state, evaluation) {
       _phaseGateReworkContext(runId, phase, evaluation)
     );
     _movePhaseGateCardToRework(evaluation);
-    state.rework_count = (state.rework_count || 0) + 1;
-    savePhaseGateState(runId, phase, state);
     autoQueueLog("info", "Created phase gate rework dispatch " + dispatchId + " for card " + evaluation.card_id, {
       run_id: runId,
       card_id: evaluation.card_id,
       dispatch_id: dispatchId,
       batch_phase: phase
     });
+    return {
+      ok: true,
+      dispatch_id: dispatchId
+    };
   } catch (e) {
+    return {
+      ok: false,
+      reason: "phase " + phase + " 재작업 dispatch 생성에 실패했습니다: " + e
+    };
+  }
+}
+
+function _handleConfirmedTickPhaseGateFailures(runId, phase, state, evaluations) {
+  if (!evaluations || evaluations.length === 0) return;
+
+  var activeFixIds = [];
+  var failuresNeedingDispatch = [];
+  for (var i = 0; i < evaluations.length; i++) {
+    var evaluation = evaluations[i];
+    var activeFix = evaluation.active_fix_dispatch;
+    if (activeFix) {
+      activeFixIds.push(activeFix.id);
+      continue;
+    }
+    failuresNeedingDispatch.push(evaluation);
+  }
+
+  if (failuresNeedingDispatch.length === 0) {
+    if ((state.rework_count || 0) === 0 && activeFixIds.length > 0) {
+      state.rework_count = 1;
+      savePhaseGateState(runId, phase, state);
+    }
+    autoQueueLog("info", "Phase gate waiting for active fix dispatches on phase " + phase, {
+      run_id: runId,
+      card_id: state.anchor_card_id || evaluations[0].card_id || null,
+      dispatch_ids: activeFixIds,
+      batch_phase: phase
+    });
+    return;
+  }
+
+  var limit = phaseGateMaxReworkRetries();
+  if ((state.rework_count || 0) >= limit) {
     _saveFinalFailedPhaseGate(
       runId,
       phase,
       state,
-      evaluation.card_id,
-      "phase " + phase + " 재작업 dispatch 생성에 실패했습니다: " + e,
+      failuresNeedingDispatch[0].card_id,
+      "phase " + phase + " 자동 재작업 한도(" + limit + ")를 초과했습니다. " + _phaseGateFailureSummary(failuresNeedingDispatch),
       {
         run_id: runId,
-        card_id: evaluation.card_id,
+        card_id: failuresNeedingDispatch[0].card_id,
         batch_phase: phase
       }
     );
+    return;
   }
+
+  for (var fd = 0; fd < failuresNeedingDispatch.length; fd++) {
+    var outcome = _createPhaseGateReworkDispatch(runId, phase, failuresNeedingDispatch[fd]);
+    if (!outcome.ok) {
+      _saveFinalFailedPhaseGate(
+        runId,
+        phase,
+        state,
+        failuresNeedingDispatch[fd].card_id,
+        outcome.reason,
+        {
+          run_id: runId,
+          card_id: failuresNeedingDispatch[fd].card_id,
+          batch_phase: phase
+        }
+      );
+      return;
+    }
+  }
+
+  state.rework_count = (state.rework_count || 0) + 1;
+  savePhaseGateState(runId, phase, state);
 }
 
 function reevaluateTickPhaseGate(runId, phase) {
   var state = loadPhaseGateState(runId, phase);
-  if (!state) return false;
-  if (_isDeployPhase(runId, phase)) return false;
-  if (state.dispatch_ids && state.dispatch_ids.length > 0) return false;
+  if (!state) return { handled: false, activated_run: false };
+  if (_isDeployPhase(runId, phase)) return { handled: false, activated_run: false };
+  if (state.dispatch_ids && state.dispatch_ids.length > 0) return { handled: false, activated_run: false };
   if (state.status === "failed" && state.failed_verdict === "phase_gate_final_failure") {
-    return false;
+    return { handled: false, activated_run: false };
   }
 
   var cards = _loadPhaseGateCards(runId, phase);
@@ -1196,17 +1244,16 @@ function reevaluateTickPhaseGate(runId, phase) {
         batch_phase: phase
       }
     );
-    return true;
+    return { handled: true, activated_run: false };
   }
 
   var allPassed = true;
-  var firstFailure = null;
+  var confirmedFailures = [];
   for (var i = 0; i < cards.length; i++) {
     var evaluation = _evaluateTickPhaseGateCard(cards[i]);
-    if (evaluation.failure_type && !firstFailure) {
-      firstFailure = evaluation;
+    if (evaluation.failure_type) {
+      confirmedFailures.push(evaluation);
       allPassed = false;
-      break;
     }
     if (!(evaluation.merge_verified && evaluation.build_passed && evaluation.issue_closed)) {
       allPassed = false;
@@ -1226,7 +1273,7 @@ function reevaluateTickPhaseGate(runId, phase) {
       card_id: state.anchor_card_id || cards[0].card_id,
       batch_phase: phase
     });
-    return true;
+    return { handled: true, activated_run: true };
   }
 
   state.status = "pending";
@@ -1234,12 +1281,12 @@ function reevaluateTickPhaseGate(runId, phase) {
   state.failed_reason = null;
   savePhaseGateState(runId, phase, state);
 
-  if (firstFailure) {
-    _handleConfirmedTickPhaseGateFailure(runId, phase, state, firstFailure);
-    return true;
+  if (confirmedFailures.length > 0) {
+    _handleConfirmedTickPhaseGateFailures(runId, phase, state, confirmedFailures);
+    return { handled: true, activated_run: false };
   }
 
-  return false;
+  return { handled: false, activated_run: false };
 }
 
 function completeRunAndNotify(runId) {

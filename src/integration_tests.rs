@@ -970,6 +970,17 @@ mod tests {
         dir
     }
 
+    fn setup_auto_queue_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        fs::copy(
+            source_dir.join("auto-queue.js"),
+            dir.path().join("auto-queue.js"),
+        )
+        .unwrap();
+        dir
+    }
+
     fn write_codex_inflight(
         runtime_root: &std::path::Path,
         channel_id: &str,
@@ -4319,6 +4330,183 @@ mod tests {
     }
 
     #[test]
+    fn auto_queue_tick_phase_gate_resume_activates_run_once_per_tick() {
+        let policies_dir = setup_auto_queue_activate_spy_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(&db, "card-phase-pass", "done", "test/repo", 9004, None);
+        seed_card(&db, "card-phase-next", "ready");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-pass', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-pass-done', 'run-phase-pass', 'card-phase-pass', 'agent-1', 'done', 1, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at) \
+                 VALUES ('entry-phase-pass-next', 'run-phase-pass', 'card-phase-next', 'agent-1', 'pending', 2, 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_pr_tracking(
+            &db,
+            "card-phase-pass",
+            "test/repo",
+            Some("/tmp/wt/card-phase-pass"),
+            "wt/card-phase-pass",
+            Some(904),
+            Some("pass904"),
+            "merge",
+        );
+        set_phase_gate_state(
+            &db,
+            "run-phase-pass",
+            1,
+            "pending",
+            &[],
+            Some(2),
+            false,
+            0,
+            Some("card-phase-pass"),
+            None,
+            None,
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.exec = function(cmd, args) {
+                        if (cmd !== "gh") return "ERROR: unexpected command";
+                        if (args[0] === "pr" && args[1] === "view") {
+                            return JSON.stringify({
+                                number: 904,
+                                state: "MERGED",
+                                mergedAt: "2026-04-16T08:00:00Z",
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-pass",
+                                headRefOid: "pass904",
+                                title: "Phase pass card"
+                            });
+                        }
+                        if (args[0] === "issue" && args[1] === "view") {
+                            return "CLOSED";
+                        }
+                        return "ERROR: unexpected gh args";
+                    };
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .expect("OnTick1min should succeed");
+
+        assert_eq!(
+            kv_value(&db, "test_auto_queue_activate_count").as_deref(),
+            Some("1"),
+            "phase gate resume should activate the run only once in the same tick"
+        );
+        assert!(
+            phase_gate_state(&db, "run-phase-pass", 1).is_none(),
+            "successful phase gate pass must clear the persisted gate before activation"
+        );
+    }
+
+    #[test]
+    fn auto_queue_tick_phase_gate_skips_gh_while_rework_dispatch_is_active() {
+        let gh = install_mock_gh(&[]);
+        let db = test_db();
+        let policies_dir = setup_auto_queue_policy_dir();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(
+            &db,
+            "card-phase-active-rework",
+            "in_progress",
+            "test/repo",
+            9005,
+            None,
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-active-rework', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-active-rework', 'run-phase-active-rework', 'card-phase-active-rework', 'agent-1', 'done', 1, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, title, status, context, created_at, updated_at) \
+                 VALUES ('rework-phase-active', 'card-phase-active-rework', 'agent-1', 'rework', 'Active phase gate rework', 'dispatched', '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_pr_tracking(
+            &db,
+            "card-phase-active-rework",
+            "test/repo",
+            Some("/tmp/wt/card-phase-active-rework"),
+            "wt/card-phase-active-rework",
+            Some(905),
+            Some("active905"),
+            "wait-ci",
+        );
+        set_phase_gate_state(
+            &db,
+            "run-phase-active-rework",
+            1,
+            "pending",
+            &[],
+            Some(2),
+            false,
+            1,
+            Some("card-phase-active-rework"),
+            None,
+            None,
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .expect("OnTick1min should succeed");
+
+        let gh_calls = gh_log(&gh);
+        assert!(
+            gh_calls.trim().is_empty(),
+            "active rework should short-circuit phase gate reevaluation before any gh call; gh_calls={gh_calls}"
+        );
+        assert_eq!(
+            phase_gate_state(&db, "run-phase-active-rework", 1)
+                .expect("phase gate state must remain while rework is active")["rework_count"],
+            1,
+            "active rework wait path must keep the existing rework round count"
+        );
+    }
+
+    #[test]
     fn auto_queue_tick_phase_gate_creates_rework_on_confirmed_ci_failure() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -4461,6 +4649,171 @@ mod tests {
         assert_eq!(rework.2.as_deref(), Some("ci_failure"));
         assert_eq!(phase_gate_json["status"], "pending");
         assert_eq!(phase_gate_json["rework_count"], 1);
+    }
+
+    #[test]
+    fn auto_queue_tick_phase_gate_creates_rework_for_all_confirmed_failures_in_one_round() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let worktree_a = tempfile::tempdir().unwrap();
+        let worktree_b = tempfile::tempdir().unwrap();
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(&db, "card-phase-multi-a", "done", "test/repo", 9006, None);
+        seed_card_with_repo(&db, "card-phase-multi-b", "done", "test/repo", 9007, None);
+        set_config_key(&db, "phase_gate_max_rework_retries", json!(3));
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-multi-fail', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-multi-a', 'run-phase-multi-fail', 'card-phase-multi-a', 'agent-1', 'done', 1, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at, completed_at) \
+                 VALUES ('entry-phase-multi-b', 'run-phase-multi-fail', 'card-phase-multi-b', 'agent-1', 'done', 1, 1, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_pr_tracking(
+            &db,
+            "card-phase-multi-a",
+            "test/repo",
+            Some(worktree_a.path().to_str().unwrap()),
+            "wt/card-phase-multi-a",
+            Some(906),
+            Some("multi906"),
+            "wait-ci",
+        );
+        seed_pr_tracking(
+            &db,
+            "card-phase-multi-b",
+            "test/repo",
+            Some(worktree_b.path().to_str().unwrap()),
+            "wt/card-phase-multi-b",
+            Some(907),
+            Some("multi907"),
+            "wait-ci",
+        );
+        set_phase_gate_state(
+            &db,
+            "run-phase-multi-fail",
+            1,
+            "pending",
+            &[],
+            Some(2),
+            false,
+            0,
+            Some("card-phase-multi-a"),
+            None,
+            None,
+        );
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.exec = function(cmd, args) {
+                        if (cmd !== "gh") return "ERROR: unexpected command";
+                        if (args[0] === "pr" && args[1] === "view" && args.indexOf("906") >= 0) {
+                            return JSON.stringify({
+                                number: 906,
+                                state: "OPEN",
+                                mergedAt: null,
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-multi-a",
+                                headRefOid: "multi906",
+                                title: "Multi fail A"
+                            });
+                        }
+                        if (args[0] === "pr" && args[1] === "view" && args.indexOf("907") >= 0) {
+                            return JSON.stringify({
+                                number: 907,
+                                state: "OPEN",
+                                mergedAt: null,
+                                mergeable: "MERGEABLE",
+                                headRefName: "wt/card-phase-multi-b",
+                                headRefOid: "multi907",
+                                title: "Multi fail B"
+                            });
+                        }
+                        if (args[0] === "run" && args[1] === "list" && args.indexOf("wt/card-phase-multi-a") >= 0) {
+                            return JSON.stringify([{
+                                databaseId: 5006,
+                                status: "completed",
+                                conclusion: "failure",
+                                headSha: "multi906",
+                                event: "pull_request"
+                            }]);
+                        }
+                        if (args[0] === "run" && args[1] === "list" && args.indexOf("wt/card-phase-multi-b") >= 0) {
+                            return JSON.stringify([{
+                                databaseId: 5007,
+                                status: "completed",
+                                conclusion: "failure",
+                                headSha: "multi907",
+                                event: "pull_request"
+                            }]);
+                        }
+                        return "ERROR: unexpected gh args";
+                    };
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .expect("OnTick1min should succeed");
+
+        let conn = db.lock().unwrap();
+        let rework_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id IN ('card-phase-multi-a', 'card-phase-multi-b') \
+                   AND dispatch_type = 'rework' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let card_a_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-phase-multi-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let card_b_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-phase-multi-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json = phase_gate_state(&db, "run-phase-multi-fail", 1)
+            .expect("phase gate state must remain for multi-card rework");
+        assert_eq!(
+            rework_count, 2,
+            "all confirmed failures in the phase should dispatch rework in the same tick"
+        );
+        assert_eq!(card_a_status, "in_progress");
+        assert_eq!(card_b_status, "in_progress");
+        assert_eq!(
+            phase_gate_json["rework_count"], 1,
+            "multiple failing cards in the same tick should count as one rework round"
+        );
     }
 
     #[test]
