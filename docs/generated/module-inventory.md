@@ -256,7 +256,7 @@
 | `services::dispatches` | `src/services/dispatches.rs` | 344 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 145 |  |
-| `services::mcp_config` | `src/services/mcp_config.rs` | 607 |  |
+| `services::mcp_config` | `src/services/mcp_config.rs` | 625 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 346 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 113 |  |
 | `services::memory::mem0` | `src/services/memory/mem0.rs` | 1011 | giant-file |
