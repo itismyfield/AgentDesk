@@ -433,9 +433,11 @@ body {
 .animate-cta-glow { animation: cta-glow 3s ease-in-out infinite; }
 
 .pcd-markdown {
+  max-width: 100%;
   color: inherit;
   line-height: 1.7;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .pcd-markdown > :first-child {
@@ -516,6 +518,7 @@ body {
 }
 
 .pcd-markdown pre {
+  max-width: 100%;
   overflow-x: auto;
   padding: 0.85rem 0.95rem;
   border-radius: 0.9rem;
@@ -524,6 +527,9 @@ body {
 }
 
 .pcd-markdown pre code {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -540,6 +546,13 @@ body {
   color: var(--th-accent-info);
   text-decoration: underline;
   text-underline-offset: 0.16em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.pcd-markdown img {
+  max-width: 100%;
+  height: auto;
 }
 
 .pcd-markdown input[type="checkbox"] {

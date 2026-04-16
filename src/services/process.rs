@@ -84,6 +84,11 @@ pub fn kill_pid_tree(pid: u32) {
         let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
         if ret != 0 {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
@@ -498,6 +503,20 @@ fn get_process_command(pid: i32) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn test_wait_with_output_timeout_kills_child_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        configure_child_process_group(&mut command);
+
+        let child = command.spawn().expect("sleep command should spawn");
+        let error = wait_with_output_timeout(child, Duration::from_millis(20), "test child")
+            .expect_err("timeout should fail");
+
+        assert!(error.contains("test child timed out after 0s"));
+    }
+
     // ========== is_valid_pid tests ==========
 
     #[test]
@@ -683,19 +702,5 @@ mod tests {
         assert_eq!(cloned.pid, info.pid);
         assert_eq!(cloned.user, info.user);
         assert_eq!(cloned.command, info.command);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_wait_with_output_timeout_kills_child_process_group() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 5"]);
-        configure_child_process_group(&mut command);
-        let child = command.spawn().expect("spawn sleep");
-
-        let error = wait_with_output_timeout(child, Duration::from_millis(20), "test child")
-            .expect_err("expected timeout");
-
-        assert!(error.contains("timed out"));
     }
 }

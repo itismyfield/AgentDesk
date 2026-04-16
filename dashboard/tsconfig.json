@@ -7,16 +7,11 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "ignoreDeprecations": "5.0",
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
   "include": ["src", "vite.config.ts"],
   "exclude": [

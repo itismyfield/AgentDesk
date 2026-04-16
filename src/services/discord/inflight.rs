@@ -56,6 +56,10 @@ pub(super) struct InflightTurnState {
     /// Active dispatch ID for long-turn diagnostics.
     #[serde(default)]
     pub dispatch_id: Option<String>,
+    /// Last tmux output offset from which a watcher relayed a response.
+    /// Persisted so that replacement watcher instances can skip already-delivered output.
+    #[serde(default)]
+    pub last_watcher_relayed_offset: Option<u64>,
 }
 
 impl InflightTurnState {
@@ -104,6 +108,7 @@ impl InflightTurnState {
             has_post_tool_text: false,
             session_key: None,
             dispatch_id: None,
+            last_watcher_relayed_offset: None,
         }
     }
 

@@ -600,6 +600,14 @@ fn memento_reflect_request_handles_local_session_reset_once() {
         ..ResolvedMemorySettings::default()
     };
     let mut session = sample_session();
+    session.history.push(HistoryItem {
+        item_type: HistoryType::User,
+        content: "current user".to_string(),
+    });
+    session.history.push(HistoryItem {
+        item_type: HistoryType::Assistant,
+        content: "current assistant".to_string(),
+    });
 
     let request = take_memento_reflect_request(
         &mut session,
@@ -612,6 +620,12 @@ fn memento_reflect_request_handles_local_session_reset_once() {
     .expect("turn cap should trigger one reflect");
 
     assert_eq!(request.reason, SessionEndReason::TurnCapReached);
+    assert!(request.transcript.contains("[User]: current user"));
+    assert!(
+        request
+            .transcript
+            .contains("[Assistant]: current assistant")
+    );
     assert!(session.memento_reflected);
 
     let duplicate = take_memento_reflect_request(
@@ -713,9 +727,16 @@ fn clear_local_session_state_drops_stale_resume_id_everywhere() {
         0,
     );
 
-    clear_local_session_state(&mut new_session_id, &mut inflight_state);
+    let mut new_raw_provider_session_id = Some("raw-stale-session".to_string());
+
+    clear_local_session_state(
+        &mut new_session_id,
+        &mut new_raw_provider_session_id,
+        &mut inflight_state,
+    );
 
     assert_eq!(new_session_id, None);
+    assert_eq!(new_raw_provider_session_id, None);
     assert_eq!(inflight_state.session_id, None);
 }
 
@@ -737,7 +758,7 @@ fn terminal_session_reset_helper_matches_terminal_recovery_failures() {
         "",
     ));
     assert!(stream_error_requires_terminal_session_reset(
-        "InvalidArgument: Gemini resume selector must be `latest` or a numeric session index",
+        "InvalidArgument: Gemini resume selector must be `latest`, a numeric session index, or a UUID-like Gemini session reference",
         "",
     ));
     assert!(stream_error_requires_terminal_session_reset(
@@ -908,6 +929,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     let mut response_sent_offset = 42usize;
     let mut last_edit_text = "partial answer".to_string();
     let mut new_session_id = Some("stale".to_string());
+    let mut new_raw_provider_session_id = Some("raw-stale".to_string());
     let mut inflight_state = InflightTurnState::new(
         ProviderKind::Gemini,
         1479671298497183835,
@@ -940,6 +962,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
         &mut response_sent_offset,
         &mut last_edit_text,
         &mut new_session_id,
+        &mut new_raw_provider_session_id,
         &mut inflight_state,
     );
 
@@ -953,6 +976,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     assert!(!has_post_tool_text);
     assert_eq!(response_sent_offset, 0);
     assert!(last_edit_text.is_empty());
+    assert_eq!(new_raw_provider_session_id, None);
     assert_eq!(new_session_id, None);
     assert_eq!(inflight_state.session_id, None);
     assert!(inflight_state.full_response.is_empty());

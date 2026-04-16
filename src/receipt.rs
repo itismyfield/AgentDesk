@@ -183,6 +183,42 @@ struct CodexTokenUsage {
 
 fn pricing_for(model: &str) -> Pricing {
     match model {
+        // Gemini pricing (Google AI / ai.google.dev, USD per 1M tokens, ≤200K context)
+        // Source: https://ai.google.dev/gemini-api/docs/pricing (checked 2026-04-15)
+        m if m.contains("gemini-3.1-pro-preview") || m.contains("gemini-2.5-pro") => Pricing {
+            input_per_m: 2.00,
+            output_per_m: 12.00,
+            cache_read_factor: 0.1,   // $0.20/$2.00
+            cache_create_factor: 0.0, // cache storage billed per-hour, not per-token
+        },
+        m if m.contains("gemini-2.5-flash-lite") || m.contains("flash-lite") => Pricing {
+            input_per_m: 0.10,
+            output_per_m: 0.40,
+            cache_read_factor: 0.1, // $0.01/$0.10
+            cache_create_factor: 0.0,
+        },
+        m if m.contains("gemini-2.5-flash") || (m.contains("gemini") && m.contains("flash")) => {
+            Pricing {
+                input_per_m: 0.30,
+                output_per_m: 2.50,
+                cache_read_factor: 0.1, // $0.03/$0.30
+                cache_create_factor: 0.0,
+            }
+        }
+        // Gemini fallback (unknown Gemini model) — N/A
+        m if m.contains("gemini") => Pricing {
+            input_per_m: 0.0,
+            output_per_m: 0.0,
+            cache_read_factor: 0.0,
+            cache_create_factor: 0.0,
+        },
+        // Qwen pricing — using $0 until official DashScope rates are confirmed
+        m if m.contains("qwen") || m.contains("coder-model") => Pricing {
+            input_per_m: 0.0,
+            output_per_m: 0.0,
+            cache_read_factor: 0.0,
+            cache_create_factor: 0.0,
+        },
         m if m.contains("opus-4-6") || m.contains("opus-4-5") => Pricing {
             input_per_m: 15.0,
             output_per_m: 75.0,
@@ -314,6 +350,22 @@ fn codex_usage_record(
 
 fn shorten_model(model: &str) -> String {
     match model {
+        m if m.contains("gemini-3.1-pro-preview") || m.contains("gemini-2.5-pro") => {
+            "Gemini 2.5 Pro".into()
+        }
+        m if m.contains("gemini-2.5-flash-lite") || m.contains("flash-lite") => {
+            "Gemini 2.5 Flash Lite".into()
+        }
+        m if m.contains("gemini-2.5-flash") || (m.contains("gemini") && m.contains("flash")) => {
+            "Gemini 2.5 Flash".into()
+        }
+        m if m.contains("gemini") => "Gemini".into(),
+        m if m.contains("qwen3-max") || m.contains("qwen3:max") => "Qwen3 Max".into(),
+        m if m.contains("qwen3.6-plus") || m.contains("qwen3.6:plus") => "Qwen3.6 Plus".into(),
+        m if m.contains("qwen3.5-plus") || m.contains("qwen3.5:plus") => "Qwen3.5 Plus".into(),
+        m if m.contains("qwen3.5-flash") || m.contains("qwen3.5:flash") => "Qwen3.5 Flash".into(),
+        m if m.contains("qwen3.5") && m.contains("397b") => "Qwen3.5 397B".into(),
+        m if m.contains("qwen") || m.contains("coder-model") => "Qwen".into(),
         m if m.contains("opus-4-6") => "Opus 4.6".into(),
         m if m.contains("opus-4-5") => "Opus 4.5".into(),
         m if m.contains("sonnet-4-6") => "Sonnet 4.6".into(),
@@ -487,6 +539,29 @@ fn resolve_agent(
 fn find_jsonl(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(root, &mut out);
+    out
+}
+
+fn scan_gemini_chats(home: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let root = home.join(".gemini").join("tmp");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let chats_dir = entry.path().join("chats");
+        let Ok(chat_entries) = fs::read_dir(&chats_dir) else {
+            continue;
+        };
+        for chat in chat_entries.flatten() {
+            let path = chat.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                out.push(path);
+            }
+        }
+    }
+
     out
 }
 
@@ -748,6 +823,248 @@ fn parse_codex(
     (records, msgs, sid)
 }
 
+fn parse_gemini(
+    path: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> (Vec<UsageRecord>, u64, Option<String>) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return (Vec::new(), 0, None);
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&contents) else {
+        return (Vec::new(), 0, None);
+    };
+
+    let session_id = root
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(String::from);
+    let start_time = root
+        .get("startTime")
+        .and_then(|value| value.as_str())
+        .and_then(parse_ts);
+
+    let Some(messages) = root.get("messages").and_then(|value| value.as_array()) else {
+        return (Vec::new(), 0, session_id);
+    };
+
+    let mut records = Vec::new();
+    for message in messages {
+        if message.get("type").and_then(|value| value.as_str()) != Some("gemini") {
+            continue;
+        }
+        let Some(tokens) = message.get("tokens") else {
+            continue;
+        };
+        let timestamp = message
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .and_then(parse_ts)
+            .or(start_time);
+        let Some(timestamp) = timestamp else {
+            continue;
+        };
+        if timestamp < start || timestamp > end {
+            continue;
+        }
+
+        let input_tokens = tokens
+            .get("input")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            + tokens
+                .get("tool")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+        let output_tokens = tokens
+            .get("output")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let cache_read_tokens = tokens
+            .get("cached")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let cache_creation_tokens = tokens
+            .get("thoughts")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_read_tokens == 0
+            && cache_creation_tokens == 0
+        {
+            continue;
+        }
+
+        records.push(UsageRecord {
+            timestamp,
+            model: message
+                .get("model")
+                .and_then(|value| value.as_str())
+                .unwrap_or("gemini")
+                .to_string(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            provider: "Gemini".into(),
+            agent: "gemini".into(),
+            session_id: session_id.clone(),
+        });
+    }
+
+    let msgs = records.len() as u64;
+    (records, msgs, session_id)
+}
+
+fn decode_qwen_project_path(encoded: &str) -> Option<String> {
+    if encoded.is_empty() {
+        return None;
+    }
+
+    let mut decoded = String::new();
+    let mut chars = encoded.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '-' {
+            if chars.peek() == Some(&'-') {
+                chars.next();
+                decoded.push('/');
+                decoded.push('.');
+            } else {
+                decoded.push('/');
+            }
+        } else {
+            decoded.push(ch);
+        }
+    }
+
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
+}
+
+fn normalize_qwen_model(model: &str) -> String {
+    match model {
+        "" => "qwen".into(),
+        "coder-model" => "qwen".into(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_qwen(
+    path: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    ws_map: &HashMap<PathBuf, String>,
+) -> (Vec<UsageRecord>, u64, Option<String>) {
+    let mut agent_name = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|project_dir| project_dir.file_name())
+        .and_then(|value| value.to_str())
+        .and_then(decode_qwen_project_path)
+        .and_then(|cwd| {
+            let resolved = resolve_agent(path, Some(&cwd), ws_map, "qwen");
+            (resolved != "qwen").then_some(resolved)
+        });
+    let mut sid: Option<String> = None;
+    let mut records = Vec::new();
+
+    let Ok(file) = fs::File::open(path) else {
+        return (records, 0, None);
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+
+        if sid.is_none() {
+            sid = v
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .map(String::from);
+        }
+
+        if agent_name.is_none() {
+            if let Some(cwd) = v.get("cwd").and_then(|value| value.as_str()) {
+                let resolved = resolve_agent(path, Some(cwd), ws_map, "qwen");
+                if resolved != "qwen" {
+                    agent_name = Some(resolved);
+                }
+            }
+        }
+
+        if v.get("type").and_then(|value| value.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let Some(timestamp) = v
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .and_then(parse_ts)
+        else {
+            continue;
+        };
+        if timestamp < start || timestamp > end {
+            continue;
+        }
+
+        let Some(usage) = v.get("usageMetadata") else {
+            continue;
+        };
+        let prompt_tokens = usage
+            .get("promptTokenCount")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let output_tokens = usage
+            .get("candidatesTokenCount")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let cache_read_tokens = usage
+            .get("cachedContentTokenCount")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let input_tokens = prompt_tokens.saturating_sub(cache_read_tokens);
+        let cache_creation_tokens = usage
+            .get("thoughtsTokenCount")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_read_tokens == 0
+            && cache_creation_tokens == 0
+        {
+            continue;
+        }
+
+        records.push(UsageRecord {
+            timestamp,
+            model: normalize_qwen_model(
+                v.get("model")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("qwen"),
+            ),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            provider: "Qwen".into(),
+            agent: agent_name.clone().unwrap_or_else(|| "qwen".into()),
+            session_id: sid.clone(),
+        });
+    }
+
+    let msgs = records.len() as u64;
+    (records, msgs, sid)
+}
+
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -787,6 +1104,8 @@ fn scan_usage_records(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<UsageReco
     let home = dirs::home_dir().unwrap_or_default();
     let claude_files = find_jsonl(&home.join(".claude").join("projects"));
     let codex_files = find_jsonl(&home.join(".codex").join("sessions"));
+    let gemini_files = scan_gemini_chats(&home);
+    let qwen_files = find_jsonl(&home.join(".qwen").join("projects"));
     let ws_map = build_workspace_map();
 
     let mut all: Vec<UsageRecord> = Vec::new();
@@ -797,6 +1116,14 @@ fn scan_usage_records(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<UsageReco
     }
     for f in &codex_files {
         let (recs, _, _) = parse_codex(f, start, end, &ws_map);
+        all.extend(recs);
+    }
+    for f in &gemini_files {
+        let (recs, _, _) = parse_gemini(f, start, end);
+        all.extend(recs);
+    }
+    for f in &qwen_files {
+        let (recs, _, _) = parse_qwen(f, start, end, &ws_map);
         all.extend(recs);
     }
     all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -1513,12 +1840,19 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().expect("create temp jsonl");
         for line in lines {
             writeln!(file, "{line}").expect("write jsonl line");
         }
+        file
+    }
+
+    fn write_json(contents: &str) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("create temp json");
+        write!(file, "{contents}").expect("write json");
         file
     }
 
@@ -1621,5 +1955,176 @@ mod tests {
         assert_eq!(agent.cache_read_tokens, 800);
         assert_eq!(agent.cache_creation_tokens, 40);
         assert!(agent.cost_without_cache > agent.cost);
+    }
+
+    #[test]
+    fn parse_gemini_uses_message_level_model_and_token_fields() {
+        let file = write_json(
+            r#"{
+  "sessionId": "gemini-session-1",
+  "startTime": "2026-04-14T14:47:46.041Z",
+  "messages": [
+    {
+      "id": "msg-user",
+      "timestamp": "2026-04-14T14:47:46.455Z",
+      "type": "user",
+      "content": [{"text": "hello"}]
+    },
+    {
+      "id": "msg-gemini",
+      "timestamp": "2026-04-14T14:50:14.209Z",
+      "type": "gemini",
+      "content": "response",
+      "tokens": {
+        "input": 12584,
+        "output": 135,
+        "cached": 12,
+        "thoughts": 236,
+        "tool": 7,
+        "total": 12974
+      },
+      "model": "gemini-3.1-pro-preview"
+    }
+  ]
+}"#,
+        );
+
+        let start = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).single().unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).single().unwrap();
+        let (records, msgs, sid) = parse_gemini(file.path(), start, end);
+
+        assert_eq!(sid.as_deref(), Some("gemini-session-1"));
+        assert_eq!(msgs, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].provider, "Gemini");
+        assert_eq!(records[0].agent, "gemini");
+        assert_eq!(records[0].model, "gemini-3.1-pro-preview");
+        assert_eq!(records[0].input_tokens, 12_591);
+        assert_eq!(records[0].output_tokens, 135);
+        assert_eq!(records[0].cache_read_tokens, 12);
+        assert_eq!(records[0].cache_creation_tokens, 236);
+    }
+
+    #[test]
+    fn decode_qwen_project_path_restores_workspace_path() {
+        assert_eq!(
+            decode_qwen_project_path("-Users-kunkun--adk-release-workspaces-uza2qoqz"),
+            Some("/Users/kunkun/.adk/release/workspaces/uza2qoqz".to_string())
+        );
+        assert_eq!(decode_qwen_project_path("-"), Some("/".to_string()));
+    }
+
+    #[test]
+    fn parse_qwen_uses_usage_metadata_and_workspace_resolution() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let chats_dir = dir
+            .path()
+            .join("-Users-kunkun--adk-release-workspaces-uza2qoqz")
+            .join("chats");
+        fs::create_dir_all(&chats_dir).expect("create chats dir");
+        let file_path = chats_dir.join("session.jsonl");
+        fs::write(
+            &file_path,
+            concat!(
+                r#"{"sessionId":"qwen-session-1","timestamp":"2026-04-12T05:12:58.028Z","type":"system","cwd":"/Users/kunkun/.adk/release/workspaces/uza2qoqz","version":"0.14.2","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"event.name":"qwen-code.api_response","model":"coder-model"}}}"#,
+                "\n",
+                r#"{"sessionId":"qwen-session-1","timestamp":"2026-04-12T05:12:58.063Z","type":"assistant","cwd":"/Users/kunkun/.adk/release/workspaces/uza2qoqz","version":"0.14.2","model":"coder-model","message":{"role":"model","parts":[{"text":"hello"}]},"usageMetadata":{"promptTokenCount":15599,"candidatesTokenCount":76,"thoughtsTokenCount":26,"totalTokenCount":15675,"cachedContentTokenCount":13042}}"#,
+                "\n"
+            ),
+        )
+        .expect("write qwen sample");
+
+        let start = Utc.with_ymd_and_hms(2026, 4, 12, 0, 0, 0).single().unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 4, 13, 0, 0, 0).single().unwrap();
+        let ws_map = HashMap::from([(
+            PathBuf::from("/Users/kunkun/.adk/release/workspaces/uza2qoqz"),
+            "uza2qoqz".to_string(),
+        )]);
+
+        let (records, msgs, sid) = parse_qwen(&file_path, start, end, &ws_map);
+
+        assert_eq!(sid.as_deref(), Some("qwen-session-1"));
+        assert_eq!(msgs, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].provider, "Qwen");
+        assert_eq!(records[0].agent, "uza2qoqz");
+        assert_eq!(records[0].model, "qwen");
+        assert_eq!(records[0].input_tokens, 2_557);
+        assert_eq!(records[0].output_tokens, 76);
+        assert_eq!(records[0].cache_read_tokens, 13_042);
+        assert_eq!(records[0].cache_creation_tokens, 26);
+    }
+
+    #[test]
+    fn build_receipt_data_keeps_gemini_and_qwen_provider_shares_without_cost_fallback() {
+        let start = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).single().unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).single().unwrap();
+        let records = vec![
+            UsageRecord {
+                timestamp: start,
+                model: "gemini-3.1-pro-preview".into(),
+                input_tokens: 1000,
+                output_tokens: 200,
+                cache_read_tokens: 50,
+                cache_creation_tokens: 25,
+                provider: "Gemini".into(),
+                agent: "gemini".into(),
+                session_id: Some("gem-1".into()),
+            },
+            UsageRecord {
+                timestamp: start + Duration::minutes(1),
+                model: "qwen".into(),
+                input_tokens: 800,
+                output_tokens: 100,
+                cache_read_tokens: 20,
+                cache_creation_tokens: 10,
+                provider: "Qwen".into(),
+                agent: "qwen".into(),
+                session_id: Some("qwen-1".into()),
+            },
+        ];
+
+        let receipt = build_receipt_data(&records, start, end, "Test");
+        let providers: HashMap<_, _> = receipt
+            .providers
+            .iter()
+            .map(|item| (item.provider.as_str(), item.tokens))
+            .collect();
+
+        assert_eq!(providers.get("Gemini"), Some(&1_275));
+        assert_eq!(providers.get("Qwen"), Some(&930));
+
+        let gemini_line = receipt
+            .models
+            .iter()
+            .find(|item| item.provider == "Gemini")
+            .expect("gemini line");
+        let qwen_line = receipt
+            .models
+            .iter()
+            .find(|item| item.provider == "Qwen")
+            .expect("qwen line");
+
+        assert_eq!(gemini_line.display_name, "Gemini 2.5 Pro");
+        assert_eq!(qwen_line.display_name, "Qwen");
+
+        // Gemini 2.5 Pro: $2.00/M input, $12.00/M output, cache_read_factor=0.1
+        // input: 1000*2.00/1e6=0.002, cache_read: 50*2.00*0.1/1e6=0.00001, output: 200*12.00/1e6=0.0024
+        let expected_gemini_cost = 0.00441_f64;
+        // no_cache: (1000+50+25)*2.00/1e6 + 200*12.00/1e6 = 0.00215+0.0024 = 0.00455
+        let expected_gemini_no_cache = 0.00455_f64;
+        assert!(
+            (gemini_line.cost - expected_gemini_cost).abs() < 1e-9,
+            "Gemini cost should use 2.5 Pro pricing, not Sonnet fallback: got {}",
+            gemini_line.cost
+        );
+        assert!(
+            (gemini_line.cost_without_cache - expected_gemini_no_cache).abs() < 1e-9,
+            "Gemini no_cache cost mismatch: got {}",
+            gemini_line.cost_without_cache
+        );
+        // Qwen pricing still N/A ($0) until token rates are verified
+        assert_eq!(qwen_line.cost, 0.0);
+        assert_eq!(qwen_line.cost_without_cache, 0.0);
     }
 }

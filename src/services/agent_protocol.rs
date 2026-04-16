@@ -26,7 +26,10 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub enum StreamMessage {
     /// Initialization - contains session_id
-    Init { session_id: String },
+    Init {
+        session_id: String,
+        raw_session_id: Option<String>,
+    },
     /// Provider started a fresh retry attempt after discarding stale session state
     RetryBoundary,
     /// Text response chunk
