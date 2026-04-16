@@ -42,6 +42,106 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
+fn normalize_review_notes(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_lowercase()
+}
+
+fn enforce_session_reset_dilemma_fallback(
+    db: &crate::db::Db,
+    card_id: &str,
+    verdict: &str,
+    new_notes: Option<&str>,
+) {
+    if !matches!(verdict, "improve" | "reject" | "rework") {
+        return;
+    }
+
+    let Some(new_notes) = new_notes
+        .map(normalize_review_notes)
+        .filter(|notes| !notes.is_empty())
+    else {
+        return;
+    };
+
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+
+    let snapshot: Option<(String, Option<String>, Option<String>, i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT c.status, c.review_status, c.review_notes, COALESCE(c.review_round, 0), rs.session_reset_round
+             FROM kanban_cards c
+             LEFT JOIN card_review_state rs ON rs.card_id = c.id
+             WHERE c.id = ?1",
+            [card_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .ok();
+
+    let Some((card_status, review_status, previous_notes, current_round, session_reset_round)) =
+        snapshot
+    else {
+        return;
+    };
+
+    if card_status != "review" || review_status.as_deref() != Some("reviewing") || current_round < 2
+    {
+        return;
+    }
+
+    let Some(reset_round) = session_reset_round else {
+        return;
+    };
+
+    let Some(previous_notes) = previous_notes
+        .as_deref()
+        .map(normalize_review_notes)
+        .filter(|notes| !notes.is_empty())
+    else {
+        return;
+    };
+
+    if previous_notes != new_notes {
+        return;
+    }
+
+    let blocked_reason = format!(
+        "세션 리셋 후에도 동일 finding 반복 (R{}→R{}) — PM 판단 필요",
+        reset_round, current_round
+    );
+
+    let _ = conn.execute(
+        "UPDATE kanban_cards
+         SET review_status = 'dilemma_pending',
+             blocked_reason = ?1,
+             suggestion_pending_at = NULL,
+             awaiting_dod_at = NULL,
+             updated_at = datetime('now')
+         WHERE id = ?2",
+        rusqlite::params![blocked_reason, card_id],
+    );
+
+    let payload = serde_json::json!({
+        "card_id": card_id,
+        "state": "dilemma_pending",
+        "last_verdict": verdict,
+        "session_reset_round": reset_round,
+    });
+    let _ = crate::engine::ops::review_state_sync_on_conn(&conn, &payload.to_string());
+}
+
 #[derive(Debug, Deserialize)]
 pub struct VerdictItem {
     pub category: Option<String>,
@@ -363,6 +463,13 @@ pub async fn submit_verdict(
                 );
             }
         }
+
+        enforce_session_reset_dilemma_fallback(
+            &state.db,
+            cid,
+            &body.overall,
+            body.notes.as_deref().or(body.feedback.as_deref()),
+        );
 
         super::super::dispatches::queue_dispatch_followup(&state.db, &body.dispatch_id);
     }

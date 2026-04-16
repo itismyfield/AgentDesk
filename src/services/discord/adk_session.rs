@@ -216,11 +216,14 @@ pub(super) async fn clear_provider_session_id(session_key: &str, _api_port: u16)
     }
 }
 
-/// Save a provider session_id to DB so it survives dcserver restarts.
-/// Stored in the legacy `claude_session_id` column for compatibility.
+/// Save a provider session selector to DB so it survives dcserver restarts.
+/// The executable selector stays in the legacy `claude_session_id` column for
+/// compatibility, while the raw observed provider session id travels through
+/// `session_id` and is persisted separately by the server route.
 pub(super) async fn save_provider_session_id(
     session_key: &str,
     session_id: &str,
+    raw_provider_session_id: Option<&str>,
     provider: &ProviderKind,
     _api_port: u16,
 ) {
@@ -237,7 +240,7 @@ pub(super) async fn save_provider_session_id(
         dispatch_id: None,
         thread_channel_id: None,
         claude_session_id: Some(session_id.to_string()),
-        session_id: Some(session_id.to_string()),
+        session_id: raw_provider_session_id.map(str::to_string),
     };
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -245,8 +248,9 @@ pub(super) async fn save_provider_session_id(
     }
 }
 
-/// Fetch the stored provider session_id from DB for a given session_key.
-/// Reads the legacy `claude_session_id` field for compatibility.
+/// Fetch the stored executable provider session selector from DB for a given session_key.
+/// Prefer the legacy `claude_session_id` field and fall back to `session_id`
+/// only for older rows that never populated the dedicated selector slot.
 pub(super) async fn fetch_provider_session_id(
     session_key: &str,
     provider: &ProviderKind,
@@ -271,9 +275,9 @@ async fn fetch_provider_session_id_once(
     // #107: Filter empty strings — a stale clear path may have stored ""
     // instead of NULL; treat it as no session ID.
     // Also try session_id field as fallback for provider-agnostic lookup.
-    json.get("session_id")
+    json.get("claude_session_id")
         .and_then(|v| v.as_str())
-        .or_else(|| json.get("claude_session_id").and_then(|v| v.as_str()))
+        .or_else(|| json.get("session_id").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
@@ -281,11 +285,12 @@ async fn fetch_provider_session_id_once(
 fn build_provider_session_payload(
     session_key: &str,
     session_id: &str,
+    raw_provider_session_id: Option<&str>,
     provider: &ProviderKind,
 ) -> serde_json::Value {
     serde_json::json!({
         "session_key": session_key,
-        "session_id": session_id,
+        "session_id": raw_provider_session_id,
         "claude_session_id": session_id,
         "provider": provider.as_str(),
     })
@@ -642,11 +647,12 @@ mod tests {
         let payload = super::build_provider_session_payload(
             "host:AgentDesk-codex-adk-cdx",
             "session-123",
+            Some("raw-session-123"),
             &ProviderKind::Codex,
         );
 
         assert_eq!(payload["session_key"], "host:AgentDesk-codex-adk-cdx");
-        assert_eq!(payload["session_id"], "session-123");
+        assert_eq!(payload["session_id"], "raw-session-123");
         assert_eq!(payload["claude_session_id"], "session-123");
         assert_eq!(payload["provider"], "codex");
     }

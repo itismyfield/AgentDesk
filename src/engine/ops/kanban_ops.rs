@@ -23,13 +23,13 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 };
                 let force = force.unwrap_or(false);
 
-                // Get current status
-                let old_status: String = match conn.query_row(
-                    "SELECT status FROM kanban_cards WHERE id = ?1",
+                // Get current status + review round before any terminal cleanup runs.
+                let (old_status, old_review_round): (String, Option<i64>) = match conn.query_row(
+                    "SELECT status, review_round FROM kanban_cards WHERE id = ?1",
                     [&card_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 ) {
-                    Ok(s) => s,
+                    Ok(values) => values,
                     Err(_) => return r#"{"error":"card not found"}"#.to_string(),
                 };
 
@@ -60,7 +60,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 let transition_rule = pipeline.find_transition(&old_status, &new_status);
 
                 // Guard: prevent reverting terminal cards
-                if pipeline.is_terminal(&old_status) && old_status != new_status {
+                if pipeline.is_terminal(&old_status) && old_status != new_status && !force {
                     return format!(
                         r#"{{"error":"cannot revert terminal card from {} to {}"}}"#,
                         old_status, new_status
@@ -177,7 +177,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                         crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
                             &conn,
                             dispatch_id,
-                            Some("js_terminal_cleanup"),
+                            Some("auto_cancelled_on_terminal_card"),
                         )
                         .ok();
                     }
@@ -191,9 +191,15 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     .hooks_for_state(&new_status)
                     .is_some_and(|h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
                 if pipeline.is_terminal(&new_status) || !has_hooks {
+                    let mut payload = serde_json::json!({"card_id": card_id, "state": "idle"});
+                    if pipeline.is_terminal(&new_status)
+                        && let Some(review_round) = old_review_round.filter(|value| *value > 0)
+                    {
+                        payload["review_round"] = serde_json::json!(review_round);
+                    }
                     review_state_sync_on_conn(
                         &conn,
-                        &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string(),
+                        &payload.to_string(),
                     );
                 } else if is_review_enter {
                     review_state_sync_on_conn(
@@ -738,7 +744,7 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
     // UPSERT: INSERT OR REPLACE with all fields
     let result = conn.execute(
         "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, approach_change_round, session_reset_round, review_entered_at, updated_at) \
-         VALUES (?1, ?2, COALESCE(?3, 0), ?4, ?5, ?6, ?7, ?8, COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+         VALUES (?1, ?2, COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0), ?4, ?5, ?6, ?7, ?8, COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
          ON CONFLICT(card_id) DO UPDATE SET \
          state = ?2, \
          review_round = COALESCE(?3, review_round), \

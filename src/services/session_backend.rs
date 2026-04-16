@@ -411,7 +411,7 @@ pub fn process_stream_line(
 
     if let Some(message) = parse_stream_message(&json) {
         match &message {
-            StreamMessage::Init { session_id } => {
+            StreamMessage::Init { session_id, .. } => {
                 state.last_session_id = Some(session_id.clone());
             }
             StreamMessage::Done { result, session_id } => {
@@ -450,7 +450,10 @@ pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
             match subtype {
                 "init" => {
                     let session_id = json.get("session_id")?.as_str()?.to_string();
-                    Some(StreamMessage::Init { session_id })
+                    Some(StreamMessage::Init {
+                        session_id,
+                        raw_session_id: None,
+                    })
                 }
                 "task_notification" => Some(StreamMessage::TaskNotification {
                     task_id: json
@@ -863,7 +866,7 @@ mod tests {
         ));
         assert!(matches!(
             receiver.recv().unwrap(),
-            StreamMessage::Init { session_id } if session_id == "sess-1"
+            StreamMessage::Init { session_id, .. } if session_id == "sess-1"
         ));
         assert!(matches!(
             receiver.recv().unwrap(),

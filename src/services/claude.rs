@@ -401,6 +401,24 @@ fn execute_command_simple_with_model_and_cancel(
     }
 }
 
+/// Execute a simple Claude CLI call with an optional timeout.
+/// This is a blocking function — call from tokio::task::spawn_blocking.
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<String, String> {
+    let prompt = prompt.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(execute_command_simple(&prompt));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
+    }
+}
+
 /// Execute a command using Claude CLI with streaming output
 /// If `system_prompt` is None, uses the default file manager system prompt.
 /// If `system_prompt` is Some(""), no system prompt is appended.
@@ -838,7 +856,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
                 // Track session_id and final result for Done message
                 match &msg {
-                    StreamMessage::Init { session_id } => {
+                    StreamMessage::Init { session_id, .. } => {
                         debug_log(&format!("  >>> Init: session_id={}", session_id));
                         last_session_id = Some(session_id.clone());
                     }
@@ -1959,7 +1977,7 @@ mod tests {
                 .unwrap();
 
         match parse_stream_message(&json) {
-            Some(StreamMessage::Init { session_id }) => {
+            Some(StreamMessage::Init { session_id, .. }) => {
                 assert_eq!(session_id, "test-123");
             }
             _ => panic!("Expected Init message"),

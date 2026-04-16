@@ -25,7 +25,7 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         })?,
     )?;
 
-    let db_record = db;
+    let db_record = db.clone();
     review_obj.set(
         "__recordEntryRaw",
         Function::new(
@@ -34,6 +34,14 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 review_record_entry_raw(&db_record, &card_id, &opts_json)
             },
         )?,
+    )?;
+
+    let db_active_work = db.clone();
+    review_obj.set(
+        "__hasActiveWorkRaw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            review_has_active_work_raw(&db_active_work, &card_id)
+        })?,
     )?;
 
     ad.set("review", review_obj)?;
@@ -56,6 +64,11 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 var result = JSON.parse(review.__recordEntryRaw(cardId || "", JSON.stringify(opts || {})));
                 if (result.error) throw new Error(result.error);
                 return result;
+            };
+            review.hasActiveWork = function(cardId) {
+                var result = JSON.parse(review.__hasActiveWorkRaw(cardId || ""));
+                if (result.error) throw new Error(result.error);
+                return !!result.has_active_work;
             };
         })();
         "#,
@@ -253,6 +266,31 @@ fn review_record_entry_raw(db: &Db, card_id: &str, opts_json: &str) -> String {
             "rows_affected": changed,
             "changed": changed > 0,
         }))
+    })();
+
+    match result {
+        Ok(value) => value.to_string(),
+        Err(err) => json!({ "error": err.to_string() }).to_string(),
+    }
+}
+
+fn review_has_active_work_raw(db: &Db, card_id: &str) -> String {
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        if card_id.trim().is_empty() {
+            return Err(anyhow::anyhow!("review.hasActiveWork requires card_id"));
+        }
+
+        let conn = db.read_conn()?;
+        let has_active_work: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM task_dispatches \
+             WHERE kanban_card_id = ?1 \
+               AND dispatch_type IN ('implementation', 'rework') \
+               AND status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )?;
+
+        Ok(json!({ "has_active_work": has_active_work }))
     })();
 
     match result {

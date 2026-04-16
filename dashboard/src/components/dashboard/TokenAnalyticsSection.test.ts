@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildModelSegments,
   buildAgentCacheRows,
   buildDailyCacheHitPoints,
   cacheHitRatePct,
@@ -99,5 +100,36 @@ describe("TokenAnalyticsSection helpers", () => {
     expect(rows[0]?.promptTokens).toBe(500);
     expect(rows[0]?.cacheReadTokens).toBe(300);
     expect(rows[0]?.hitRate).toBeCloseTo(60, 4);
+  });
+
+  it("normalizes Gemini and Qwen providers in the model distribution", () => {
+    const segments = buildModelSegments([
+      {
+        provider: "gemini",
+        model: "gemini-2.5-pro",
+        display_name: "Gemini 2.5 Pro",
+        total_tokens: 700,
+        cost: 0,
+      },
+      {
+        provider: "qwen",
+        model: "coder-model",
+        display_name: "Qwen",
+        total_tokens: 300,
+        cost: 0,
+      },
+    ]);
+
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toMatchObject({
+      provider: "Gemini",
+      label: "Gemini 2.5 Pro",
+      percentage: 70,
+    });
+    expect(segments[1]).toMatchObject({
+      provider: "Qwen",
+      label: "Qwen",
+      percentage: 30,
+    });
   });
 });

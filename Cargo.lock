@@ -21,6 +21,7 @@ dependencies = [
  "dashmap 6.1.0",
  "dirs",
  "futures",
+ "glob",
  "hex",
  "json5",
  "libc",

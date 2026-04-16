@@ -45,12 +45,6 @@ var reviewAutomation = {
       return;
     }
 
-    // Guard: don't create review dispatch if implementation/rework is still active
-    if (agentdesk.dispatch.hasActiveWork(card.id)) {
-      agentdesk.log.info("[review] Card " + card.id + " has active work dispatch — deferring review");
-      return;
-    }
-
     // Check if review is enabled — if not, complete immediately
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
@@ -99,6 +93,14 @@ var reviewAutomation = {
 
     // #117: Update canonical card_review_state
     agentdesk.reviewState.sync(card.id, "reviewing", { review_round: newRound });
+
+    // Guard: don't create review dispatch if implementation/rework is still active.
+    // The card has already entered review canonically, so preserve the fresh
+    // round/state while deferring only the counter-model dispatch creation.
+    if (agentdesk.review.hasActiveWork(card.id)) {
+      agentdesk.log.info("[review] Card " + card.id + " has active work dispatch — deferring review dispatch creation");
+      return;
+    }
 
     // Check review round limit — exceed → dilemma_pending with deadlock-manager notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
@@ -450,6 +452,8 @@ function setNormalSuggestionPending(cardId, verdict) {
 
 function parseJsonObject(raw) {
   if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  if (typeof raw !== "string") return {};
   try {
     return JSON.parse(raw) || {};
   } catch (e) {
@@ -599,6 +603,19 @@ function loadLatestReviewDispatchContext(cardId, dispatchId) {
   return parseJsonObject(rows[0].context);
 }
 
+function findGateTransition(config, gateName) {
+  var cfg = config || agentdesk.pipeline.getConfig();
+  if (!cfg || !cfg.transitions) return null;
+  for (var i = 0; i < cfg.transitions.length; i++) {
+    var t = cfg.transitions[i];
+    if (t.type !== "gated" || !t.gates) continue;
+    for (var gi = 0; gi < t.gates.length; gi++) {
+      if (t.gates[gi] === gateName) return t;
+    }
+  }
+  return null;
+}
+
 function processVerdict(cardId, verdict, result, options) {
   var opts = options || {};
   // Guard: skip processing for terminal cards — prevents stale dispatches from
@@ -607,9 +624,13 @@ function processVerdict(cardId, verdict, result, options) {
   var terminalState = agentdesk.pipeline.terminalState(cfg);
   var initialState = agentdesk.pipeline.kickoffState(cfg);
   var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
-  var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
-  var reviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_passed", cfg) || terminalState;
-  var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
+  var reviewPassTransition = findGateTransition(cfg, "review_passed");
+  var reviewReworkTransition = findGateTransition(cfg, "review_rework");
+  var reviewState = reviewPassTransition
+    ? reviewPassTransition.from
+    : agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+  var reviewPassTarget = reviewPassTransition ? reviewPassTransition.to : terminalState;
+  var reviewReworkTarget = reviewReworkTransition ? reviewReworkTransition.to : inProgressState;
 
   var cardCheck = agentdesk.db.query(
     "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
@@ -795,6 +816,7 @@ function processVerdict(cardId, verdict, result, options) {
               "create-pr",
               "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
               {
+                sidecar_dispatch: true,
                 worktree_path: latestWorkTarget.worktree_path,
                 worktree_branch: latestWorkTarget.branch,
                 branch: latestWorkTarget.branch

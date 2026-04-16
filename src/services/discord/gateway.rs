@@ -107,6 +107,11 @@ impl DiscordGateway {
     }
 }
 
+fn live_bot_owner_provider(live_turn: Option<&LiveDiscordTurnContext>) -> Option<ProviderKind> {
+    let live_turn = live_turn?;
+    Some(resolve_discord_bot_provider(&live_turn.token))
+}
+
 impl TurnGateway for DiscordGateway {
     fn send_message<'a>(
         &'a self,
@@ -273,9 +278,16 @@ impl TurnGateway for DiscordGateway {
     }
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
-        self.live_turn
-            .as_ref()
-            .map(|live_turn| resolve_discord_bot_provider(&live_turn.token))
-            .or_else(|| Some(self.provider.clone()))
+        live_bot_owner_provider(self.live_turn.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_bot_owner_provider;
+
+    #[test]
+    fn live_bot_owner_provider_requires_live_turn_context() {
+        assert!(live_bot_owner_provider(None).is_none());
     }
 }

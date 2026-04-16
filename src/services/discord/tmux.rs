@@ -408,7 +408,16 @@ pub(super) async fn tmux_output_watcher(
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
     // the relay is suppressed.
-    let mut last_relayed_offset: Option<u64> = None;
+    // Initialize from persisted inflight state so replacement watcher instances skip
+    // already-delivered output (fixes double-reply on stale watcher replacement).
+    let mut last_relayed_offset: Option<u64> = {
+        if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name) {
+            super::inflight::load_inflight_state(&pk, channel_id.get())
+                .and_then(|s| s.last_watcher_relayed_offset)
+        } else {
+            None
+        }
+    };
 
     loop {
         // Always consume resume_offset first — the turn bridge may have set it
@@ -1312,6 +1321,15 @@ pub(super) async fn tmux_output_watcher(
             }
             // Record the offset range we just relayed to prevent duplicate relay.
             last_relayed_offset = Some(data_start_offset);
+            // Persist to inflight state so replacement watcher instances also skip this offset.
+            if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name) {
+                if let Some(mut inflight) =
+                    super::inflight::load_inflight_state(&pk, channel_id.get())
+                {
+                    inflight.last_watcher_relayed_offset = Some(data_start_offset);
+                    let _ = super::inflight::save_inflight_state(&inflight);
+                }
+            }
             if relay_ok {
                 clear_provider_overload_retry_state(channel_id);
             }

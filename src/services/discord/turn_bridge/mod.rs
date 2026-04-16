@@ -286,6 +286,7 @@ pub(super) fn spawn_turn_bridge(
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut new_session_id = bridge.new_session_id.clone();
+        let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let completion_tx = bridge.completion_tx;
         // Guard: ensure completion_tx fires even if the task panics or
@@ -358,6 +359,7 @@ pub(super) fn spawn_turn_bridge(
                                     &mut response_sent_offset,
                                     &mut last_edit_text,
                                     &mut new_session_id,
+                                    &mut new_raw_provider_session_id,
                                     &mut inflight_state,
                                 )
                             {
@@ -365,8 +367,13 @@ pub(super) fn spawn_turn_bridge(
                                 state_dirty = true;
                             }
                         }
-                        StreamMessage::Init { session_id: sid } => {
+                        StreamMessage::Init {
+                            session_id: sid,
+                            raw_session_id,
+                        } => {
                             new_session_id = Some(sid.clone());
+                            new_raw_provider_session_id =
+                                raw_session_id.or_else(|| Some(sid.clone()));
                             inflight_state.session_id = Some(sid);
                             state_dirty = true;
                         }
@@ -687,7 +694,11 @@ pub(super) fn spawn_turn_bridge(
                             );
                             if session_reset_required {
                                 terminal_session_reset_required = true;
-                                clear_local_session_state(&mut new_session_id, &mut inflight_state);
+                                clear_local_session_state(
+                                    &mut new_session_id,
+                                    &mut new_raw_provider_session_id,
+                                    &mut inflight_state,
+                                );
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::warn!(
                                     "  [{ts}] ⚠ Clearing stored provider session after terminal {} session failure (channel {})",
@@ -1083,6 +1094,7 @@ pub(super) fn spawn_turn_bridge(
                 &cancel_token,
                 adk_session_key.as_deref(),
                 &mut new_session_id,
+                &mut new_raw_provider_session_id,
                 &mut inflight_state,
                 "recovery session died",
             )
@@ -1157,6 +1169,7 @@ pub(super) fn spawn_turn_bridge(
                         &cancel_token,
                         adk_session_key.as_deref(),
                         &mut new_session_id,
+                        &mut new_raw_provider_session_id,
                         &mut inflight_state,
                         "restart recovery handoff failed",
                     )
@@ -1271,6 +1284,7 @@ pub(super) fn spawn_turn_bridge(
                     &cancel_token,
                     adk_session_key.as_deref(),
                     &mut new_session_id,
+                    &mut new_raw_provider_session_id,
                     &mut inflight_state,
                     "resume failed in response output",
                 )
@@ -1326,6 +1340,7 @@ pub(super) fn spawn_turn_bridge(
                         &cancel_token,
                         adk_session_key.as_deref(),
                         &mut new_session_id,
+                        &mut new_raw_provider_session_id,
                         &mut inflight_state,
                         "stale session_id in recovered output",
                     )
@@ -1362,6 +1377,7 @@ pub(super) fn spawn_turn_bridge(
                             &cancel_token,
                             adk_session_key.as_deref(),
                             &mut new_session_id,
+                            &mut new_raw_provider_session_id,
                             &mut inflight_state,
                             "stale session_id in output file",
                         )
@@ -1398,6 +1414,7 @@ pub(super) fn spawn_turn_bridge(
                                 &cancel_token,
                                 adk_session_key.as_deref(),
                                 &mut new_session_id,
+                                &mut new_raw_provider_session_id,
                                 &mut inflight_state,
                                 "quick exit with empty response",
                             )
@@ -1632,6 +1649,7 @@ pub(super) fn spawn_turn_bridge(
             super::adk_session::save_provider_session_id(
                 session_key,
                 persisted_sid,
+                new_raw_provider_session_id.as_deref(),
                 &provider,
                 shared_owned.api_port,
             )

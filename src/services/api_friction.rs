@@ -1196,8 +1196,7 @@ mod tests {
         ])
         .await;
 
-        let lock = crate::services::discord::runtime_store::test_env_lock();
-        let _guard = lock.lock().unwrap();
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_key = std::env::var_os("MEMENTO_TEST_KEY");

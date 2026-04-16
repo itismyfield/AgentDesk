@@ -36,7 +36,10 @@ impl DbPool {
     /// Open a new read-only connection for non-blocking reads.
     /// SQLite WAL mode allows concurrent readers without blocking writers.
     pub fn read_conn(&self) -> std::result::Result<Connection, rusqlite::Error> {
-        let conn = Connection::open(&self.path)?;
+        let conn = Connection::open_with_flags(
+            &self.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
         conn.execute_batch(
             "PRAGMA query_only=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
         )?;
@@ -47,7 +50,13 @@ impl DbPool {
     /// Used by the policy engine (QuickJS) to avoid blocking request handlers.
     /// SQLite WAL serializes concurrent writers via busy_timeout.
     pub fn separate_conn(&self) -> std::result::Result<Connection, rusqlite::Error> {
-        let conn = Connection::open(&self.path)?;
+        let conn = Connection::open_with_flags(
+            &self.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
         )?;
@@ -102,6 +111,9 @@ pub fn wrap_conn(conn: Connection) -> Db {
 
 pub fn init(config: &Config) -> Result<Db> {
     let db_path = config.data.dir.join(&config.data.db_name);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let conn = Connection::open(&db_path)?;
 
     conn.execute_batch(

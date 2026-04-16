@@ -357,18 +357,32 @@ fn fire_dynamic_hooks(
 const TERMINAL_DISPATCH_CLEANUP_REASON: &str = "auto_cancelled_on_terminal_card";
 
 fn sync_terminal_card_state(db: &Db, card_id: &str) {
+    sync_terminal_card_state_with_scope(db, card_id, true);
+}
+
+fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
+    sync_terminal_card_state_with_scope(db, card_id, false);
+}
+
+fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
     let Ok(conn) = db.lock() else {
         return;
     };
 
     crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
 
+    let dispatch_types = if cancel_implementation {
+        "'implementation', 'review-decision', 'rework'"
+    } else {
+        "'review-decision', 'rework'"
+    };
+
     let pending_followups: Vec<String> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'review-decision', 'rework') \
-             AND status IN ('pending', 'dispatched')",
-        )
+             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
+             AND status IN ('pending', 'dispatched')"
+        ))
         .ok()
         .and_then(|mut stmt| {
             stmt.query_map([card_id], |row| row.get::<_, String>(0))
@@ -555,7 +569,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     if let Some(ref pipeline) = effective {
         // Sync auto_queue_entries + GitHub on terminal status
         if pipeline.is_terminal(to) {
-            sync_terminal_card_state(db, card_id);
+            sync_terminal_transition_followups(db, card_id);
         }
 
         github_sync_on_transition(db, pipeline, card_id, to);

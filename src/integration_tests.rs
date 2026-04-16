@@ -2069,6 +2069,10 @@ mod tests {
 
     #[test]
     fn auto_queue_activate_concurrent_calls_dispatch_once() {
+        // `create_dispatch()` may resolve the default repo/worktree from
+        // AGENTDESK_REPO_DIR. Hold the shared env lock with a real git repo so
+        // this concurrency test does not race unrelated env-mutating tests.
+        let (_repo, _repo_guard) = setup_test_repo();
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
@@ -7208,7 +7212,7 @@ done
         });
 
         match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
-            crate::services::agent_protocol::StreamMessage::Init { session_id } => {
+            crate::services::agent_protocol::StreamMessage::Init { session_id, .. } => {
                 assert_eq!(session_id, "latest");
             }
             other => panic!("expected Init, got {:?}", other),

@@ -203,29 +203,15 @@ pub(super) fn build_model_picker_option_specs(
     default_source: &str,
     working_dir: Option<&str>,
 ) -> Vec<ModelPickerOptionSpec> {
-    let default_selected = match pending_model {
-        Some(value) => is_default_picker_value(value),
-        None => override_model.is_none(),
-    };
     let selected_explicit_model = match pending_model {
         Some(value) if is_default_picker_value(value) => None,
         Some(value) => Some(value),
         None => override_model,
     };
+    let clearing_override = pending_model.is_some_and(is_default_picker_value);
 
     let resolved_models = resolved_models(provider, working_dir);
-    let mut options = Vec::with_capacity(resolved_models.len() + 1);
-    options.push(ModelPickerOptionSpec {
-        value: DEFAULT_PICKER_VALUE.to_string(),
-        label: default_picker_option_label(),
-        description: default_picker_option_description(
-            provider,
-            default_model,
-            default_source,
-            working_dir,
-        ),
-        selected: default_selected,
-    });
+    let mut options = Vec::with_capacity(resolved_models.len());
     options.extend(
         capped_model_picker_explicit_entries(&resolved_models, selected_explicit_model)
             .iter()
@@ -237,6 +223,19 @@ pub(super) fn build_model_picker_option_specs(
                     .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
             }),
     );
+    if options.is_empty() && !clearing_override {
+        options.push(ModelPickerOptionSpec {
+            value: DEFAULT_PICKER_VALUE.to_string(),
+            label: default_picker_option_label(),
+            description: default_picker_option_description(
+                provider,
+                default_model,
+                default_source,
+                working_dir,
+            ),
+            selected: false,
+        });
+    }
     append_unavailable_selected_option(&mut options, selected_explicit_model);
     options
 }
@@ -373,7 +372,9 @@ mod tests {
     }
 
     #[test]
-    fn build_model_picker_option_specs_selects_only_default_when_clearing_override() {
+    fn build_model_picker_option_specs_no_selection_when_clearing_override() {
+        // Default sentinel as pending means "user staged a reset via button".
+        // The 기본값 option no longer exists in the dropdown — nothing is selected.
         let options = build_model_picker_option_specs(
             &ProviderKind::Claude,
             Some(crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
@@ -383,23 +384,20 @@ mod tests {
             None,
         );
 
-        let selected: Vec<_> = options.iter().filter(|entry| entry.selected).collect();
-        assert_eq!(selected.len(), 1, "expected exactly one selected option");
-        assert_eq!(
-            selected[0].value,
-            crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+        assert!(
+            options.iter().all(|entry| !entry.selected),
+            "no option should be selected when pending value is the default sentinel"
         );
         assert!(
-            options
+            !options
                 .iter()
-                .filter(|entry| entry.value == "claude-sonnet-4-6")
-                .all(|entry| !entry.selected),
-            "stale override should not stay selected when pending value is default"
+                .any(|e| e.value == crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
+            "default sentinel must not appear as a dropdown option"
         );
     }
 
     #[test]
-    fn build_model_picker_option_specs_clearing_missing_override_keeps_single_selection() {
+    fn build_model_picker_option_specs_clearing_missing_override_leaves_nothing_selected() {
         with_temp_qwen_env(|_temp_home, _temp_project| {
             let options = build_model_picker_option_specs(
                 &ProviderKind::Qwen,
@@ -410,19 +408,39 @@ mod tests {
                 None,
             );
 
-            let selected: Vec<_> = options.iter().filter(|entry| entry.selected).collect();
-            assert_eq!(selected.len(), 1, "expected exactly one selected option");
-            assert_eq!(
-                selected[0].value,
-                crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+            assert!(
+                options.iter().all(|entry| !entry.selected),
+                "no option should be selected when pending value is the default sentinel"
             );
             assert!(
-                options
+                !options
                     .iter()
-                    .filter(|entry| entry.value == "coder-model")
-                    .all(|entry| !entry.selected),
-                "missing override should not remain selected when pending value is default"
+                    .any(|e| e.value
+                        == crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE),
+                "default sentinel must not appear as a dropdown option"
             );
+        });
+    }
+
+    #[test]
+    fn build_model_picker_option_specs_adds_default_fallback_when_catalog_is_empty() {
+        with_temp_qwen_env(|_temp_home, _temp_project| {
+            let options = build_model_picker_option_specs(
+                &ProviderKind::Qwen,
+                None,
+                None,
+                "default",
+                SOURCE_PROVIDER_DEFAULT,
+                None,
+            );
+
+            assert_eq!(options.len(), 1);
+            assert_eq!(
+                options[0].value,
+                crate::services::discord::model_catalog::DEFAULT_PICKER_VALUE
+            );
+            assert_eq!(options[0].label, "기본값");
+            assert!(!options[0].selected);
         });
     }
 

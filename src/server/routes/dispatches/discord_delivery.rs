@@ -916,14 +916,26 @@ async fn reset_stale_slot_thread_if_needed(
         total_message_sent,
         age_limit_hit,
     );
-    reset_slot_thread_bindings_excluding(
+    match reset_slot_thread_bindings_excluding(
         db,
         &slot_binding.agent_id,
         slot_binding.slot_index,
         Some(dispatch_id),
     )
-    .await?;
-    Ok(true)
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] stale slot thread reset failed for dispatch {}: agent={} slot={} error={}",
+                dispatch_id,
+                slot_binding.agent_id,
+                slot_binding.slot_index,
+                err
+            );
+            Ok(false)
+        }
+    }
 }
 
 async fn archive_duplicate_slot_threads(
@@ -2049,8 +2061,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
     // For improve/rework/reject: create a review-decision dispatch via the
     // authoritative path and let the outbox worker deliver the message.
     if verdict != "pass" && verdict != "approved" && verdict != "unknown" {
-        // #118: If approach-change already created a rework dispatch (review_status = rework_pending),
-        // skip creating the review-decision dispatch to avoid double dispatch.
+        // #118/#420: If review automation already converged on a concrete
+        // follow-up state, don't enqueue a generic review-decision dispatch on
+        // top of it.
         {
             let skip = db
                 .lock()
@@ -2064,11 +2077,11 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                     .ok()
                     .flatten()
                 })
-                .map(|s| s == "rework_pending")
+                .map(|s| s == "rework_pending" || s == "dilemma_pending")
                 .unwrap_or(false);
             if skip {
                 tracing::info!(
-                    "[review-followup] #118 skipping review-decision for {card_id} — approach-change rework already dispatched"
+                    "[review-followup] skipping review-decision for {card_id} — review automation already resolved the follow-up state"
                 );
                 return Ok(());
             }

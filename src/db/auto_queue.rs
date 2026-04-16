@@ -235,7 +235,7 @@ fn update_entry_status_with_current_on_conn(
             .batch_phase(current.batch_phase)
             .maybe_slot_index(current.slot_index);
 
-        if !is_allowed_entry_transition(&current.status, normalized) {
+        if !is_allowed_entry_transition(&current.status, normalized, trigger_source) {
             crate::auto_queue_log!(
                 warn,
                 "entry_status_transition_blocked",
@@ -405,7 +405,7 @@ fn update_entry_status_with_current_on_conn(
                 });
             }
 
-            if !is_allowed_entry_transition(&latest.status, normalized) {
+            if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
                 let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
                     .run(&latest.run_id)
                     .entry(entry_id)
@@ -1750,8 +1750,15 @@ fn normalize_entry_status(status: &str) -> Result<&str, EntryStatusUpdateError> 
     }
 }
 
-fn is_allowed_entry_transition(from_status: &str, to_status: &str) -> bool {
+fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_source: &str) -> bool {
     if from_status == to_status {
+        return true;
+    }
+
+    if from_status == ENTRY_STATUS_DONE
+        && to_status == ENTRY_STATUS_DISPATCHED
+        && matches!(trigger_source, "pmd_reopen" | "rereview_dispatch")
+    {
         return true;
     }
 
@@ -2647,6 +2654,52 @@ mod tests {
         assert_eq!(status, ENTRY_STATUS_DISPATCHED);
         assert_eq!(dispatch_id.as_deref(), Some("dispatch-restored"));
         assert_eq!(slot_index, Some(0));
+    }
+
+    #[test]
+    fn entry_transition_allows_done_restore_to_dispatched_for_recovery_sources() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, completed_at
+             ) VALUES ('entry-3b', 'run-1', 'card-3b', 'agent-1', 'done', 0, datetime('now'))",
+            [],
+        )
+        .expect("seed done entry");
+
+        let restored = update_entry_status_on_conn(
+            &conn,
+            "entry-3b",
+            ENTRY_STATUS_DISPATCHED,
+            "rereview_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-rereview".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("recovery transition");
+        assert!(restored.changed);
+        assert_eq!(restored.from_status, ENTRY_STATUS_DONE);
+        assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+
+        let (status, dispatch_id, slot_index, completed_at): (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-3b'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("entry row");
+        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-rereview"));
+        assert_eq!(slot_index, Some(0));
+        assert!(completed_at.is_none());
     }
 
     #[test]
