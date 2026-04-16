@@ -2922,8 +2922,16 @@ mod tests {
 
         server_handle.abort();
         let state = state.lock().unwrap();
+        // Filter to reaction calls only: on some platforms (Windows) background
+        // thread/channel PATCH requests may also hit the mock server.
+        let reaction_calls: Vec<String> = state
+            .calls
+            .iter()
+            .filter(|call| call.contains("/channels/123/messages/message-123/reactions/"))
+            .cloned()
+            .collect();
         assert_eq!(
-            state.calls,
+            reaction_calls,
             vec![
                 "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
                 "DELETE /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
