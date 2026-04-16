@@ -259,12 +259,19 @@ fn slot_has_dispatch_thread_history(
 fn slot_requires_thread_reset_before_reuse(
     conn: &rusqlite::Connection,
     agent_id: &str,
-    slot_index: i64,
-    newly_assigned: bool,
+    allocation: crate::db::auto_queue::SlotAllocation,
 ) -> bool {
-    newly_assigned
-        && (slot_thread_map_has_bindings(conn, agent_id, slot_index)
-            || slot_has_dispatch_thread_history(conn, agent_id, slot_index))
+    slot_requires_session_clear_before_dispatch(conn, agent_id, allocation)
+        && (allocation.newly_assigned || allocation.rebound_from_other_group)
+}
+
+fn slot_requires_session_clear_before_dispatch(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    allocation: crate::db::auto_queue::SlotAllocation,
+) -> bool {
+    slot_thread_map_has_bindings(conn, agent_id, allocation.slot_index)
+        || slot_has_dispatch_thread_history(conn, agent_id, allocation.slot_index)
 }
 
 fn build_auto_queue_dispatch_context(
@@ -901,9 +908,11 @@ fn apply_restore_state_changes(
                         entry.entry_id
                     )
                 })?;
-                let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
-                if let Some((_, newly_assigned)) = slot_allocation {
-                    if newly_assigned {
+                let slot_index = slot_allocation
+                    .as_ref()
+                    .map(|allocation| allocation.slot_index);
+                if let Some(allocation) = slot_allocation {
+                    if allocation.newly_assigned || allocation.rebound_from_other_group {
                         counts.rebound_slots += 1;
                     }
                 } else {
@@ -1003,10 +1012,12 @@ fn attempt_restore_dispatch(
                 entry.entry_id
             )
         })?;
-        let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+        let slot_index = slot_allocation
+            .as_ref()
+            .map(|allocation| allocation.slot_index);
         let mut result = RestoreDispatchAttemptResult::default();
-        if let Some((_, newly_assigned)) = slot_allocation {
-            if newly_assigned {
+        if let Some(allocation) = slot_allocation {
+            if allocation.newly_assigned || allocation.rebound_from_other_group {
                 result.rebound_slot = true;
             }
         } else {
@@ -1047,23 +1058,29 @@ fn attempt_restore_dispatch(
             entry.entry_id
         )
     })?;
-    let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+    let slot_index = slot_allocation
+        .as_ref()
+        .map(|allocation| allocation.slot_index);
     let mut result = RestoreDispatchAttemptResult::default();
-    let reset_slot_thread_before_reuse =
-        if let Some((assigned_slot, newly_assigned)) = slot_allocation {
-            let reset = slot_requires_thread_reset_before_reuse(
+    let reset_slot_thread_before_reuse = if let Some(allocation) = slot_allocation {
+        let clear_slot_session_before_dispatch =
+            slot_requires_session_clear_before_dispatch(&conn, &entry.agent_id, allocation);
+        let reset = slot_requires_thread_reset_before_reuse(&conn, &entry.agent_id, allocation);
+        if allocation.newly_assigned || allocation.rebound_from_other_group {
+            result.rebound_slot = true;
+        }
+        if clear_slot_session_before_dispatch {
+            crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
+                deps.health_registry.clone(),
                 &conn,
                 &entry.agent_id,
-                assigned_slot,
-                newly_assigned,
+                allocation.slot_index,
             );
-            if newly_assigned {
-                result.rebound_slot = true;
-            }
-            reset
-        } else {
-            return Ok(result);
-        };
+        }
+        reset
+    } else {
+        return Ok(result);
+    };
     drop(conn);
 
     let dispatch_result = run_activate_blocking(|| {
@@ -3915,7 +3932,9 @@ pub(crate) fn activate_with_deps(
                 continue;
             }
         };
-        let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
+        let slot_index = slot_allocation
+            .as_ref()
+            .map(|allocation| allocation.slot_index);
         let mut reset_slot_thread_before_reuse = false;
         if slot_allocation.is_none() {
             crate::auto_queue_log!(
@@ -3926,27 +3945,26 @@ pub(crate) fn activate_with_deps(
             );
             continue;
         }
-        if let Some((assigned_slot, _newly_assigned)) = slot_allocation {
-            reset_slot_thread_before_reuse = slot_requires_thread_reset_before_reuse(
-                &conn,
-                &agent_id,
-                assigned_slot,
-                _newly_assigned,
-            );
-            let slot_key = (agent_id.clone(), assigned_slot);
-            if reset_slot_thread_before_reuse && !cleared_slots.contains(&slot_key) {
+        if let Some(allocation) = slot_allocation {
+            let clear_slot_session_before_dispatch =
+                slot_requires_session_clear_before_dispatch(&conn, &agent_id, allocation);
+            reset_slot_thread_before_reuse =
+                slot_requires_thread_reset_before_reuse(&conn, &agent_id, allocation);
+            let slot_key = (agent_id.clone(), allocation.slot_index);
+            if clear_slot_session_before_dispatch && !cleared_slots.contains(&slot_key) {
                 let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
                     deps.health_registry.clone(),
                     &conn,
                     &agent_id,
-                    assigned_slot,
+                    allocation.slot_index,
                 );
                 if cleared > 0 {
                     crate::auto_queue_log!(
                         info,
                         "activate_slot_cleared_before_dispatch",
-                        entry_log_ctx.clone().slot_index(assigned_slot),
-                        "[auto-queue] cleared {cleared} slot thread session(s) before dispatching {agent_id} slot {assigned_slot} group {group}"
+                        entry_log_ctx.clone().slot_index(allocation.slot_index),
+                        "[auto-queue] cleared {cleared} slot thread session(s) before dispatching {agent_id} slot {} group {group}",
+                        allocation.slot_index
                     );
                 }
                 cleared_slots.insert(slot_key);
@@ -5892,7 +5910,7 @@ mod tests {
     use super::{
         GenerateCandidate, QueueEntryOrder, build_group_plan, extract_dependency_numbers,
         extract_dependency_parse_result, reorder_entry_ids,
-        slot_requires_thread_reset_before_reuse,
+        slot_requires_session_clear_before_dispatch, slot_requires_thread_reset_before_reuse,
     };
     use rusqlite::Connection;
     use std::collections::HashMap;
@@ -5942,7 +5960,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_thread_reset_requires_new_assignment() {
+    fn slot_thread_reset_distinguishes_same_group_reuse_from_rebind() {
         let conn = slot_reset_conn();
         conn.execute(
             "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
@@ -5952,11 +5970,51 @@ mod tests {
         .expect("seed slot binding");
 
         assert!(
-            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false),
-            "same-run slot rebind must keep the existing thread binding"
+            !slot_requires_thread_reset_before_reuse(
+                &conn,
+                "agent-a",
+                crate::db::auto_queue::SlotAllocation {
+                    slot_index: 0,
+                    newly_assigned: false,
+                    rebound_from_other_group: false,
+                }
+            ),
+            "same-group reuse must keep the existing thread binding"
         );
         assert!(
-            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true),
+            slot_requires_session_clear_before_dispatch(
+                &conn,
+                "agent-a",
+                crate::db::auto_queue::SlotAllocation {
+                    slot_index: 0,
+                    newly_assigned: false,
+                    rebound_from_other_group: false,
+                }
+            ),
+            "same-group reuse still needs a fresh provider session"
+        );
+        assert!(
+            slot_requires_thread_reset_before_reuse(
+                &conn,
+                "agent-a",
+                crate::db::auto_queue::SlotAllocation {
+                    slot_index: 0,
+                    newly_assigned: false,
+                    rebound_from_other_group: true,
+                }
+            ),
+            "same-run cross-group rebind must reset the reused slot thread"
+        );
+        assert!(
+            slot_requires_thread_reset_before_reuse(
+                &conn,
+                "agent-a",
+                crate::db::auto_queue::SlotAllocation {
+                    slot_index: 0,
+                    newly_assigned: true,
+                    rebound_from_other_group: false,
+                }
+            ),
             "cross-run reclaim must reset preserved slot bindings"
         );
     }
