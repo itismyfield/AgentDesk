@@ -37,6 +37,18 @@ pub fn config_dir(root: &Path) -> PathBuf {
     root.join("config")
 }
 
+pub fn credential_dir(root: &Path) -> PathBuf {
+    root.join("credential")
+}
+
+pub fn legacy_credential_dir(root: &Path) -> PathBuf {
+    config_dir(root).join("credential")
+}
+
+pub fn credential_token_path(root: &Path, bot_name: &str) -> PathBuf {
+    credential_dir(root).join(format!("{bot_name}_bot_token"))
+}
+
 pub fn config_file_path(root: &Path) -> PathBuf {
     config_dir(root).join("agentdesk.yaml")
 }

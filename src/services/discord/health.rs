@@ -121,32 +121,24 @@ impl HealthRegistry {
         self.discord_http.lock().await.push((provider, http));
     }
 
-    /// Load announce + notify bot tokens from credential/ files.
+    /// Load announce + notify bot tokens from the canonical runtime credential path.
     /// Call once at startup before the axum server begins accepting requests.
     pub async fn init_bot_tokens(&self) {
-        if let Some(root) = super::runtime_store::agentdesk_root() {
+        if super::runtime_store::agentdesk_root().is_some() {
             for (bot_name, field) in [
                 ("announce", &self.announce_http),
                 ("notify", &self.notify_http),
             ] {
-                let path = root
-                    .join("credential")
-                    .join(format!("{bot_name}_bot_token"));
-                if let Ok(token) = std::fs::read_to_string(&path) {
-                    let token = token.trim().to_string();
-                    if !token.is_empty() {
-                        let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
-                        *field.lock().await = Some(http);
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        let emoji = if bot_name == "announce" {
-                            "📢"
-                        } else {
-                            "🔔"
-                        };
-                        tracing::info!(
-                            "  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing"
-                        );
-                    }
+                if let Some(token) = crate::credential::read_bot_token(bot_name) {
+                    let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
+                    *field.lock().await = Some(http);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    let emoji = if bot_name == "announce" {
+                        "📢"
+                    } else {
+                        "🔔"
+                    };
+                    tracing::info!("  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing");
                 }
             }
         }

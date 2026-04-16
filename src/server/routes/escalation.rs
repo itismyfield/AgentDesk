@@ -1294,14 +1294,18 @@ mod tests {
     }
 
     fn write_test_bot_tokens(root: &FsPath) {
-        let credential_dir = root.join("credential");
+        let credential_dir = crate::runtime_layout::credential_dir(root);
         std::fs::create_dir_all(&credential_dir).unwrap();
         std::fs::write(
-            credential_dir.join("announce_bot_token"),
+            crate::runtime_layout::credential_token_path(root, "announce"),
             "announce-token\n",
         )
         .unwrap();
-        std::fs::write(credential_dir.join("notify_bot_token"), "notify-token\n").unwrap();
+        std::fs::write(
+            crate::runtime_layout::credential_token_path(root, "notify"),
+            "notify-token\n",
+        )
+        .unwrap();
     }
 
     fn test_db() -> crate::db::Db {

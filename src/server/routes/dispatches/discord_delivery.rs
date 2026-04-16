@@ -2208,10 +2208,10 @@ mod tests {
     }
 
     fn write_announce_token(root: &std::path::Path) {
-        let credential_dir = root.join("credential");
+        let credential_dir = crate::runtime_layout::credential_dir(root);
         std::fs::create_dir_all(&credential_dir).unwrap();
         std::fs::write(
-            credential_dir.join("announce_bot_token"),
+            crate::runtime_layout::credential_token_path(root, "announce"),
             "announce-token\n",
         )
         .unwrap();

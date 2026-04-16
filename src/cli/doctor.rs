@@ -820,7 +820,7 @@ fn apply_safe_fixes(cfg: &config::Config) -> Vec<FixAction> {
                 root.join("config"),
                 root.join("logs"),
                 root.join("releases"),
-                root.join("credential"),
+                crate::runtime_layout::credential_dir(&root),
             ];
             let mut failed = None;
             for dir in dirs {

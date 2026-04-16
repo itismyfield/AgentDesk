@@ -1290,9 +1290,10 @@ fn write_credential_token(
     bot_name: &str,
     token: Option<&str>,
 ) -> Result<(), String> {
-    let credential_dir = runtime_root.join("credential");
+    crate::runtime_layout::ensure_credential_layout(runtime_root)?;
+    let credential_dir = crate::runtime_layout::credential_dir(runtime_root);
     std::fs::create_dir_all(&credential_dir).map_err(|e| e.to_string())?;
-    let path = credential_dir.join(format!("{bot_name}_bot_token"));
+    let path = crate::runtime_layout::credential_token_path(runtime_root, bot_name);
 
     match token.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => std::fs::write(path, format!("{value}\n")).map_err(|e| e.to_string()),
@@ -2015,7 +2016,7 @@ fn verify_onboarding_settings_artifacts(
         }
     }
 
-    let announce_path = runtime_root.join("credential").join("announce_bot_token");
+    let announce_path = crate::runtime_layout::credential_token_path(runtime_root, "announce");
     match announce_token
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -2035,7 +2036,7 @@ fn verify_onboarding_settings_artifacts(
         _ => {}
     }
 
-    let notify_path = runtime_root.join("credential").join("notify_bot_token");
+    let notify_path = crate::runtime_layout::credential_token_path(runtime_root, "notify");
     match notify_token
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -3481,12 +3482,29 @@ mod tests {
         );
 
         assert_eq!(
-            std::fs::read_to_string(root.join("credential").join("announce_bot_token")).unwrap(),
+            std::fs::read_to_string(crate::runtime_layout::credential_token_path(
+                root, "announce"
+            ))
+            .unwrap(),
             "announce-token\n"
         );
         assert_eq!(
-            std::fs::read_to_string(root.join("credential").join("notify_bot_token")).unwrap(),
+            std::fs::read_to_string(crate::runtime_layout::credential_token_path(root, "notify"))
+                .unwrap(),
             "notify-token\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(crate::runtime_layout::legacy_credential_dir(root))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                crate::runtime_layout::legacy_credential_dir(root).join("announce_bot_token"),
+            )
+            .unwrap(),
+            "announce-token\n"
         );
     }
 

@@ -27,10 +27,11 @@ use skill_sync::ensure_managed_skill_dir;
 pub(crate) use config_merge::preview_role_map_merge;
 #[allow(unused_imports)]
 pub use paths::{
-    config_dir, config_file_path, legacy_config_file_path, managed_agents_root,
-    managed_memories_root, managed_skills_manifest_path, managed_skills_root,
-    memories_archive_root, memory_backend_path, org_schema_path, resolve_memory_path,
-    role_map_path, shared_agent_knowledge_dir, shared_prompt_path,
+    config_dir, config_file_path, credential_dir, credential_token_path, legacy_config_file_path,
+    legacy_credential_dir, managed_agents_root, managed_memories_root,
+    managed_skills_manifest_path, managed_skills_root, memories_archive_root, memory_backend_path,
+    org_schema_path, resolve_memory_path, role_map_path, shared_agent_knowledge_dir,
+    shared_prompt_path,
 };
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
@@ -294,6 +295,7 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     }
 
     ensure_layout_dirs(root)?;
+    ensure_credential_layout(root)?;
     normalize_agent_config_channels(root)?;
     synchronize_shared_prompt(root)?;
     update_role_map_prompt_paths(root)?;
@@ -328,6 +330,7 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
     let backend = load_memory_backend(root).with_defaults();
     for dir in [
         config_dir(root),
+        credential_dir(root),
         managed_agents_root(root),
         shared_agent_knowledge_path(root)
             .parent()
@@ -341,6 +344,44 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
         fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create '{}': {e}", dir.display()))?;
     }
+    Ok(())
+}
+
+pub(crate) fn ensure_credential_layout(root: &Path) -> Result<(), String> {
+    let canonical = credential_dir(root);
+    let legacy = legacy_credential_dir(root);
+
+    fs::create_dir_all(&canonical)
+        .map_err(|e| format!("Failed to create '{}': {e}", canonical.display()))?;
+
+    if path_exists(&legacy) {
+        if same_canonical_path(&legacy, &canonical) {
+            return Ok(());
+        }
+
+        migrate_legacy_credential_entries(&legacy, &canonical)?;
+        remove_link_or_path(&legacy)?;
+    }
+
+    if !path_exists(&legacy) {
+        create_symlink_entry(&canonical, &legacy, true)?;
+    }
+
+    Ok(())
+}
+
+fn migrate_legacy_credential_entries(legacy: &Path, canonical: &Path) -> Result<(), String> {
+    for entry in read_dir_resolved(legacy)? {
+        let Some(name) = entry.file_name() else {
+            continue;
+        };
+        let destination = canonical.join(name);
+        if path_exists(&destination) {
+            continue;
+        }
+        copy_path_resolving_symlinks(&entry, &destination)?;
+    }
+
     Ok(())
 }
 
@@ -820,6 +861,55 @@ agents:
                 .is_symlink()
         );
         assert!(same_canonical_path(&legacy_alias, &canonical));
+    }
+
+    #[test]
+    fn ensure_runtime_layout_migrates_legacy_credentials_into_canonical_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        write_text(
+            &legacy_credential_dir(root).join("announce_bot_token"),
+            "announce-token\n",
+        );
+        write_text(
+            &legacy_credential_dir(root).join("notify_bot_token"),
+            "notify-token\n",
+        );
+        write_text(&credential_token_path(root, "claude"), "canonical-claude\n");
+        write_text(
+            &legacy_credential_dir(root).join("claude_bot_token"),
+            "legacy-claude\n",
+        );
+
+        ensure_runtime_layout(root).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(credential_token_path(root, "announce")).unwrap(),
+            "announce-token\n"
+        );
+        assert_eq!(
+            fs::read_to_string(credential_token_path(root, "notify")).unwrap(),
+            "notify-token\n"
+        );
+        assert_eq!(
+            fs::read_to_string(credential_token_path(root, "claude")).unwrap(),
+            "canonical-claude\n"
+        );
+        assert!(
+            fs::symlink_metadata(legacy_credential_dir(root))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(same_canonical_path(
+            &legacy_credential_dir(root),
+            &credential_dir(root)
+        ));
+        assert_eq!(
+            fs::read_to_string(legacy_credential_dir(root).join("announce_bot_token")).unwrap(),
+            "announce-token\n"
+        );
     }
 
     #[test]
