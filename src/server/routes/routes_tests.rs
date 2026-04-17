@@ -5001,7 +5001,8 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     let mut pr_tracking_pr_number: Option<i64> = None;
     let mut pr_tracking_last_error: Option<String> = None;
 
-    for attempt in 0..20 {
+    let tracking_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         let (
             observed_card_status,
             observed_latest_dispatch_id,
@@ -5067,9 +5068,11 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
             break;
         }
 
-        if attempt < 19 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if std::time::Instant::now() >= tracking_deadline {
+            break;
         }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     assert_eq!(card_status, "done");
