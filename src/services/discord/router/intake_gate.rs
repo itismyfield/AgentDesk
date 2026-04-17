@@ -240,19 +240,9 @@ async fn handle_reaction_remove(
         return Ok(());
     }
 
-    let (user_name, is_allowed_bot) = {
-        let cached_user = ctx.cache.user(user_id);
-        let user_name = cached_user
-            .as_ref()
-            .map(|user| user.name.clone())
-            .unwrap_or_else(|| format!("user:{}", user_id.get()));
-        let is_allowed_bot = cached_user
-            .as_ref()
-            .map(|user| user.bot && settings_snapshot.allowed_bot_ids.contains(&user_id.get()))
-            .unwrap_or(false);
-        (user_name, is_allowed_bot)
-    };
-    if !is_allowed_bot && !check_auth(user_id, &user_name, &data.shared, &data.token).await {
+    // Reaction-removal controls must never imprint owner state.
+    // Only already-authorized users may trigger queue cancel / turn stop.
+    if !super::super::discord_io::user_is_authorized(&settings_snapshot, user_id.get()) {
         return Ok(());
     }
 
