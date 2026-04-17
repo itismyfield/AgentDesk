@@ -1349,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn build_pm_message_drops_low_priority_context_sections_to_fit_discord_limit() {
+    fn compose_escalation_message_drops_low_priority_context_sections_to_fit_discord_limit() {
         let summary = CardEscalationSummary {
             title: "Long card".to_string(),
             issue_number: Some(587),
@@ -1361,6 +1361,49 @@ mod tests {
             dispatch_count: 4,
             last_agent_id: Some("project-agentdesk".to_string()),
         };
+        let context = CardContext {
+            issue_summary: Some("이슈 요약 ".repeat(80)),
+            progress_summary: Some(
+                "review/dilemma_pending · 4회 디스패치 · 마지막 에이전트: project-agentdesk"
+                    .to_string(),
+            ),
+            recent_results: vec![
+                "review: finding ".repeat(40),
+                "implementation: notes ".repeat(40),
+            ],
+            blocked_reason: Some("blocked ".repeat(60)),
+        };
+
+        let message = compose_escalation_message(
+            vec![format!("⚠️ [에스컬레이션] {}", format_card_label(&summary))],
+            Some(&context),
+            vec![
+                "사유:".to_string(),
+                format_reason_lines(&["manual escalation".to_string()]),
+                "선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string(),
+                "결정 API: `POST /api/pm-decision`".to_string(),
+            ],
+        );
+
+        assert!(message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT);
+        assert!(message.contains("⚠️ [에스컬레이션] #587 Long card"));
+        assert!(message.contains("사유:"));
+    }
+
+    #[test]
+    fn build_pm_message_includes_fallback_metadata() {
+        let summary = CardEscalationSummary {
+            title: "Long card".to_string(),
+            issue_number: Some(587),
+            assigned_agent_id: Some("project-agentdesk".to_string()),
+            description: Some("desc".to_string()),
+            status: "review".to_string(),
+            review_status: Some("dilemma_pending".to_string()),
+            blocked_reason: Some("blocked".to_string()),
+            dispatch_count: 4,
+            last_agent_id: Some("project-agentdesk".to_string()),
+        };
+
         let message = build_pm_message(
             "card-587",
             &summary,
@@ -1643,10 +1686,14 @@ mod tests {
         assert_eq!(body["delivery"], json!("pm_channel"));
         assert_eq!(body["fallback_note"], json!("owner routing unavailable"));
         let sent = &mock.sent_messages.lock().unwrap()[0];
-        assert!(sent.contains("📋 이슈: 오너 라우팅이 불가한 카드입니다."));
-        assert!(sent.contains("📊 진행: review/dilemma_pending"));
-        assert!(sent.contains("📝 최근 결과:"));
-        assert!(sent.contains("⛔ 기존 차단 사유: owner routing unavailable"));
+        assert!(sent.contains("⚠️ [PM 결정 요청] card_id: card-2"));
+        assert!(sent.contains("issue: #434"));
+        assert!(sent.contains("fallback: owner routing unavailable"));
+        assert!(sent.contains("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요."));
+        assert!(sent.contains("사유:"));
+        assert!(sent.contains("owner missing"));
+        assert!(sent.contains("선택지: `resume`, `rework`, `dismiss`, `requeue`"));
+        assert!(sent.contains("결정 API: `POST /api/pm-decision`"));
 
         server.abort();
     }

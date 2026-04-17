@@ -1880,7 +1880,9 @@ mod tests {
         let dispatch = "DISPATCH: abc123\n작업 시작";
         let agent_msg = "completion_guard 수정해줘";
 
-        assert!(!should_process_allowed_bot_turn_text("⚠️ 검토 전용 — 작업 착수 금지"));
+        assert!(!should_process_allowed_bot_turn_text(
+            "⚠️ 검토 전용 — 작업 착수 금지"
+        ));
         assert!(should_process_allowed_bot_turn_text(dispatch));
         assert!(!should_process_allowed_bot_turn_text(agent_msg));
         assert!(!is_allowed_turn_sender(

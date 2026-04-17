@@ -3087,9 +3087,8 @@ mod tests {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState::test_state(db.clone(), engine);
-        let tmux_name = ProviderKind::Codex.build_tmux_session_name(
-            "project-skillmanager-extremely-verbose-channel-cdx",
-        );
+        let tmux_name = ProviderKind::Codex
+            .build_tmux_session_name("project-skillmanager-extremely-verbose-channel-cdx");
         let session_key = format!("codex/hash123/mac-mini:{tmux_name}");
 
         {

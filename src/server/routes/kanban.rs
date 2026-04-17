@@ -3337,6 +3337,7 @@ pub async fn force_transition(
     match transition_result {
         Ok(result) => {
             let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
+            crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
 
             let conn = state.db.lock().unwrap();
             let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
