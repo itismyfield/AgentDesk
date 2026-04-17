@@ -71,6 +71,7 @@ pub struct EmitEscalationBody {
 
 #[derive(Debug)]
 struct CardEscalationSummary {
+    card_id: String,
     title: String,
     issue_number: Option<i64>,
     assigned_agent_id: Option<String>,
@@ -256,6 +257,7 @@ fn load_card_summary(
         [card_id],
         |row| {
             Ok(CardEscalationSummary {
+                card_id: card_id.to_string(),
                 title: row.get(0)?,
                 issue_number: row.get(1)?,
                 assigned_agent_id: row.get(2)?,
@@ -702,7 +704,14 @@ fn build_pm_message(
     reasons: &[String],
     fallback_note: Option<&str>,
 ) -> String {
-    let mut lines = vec![format!("⚠️ [PM 결정 요청] {}", format_card_label(summary))];
+    let mut lines = vec![format!(
+        "⚠️ [PM 결정 요청] card:{}{}",
+        summary.card_id,
+        summary
+            .issue_number
+            .map(|number| format!(" (#{number})"))
+            .unwrap_or_default()
+    )];
     if let Some(note) = fallback_note {
         lines.push(format!("fallback: {note}"));
     }
@@ -1108,7 +1117,7 @@ async fn emit_escalation_with_base_url(
         &announce_token,
         &settings,
         &summary,
-        context.as_ref(),
+        None,
         &reasons,
         None,
         requested_mode,
