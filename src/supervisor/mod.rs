@@ -294,6 +294,19 @@ impl RuntimeSupervisor {
         );
     }
 
+    fn load_orphan_confirmation(&self, dispatch_id: &str) -> Option<OrphanConfirmMarker> {
+        let conn = self.db.separate_conn().ok()?;
+        let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
+        let raw: Option<String> = conn
+            .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten();
+        raw.and_then(|value| serde_json::from_str::<OrphanConfirmMarker>(&value).ok())
+    }
+
     fn confirm_orphan_candidate(
         &self,
         dispatch_id: &str,
@@ -304,14 +317,8 @@ impl RuntimeSupervisor {
             card_status: candidate.card_status.clone(),
             assigned_agent_id: candidate.assigned_agent_id.clone(),
         };
-        let refreshed = self.load_orphan_candidate(dispatch_id)?;
-        let refreshed_marker = refreshed.as_ref().map(|candidate| OrphanConfirmMarker {
-            card_id: candidate.card_id.clone(),
-            card_status: candidate.card_status.clone(),
-            assigned_agent_id: candidate.assigned_agent_id.clone(),
-        });
 
-        if refreshed_marker.as_ref() == Some(&marker) {
+        if self.load_orphan_confirmation(dispatch_id).as_ref() == Some(&marker) {
             self.clear_orphan_confirmation(dispatch_id);
             return Ok(true);
         }

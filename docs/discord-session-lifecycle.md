@@ -13,4 +13,5 @@ Current contract:
 - Fresh dispatch defaults for `implementation`, `review`, and `rework` mean `reset_provider_state=true` and `recreate_tmux=false`.
 - `/stop`, `!stop`, `!cc stop`, `/cc stop`, and turn-cancel APIs cancel the active turn while preserving tmux.
 - Idle cleanup and other system cleanup notifications use `lifecycle.auto_cleanup`, not `lifecycle.force_kill`.
+- Orphan recovery requires the same orphan marker on two consecutive supervisor ticks before rollback/recovery.
 - Repeated lifecycle alerts are deduped in `message_outbox` by `(target, reason_code, session_key)` within a short TTL.

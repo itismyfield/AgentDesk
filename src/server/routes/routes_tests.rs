@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
@@ -4448,6 +4449,69 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
     drain_pending_transitions(&db, &engine);
 
     let conn = db.lock().unwrap();
+    let first_card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-orphan-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first_dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-orphan-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first_confirm_marker: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [format!(
+                "runtime_supervisor:orphan_confirm:{}",
+                "dispatch-orphan-330"
+            )],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let (first_action, first_note): (String, Option<String>) = conn
+        .query_row(
+            "SELECT chosen_action, json_extract(evidence_json, '$.supervisor_note')
+             FROM runtime_decisions
+             WHERE dispatch_id = 'dispatch-orphan-330'
+             ORDER BY id DESC
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        first_card_status, "in_progress",
+        "first orphan tick must wait for confirm instead of rolling the card back immediately"
+    );
+    assert_eq!(
+        first_dispatch_status, "pending",
+        "first orphan tick must keep the dispatch pending until confirm succeeds"
+    );
+    assert!(
+        first_confirm_marker.is_some(),
+        "first orphan tick must persist a confirm marker"
+    );
+    assert_eq!(first_action, "Probe");
+    assert!(
+        first_note
+            .as_deref()
+            .unwrap_or("")
+            .contains("awaiting confirm"),
+        "first orphan tick must record that confirm is still pending"
+    );
+
+    let _ = engine.try_fire_hook_by_name("OnTick30s", serde_json::json!({}));
+    drain_pending_transitions(&db, &engine);
+
+    let conn = db.lock().unwrap();
     let card_status: String = conn
         .query_row(
             "SELECT status FROM kanban_cards WHERE id = 'card-orphan-330'",
@@ -4481,6 +4545,17 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             |row| row.get(0),
         )
         .unwrap();
+    let remaining_confirm_marker: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [format!(
+                "runtime_supervisor:orphan_confirm:{}",
+                "dispatch-orphan-330"
+            )],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
 
     assert_eq!(
         card_status, "requested",
@@ -4508,6 +4583,10 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
     assert_eq!(decision_signal, "OrphanCandidate");
     assert_eq!(chosen_action, "Resume");
     assert_eq!(audit_dispatch_id.as_deref(), Some("dispatch-orphan-330"));
+    assert!(
+        remaining_confirm_marker.is_none(),
+        "confirmed orphan recovery must clear the confirm marker"
+    );
 }
 
 #[test]
@@ -4555,6 +4634,60 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
     drain_pending_transitions(&db, &engine);
 
     let conn = db.lock().unwrap();
+    let first_card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-race-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first_dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-race-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first_confirm_marker: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [format!(
+                "runtime_supervisor:orphan_confirm:{}",
+                "dispatch-race-330"
+            )],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let (first_action, first_note): (String, Option<String>) = conn
+        .query_row(
+            "SELECT chosen_action, json_extract(evidence_json, '$.supervisor_note')
+             FROM runtime_decisions
+             WHERE dispatch_id = 'dispatch-race-330'
+             ORDER BY id DESC
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(first_card_status, "in_progress");
+    assert_eq!(first_dispatch_status, "pending");
+    assert!(first_confirm_marker.is_some());
+    assert_eq!(first_action, "Probe");
+    assert!(
+        first_note
+            .as_deref()
+            .unwrap_or("")
+            .contains("awaiting confirm"),
+        "race path must also wait for confirm on the first orphan tick"
+    );
+
+    let _ = engine.try_fire_hook_by_name("OnTick30s", serde_json::json!({}));
+    drain_pending_transitions(&db, &engine);
+
+    let conn = db.lock().unwrap();
     let card_status: String = conn
         .query_row(
             "SELECT status FROM kanban_cards WHERE id = 'card-race-330'",
@@ -4588,6 +4721,17 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    let remaining_confirm_marker: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [format!(
+                "runtime_supervisor:orphan_confirm:{}",
+                "dispatch-race-330"
+            )],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
 
     assert_eq!(
         card_status, "backlog",
@@ -4611,6 +4755,10 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
             .unwrap_or("")
             .contains("card moved to status=backlog"),
         "runtime_decisions audit must explain why the resume transition was skipped"
+    );
+    assert!(
+        remaining_confirm_marker.is_none(),
+        "race-guarded orphan recovery must clear the confirm marker after confirm completes"
     );
 }
 
