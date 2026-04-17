@@ -60,7 +60,7 @@
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 127 |  |
 | `db::agents` | `src/db/agents.rs` | 539 |  |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 3423 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 3419 | giant-file |
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
 | `db::kanban` | `src/db/kanban.rs` | 162 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
@@ -68,10 +68,10 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `db::turns` | `src/db/turns.rs` | 451 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 3343 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 3388 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1375 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 632 |  |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 640 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 571 |  |
 | `engine` | `src/engine/mod.rs` | 1492 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
@@ -104,7 +104,7 @@
 | `github::sync` | `src/github/sync.rs` | 496 |  |
 | `github::triage` | `src/github/triage.rs` | 247 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1218 | giant-file |
-| `kanban` | `src/kanban.rs` | 2123 | giant-file |
+| `kanban` | `src/kanban.rs` | 2143 | giant-file |
 | `launch` | `src/launch.rs` | 32 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 34 |  |
