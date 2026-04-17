@@ -4357,6 +4357,75 @@ mod tests {
     }
 
     #[test]
+    fn continue_run_after_entry_creates_phase_gate_for_single_phase_run() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-single-phase-gate", "done");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-single-phase-gate', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase, created_at, completed_at) \
+                 VALUES ('entry-single-phase-gate', 'run-single-phase-gate', 'card-single-phase-gate', 'agent-1', 'done', 0, 0, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    continueRunAfterEntry("run-single-phase-gate", "agent-1", 0, 0, "card-single-phase-gate");
+                    return "ok";
+                })()"#,
+            )
+            .expect("single-phase continueRunAfterEntry should evaluate");
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-single-phase-gate'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-single-phase-gate' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json = phase_gate_state(&db, "run-single-phase-gate", 0)
+            .expect("phase gate state must exist for single-phase runs");
+        assert_eq!(
+            run_status, "paused",
+            "single-phase completion must pause the run for phase gate"
+        );
+        assert_eq!(
+            phase_gate_count, 1,
+            "single-phase completion must create a phase-gate dispatch"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 0);
+        assert_eq!(phase_gate_json["next_phase"], serde_json::Value::Null);
+        assert_eq!(phase_gate_json["final_phase"], true);
+    }
+
+    #[test]
     fn deploy_gate_creation_skips_when_phase_still_has_live_entries() {
         let db = test_db();
         let engine = test_engine(&db);
