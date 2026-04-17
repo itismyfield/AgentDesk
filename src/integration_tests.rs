@@ -5758,6 +5758,182 @@ mod tests {
         );
     }
 
+    /// #701 regression: pipeline_stages on the repo (e.g. `dev-deploy`) must
+    /// not suppress create-pr dispatch on review pass. Prior to the fix, the
+    /// PR creation block lived only in the `nextStage === null` branch, so
+    /// AgentDesk-style repos (which always have a review_pass-triggered
+    /// stage) silently skipped PR creation and cards never merged.
+    #[test]
+    fn scenario_701_review_pass_with_pipeline_stage_dispatches_create_pr() {
+        let (repo, _repo_guard) = setup_test_repo();
+        run_git(repo.path(), &["checkout", "-b", "wt/card-701-pipeline"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        // Seed a dev-deploy-like pipeline stage (trigger_after=review_pass,
+        // provider=self, skip_condition=no_rs_changes). Without a mock gh,
+        // `hasRsChanges` falls back to `true`, so the stage is entered (not
+        // skipped) — this exercises the non-skip path.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider, skip_condition) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self', 'no_rs_changes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-pipeline",
+            "review",
+            "test/repo",
+            701,
+            Some("123456789012345679"),
+        );
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-701-pipeline",
+            "card-701-pipeline",
+            "implementation",
+        );
+        seed_completed_review_dispatch(&db, "review-701-pass", "card-701-pipeline", "pass");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnReviewVerdict",
+                serde_json::json!({"card_id": "card-701-pipeline", "verdict": "pass"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // DoD: create-pr dispatch exists even though a pipeline stage is set.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-pipeline", "create-pr"),
+            1,
+            "#701: create-pr dispatch must be created before pipeline stage handling"
+        );
+        // pr_tracking is seeded by the shared helper.
+        assert_eq!(
+            pr_tracking_state(&db, "card-701-pipeline").as_deref(),
+            Some("create-pr"),
+            "#701: pr_tracking must be seeded at create-pr state"
+        );
+        // Non-skip path assigns the pipeline stage and moves card to in_progress
+        // with blocked_reason=deploy:waiting. `kanban_cards.pipeline_stage_id` is
+        // stored as TEXT (see schema.rs:133) even though `pipeline_stages.id` is
+        // an integer PK — SQLite TEXT affinity coerces the insert to a string.
+        let conn = db.lock().unwrap();
+        let (stage_id, blocked, status): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT pipeline_stage_id, blocked_reason, status FROM kanban_cards WHERE id = 'card-701-pipeline'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            stage_id.is_some(),
+            "#701: non-skip path should bind the card to the pipeline stage"
+        );
+        assert_eq!(blocked.as_deref(), Some("deploy:waiting"));
+        assert_eq!(status, "in_progress");
+    }
+
+    /// #701 regression (skip path): when pipeline stage's `skip_condition`
+    /// matches (e.g. no_rs_changes with a PR that touches no .rs files),
+    /// the card must still get a create-pr dispatch AND `pipeline_stage_id`
+    /// must be cleared to NULL per DoD.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_review_pass_with_skipped_pipeline_stage_still_dispatches_create_pr() {
+        // `hasRsChanges` short-circuits to false when pr:list returns a PR AND
+        // the subsequent `repos/.../pulls/N/files` reply contains no .rs paths.
+        // `setup_test_repo_with_mock_gh` holds a single env-lock guard for both
+        // the repo override and the mock gh binary — using `install_mock_gh`
+        // and `setup_test_repo` separately deadlocks because each tries to
+        // re-acquire the same static env lock.
+        let (repo, _env) = setup_test_repo_with_mock_gh(&[
+            MockGhReply {
+                key: "pr:list",
+                contains: None,
+                stdout: "[{\"number\":902}]",
+            },
+            MockGhReply {
+                key: "api:repos/test/repo/pulls/902/files",
+                contains: None,
+                stdout: "README.md\ndashboard/src/App.tsx",
+            },
+        ]);
+        run_git(repo.path(), &["checkout", "-b", "wt/card-701-skip"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider, skip_condition) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self', 'no_rs_changes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-skip",
+            "review",
+            "test/repo",
+            702,
+            Some("123456789012345680"),
+        );
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-701-skip",
+            "card-701-skip",
+            "implementation",
+        );
+        seed_completed_review_dispatch(&db, "review-701-skip", "card-701-skip", "pass");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnReviewVerdict",
+                serde_json::json!({"card_id": "card-701-skip", "verdict": "pass"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // DoD: create-pr dispatch exists even when the pipeline stage was skipped.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-skip", "create-pr"),
+            1,
+            "#701: skip path must still create a create-pr dispatch"
+        );
+        assert_eq!(
+            pr_tracking_state(&db, "card-701-skip").as_deref(),
+            Some("create-pr")
+        );
+        // DoD: pipeline_stage_id must be cleared on skip.
+        let conn = db.lock().unwrap();
+        let stage_id: Option<i64> = conn
+            .query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-skip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stage_id.is_none(),
+            "#701 DoD: pipeline_stage_id must be NULL after skip_condition match"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {

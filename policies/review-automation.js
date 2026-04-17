@@ -576,6 +576,80 @@ function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSh
   return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
 }
 
+// #701: Create-PR dispatch helper used by review-pass flow.
+// Runs regardless of whether a pipeline stage follows, so repos with
+// dev-deploy/e2e-test stages still get their PR created before stage
+// handling. Returns true when a create-pr dispatch was actually created.
+//
+// Skips silently (returns false) when:
+//   - noop_verification review pass (no source changes to PR)
+//   - card has no completed work dispatch target (worktree/branch unknown)
+//   - card has no assigned_agent_id, repo_id, or branch
+//
+// On dispatch failure, pr_tracking is still upserted with last_error so the
+// OnTick5min retry loop can pick it up.
+function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
+  if (noopVerification) {
+    agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
+    return false;
+  }
+
+  var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
+  if (!latestWorkTarget) return false;
+
+  var prCardInfo = agentdesk.db.query(
+    "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (prCardInfo.length === 0 || !prCardInfo[0].assigned_agent_id) return false;
+
+  var agentId = prCardInfo[0].assigned_agent_id;
+  var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
+  if (!repoId || !latestWorkTarget.branch) return false;
+
+  upsertPrTracking(
+    cardId,
+    repoId,
+    latestWorkTarget.worktree_path,
+    latestWorkTarget.branch,
+    null,
+    latestWorkTarget.head_sha,
+    "create-pr",
+    null
+  );
+
+  var issueNum = prCardInfo[0].github_issue_number || "?";
+  try {
+    agentdesk.dispatch.create(
+      cardId,
+      agentId,
+      "create-pr",
+      "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
+      {
+        sidecar_dispatch: true,
+        worktree_path: latestWorkTarget.worktree_path,
+        worktree_branch: latestWorkTarget.branch,
+        branch: latestWorkTarget.branch
+      }
+    );
+    agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
+    return true;
+  } catch (e) {
+    upsertPrTracking(
+      cardId,
+      repoId,
+      latestWorkTarget.worktree_path,
+      latestWorkTarget.branch,
+      null,
+      latestWorkTarget.head_sha,
+      "create-pr",
+      String(e)
+    );
+    agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
+    return false;
+  }
+}
+
 function findOpenPrByTrackedBranch(repoId, branch) {
   return prTracking.findOpenPrByBranch(repoId, branch);
 }
@@ -645,6 +719,20 @@ function processVerdict(cardId, verdict, result, options) {
     // #117: Update canonical card_review_state — review passed
     agentdesk.reviewState.sync(cardId, "idle", { last_verdict: verdict });
 
+    // #701: PR creation runs BEFORE pipeline-stage branch so every review-pass
+    // case seeds pr_tracking + create-pr dispatch first. Previously the PR
+    // creation block lived only inside the `else` branch (no-next-stage path),
+    // meaning repos like AgentDesk (which has a `dev-deploy` pipeline stage
+    // with stage_order=100) could never enter that branch and skipped PR
+    // creation entirely — even on skip_condition paths that ended at `done`.
+    // Design rationale: create-pr is a prerequisite for merge; pipeline stages
+    // (dev-deploy, e2e-test) operate on the agent's worktree/branch and do
+    // not replace PR creation. Dispatching PR first is safe because
+    // pipeline-stage status transitions (in_progress / terminal) run after
+    // and override any pending review-pass state, while pr_tracking persists
+    // in parallel for CI/merge handling.
+    var prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+
     // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
     // OR the first review_pass stage if card has no current pipeline stage.
@@ -683,14 +771,19 @@ function processVerdict(cardId, verdict, result, options) {
     if (nextStage) {
       // #197: Check skip condition — no .rs changes → skip all pipeline stages
       if (nextStage.skip_condition === "no_rs_changes" && !hasRsChanges(cardId)) {
-        if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
-            [cardId]
-          );
+        // #701 DoD: always clear pipeline_stage_id on skip (including when the
+        // card had no prior stage binding — still safe since NULL → NULL).
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
+          [cardId]
+        );
+        if (!prDispatched) {
+          agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         }
-        agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
-        agentdesk.log.info("[review] Card " + cardId + " skipping pipeline stages (no .rs changes) → " + reviewPassTarget);
+        agentdesk.log.info(
+          "[review] Card " + cardId + " skipping pipeline stages (no .rs changes)" +
+          (prDispatched ? " — create-pr dispatched, awaiting CI/merge" : " → " + reviewPassTarget)
+        );
       } else {
         // Assign pipeline stage to card
         agentdesk.db.execute(
@@ -717,14 +810,16 @@ function processVerdict(cardId, verdict, result, options) {
           var dodText = (dodCheck.length > 0 && dodCheck[0].description) ? dodCheck[0].description.toLowerCase() : "";
           if (dodText.indexOf("e2e") === -1 && dodText.indexOf("end-to-end") === -1 && dodText.indexOf("end to end") === -1) {
             agentdesk.log.info("[review] Skipping e2e-test for card " + cardId + " — DoD has no e2e item");
-            // Skip remaining pipeline stages and go to done
+            // Skip remaining pipeline stages and clear stage binding per #701 DoD.
             agentdesk.db.execute(
               "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
               [cardId]
             );
-            var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
-            var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
-            agentdesk.kanban.setStatus(cardId, skipTerminal, true);
+            if (!prDispatched) {
+              var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+              var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+              agentdesk.kanban.setStatus(cardId, skipTerminal, true);
+            }
             return;
           }
           var counterCardInfo = agentdesk.db.query(
@@ -770,70 +865,15 @@ function processVerdict(cardId, verdict, result, options) {
         }
       }
     } else {
-      // No more stages — clear pipeline_stage_id and mark terminal
+      // No more stages — clear pipeline_stage_id and mark terminal.
+      // #701: PR creation was already attempted above via
+      // attemptCreatePrDispatchForReviewPass — no duplicate dispatch here.
       if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
         agentdesk.db.execute(
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
-      }
-
-      // #198/#211: If the card completed work in a canonical worktree, create
-      // a create-pr dispatch and seed pr_tracking before going terminal.
-      var prDispatched = false;
-      var latestWorkTarget = noopVerification ? null : loadLatestCompletedWorkTarget(cardId);
-      var prCardInfo = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
-        [cardId]
-      );
-      if (prCardInfo.length > 0 && prCardInfo[0].assigned_agent_id && latestWorkTarget) {
-        var agentId = prCardInfo[0].assigned_agent_id;
-        var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
-        if (repoId && latestWorkTarget.branch) {
-          upsertPrTracking(
-            cardId,
-            repoId,
-            latestWorkTarget.worktree_path,
-            latestWorkTarget.branch,
-            null,
-            latestWorkTarget.head_sha,
-            "create-pr",
-            null
-          );
-
-          var issueNum = prCardInfo[0].github_issue_number || "?";
-          try {
-            agentdesk.dispatch.create(
-              cardId,
-              agentId,
-              "create-pr",
-              "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
-              {
-                sidecar_dispatch: true,
-                worktree_path: latestWorkTarget.worktree_path,
-                worktree_branch: latestWorkTarget.branch,
-                branch: latestWorkTarget.branch
-              }
-            );
-            prDispatched = true;
-            agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
-          } catch (e) {
-            upsertPrTracking(
-              cardId,
-              repoId,
-              latestWorkTarget.worktree_path,
-              latestWorkTarget.branch,
-              null,
-              latestWorkTarget.head_sha,
-              "create-pr",
-              String(e)
-            );
-            agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
-          }
-        }
-      } else if (noopVerification) {
-        agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
       }
 
       if (!prDispatched) {
