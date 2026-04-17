@@ -556,9 +556,32 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
-            // Allow unbound channels for the owner (direct Claude Code usage).
-            // Only skip channels that are explicitly bound to a different provider.
-            // Unowned channels fall through to normal handling.
+            if !is_dm {
+                match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
+                {
+                    RuntimeChannelBindingStatus::Owned => {}
+                    RuntimeChannelBindingStatus::Unowned => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ⏭ BINDING-GUARD: skipping message {} in unbound channel {} (effective {})",
+                            new_message.id,
+                            channel_id,
+                            effective_channel_id
+                        );
+                        return Ok(());
+                    }
+                    RuntimeChannelBindingStatus::Unknown => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⏭ BINDING-GUARD: skipping message {} because channel binding lookup failed for {} (effective {})",
+                            new_message.id,
+                            channel_id,
+                            effective_channel_id
+                        );
+                        return Ok(());
+                    }
+                }
+            }
 
             let text = new_message.content.trim();
 
