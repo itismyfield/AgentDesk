@@ -36,10 +36,12 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
 }
 
 fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionResetBehavior {
-    if provider.uses_managed_tmux_backend() {
-        ManagedSessionResetBehavior::ResetManagedProcess
-    } else {
-        ManagedSessionResetBehavior::Noop
+    match provider {
+        ProviderKind::Claude => ManagedSessionResetBehavior::Noop,
+        ProviderKind::Codex | ProviderKind::Qwen => {
+            ManagedSessionResetBehavior::ResetManagedProcess
+        }
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
     }
 }
 
