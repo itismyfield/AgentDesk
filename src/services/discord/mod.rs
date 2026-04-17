@@ -491,6 +491,52 @@ impl SharedData {
     }
 }
 
+#[cfg(test)]
+pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
+    Arc::new(SharedData {
+        core: tokio::sync::Mutex::new(CoreState {
+            sessions: std::collections::HashMap::new(),
+            active_meetings: std::collections::HashMap::new(),
+        }),
+        mailboxes: ChannelMailboxRegistry::default(),
+        settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
+        api_timestamps: dashmap::DashMap::new(),
+        skills_cache: tokio::sync::RwLock::new(Vec::new()),
+        tmux_watchers: dashmap::DashMap::new(),
+        recovering_channels: dashmap::DashMap::new(),
+        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        current_generation: 0,
+        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+        global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        intake_dedup: dashmap::DashMap::new(),
+        dispatch_thread_parents: dashmap::DashMap::new(),
+        bot_connected: std::sync::atomic::AtomicBool::new(false),
+        last_turn_at: std::sync::Mutex::new(None),
+        model_overrides: dashmap::DashMap::new(),
+        model_session_reset_pending: dashmap::DashSet::new(),
+        model_picker_pending: dashmap::DashMap::new(),
+        dispatch_role_overrides: dashmap::DashMap::new(),
+        last_message_ids: dashmap::DashMap::new(),
+        turn_start_times: dashmap::DashMap::new(),
+        cached_serenity_ctx: tokio::sync::OnceCell::new(),
+        cached_bot_token: tokio::sync::OnceCell::new(),
+        token_hash: "test-token-hash".to_string(),
+        api_port: 9,
+        db: None,
+        engine: None,
+        health_registry: std::sync::Weak::new(),
+        known_slash_commands: tokio::sync::OnceCell::new(),
+    })
+}
+
 fn queue_persistence_context(
     shared: &SharedData,
     provider: &ProviderKind,

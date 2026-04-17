@@ -7,6 +7,7 @@ pub mod transition;
 
 use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 use std::thread::{self, JoinHandle, ThreadId};
+use std::time::Duration;
 
 use anyhow::Result;
 use rquickjs::{Context, Function, Persistent, Runtime};
@@ -16,6 +17,8 @@ use crate::db::Db;
 
 use hooks::Hook;
 use loader::PolicyStore;
+
+const POLICY_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// Inner state of the policy engine (not Clone).
 struct PolicyEngineInner {
@@ -540,7 +543,24 @@ impl PolicyEngine {
                     }
                 };
 
+                let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
+                let elapsed = policy_start.elapsed();
+                if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
+                    tracing::warn!(
+                        policy_name,
+                        hook_name,
+                        elapsed_ms = elapsed.as_millis(),
+                        "policy hook slow"
+                    );
+                } else {
+                    tracing::debug!(
+                        policy_name,
+                        hook_name,
+                        elapsed_ms = elapsed.as_millis(),
+                        "policy hook completed"
+                    );
+                }
                 if let Err(ref e) = result {
                     let exception_detail = ctx.catch().into_exception()
                         .map(|ex| {
@@ -617,7 +637,24 @@ impl PolicyEngine {
                     }
                 };
 
+                let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
+                let elapsed = policy_start.elapsed();
+                if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
+                    tracing::warn!(
+                        policy_name,
+                        hook = %hook,
+                        elapsed_ms = elapsed.as_millis(),
+                        "policy hook slow"
+                    );
+                } else {
+                    tracing::debug!(
+                        policy_name,
+                        hook = %hook,
+                        elapsed_ms = elapsed.as_millis(),
+                        "policy hook completed"
+                    );
+                }
                 if let Err(ref e) = result {
                     let exception_detail = ctx
                         .catch()
@@ -812,7 +849,7 @@ impl PolicyEngine {
     }
 
     #[cfg(test)]
-    fn block_actor_for_test(
+    pub(crate) fn block_actor_for_test(
         &self,
         entered: mpsc::Sender<()>,
         release: mpsc::Receiver<()>,

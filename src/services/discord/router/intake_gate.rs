@@ -92,6 +92,23 @@ async fn enqueue_soft_intervention(
     .await
 }
 
+#[cfg(test)]
+pub(super) async fn enqueue_soft_intervention_for_test(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    author_id: serenity::UserId,
+    message_id: serenity::MessageId,
+    text: &str,
+) -> bool {
+    mailbox_enqueue_intervention(
+        shared,
+        &ProviderKind::Codex,
+        channel_id,
+        build_soft_intervention(author_id, message_id, text, None, false, false),
+    )
+    .await
+}
+
 fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
     !is_allowed_bot
         && !text.starts_with('!')
