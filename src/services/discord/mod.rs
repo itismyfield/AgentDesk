@@ -135,12 +135,8 @@ pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
     format!("session_retry_context:{}", channel_id.get())
 }
 
-pub(super) fn should_process_allowed_bot_turn_text(_text: &str) -> bool {
-    // All announce bot messages trigger turns — dispatches, agent-to-agent
-    // communication, review instructions, and deadlock alerts all need
-    // processing.  "검토 전용" / "작업 착수 금지" are instructions for the
-    // agent's behavior during the turn, not reasons to skip the turn.
-    true
+pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
+    text.trim_start().starts_with("DISPATCH:")
 }
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
@@ -1871,21 +1867,19 @@ mod tests {
     }
 
     #[test]
-    fn allowed_bot_all_messages_accepted() {
+    fn allowed_bot_turns_require_dispatch_prefix() {
         let allowed_bot_ids = vec![123];
-        let review_only = "⚠️ 검토 전용 — 작업 착수 금지";
         let dispatch = "DISPATCH: abc123\n작업 시작";
         let agent_msg = "completion_guard 수정해줘";
 
-        // All announce bot messages trigger turns
-        assert!(should_process_allowed_bot_turn_text(review_only));
+        assert!(!should_process_allowed_bot_turn_text("⚠️ 검토 전용 — 작업 착수 금지"));
         assert!(should_process_allowed_bot_turn_text(dispatch));
-        assert!(should_process_allowed_bot_turn_text(agent_msg));
-        assert!(is_allowed_turn_sender(
+        assert!(!should_process_allowed_bot_turn_text(agent_msg));
+        assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,
-            review_only
+            "⚠️ 검토 전용 — 작업 착수 금지"
         ));
         assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
@@ -1893,7 +1887,7 @@ mod tests {
             false,
             dispatch
         ));
-        assert!(is_allowed_turn_sender(
+        assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,
