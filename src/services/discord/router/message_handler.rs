@@ -1068,8 +1068,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             dispatch_context: info.context.as_deref(),
             card_title: info.card_title.as_deref(),
             github_issue_url: info.github_issue_url.as_deref(),
-            issue_body: info.issue_body.as_deref(),
-            deferred_dod: info.deferred_dod.as_ref(),
         }
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
