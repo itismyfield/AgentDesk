@@ -1540,27 +1540,29 @@ fn record_entry_dispatch_failure(
     )
     .map_err(|error| format!("{entry_id}: dispatch failure state update failed: {error}"))?;
 
-    if let Some(assigned_slot) = slot_index {
-        if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
-            &conn,
-            run_id,
-            thread_group,
-            agent_id,
-            assigned_slot,
-        ) {
-            crate::auto_queue_log!(
-                warn,
-                "entry_dispatch_failure_release_slot_failed",
-                log_ctx.clone().slot_index(assigned_slot),
-                "[auto-queue] failed to release slot {} for entry {} after dispatch failure: {}",
+    if result.changed {
+        if let Some(assigned_slot) = slot_index {
+            if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
+                &conn,
+                run_id,
+                thread_group,
+                agent_id,
                 assigned_slot,
-                entry_id,
-                error
-            );
+            ) {
+                crate::auto_queue_log!(
+                    warn,
+                    "entry_dispatch_failure_release_slot_failed",
+                    log_ctx.clone().slot_index(assigned_slot),
+                    "[auto-queue] failed to release slot {} for entry {} after dispatch failure: {}",
+                    assigned_slot,
+                    entry_id,
+                    error
+                );
+            }
         }
     }
 
-    if result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
+    if result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
         if let Err(error) = queue_failed_entry_escalation_on_conn(
             &conn,
             deps,

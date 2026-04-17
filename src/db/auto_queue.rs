@@ -44,6 +44,7 @@ pub struct EntryDispatchFailureResult {
     pub to_status: String,
     pub retry_count: i64,
     pub retry_limit: i64,
+    pub changed: bool,
 }
 
 #[derive(Debug, Error)]
@@ -241,51 +242,102 @@ pub fn record_entry_dispatch_failure_on_conn(
     max_retries: i64,
     trigger_source: &str,
 ) -> Result<EntryDispatchFailureResult, EntryDispatchFailureError> {
-    let current = load_entry_status_row(conn, entry_id)?;
     let retry_limit = max_retries.max(1);
-    let retry_count = current.retry_count.saturating_add(1);
-    let target_status = if retry_count >= retry_limit {
-        ENTRY_STATUS_FAILED
-    } else {
-        ENTRY_STATUS_PENDING
-    };
-
-    conn.execute_batch("SAVEPOINT auto_queue_entry_dispatch_failure")?;
-    let update_result = (|| -> Result<EntryDispatchFailureResult, EntryDispatchFailureError> {
-        let status_result = update_entry_status_with_current_on_conn(
-            conn,
-            entry_id,
-            target_status,
-            trigger_source,
-            &EntryStatusUpdateOptions::default(),
-            current,
-        )?;
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET retry_count = ?1
-             WHERE id = ?2",
-            rusqlite::params![retry_count, entry_id],
-        )?;
-        Ok(EntryDispatchFailureResult {
-            run_id: status_result.run_id,
-            from_status: status_result.from_status,
-            to_status: status_result.to_status,
-            retry_count,
-            retry_limit,
-        })
-    })();
-
-    match update_result {
-        Ok(result) => {
-            conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
-            Ok(result)
+    loop {
+        let current = load_entry_status_row(conn, entry_id)?;
+        if current.status != ENTRY_STATUS_DISPATCHED {
+            return Ok(EntryDispatchFailureResult {
+                run_id: current.run_id,
+                from_status: current.status.clone(),
+                to_status: current.status,
+                retry_count: current.retry_count,
+                retry_limit,
+                changed: false,
+            });
         }
-        Err(error) => {
-            let _ = conn.execute_batch(
-                "ROLLBACK TO SAVEPOINT auto_queue_entry_dispatch_failure; \
-                 RELEASE SAVEPOINT auto_queue_entry_dispatch_failure",
-            );
-            Err(error)
+
+        let retry_count = current.retry_count.saturating_add(1);
+        let target_status = if retry_count >= retry_limit {
+            ENTRY_STATUS_FAILED
+        } else {
+            ENTRY_STATUS_PENDING
+        };
+
+        conn.execute_batch("SAVEPOINT auto_queue_entry_dispatch_failure")?;
+        let update_result =
+            (|| -> Result<Option<EntryDispatchFailureResult>, EntryDispatchFailureError> {
+                let rows_affected = conn.execute(
+                    "UPDATE auto_queue_entries
+                 SET status = CASE
+                         WHEN retry_count + 1 >= ?1 THEN 'failed'
+                         ELSE 'pending'
+                     END,
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = CASE
+                         WHEN retry_count + 1 >= ?1 THEN datetime('now')
+                         ELSE NULL
+                     END,
+                     retry_count = retry_count + 1
+                 WHERE id = ?2
+                   AND status = 'dispatched'
+                   AND retry_count = ?3",
+                    rusqlite::params![retry_limit, entry_id, current.retry_count],
+                )?;
+
+                if rows_affected == 0 {
+                    return Ok(None);
+                }
+
+                record_entry_transition_on_conn(
+                    conn,
+                    entry_id,
+                    ENTRY_STATUS_DISPATCHED,
+                    target_status,
+                    trigger_source,
+                )?;
+
+                if target_status == ENTRY_STATUS_FAILED {
+                    maybe_finalize_run_after_terminal_entry(conn, &current.run_id, target_status)?;
+                }
+
+                Ok(Some(EntryDispatchFailureResult {
+                    run_id: current.run_id,
+                    from_status: ENTRY_STATUS_DISPATCHED.to_string(),
+                    to_status: target_status.to_string(),
+                    retry_count,
+                    retry_limit,
+                    changed: true,
+                }))
+            })();
+
+        match update_result {
+            Ok(Some(result)) => {
+                conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
+                return Ok(result);
+            }
+            Ok(None) => {
+                conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
+                let latest = load_entry_status_row(conn, entry_id)?;
+                if latest.status != ENTRY_STATUS_DISPATCHED {
+                    return Ok(EntryDispatchFailureResult {
+                        run_id: latest.run_id,
+                        from_status: latest.status.clone(),
+                        to_status: latest.status,
+                        retry_count: latest.retry_count,
+                        retry_limit,
+                        changed: false,
+                    });
+                }
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT auto_queue_entry_dispatch_failure; \
+                     RELEASE SAVEPOINT auto_queue_entry_dispatch_failure",
+                );
+                return Err(error);
+            }
         }
     }
 }
@@ -2915,6 +2967,7 @@ mod tests {
                 .expect("first dispatch failure");
         assert_eq!(first.to_status, ENTRY_STATUS_PENDING);
         assert_eq!(first.retry_count, 1);
+        assert!(first.changed);
 
         update_entry_status_on_conn(
             &conn,
@@ -2932,6 +2985,7 @@ mod tests {
                 .expect("second dispatch failure");
         assert_eq!(second.to_status, ENTRY_STATUS_PENDING);
         assert_eq!(second.retry_count, 2);
+        assert!(second.changed);
 
         update_entry_status_on_conn(
             &conn,
@@ -2949,6 +3003,7 @@ mod tests {
                 .expect("third dispatch failure");
         assert_eq!(third.to_status, ENTRY_STATUS_FAILED);
         assert_eq!(third.retry_count, 3);
+        assert!(third.changed);
 
         let (status, retry_count, dispatch_id): (String, i64, Option<String>) = conn
             .query_row(
@@ -2982,6 +3037,50 @@ mod tests {
             .expect("retried entry row");
         assert_eq!(status, ENTRY_STATUS_PENDING);
         assert_eq!(retry_count, 0);
+    }
+
+    #[test]
+    fn dispatch_failure_is_idempotent_after_entry_already_recovered() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, retry_count
+             ) VALUES (
+                 'entry-failure-stale', 'run-1', 'card-failure-stale', 'agent-1', 'dispatched', 'dispatch-1', 0, 0, 1
+             )",
+            [],
+        )
+        .expect("seed dispatched entry");
+
+        let first =
+            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-stale", 3, "test_fail_a")
+                .expect("first dispatch failure");
+        assert_eq!(first.to_status, ENTRY_STATUS_PENDING);
+        assert_eq!(first.retry_count, 2);
+        assert!(first.changed);
+
+        let duplicate = record_entry_dispatch_failure_on_conn(
+            &conn,
+            "entry-failure-stale",
+            3,
+            "test_fail_duplicate",
+        )
+        .expect("duplicate dispatch failure");
+        assert_eq!(duplicate.from_status, ENTRY_STATUS_PENDING);
+        assert_eq!(duplicate.to_status, ENTRY_STATUS_PENDING);
+        assert_eq!(duplicate.retry_count, 2);
+        assert!(!duplicate.changed);
+
+        let retry_count: i64 = conn
+            .query_row(
+                "SELECT retry_count
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-failure-stale'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retry count row");
+        assert_eq!(retry_count, 2);
     }
 
     #[test]
