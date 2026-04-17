@@ -239,9 +239,14 @@ function advancePipelineStage(cardId) {
               "create-pr", "review_automation_missing"
             );
           }
+          // Force the terminal transition (the card is still in an
+          // in_progress pipeline state and the direct transition to
+          // terminal may be illegal without force). Without force the
+          // setStatus can silently fail while we still stamp the marker,
+          // leaving the card non-terminal and invisible to the retry loop.
           var skipCfgFallback = agentdesk.pipeline.resolveForCard(cardId);
           var skipTerminalFallback = agentdesk.pipeline.terminalState(skipCfgFallback);
-          agentdesk.kanban.setStatus(cardId, skipTerminalFallback);
+          agentdesk.kanban.setStatus(cardId, skipTerminalFallback, true);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
             ["pr:create_failed:review_automation_missing", cardId]
@@ -338,9 +343,10 @@ function advancePipelineStage(cardId) {
           "create-pr", "review_automation_missing"
         );
       }
+      // Force the transition — see the e2e-skip fallback above.
       var cfgFallback = agentdesk.pipeline.resolveForCard(cardId);
       var terminalStateFallback = agentdesk.pipeline.terminalState(cfgFallback);
-      agentdesk.kanban.setStatus(cardId, terminalStateFallback);
+      agentdesk.kanban.setStatus(cardId, terminalStateFallback, true);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
         ["pr:create_failed:review_automation_missing", cardId]

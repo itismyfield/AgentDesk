@@ -42,7 +42,36 @@ var mergeAutomation = {
     if (!isEnabled()) return;
 
     var cardId = payload.card_id;
+
+    // #701: Defer cards in the explicit create-pr retry loop. In
+    // direct-first mode tryDirectMergeOrTrackPr attempts a direct merge
+    // to main BEFORE falling back to PR creation — so letting a
+    // pr:create_failed card through here could ship code to main with
+    // no PR and no CI. The processTrackedMergeQueue retry loop (fired
+    // by onTick5min) handles these rows exclusively.
+    var cardRow = agentdesk.db.query(
+      "SELECT blocked_reason FROM kanban_cards WHERE id = ?",
+      [cardId]
+    );
+    if (cardRow.length > 0 && cardRow[0].blocked_reason
+        && cardRow[0].blocked_reason.indexOf("pr:create_failed") === 0) {
+      agentdesk.log.info(
+        "[merge] Card " + cardId + " terminal with pr:create_failed marker — deferring to processTrackedMergeQueue retry (skip direct-merge)"
+      );
+      return;
+    }
+
     var tracking = loadTrackedPrForCard(cardId);
+
+    // #701: Same defer if pr_tracking is still in the create-pr state
+    // (the retry loop owns it). Would otherwise trigger direct-merge.
+    if (tracking && tracking.state === "create-pr") {
+      agentdesk.log.info(
+        "[merge] Card " + cardId + " terminal with pr_tracking state='create-pr' — deferring to processTrackedMergeQueue retry (skip direct-merge)"
+      );
+      return;
+    }
+
     if (!tracking || !tracking.pr_number || !tracking.repo_id) {
       tryDirectMergeOrTrackPr(cardId, tracking);
       return;
