@@ -4993,33 +4993,84 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         merge_debug
     );
 
-    let conn = db.lock().unwrap();
-    let (card_status, latest_dispatch_id, blocked_reason): (String, Option<String>, Option<String>) =
-        conn
-        .query_row(
-            "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-ft-terminal'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    let dispatch_status: String = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let (pr_tracking_state, pr_tracking_pr_number, pr_tracking_last_error): (
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    ) = conn
-        .query_row(
-            "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap_or((None, None, None));
+    let mut card_status = String::new();
+    let mut latest_dispatch_id: Option<String> = None;
+    let mut blocked_reason: Option<String> = None;
+    let mut dispatch_status = String::new();
+    let mut pr_tracking_state: Option<String> = None;
+    let mut pr_tracking_pr_number: Option<i64> = None;
+    let mut pr_tracking_last_error: Option<String> = None;
+
+    for attempt in 0..20 {
+        let (
+            observed_card_status,
+            observed_latest_dispatch_id,
+            observed_blocked_reason,
+            observed_dispatch_status,
+            observed_pr_tracking_state,
+            observed_pr_tracking_pr_number,
+            observed_pr_tracking_last_error,
+        ) = {
+            let conn = db.lock().unwrap();
+            let (observed_card_status, observed_latest_dispatch_id, observed_blocked_reason): (
+                String,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-ft-terminal'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            let observed_dispatch_status: String = conn
+                .query_row(
+                    "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let (
+                observed_pr_tracking_state,
+                observed_pr_tracking_pr_number,
+                observed_pr_tracking_last_error,
+            ): (Option<String>, Option<i64>, Option<String>) = conn
+                .query_row(
+                    "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap_or((None, None, None));
+            (
+                observed_card_status,
+                observed_latest_dispatch_id,
+                observed_blocked_reason,
+                observed_dispatch_status,
+                observed_pr_tracking_state,
+                observed_pr_tracking_pr_number,
+                observed_pr_tracking_last_error,
+            )
+        };
+
+        card_status = observed_card_status;
+        latest_dispatch_id = observed_latest_dispatch_id;
+        blocked_reason = observed_blocked_reason;
+        dispatch_status = observed_dispatch_status;
+        pr_tracking_state = observed_pr_tracking_state;
+        pr_tracking_pr_number = observed_pr_tracking_pr_number;
+        pr_tracking_last_error = observed_pr_tracking_last_error;
+
+        if pr_tracking_state.as_deref() == Some("wait-ci")
+            && pr_tracking_pr_number == Some(905)
+            && blocked_reason.as_deref() == Some("ci:waiting")
+        {
+            break;
+        }
+
+        if attempt < 19 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
 
     assert_eq!(card_status, "done");
     assert!(
