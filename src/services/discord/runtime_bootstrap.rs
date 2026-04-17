@@ -453,7 +453,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     match bot_settings.owner_user_id {
         Some(owner_id) => tracing::info!("  ✓ Owner: {owner_id}"),
-        None => tracing::info!("  ⚠ No owner registered — first user will be registered as owner"),
+        None => tracing::info!(
+            "  ⚠ No owner registered — configure discord.owner_id (or allow_all_users) before use"
+        ),
     }
 
     let initial_skills = scan_skills(&provider, None);

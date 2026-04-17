@@ -3,25 +3,22 @@ use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 
 /// Check if a user is authorized (owner or allowed user)
 /// Returns true if authorized, false if rejected.
-/// On first use, registers the user as owner.
+/// Requires an explicitly configured owner unless allow-all mode is enabled.
 pub(super) async fn check_auth(
     user_id: UserId,
     user_name: &str,
     shared: &Arc<SharedData>,
-    token: &str,
+    _token: &str,
 ) -> bool {
-    let mut settings = shared.settings.write().await;
+    let settings = shared.settings.write().await;
     match settings.owner_user_id {
         None => {
-            // Imprint: register first user as owner
-            settings.owner_user_id = Some(user_id.get());
-            save_bot_settings(token, &settings);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ★ Owner registered: {user_name} (id:{})",
+                "  [{ts}] ✗ Rejected: {user_name} (id:{}) — owner_user_id is not configured",
                 user_id.get()
             );
-            true
+            false
         }
         Some(_) => {
             let uid = user_id.get();
