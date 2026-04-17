@@ -5758,13 +5758,14 @@ mod tests {
         );
     }
 
-    /// #701 regression: pipeline_stages on the repo (e.g. `dev-deploy`) must
-    /// not suppress create-pr dispatch on review pass. Prior to the fix, the
-    /// PR creation block lived only in the `nextStage === null` branch, so
-    /// AgentDesk-style repos (which always have a review_pass-triggered
-    /// stage) silently skipped PR creation and cards never merged.
+    /// #701 non-skip path: review pass with an active non-skip pipeline stage
+    /// (e.g. `dev-deploy`) keeps PR creation deferred so `ci-recovery` cannot
+    /// race `deploy-pipeline` for ownership. The card still enters the stage
+    /// (pipeline_stage_id set, status=in_progress, blocked_reason=deploy:waiting)
+    /// but no create-pr dispatch is seeded here — the follow-up on completion
+    /// path is tracked separately (scope deliberately limited in this PR).
     #[test]
-    fn scenario_701_review_pass_with_pipeline_stage_dispatches_create_pr() {
+    fn scenario_701_review_pass_with_pipeline_stage_enters_stage_without_early_pr() {
         let (repo, _repo_guard) = setup_test_repo();
         run_git(repo.path(), &["checkout", "-b", "wt/card-701-pipeline"]);
 
@@ -5811,22 +5812,18 @@ mod tests {
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        // DoD: create-pr dispatch exists even though a pipeline stage is set.
+        // Non-skip path: the stage owns the card. No create-pr dispatch is
+        // seeded here — that would race `ci-recovery` with `deploy-pipeline`.
         assert_eq!(
             count_active_dispatches_by_type(&db, "card-701-pipeline", "create-pr"),
-            1,
-            "#701: create-pr dispatch must be created before pipeline stage handling"
+            0,
+            "#701: non-skip path must NOT seed create-pr — pipeline stage owns the card"
         );
-        // pr_tracking is seeded by the shared helper.
-        assert_eq!(
-            pr_tracking_state(&db, "card-701-pipeline").as_deref(),
-            Some("create-pr"),
-            "#701: pr_tracking must be seeded at create-pr state"
+        assert!(
+            pr_tracking_state(&db, "card-701-pipeline").is_none(),
+            "#701: non-skip path must NOT seed pr_tracking"
         );
-        // Non-skip path assigns the pipeline stage and moves card to in_progress
-        // with blocked_reason=deploy:waiting. `kanban_cards.pipeline_stage_id` is
-        // stored as TEXT (see schema.rs:133) even though `pipeline_stages.id` is
-        // an integer PK — SQLite TEXT affinity coerces the insert to a string.
+        // The card is bound to the pipeline stage (TEXT column per schema).
         let conn = db.lock().unwrap();
         let (stage_id, blocked, status): (Option<String>, Option<String>, String) = conn
             .query_row(

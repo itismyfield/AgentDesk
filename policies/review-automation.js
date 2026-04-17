@@ -719,19 +719,18 @@ function processVerdict(cardId, verdict, result, options) {
     // #117: Update canonical card_review_state — review passed
     agentdesk.reviewState.sync(cardId, "idle", { last_verdict: verdict });
 
-    // #701: PR creation runs BEFORE pipeline-stage branch so every review-pass
-    // case seeds pr_tracking + create-pr dispatch first. Previously the PR
-    // creation block lived only inside the `else` branch (no-next-stage path),
-    // meaning repos like AgentDesk (which has a `dev-deploy` pipeline stage
-    // with stage_order=100) could never enter that branch and skipped PR
-    // creation entirely — even on skip_condition paths that ended at `done`.
-    // Design rationale: create-pr is a prerequisite for merge; pipeline stages
-    // (dev-deploy, e2e-test) operate on the agent's worktree/branch and do
-    // not replace PR creation. Dispatching PR first is safe because
-    // pipeline-stage status transitions (in_progress / terminal) run after
-    // and override any pending review-pass state, while pr_tracking persists
-    // in parallel for CI/merge handling.
-    var prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+    // #701: PR creation is attempted in the review-pass branches that do NOT
+    // queue a running pipeline stage — skip paths and the no-stage else branch.
+    // It is intentionally NOT attempted on the non-skip dev-deploy / e2e-test /
+    // normal-agent dispatch paths: those keep ownership of the card via
+    // `pipeline_stage_id` + `blocked_reason`, and letting pr_tracking enter
+    // `wait-ci` while those pipelines are active would race ci-recovery with
+    // deploy-pipeline (ci-recovery overwrites `blocked_reason` to `ci:*` and
+    // the card would be dropped from the deploy queue — merge could even land
+    // before the deploy/e2e finishes). Those pipelines must trigger their own
+    // create-pr on completion; tracking that is out of scope for #701 and
+    // should be a follow-up once the cross-policy contract is redesigned.
+    var prDispatched = false;
 
     // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
@@ -777,6 +776,11 @@ function processVerdict(cardId, verdict, result, options) {
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
+        // #701: create-pr must fire here because the pipeline is being skipped
+        // entirely — there is no dev-deploy / e2e-test to create the PR later.
+        // Safe relative to ci-recovery: the pipeline stage is cleared in the
+        // same statement above, so the card has no active deploy ownership.
+        prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
         if (!prDispatched) {
           agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         }
@@ -815,6 +819,9 @@ function processVerdict(cardId, verdict, result, options) {
               "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
               [cardId]
             );
+            // #701: e2e skipped via DoD gate — same reasoning as the no_rs_changes
+            // branch: the pipeline is cleared, so it's safe to seed pr_tracking.
+            prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
             if (!prDispatched) {
               var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
               var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
@@ -866,8 +873,6 @@ function processVerdict(cardId, verdict, result, options) {
       }
     } else {
       // No more stages — clear pipeline_stage_id and mark terminal.
-      // #701: PR creation was already attempted above via
-      // attemptCreatePrDispatchForReviewPass — no duplicate dispatch here.
       if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
         agentdesk.db.execute(
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
@@ -876,6 +881,9 @@ function processVerdict(cardId, verdict, result, options) {
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
       }
 
+      // #198/#211/#701: PR creation for the no-pipeline case (and for cards
+      // that have completed all configured pipeline stages).
+      prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
       if (!prDispatched) {
         agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
