@@ -39,6 +39,7 @@ CODESIGN_MODE="${AGENTDESK_CODESIGN_MODE:-auto}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-}"
 CODESIGN_IDENTIFIER="${AGENTDESK_CODESIGN_IDENTIFIER:-com.itismyfield.agentdesk}"
 RAW_CODESIGN_MODE="$CODESIGN_MODE"
+RESOLVED_CODESIGN_MODE=""
 RESOLVED_CODESIGN_IDENTITY=""
 
 for arg in "$@"; do
@@ -116,22 +117,23 @@ resolve_developer_id_identity() {
 }
 
 resolve_macos_codesign_mode() {
+  RESOLVED_CODESIGN_MODE=""
   RESOLVED_CODESIGN_IDENTITY=""
   case "$CODESIGN_MODE" in
     developer-id)
       RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity)" || return 1
-      printf 'developer-id\n'
+      RESOLVED_CODESIGN_MODE="developer-id"
       ;;
     adhoc|skip)
-      printf '%s\n' "$CODESIGN_MODE"
+      RESOLVED_CODESIGN_MODE="$CODESIGN_MODE"
       ;;
     auto)
       if [ "$CODESIGN_IDENTITY" = "-" ]; then
-        printf 'adhoc\n'
+        RESOLVED_CODESIGN_MODE="adhoc"
       elif RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
-        printf 'developer-id\n'
+        RESOLVED_CODESIGN_MODE="developer-id"
       else
-        printf 'adhoc\n'
+        RESOLVED_CODESIGN_MODE="adhoc"
       fi
       ;;
     *)
@@ -422,7 +424,7 @@ if [ -e "$REAL_BIN" ]; then
 fi
 install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
 if [ "$OS" = "darwin" ]; then
-  RESOLVED_CODESIGN_MODE="$(resolve_macos_codesign_mode)" \
+  resolve_macos_codesign_mode \
     || fail "Could not resolve macOS codesign mode from: $CODESIGN_MODE"
   info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
   if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
