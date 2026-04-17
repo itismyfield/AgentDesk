@@ -1662,10 +1662,14 @@ mod tests {
         assert_eq!(body["delivery"], json!("pm_channel"));
         assert_eq!(body["fallback_note"], json!("owner routing unavailable"));
         let sent = &mock.sent_messages.lock().unwrap()[0];
-        assert!(sent.contains("📋 이슈: 오너 라우팅이 불가한 카드입니다."));
-        assert!(sent.contains("📊 진행: review/dilemma_pending"));
-        assert!(sent.contains("📝 최근 결과:"));
-        assert!(sent.contains("⛔ 기존 차단 사유: owner routing unavailable"));
+        assert!(sent.contains("⚠️ [PM 결정 요청] card_id: card-2"));
+        assert!(sent.contains("issue: #434"));
+        assert!(sent.contains("fallback: owner routing unavailable"));
+        assert!(sent.contains("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요."));
+        assert!(sent.contains("사유:"));
+        assert!(sent.contains("owner missing"));
+        assert!(sent.contains("선택지: `resume`, `rework`, `dismiss`, `requeue`"));
+        assert!(sent.contains("결정 API: `POST /api/pm-decision`"));
 
         server.abort();
     }

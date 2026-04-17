@@ -567,6 +567,16 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_worktree_session(db: &db::Db, session_key: &str, cwd: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, cwd, last_heartbeat) \
+             VALUES (?1, 'agent-1', 'codex', 'working', ?2, datetime('now'))",
+            rusqlite::params![session_key, cwd],
+        )
+        .unwrap();
+    }
+
     fn set_kv(db: &db::Db, key: &str, value: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -6111,6 +6121,7 @@ mod tests {
             "wt/card-211-direct",
             &feature_commit,
         );
+        seed_worktree_session(&db, "session-211-direct", worktree_path.to_str().unwrap());
 
         engine
             .try_fire_hook_by_name(
@@ -6239,6 +6250,11 @@ mod tests {
             "wt/card-211-push-rejected",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-push-rejected",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6365,6 +6381,11 @@ mod tests {
             worktree_path.to_str().unwrap(),
             "wt/card-211-pr-always",
             &feature_commit,
+        );
+        seed_worktree_session(
+            &db,
+            "session-211-pr-always",
+            worktree_path.to_str().unwrap(),
         );
 
         engine
@@ -6525,6 +6546,11 @@ mod tests {
             "wt/card-211-pr-approved",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-pr-approved",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6652,6 +6678,11 @@ mod tests {
             "wt/card-211-rebase-conflict",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-rebase-conflict",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6765,6 +6796,7 @@ mod tests {
             "wt/card-211-conflict",
             &feature_commit,
         );
+        seed_worktree_session(&db, "session-211-conflict", worktree_path.to_str().unwrap());
 
         engine
             .try_fire_hook_by_name(
@@ -6857,6 +6889,11 @@ mod tests {
             worktree_path.to_str().unwrap(),
             "wt/card-211-create-pr-retry",
             &feature_commit,
+        );
+        seed_worktree_session(
+            &db,
+            "session-211-create-pr-retry",
+            worktree_path.to_str().unwrap(),
         );
         seed_pr_tracking(
             &db,
