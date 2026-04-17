@@ -126,30 +126,57 @@ fn total_model_input_tokens(
         .saturating_add(cache_read_tokens)
 }
 
-fn resolve_output_analytics_snapshot(
-    inflight_state: &InflightTurnState,
-    fallback_session_id: Option<&str>,
+struct TurnAnalyticsSnapshot {
+    output_path: Option<String>,
+    output_start_offset: u64,
+    output_end_offset: Option<u64>,
+    fallback_session_id: Option<String>,
     fallback_token_usage: TurnTokenUsage,
+    inflight_session_id: Option<String>,
+}
+
+impl TurnAnalyticsSnapshot {
+    fn capture(
+        inflight_state: &InflightTurnState,
+        fallback_session_id: Option<&str>,
+        fallback_token_usage: TurnTokenUsage,
+    ) -> Self {
+        Self {
+            output_path: inflight_state.output_path.clone(),
+            output_start_offset: inflight_state
+                .turn_start_offset
+                .unwrap_or(inflight_state.last_offset),
+            output_end_offset: inflight_state
+                .output_path
+                .as_ref()
+                .map(|_| inflight_state.last_offset),
+            fallback_session_id: fallback_session_id.map(str::to_string),
+            fallback_token_usage,
+            inflight_session_id: inflight_state.session_id.clone(),
+        }
+    }
+}
+
+fn resolve_output_analytics_snapshot(
+    snapshot: &TurnAnalyticsSnapshot,
 ) -> (Option<String>, TurnTokenUsage) {
-    let output_start_offset = inflight_state
-        .turn_start_offset
-        .unwrap_or(inflight_state.last_offset);
-    let (output_session_id, output_token_usage) = inflight_state
+    let (output_session_id, output_token_usage) = snapshot
         .output_path
         .as_deref()
         .map(|path| {
-            crate::services::session_backend::extract_turn_analytics_from_output(
+            crate::services::session_backend::extract_turn_analytics_from_output_range(
                 path,
-                output_start_offset,
+                snapshot.output_start_offset,
+                snapshot.output_end_offset,
             )
         })
         .unwrap_or((None, None));
 
     (
         output_session_id
-            .or_else(|| fallback_session_id.map(str::to_string))
-            .or_else(|| inflight_state.session_id.clone()),
-        output_token_usage.unwrap_or(fallback_token_usage),
+            .or_else(|| snapshot.fallback_session_id.clone())
+            .or_else(|| snapshot.inflight_session_id.clone()),
+        output_token_usage.unwrap_or(snapshot.fallback_token_usage),
     )
 }
 
@@ -189,15 +216,12 @@ pub(super) fn persist_turn_analytics_row(
         .map(str::to_string)
         .or_else(|| inflight_state.dispatch_id.clone());
     let started_at = inflight_state.started_at.clone();
-    let fallback_session_id = session_id.map(str::to_string);
-    let inflight_state = inflight_state.clone();
+    let analytics_snapshot =
+        TurnAnalyticsSnapshot::capture(inflight_state, session_id, token_usage);
     let db = db.clone();
     let persist = move || {
-        let (resolved_session_id, resolved_token_usage) = resolve_output_analytics_snapshot(
-            &inflight_state,
-            fallback_session_id.as_deref(),
-            token_usage,
-        );
+        let (resolved_session_id, resolved_token_usage) =
+            resolve_output_analytics_snapshot(&analytics_snapshot);
         let entry = PersistTurnOwned {
             turn_id,
             session_key,

@@ -243,7 +243,7 @@
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 343 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 372 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 2012 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 2036 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 1348 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
@@ -277,7 +277,7 @@
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 640 |  |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |
-| `services::session_backend` | `src/services/session_backend.rs` | 926 |  |
+| `services::session_backend` | `src/services/session_backend.rs` | 938 |  |
 | `services::settings` | `src/services/settings.rs` | 280 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 101 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 47 |  |
