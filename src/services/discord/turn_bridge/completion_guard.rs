@@ -98,28 +98,6 @@ fn classify_review_decision_phrase(text: &str) -> Option<&'static str> {
         return Some("dismiss");
     }
 
-    const DISMISS_PHRASES: &[&str] = &[
-        "리뷰 우회",
-        "리뷰 무시",
-        "리뷰 스킵",
-        "직접 머지",
-        "직접 merge",
-        "머지 가능하게",
-        "머지가능하게",
-        "merge 가능하게",
-        "merge가능하게",
-        "기여자가 직접 머지",
-        "contributor can merge",
-        "author can merge",
-        "direct merge",
-    ];
-    if DISMISS_PHRASES
-        .iter()
-        .any(|phrase| normalized.contains(phrase))
-    {
-        return Some("dismiss");
-    }
-
     None
 }
 
@@ -150,7 +128,7 @@ pub(in crate::services::discord) fn extract_review_decision(
         }
         found = Some(candidate);
     }
-    found.or_else(|| classify_review_decision_phrase(tail))
+    found
 }
 
 async fn submit_review_decision_fallback(
