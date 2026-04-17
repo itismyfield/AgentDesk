@@ -114,7 +114,7 @@ var reviewAutomation = {
       notifyDeadlockManager(
         "⚠️ [Review Deadlock] " +
           (card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") +
-          (card.title || card.id) + "\n" +
+          card.id + "\n" +
           "card_id: " + card.id + "\n" +
           "agent: " + card.assigned_agent_id + "\n" +
           "review round " + newRound + " exceeded max " + maxRounds,

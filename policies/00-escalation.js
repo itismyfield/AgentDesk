@@ -128,14 +128,14 @@ function escalationApiUrl(path) {
 
 function escalationCardTitle(cardId) {
   var cards = agentdesk.db.query(
-    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?",
+    "SELECT github_issue_number FROM kanban_cards WHERE id = ?",
     [cardId]
   );
   if (cards.length === 0) return cardId;
   if (cards[0].github_issue_number) {
-    return "#" + cards[0].github_issue_number + " " + cards[0].title;
+    return "#" + cards[0].github_issue_number + " (" + cardId + ")";
   }
-  return cards[0].title || cardId;
+  return cardId;
 }
 
 function parseCooldownRecord(raw) {
