@@ -68,12 +68,14 @@ fn persist_bot_auth_to_yaml_checked(
         crate::config::Config::default()
     };
 
-    config.discord.owner_id = settings.owner_user_id;
-
     let Some(bot_name) = super::resolved_config_bot_name(&config, token) else {
-        let rendered = serde_yaml::to_string(&config).map_err(|err| config_io_error(&path, err))?;
-        return write_bytes_atomically(&path, rendered.as_bytes());
+        // Do not mutate YAML for tokens that are not managed by agentdesk.yaml.
+        // This prevents owner imprinting from an unconfigured bot from overwriting
+        // the shared discord.owner_id used by configured bots.
+        return Ok(());
     };
+
+    config.discord.owner_id = settings.owner_user_id;
 
     if let Some(bot) = config.discord.bots.get_mut(&bot_name) {
         bot.provider = Some(settings.provider.as_str().to_string());
