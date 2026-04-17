@@ -178,6 +178,11 @@ var reviewAutomation = {
         || (latestWork && latestWork.head_sha);
 
       if (!repoId || !branch) {
+        // #701: Seed pr_tracking with last_error so merge-automation's
+        // retry loop has a row to find. Use markPrCreateFailed to ensure
+        // the card is terminal — pipeline-originated create-pr dispatches
+        // (from deploy-pipeline's post-pipeline handoff) arrive here still
+        // non-terminal, and the retry loop skips non-terminal cards.
         upsertPrTracking(
           dispatch.kanban_card_id,
           repoId,
@@ -188,16 +193,15 @@ var reviewAutomation = {
           "create-pr",
           "create-pr completed without canonical repo/branch"
         );
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed' WHERE id = ?",
-          [dispatch.kanban_card_id]
-        );
         agentdesk.log.warn("[review] Create-PR completed but canonical tracking is incomplete for card " + dispatch.kanban_card_id);
+        markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking");
         return;
       }
 
       var pr = findOpenPrByTrackedBranch(repoId, branch);
       if (!pr) {
+        // #701: Same reasoning — seed pr_tracking and force terminal so
+        // merge-automation.processTrackedMergeQueue can retry create-pr.
         upsertPrTracking(
           dispatch.kanban_card_id,
           repoId,
@@ -208,11 +212,8 @@ var reviewAutomation = {
           "create-pr",
           "create-pr completed but no open PR found for branch " + branch
         );
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed' WHERE id = ?",
-          [dispatch.kanban_card_id]
-        );
         agentdesk.log.warn("[review] Create-PR completed but no open PR was found for card " + dispatch.kanban_card_id + " branch " + branch);
+        markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found");
         return;
       }
 
@@ -612,13 +613,37 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
     "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
     [cardId]
   );
-  // Card metadata is incomplete in a way that rules out a PR entirely.
-  // These are "nothing to PR" cases rather than failures.
+  // Card gone entirely is a genuine noop — nothing to track.
   if (prCardInfo.length === 0) return { status: "noop", reason: "card_missing" };
-  if (!prCardInfo[0].assigned_agent_id) return { status: "noop", reason: "no_agent" };
+
+  // #701: A card with completed work AND a resolvable repo but NO assigned
+  // agent is a genuine anomaly, not a benign noop — there is shippable
+  // work but no one to drive the create-pr dispatch. Returning noop here
+  // would silently drop the card to done with no PR and no retry row.
+  // Seed pr_tracking with last_error so merge-automation's retry loop
+  // can pick it up once an agent is assigned (or operators can see the
+  // card's pr:create_failed marker). Callers must treat error → terminal
+  // + blocked_reason via markPrCreateFailed.
+  var precheckRepoId = prCardInfo[0].repo_id
+    || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
+  if (!prCardInfo[0].assigned_agent_id) {
+    if (precheckRepoId) {
+      upsertPrTracking(
+        cardId,
+        precheckRepoId,
+        latestWorkTarget.worktree_path,
+        latestWorkTarget.branch,
+        null,
+        latestWorkTarget.head_sha,
+        "create-pr",
+        "no_assigned_agent_for_create_pr"
+      );
+    }
+    return { status: "error", reason: "no_agent" };
+  }
 
   var agentId = prCardInfo[0].assigned_agent_id;
-  var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
+  var repoId = precheckRepoId;
   if (!repoId) return { status: "noop", reason: "no_repo" };
 
   // We have a work target AND a repo, so a PR was expected. From here on,
