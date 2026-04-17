@@ -54,7 +54,10 @@ impl QueueExitEvent {
 }
 
 fn prune_interventions(queue: &mut Vec<Intervention>) -> Vec<QueueExitEvent> {
-    let now = Instant::now();
+    prune_interventions_at(queue, Instant::now())
+}
+
+fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) -> Vec<QueueExitEvent> {
     let mut queue_exit_events = Vec::new();
     queue.retain(|intervention| {
         let keep = now.duration_since(intervention.created_at) <= INTERVENTION_TTL;
@@ -1395,6 +1398,16 @@ mod tests {
         intervention
     }
 
+    fn make_overflow_queue(now: Instant) -> Vec<Intervention> {
+        std::iter::once(make_intervention(1, "trimmed", now))
+            .chain(
+                (2..=(MAX_INTERVENTIONS_PER_CHANNEL as u64 + 1)).map(|message_id| {
+                    make_intervention(message_id, &format!("queued-{message_id}"), now)
+                }),
+            )
+            .collect()
+    }
+
     fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
         test_env_lock()
             .lock()
@@ -1413,36 +1426,32 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel_id);
         let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let now = Instant::now();
+        let queue = make_overflow_queue(Instant::now());
 
-        handle
-            .replace_queue(
-                vec![
-                    make_intervention(1, "stale", now - INTERVENTION_TTL - Duration::from_secs(1)),
-                    make_intervention(2, "fresh", now),
-                ],
-                persistence.clone(),
-            )
-            .await;
+        handle.replace_queue(queue, persistence.clone()).await;
 
         assert_eq!(
             read_saved_items(tmp.path(), &provider, token_hash, channel_id).len(),
-            2
+            MAX_INTERVENTIONS_PER_CHANNEL + 1
         );
 
         let result = handle.has_pending_soft_queue(persistence).await;
         assert!(result.has_pending);
         assert_eq!(result.queue_exit_events.len(), 1);
-        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Expired);
+        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
         assert_eq!(
             result.queue_exit_events[0].intervention.message_id,
             MessageId::new(1)
         );
-        assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+        assert_eq!(
+            handle.snapshot().await.intervention_queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL
+        );
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "fresh");
+        assert_eq!(items.len(), MAX_INTERVENTIONS_PER_CHANNEL);
+        assert!(items.iter().all(|item| item.text != "trimmed"));
+        assert!(items.iter().any(|item| item.text == "queued-2"));
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
@@ -1459,17 +1468,9 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel_id);
         let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let now = Instant::now();
+        let queue = make_overflow_queue(Instant::now());
 
-        handle
-            .replace_queue(
-                vec![
-                    make_intervention(1, "stale", now - INTERVENTION_TTL - Duration::from_secs(1)),
-                    make_intervention(2, "fresh", now),
-                ],
-                persistence.clone(),
-            )
-            .await;
+        handle.replace_queue(queue, persistence.clone()).await;
         let active_msg_id = MessageId::new(77);
         handle
             .restore_active_turn(Arc::new(CancelToken::new()), UserId::new(7), active_msg_id)
@@ -1480,7 +1481,7 @@ mod tests {
         assert!(result.has_pending);
         assert!(result.mailbox_online);
         assert_eq!(result.queue_exit_events.len(), 1);
-        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Expired);
+        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
         assert_eq!(
             result.queue_exit_events[0].intervention.message_id,
             MessageId::new(1)
@@ -1489,11 +1490,15 @@ mod tests {
         let snapshot = handle.snapshot().await;
         assert!(snapshot.cancel_token.is_none());
         assert_eq!(snapshot.active_user_message_id, None);
-        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL
+        );
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "fresh");
+        assert_eq!(items.len(), MAX_INTERVENTIONS_PER_CHANNEL);
+        assert!(items.iter().all(|item| item.text != "trimmed"));
+        assert!(items.iter().any(|item| item.text == "queued-2"));
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
@@ -1510,17 +1515,9 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel_id);
         let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let now = Instant::now();
+        let queue = make_overflow_queue(Instant::now());
 
-        handle
-            .replace_queue(
-                vec![
-                    make_intervention(1, "stale", now - INTERVENTION_TTL - Duration::from_secs(1)),
-                    make_intervention(2, "fresh", now),
-                ],
-                persistence,
-            )
-            .await;
+        handle.replace_queue(queue, persistence).await;
         handle
             .restore_active_turn(
                 Arc::new(CancelToken::new()),
@@ -1534,7 +1531,7 @@ mod tests {
         assert!(result.has_pending);
         assert!(result.mailbox_online);
         assert_eq!(result.queue_exit_events.len(), 1);
-        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Expired);
+        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
         assert_eq!(
             result.queue_exit_events[0].intervention.message_id,
             MessageId::new(1)
@@ -1543,13 +1540,34 @@ mod tests {
         let snapshot = handle.snapshot().await;
         assert!(snapshot.cancel_token.is_none());
         assert_eq!(snapshot.active_user_message_id, None);
-        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL
+        );
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "fresh");
+        assert_eq!(items.len(), MAX_INTERVENTIONS_PER_CHANNEL);
+        assert!(items.iter().all(|item| item.text != "trimmed"));
+        assert!(items.iter().any(|item| item.text == "queued-2"));
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn has_soft_intervention_at_prunes_expired_entries_without_boot_time_dependency() {
+        let created_at = Instant::now();
+        let mut queue = vec![
+            make_intervention(1, "expired", created_at),
+            make_intervention(2, "fresh", created_at + Duration::from_secs(1)),
+        ];
+
+        assert!(has_soft_intervention_at(
+            &mut queue,
+            created_at + INTERVENTION_TTL + Duration::from_secs(1)
+        ));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].message_id, MessageId::new(2));
+        assert_eq!(queue[0].text, "fresh");
     }
 
     #[tokio::test]

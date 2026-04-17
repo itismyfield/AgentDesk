@@ -138,10 +138,14 @@ fn install_mock_gh_pr_tracking(
 ) -> MockGhOverride {
     let dir = tempfile::tempdir().unwrap();
     let gh_path = dir.path().join("gh.cmd");
+    let gh_ps1_path = dir.path().join("gh.ps1");
+    let wrapper =
+        "@echo off\r\npwsh -NoProfile -ExecutionPolicy Bypass -File \"%~dp0gh.ps1\" %*\r\n";
     let script = format!(
-        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo gh mock 1.0\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"list\" (\r\n  echo %* | findstr /C:\"--repo {repo}\" /C:\"--head {branch}\" >nul\r\n  if not errorlevel 1 (\r\n    echo []\r\n    exit /b 0\r\n  )\r\n)\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"create\" (\r\n  echo %* | findstr /C:\"--repo {repo}\" /C:\"--head {branch}\" >nul\r\n  if not errorlevel 1 (\r\n    echo https://github.com/{repo}/pull/{pr_number}\r\n    exit /b 0\r\n  )\r\n)\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"view\" if \"%~3\"==\"{pr_number}\" (\r\n  echo %* | findstr /C:\"--repo {repo}\" /C:\"--json headRefOid\" /C:\"--jq .headRefOid\" >nul\r\n  if not errorlevel 1 (\r\n    echo {head_sha}\r\n    exit /b 0\r\n  )\r\n)\r\necho gh mock: unexpected args: %* 1>&2\r\nexit /b 1\r\n"
+        "$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'list' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--head {branch}')) {{\n  '[]' | Write-Output\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'create' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--head {branch}')) {{\n  'https://github.com/{repo}/pull/{pr_number}' | Write-Output\n  exit 0\n}}\nif ($args.Count -ge 3 -and $args[0] -eq 'pr' -and $args[1] -eq 'view' -and $args[2] -eq '{pr_number}' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--json headRefOid') -and $joined.Contains('--jq .headRefOid')) {{\n  '{head_sha}' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
     );
-    fs::write(&gh_path, script).unwrap();
+    fs::write(&gh_path, wrapper).unwrap();
+    fs::write(&gh_ps1_path, script).unwrap();
     let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
     MockGhOverride {
         _dir: dir,
@@ -153,10 +157,14 @@ fn install_mock_gh_pr_tracking(
 fn install_mock_gh_issue_view_closed(issue_number: i64, repo: &str) -> MockGhOverride {
     let dir = tempfile::tempdir().unwrap();
     let gh_path = dir.path().join("gh.cmd");
+    let gh_ps1_path = dir.path().join("gh.ps1");
+    let wrapper =
+        "@echo off\r\npwsh -NoProfile -ExecutionPolicy Bypass -File \"%~dp0gh.ps1\" %*\r\n";
     let script = format!(
-        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo gh mock 1.0\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"issue\" if \"%~2\"==\"view\" if \"%~3\"==\"{issue_number}\" (\r\n  echo %* | findstr /C:\"--repo {repo}\" /C:\"--json state\" /C:\"--jq .state\" >nul\r\n  if not errorlevel 1 (\r\n    echo CLOSED\r\n    exit /b 0\r\n  )\r\n)\r\necho gh mock: unexpected args: %* 1>&2\r\nexit /b 1\r\n"
+        "$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 3 -and $args[0] -eq 'issue' -and $args[1] -eq 'view' -and $args[2] -eq '{issue_number}' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--json state') -and $joined.Contains('--jq .state')) {{\n  'CLOSED' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
     );
-    fs::write(&gh_path, script).unwrap();
+    fs::write(&gh_path, wrapper).unwrap();
+    fs::write(&gh_ps1_path, script).unwrap();
     let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
     MockGhOverride {
         _dir: dir,
