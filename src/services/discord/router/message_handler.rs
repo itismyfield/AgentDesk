@@ -1,8 +1,5 @@
 use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
-use super::control_intent::{
-    build_control_intent_system_reminder, detect_natural_language_control_intent,
-};
 use crate::services::memory::{
     RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
     resolve_memory_session_id,
@@ -987,9 +984,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
-    }
-    if let Some(control_intent) = detect_natural_language_control_intent(user_text) {
-        context_chunks.push(build_control_intent_system_reminder(&control_intent));
     }
     context_chunks.push(sanitized_input);
     let context_prompt = context_chunks.join("\n\n");
