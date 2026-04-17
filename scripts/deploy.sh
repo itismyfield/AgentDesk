@@ -53,7 +53,8 @@ done
 
 info()  { printf "\033[1;34m[deploy]\033[0m %s\n" "$*"; }
 ok()    { printf "\033[1;32m[deploy]\033[0m %s\n" "$*"; }
-fail()  { printf "\033[1;31m[deploy]\033[0m %s\n" "$*"; exit 1; }
+error() { printf "\033[1;31m[deploy]\033[0m %s\n" "$*" >&2; }
+fail()  { error "$*"; exit 1; }
 
 normalize_codesign_mode() {
   local raw_mode="${1:-}"
@@ -186,18 +187,30 @@ codesign_binary() {
 
   case "$mode" in
     developer-id)
-      [ -n "$RESOLVED_CODESIGN_IDENTITY" ] || fail "Developer ID signing requested but no usable identity was resolved"
+      [ -n "$RESOLVED_CODESIGN_IDENTITY" ] || {
+        error "Developer ID signing requested but no usable identity was resolved"
+        return 1
+      }
       codesign_identity_available "$RESOLVED_CODESIGN_IDENTITY" \
-        || fail "Developer ID identity not found in keychain: $RESOLVED_CODESIGN_IDENTITY"
+        || {
+          error "Developer ID identity not found in keychain: $RESOLVED_CODESIGN_IDENTITY"
+          return 1
+        }
       info "Signing $target with Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
       codesign \
         -s "$RESOLVED_CODESIGN_IDENTITY" \
         --options runtime \
         --identifier "$CODESIGN_IDENTIFIER" \
         --force \
-        "$target"
+        "$target" || {
+          error "Developer ID codesign failed — aborting"
+          return 1
+        }
       codesign -v "$target" 2>/dev/null \
-        || fail "Developer ID codesign verification failed — aborting"
+        || {
+          error "Developer ID codesign verification failed — aborting"
+          return 1
+        }
       ;;
     adhoc)
       info "Signing $target with ad-hoc identity"
@@ -205,12 +218,19 @@ codesign_binary() {
         -s - \
         --identifier "$CODESIGN_IDENTIFIER" \
         --force \
-        "$target"
+        "$target" || {
+          error "Ad-hoc codesign failed — aborting"
+          return 1
+        }
       codesign -v "$target" 2>/dev/null \
-        || fail "Ad-hoc codesign verification failed — aborting"
+        || {
+          error "Ad-hoc codesign verification failed — aborting"
+          return 1
+        }
       ;;
     *)
-      fail "Unsupported codesign mode: $mode"
+      error "Unsupported codesign mode: $mode"
+      return 1
       ;;
   esac
 }
@@ -244,11 +264,13 @@ preserve_previous_signature_state_if_needed() {
         info "Previous install used Developer ID signing; preserving that mode"
         codesign_binary developer-id "$REAL_BIN"
       else
-        fail "Previous install used Developer ID signing, but no usable Developer ID identity is available to preserve it. Provide --codesign-identity or use --codesign-mode=adhoc."
+        error "Previous install used Developer ID signing, but no usable Developer ID identity is available to preserve it. Provide --codesign-identity or use --codesign-mode=adhoc."
+        return 1
       fi
       ;;
     signed)
-      fail "Previous install used a non-standard code signature that cannot be preserved automatically. Use an explicit --codesign-mode."
+      error "Previous install used a non-standard code signature that cannot be preserved automatically. Use an explicit --codesign-mode."
+      return 1
       ;;
     unsigned)
       info "Previous install was unsigned; leaving $REAL_BIN unsigned"
@@ -274,7 +296,8 @@ codesign_real_binary_if_needed() {
       preserve_previous_signature_state_if_needed "${BACKUP_REAL:-}"
       ;;
     *)
-      fail "Unsupported resolved codesign mode: $resolved_mode"
+      error "Unsupported resolved codesign mode: $resolved_mode"
+      return 1
       ;;
   esac
 }
@@ -354,6 +377,24 @@ restore_previous_install() {
   fi
 }
 
+restore_previous_install_and_fail() {
+  local message="$1"
+  local restore_message="${2:-Restored previous install after failed binary update}"
+  local restore_status
+
+  set +e
+  restore_previous_install
+  restore_status=$?
+  set -e
+
+  if [ "$restore_status" -eq 0 ]; then
+    ok "$restore_message"
+    fail "$message"
+  fi
+
+  fail "$message (previous install restore also failed)"
+}
+
 run_installed_binary_self_check() {
   local stdout_file stderr_file version_line exit_code
   stdout_file="$(mktemp)"
@@ -384,10 +425,9 @@ run_installed_binary_self_check() {
   rm -f "$stdout_file" "$stderr_file"
   print_recent_macos_binary_logs
 
-  restore_previous_install
-  ok "Restored previous install after failed self-check"
-
-  fail "Installed binary self-check failed for $WRAPPER_BIN"
+  restore_previous_install_and_fail \
+    "Installed binary self-check failed for $WRAPPER_BIN" \
+    "Restored previous install after failed self-check"
 }
 
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
@@ -428,14 +468,22 @@ fi
 install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
 if [ "$OS" = "darwin" ]; then
   resolve_macos_codesign_mode \
-    || fail "Could not resolve macOS codesign mode from: $CODESIGN_MODE"
+    || restore_previous_install_and_fail \
+      "Could not resolve macOS codesign mode from: $CODESIGN_MODE" \
+      "Restored previous install after failed codesign resolution"
   info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
   if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
     info "Resolved Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
   fi
-  codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE"
+  codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE" \
+    || restore_previous_install_and_fail \
+      "Failed to apply macOS code signature using mode: $RESOLVED_CODESIGN_MODE" \
+      "Restored previous install after failed codesign step"
 fi
-write_wrapper_script
+write_wrapper_script \
+  || restore_previous_install_and_fail \
+    "Failed to update binary wrapper at $WRAPPER_BIN" \
+    "Restored previous install after failed wrapper update"
 ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
 run_installed_binary_self_check
 rm -f "$BIN_DIR/agentdesk-real"
