@@ -7909,7 +7909,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scenario_690_code_failure_does_not_redispatch_same_run_after_rework_cycle() {
+    fn scenario_690_code_failure_duplicate_run_is_suppressed_after_review_reentry() {
         let repo = tempfile::tempdir().unwrap();
         let gh = install_mock_gh(&[
             MockGhReply {
@@ -7971,23 +7971,166 @@ mod tests {
             "first CI failure should create exactly one active rework dispatch"
         );
 
+        let rework_dispatch_id: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-690-loop' AND dispatch_type = 'rework' \
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        seed_assistant_response_for_dispatch(
+            &db,
+            &rework_dispatch_id,
+            "attempted CI fix without creating a new commit",
+        );
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &rework_dispatch_id,
+            &serde_json::json!({"completion_source": "test_harness"}),
+        );
+        assert!(
+            result.is_ok(),
+            "rework completion should succeed: {:?}",
+            result.err()
+        );
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            get_card_status(&db, "card-690-loop"),
+            "review",
+            "real rework completion should return the card to review"
+        );
         {
             let conn = db.lock().unwrap();
             conn.execute(
-                "UPDATE task_dispatches \
-                 SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') \
-                 WHERE kanban_card_id = 'card-690-loop' AND dispatch_type = 'rework'",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE kanban_cards \
-                 SET status = 'review', blocked_reason = NULL, updated_at = datetime('now') \
-                 WHERE id = 'card-690-loop'",
+                "DELETE FROM kv_meta WHERE key = 'ci:card-690-loop:last_run_id'",
                 [],
             )
             .unwrap();
         }
+
+        {
+            engine
+                .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+                .unwrap();
+        }
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            count_dispatches_by_type(&db, "card-690-loop", "rework"),
+            1,
+            "same completed CI run must not spawn another rework dispatch after the card re-enters review"
+        );
+        assert_eq!(
+            get_card_status(&db, "card-690-loop"),
+            "review",
+            "duplicate failed run suppression must keep the card in review instead of looping back to rework"
+        );
+        let log = gh_log(&gh);
+        assert_eq!(
+            log.matches("issue comment 696 --repo test/repo --body")
+                .count(),
+            1,
+            "same failed CI run must not accumulate duplicate review-status comments"
+        );
+        assert!(
+            !log.contains("run rerun 6910"),
+            "same failed CI run should be deduped rather than rerun or redispatched"
+        );
+
+        let metadata_json: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-690-loop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(
+            metadata["loop_guard"]["ci_recovery"]["status"],
+            "suppressed"
+        );
+        assert_eq!(metadata["loop_guard"]["ci_recovery"]["suppress_count"], 1);
+        assert_eq!(
+            metadata["loop_guard"]["ci_recovery"]["classification"],
+            "code_failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_new_failed_run_is_not_blocked_by_prior_loop_fingerprint() {
+        let repo = tempfile::tempdir().unwrap();
+        let _gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-dashboard-new-run",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-new-run"),
+                stdout: r#"[{"databaseId":6911,"status":"completed","conclusion":"failure","headSha":"sha-dashboard-new-run","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"Script checks","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "generated docs are stale; rerun scripts/generate_inventory_docs.py",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-new-run", "review", "test/repo", 697, None);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-new-run'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-new-run",
+            "test/repo",
+            Some(repo.path().to_str().unwrap()),
+            "wt/card-690-new-run",
+            Some(697),
+            Some("sha-dashboard-new-run"),
+            "wait-ci",
+        );
+        set_kv(&db, "ci:card-690-new-run:last_run_id", "6910");
+        set_kv(
+            &db,
+            "loop_guard:ci_recovery:card-690-new-run",
+            &serde_json::json!({
+                "status": "active",
+                "action": "rework_dispatched",
+                "fingerprint": "card-690-new-run::sha-dashboard-new-run::6910::code_failure",
+                "base_fingerprint": "card-690-new-run::sha-dashboard-new-run::6910",
+                "classification": "code_failure",
+                "run_id": "6910",
+                "head_sha": "sha-dashboard-new-run",
+                "suppress_count": 2,
+                "last_reason": "code_job_match: failed jobs=Script checks"
+            })
+            .to_string(),
+        );
 
         engine
             .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
@@ -7995,18 +8138,153 @@ mod tests {
         kanban::drain_hook_side_effects(&db, &engine);
 
         assert_eq!(
-            count_dispatches_by_type(&db, "card-690-loop", "rework"),
+            count_active_dispatches_by_type(&db, "card-690-new-run", "rework"),
             1,
-            "same completed CI run must not spawn another rework dispatch without a new head SHA"
+            "a new failed run_id must still create a fresh rework dispatch"
+        );
+
+        let metadata_json: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-690-new-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(metadata["loop_guard"]["ci_recovery"]["run_id"], "6911");
+        assert_eq!(metadata["loop_guard"]["ci_recovery"]["status"], "active");
+        assert_eq!(
+            metadata["loop_guard"]["ci_recovery"]["action"],
+            "rework_dispatched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_741_review_loop_guard_escalates_same_head_review_churn() {
+        let gh = install_mock_gh(&[]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-741-review-loop",
+            "in_progress",
+            "test/repo",
+            741,
+            None,
+        );
+        seed_pr_tracking(
+            &db,
+            "card-741-review-loop",
+            "test/repo",
+            None,
+            "wt/card-741-review-loop",
+            Some(741),
+            Some("sha-review-loop"),
+            "wait-ci",
+        );
+
+        for idx in 1..=3 {
+            let dispatch_id = format!("rw-741-loop-{idx}");
+            seed_dispatch(
+                &db,
+                &dispatch_id,
+                "card-741-review-loop",
+                "rework",
+                "pending",
+            );
+            seed_assistant_response_for_dispatch(&db, &dispatch_id, "repeat review loop");
+
+            let result = dispatch::complete_dispatch(
+                &db,
+                &engine,
+                &dispatch_id,
+                &serde_json::json!({"completion_source": "test_harness"}),
+            );
+            assert!(
+                result.is_ok(),
+                "rework completion should succeed on loop attempt {idx}: {:?}",
+                result.err()
+            );
+            kanban::drain_hook_side_effects(&db, &engine);
+
+            if idx < 3 {
+                let conn = db.lock().unwrap();
+                conn.execute(
+                    "UPDATE task_dispatches \
+                     SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') \
+                     WHERE kanban_card_id = 'card-741-review-loop' AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE kanban_cards \
+                     SET status = 'in_progress', review_status = NULL, blocked_reason = NULL, updated_at = datetime('now') \
+                     WHERE id = 'card-741-review-loop'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+
+        let (review_status, blocked_reason, metadata_json): (
+            Option<String>,
+            Option<String>,
+            String,
+        ) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT review_status, blocked_reason, metadata FROM kanban_cards WHERE id = 'card-741-review-loop'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(review_status.as_deref(), Some("dilemma_pending"));
+        assert!(
+            blocked_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Review loop guard"),
+            "loop guard escalation must explain itself in blocked_reason"
         );
         assert_eq!(
-            count_active_dispatches_by_type(&db, "card-690-loop", "rework"),
+            count_active_dispatches_by_type(&db, "card-741-review-loop", "review"),
             0,
-            "rework dispatch should stay completed until a new CI run appears"
+            "once review churn is escalated, a new review dispatch must not remain active"
+        );
+
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(
+            metadata["loop_guard"]["review_churn"]["status"],
+            "escalated"
         );
         assert!(
-            !gh_log(&gh).contains("run rerun 6910"),
-            "same failed CI run should be deduped rather than rerun or redispatched"
+            metadata["loop_guard"]["review_churn"]["enter_count"]
+                .as_i64()
+                .unwrap_or_default()
+                >= 3,
+            "review churn guard must record that the same head crossed the escalation threshold"
+        );
+        assert!(
+            metadata["loop_guard"]["review_churn"]["escalation_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Review loop guard")
+        );
+
+        let log = gh_log(&gh);
+        assert_eq!(
+            log.matches("issue comment 741 --repo test/repo --body")
+                .count(),
+            3,
+            "review churn test must observe the repeated review-status comment path before escalating"
         );
     }
 

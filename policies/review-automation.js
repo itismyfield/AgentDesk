@@ -9,6 +9,8 @@
  */
 
 var prTracking = agentdesk.prTracking;
+var REVIEW_LOOP_CHURN_WINDOW_MS = 1800000;
+var REVIEW_LOOP_CHURN_THRESHOLD = 3;
 
 function sendDiscordReview(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
@@ -16,6 +18,53 @@ function sendDiscordReview(target, content, bot) {
 
 function notifyPmdPendingDecision(cardId, reason) {
   escalate(cardId, reason);
+}
+
+function reviewLoopFingerprintInfo(cardId) {
+  var tracking = loadPrTracking(cardId);
+  var headSha = tracking && tracking.head_sha ? String(tracking.head_sha) : null;
+  if (!headSha) {
+    var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
+    if (latestWorkTarget && latestWorkTarget.head_sha) {
+      headSha = String(latestWorkTarget.head_sha);
+    }
+  }
+  if (!headSha) {
+    headSha = "unknown-head";
+  }
+  return {
+    head_sha: headSha,
+    fingerprint: String(cardId) + "::review::" + headSha
+  };
+}
+
+function recordReviewLoopEntry(cardId, newRound) {
+  var info = reviewLoopFingerprintInfo(cardId);
+  var prior = loadLoopGuardRecord(cardId, "review_churn");
+  var nowMs = loopGuardNowMs();
+  var nowIso = loopGuardNowIso();
+  var priorFirstSeenMs = Number(prior.first_seen_ms || 0);
+  var withinWindow =
+    prior &&
+    prior.fingerprint === info.fingerprint &&
+    priorFirstSeenMs > 0 &&
+    (nowMs - priorFirstSeenMs) <= REVIEW_LOOP_CHURN_WINDOW_MS;
+  var enterCount = withinWindow ? (Number(prior.enter_count || 0) + 1) : 1;
+  return replaceLoopGuardRecord(cardId, "review_churn", {
+    status: enterCount >= REVIEW_LOOP_CHURN_THRESHOLD ? "threshold_reached" : "tracking",
+    fingerprint: info.fingerprint,
+    head_sha: info.head_sha,
+    enter_count: enterCount,
+    threshold: REVIEW_LOOP_CHURN_THRESHOLD,
+    window_ms: REVIEW_LOOP_CHURN_WINDOW_MS,
+    review_round: newRound,
+    first_seen_ms: withinWindow ? priorFirstSeenMs : nowMs,
+    last_seen_ms: nowMs,
+    first_seen_at: withinWindow ? (prior.first_seen_at || nowIso) : nowIso,
+    last_seen_at: nowIso,
+    escalation_reason: withinWindow ? (prior.escalation_reason || null) : null,
+    escalated_at: withinWindow ? (prior.escalated_at || null) : null
+  }, LOOP_GUARD_TTL_SEC);
 }
 
 var reviewAutomation = {
@@ -79,6 +128,51 @@ var reviewAutomation = {
         ? {review_round: newRound, exclude_status: terminalState}
         : {exclude_status: terminalState}
     );
+
+    var reviewLoopState = recordReviewLoopEntry(card.id, newRound);
+    if (Number(reviewLoopState.enter_count || 0) >= REVIEW_LOOP_CHURN_THRESHOLD) {
+      var shortSha = String(reviewLoopState.head_sha || "unknown").substring(0, 12);
+      var churnReason =
+        "Review loop guard: same head re-entered review " +
+        reviewLoopState.enter_count + " times within " +
+        Math.round(REVIEW_LOOP_CHURN_WINDOW_MS / 60000) + "m (head " + shortSha + ")";
+      replaceLoopGuardRecord(card.id, "review_churn", {
+        status: "escalated",
+        fingerprint: reviewLoopState.fingerprint,
+        head_sha: reviewLoopState.head_sha,
+        enter_count: reviewLoopState.enter_count,
+        threshold: REVIEW_LOOP_CHURN_THRESHOLD,
+        window_ms: REVIEW_LOOP_CHURN_WINDOW_MS,
+        review_round: newRound,
+        first_seen_ms: reviewLoopState.first_seen_ms,
+        last_seen_ms: reviewLoopState.last_seen_ms,
+        first_seen_at: reviewLoopState.first_seen_at,
+        last_seen_at: reviewLoopState.last_seen_at,
+        escalation_reason: churnReason,
+        escalated_at: loopGuardNowIso()
+      }, LOOP_GUARD_TTL_SEC);
+      escalateToManualIntervention(card.id, churnReason, {
+        review: true,
+        reviewStateSync: { review_round: newRound },
+        skipEscalate: true
+      });
+      agentdesk.log.warn(
+        "[review] Loop guard escalated " + card.id +
+        " after repeated same-head review re-entry (" + reviewLoopState.enter_count + ")"
+      );
+      notifyDeadlockManager(
+        "⚠️ [Review Loop Guard] " +
+          (card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") +
+          card.id + "\n" +
+          "card_id: " + card.id + "\n" +
+          "agent: " + card.assigned_agent_id + "\n" +
+          "head_sha: " + shortSha + "\n" +
+          "review re-entry count: " + reviewLoopState.enter_count,
+        "review-automation"
+      );
+      return;
+    }
+
     if (!shouldAdvanceRound) {
       agentdesk.log.info(
         "[review] Reusing review round R" + currentRound + " for " + card.id +

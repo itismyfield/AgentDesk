@@ -2,6 +2,7 @@
 // re-notify after a longer interval if the problem is still unresolved.
 var ESCALATION_COOLDOWN_SEC = 600;
 var ESCALATION_PENDING_TTL_SEC = 600;
+var LOOP_GUARD_TTL_SEC = 604800;
 var BENIGN_BLOCKED_REASON_PREFIXES = [
   "ci:waiting",
   "ci:running",
@@ -114,6 +115,115 @@ function notifyDeadlockManager(message, source) {
     return true;
   }
   return notifyHumanAlert(message, source || "system");
+}
+
+function loopGuardNowIso() {
+  return new Date().toISOString();
+}
+
+function loopGuardNowMs() {
+  return new Date().getTime();
+}
+
+function loadLoopGuardJson(raw) {
+  if (!raw) return null;
+  try {
+    var parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function loadCardMetadata(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT metadata FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0 || !rows[0].metadata) return {};
+  return loadLoopGuardJson(rows[0].metadata) || {};
+}
+
+function writeCardMetadata(cardId, metadata) {
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET metadata = ?, updated_at = datetime('now') WHERE id = ?",
+    [JSON.stringify(metadata || {}), cardId]
+  );
+}
+
+function mergeObjectPatch(base, patch) {
+  var next = {};
+  var key;
+  var source = (base && typeof base === "object") ? base : {};
+  for (key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      next[key] = source[key];
+    }
+  }
+  var updates = (patch && typeof patch === "object") ? patch : {};
+  for (key in updates) {
+    if (Object.prototype.hasOwnProperty.call(updates, key)) {
+      next[key] = updates[key];
+    }
+  }
+  return next;
+}
+
+function mergeLoopGuardMetadata(cardId, scope, patch) {
+  var meta = loadCardMetadata(cardId);
+  if (!meta.loop_guard || typeof meta.loop_guard !== "object") {
+    meta.loop_guard = {};
+  }
+  var current = meta.loop_guard[scope];
+  if (!current || typeof current !== "object") {
+    current = {};
+  }
+  meta.loop_guard[scope] = mergeObjectPatch(current, patch || {});
+  writeCardMetadata(cardId, meta);
+  return meta.loop_guard[scope];
+}
+
+function loopGuardKvKey(cardId, scope) {
+  return "loop_guard:" + scope + ":" + cardId;
+}
+
+function loadLoopGuardRecord(cardId, scope) {
+  return loadLoopGuardJson(agentdesk.kv.get(loopGuardKvKey(cardId, scope))) || {};
+}
+
+function saveLoopGuardRecord(cardId, scope, patch, ttlSec) {
+  var next = mergeObjectPatch(loadLoopGuardRecord(cardId, scope), patch || {});
+  if (!next.updated_at) {
+    next.updated_at = loopGuardNowIso();
+  }
+  agentdesk.kv.set(
+    loopGuardKvKey(cardId, scope),
+    JSON.stringify(next),
+    ttlSec || LOOP_GUARD_TTL_SEC
+  );
+  mergeLoopGuardMetadata(cardId, scope, next);
+  return next;
+}
+
+function replaceLoopGuardRecord(cardId, scope, record, ttlSec) {
+  var next = mergeObjectPatch({}, record || {});
+  if (!next.updated_at) {
+    next.updated_at = loopGuardNowIso();
+  }
+  agentdesk.kv.set(
+    loopGuardKvKey(cardId, scope),
+    JSON.stringify(next),
+    ttlSec || LOOP_GUARD_TTL_SEC
+  );
+  mergeLoopGuardMetadata(cardId, scope, next);
+  return next;
+}
+
+function clearLoopGuardRecord(cardId, scope, metadataPatch) {
+  agentdesk.kv.delete(loopGuardKvKey(cardId, scope));
+  if (metadataPatch && typeof metadataPatch === "object") {
+    mergeLoopGuardMetadata(cardId, scope, metadataPatch);
+  }
 }
 
 function escalationServerPort() {

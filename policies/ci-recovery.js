@@ -22,6 +22,7 @@ var CI_LOG_MAX_LINES = 50;
 var CI_DISPATCH_CARD_TITLE_MAX_CHARS = 120;
 var CI_DISPATCH_JOB_NAME_MAX_CHARS = 60;
 var CI_RUN_SUMMARY_MAX_CHARS = 240;
+var CI_LOOP_SUPPRESS_ESCALATION_THRESHOLD = 3;
 
 function truncateText(text, maxChars) {
   var normalized = String(text || "");
@@ -136,6 +137,133 @@ function loadPrTracking(cardId) {
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
   return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
+}
+
+function ciLoopBaseFingerprint(cardId, headSha, runId) {
+  return [
+    String(cardId || "unknown-card"),
+    String(headSha || "unknown-head"),
+    String(runId || "unknown-run")
+  ].join("::");
+}
+
+function ciLoopFingerprint(cardId, headSha, runId, classificationType) {
+  return ciLoopBaseFingerprint(cardId, headSha, runId) + "::" + String(classificationType || "unknown");
+}
+
+function replaceCiLoopState(cardId, record) {
+  var next = mergeObjectPatch({}, record || {});
+  next.updated_at = loopGuardNowIso();
+  return replaceLoopGuardRecord(cardId, "ci_recovery", next, LOOP_GUARD_TTL_SEC);
+}
+
+function noteCiLoopReset(cardId, headSha, reason) {
+  return replaceCiLoopState(cardId, {
+    status: "reset",
+    action: "reset",
+    fingerprint: null,
+    base_fingerprint: null,
+    classification: null,
+    run_id: null,
+    head_sha: headSha || null,
+    suppress_count: 0,
+    last_reason: reason,
+    reset_reason: reason,
+    last_seen_at: loopGuardNowIso(),
+    escalated_at: null,
+    escalation_reason: null
+  });
+}
+
+function maybeSuppressDuplicateCodeFailure(cardId, repo, pr, branch, headSha, runId, classification, blockedReason) {
+  var fingerprint = ciLoopFingerprint(cardId, headSha, runId, classification.type);
+  var state = loadLoopGuardRecord(cardId, "ci_recovery");
+  if (!state || state.fingerprint !== fingerprint || state.action !== "rework_dispatched") {
+    return {
+      suppressed: false,
+      fingerprint: fingerprint,
+      baseFingerprint: ciLoopBaseFingerprint(cardId, headSha, runId)
+    };
+  }
+
+  var suppressCount = Number(state.suppress_count || 0) + 1;
+  var nowIso = loopGuardNowIso();
+  var next = replaceCiLoopState(cardId, {
+    status: "suppressed",
+    action: "rework_dispatched",
+    fingerprint: fingerprint,
+    base_fingerprint: ciLoopBaseFingerprint(cardId, headSha, runId),
+    classification: classification.type,
+    run_id: String(runId),
+    head_sha: headSha || null,
+    suppress_count: suppressCount,
+    last_reason: classification.reason,
+    last_seen_at: nowIso,
+    blocked_reason: blockedReason || null,
+    first_seen_at: state.first_seen_at || nowIso,
+    escalation_reason: state.escalation_reason || null,
+    escalated_at: state.escalated_at || null
+  });
+  agentdesk.log.warn(
+    "[ci-recovery] Suppressed duplicate code_failure fingerprint for card " + cardId +
+    ": " + fingerprint + " (count " + suppressCount + ")"
+  );
+
+  if (suppressCount < CI_LOOP_SUPPRESS_ESCALATION_THRESHOLD) {
+    return {
+      suppressed: true,
+      escalated: false,
+      fingerprint: fingerprint,
+      baseFingerprint: next.base_fingerprint
+    };
+  }
+
+  var shortSha = headSha ? String(headSha).substring(0, 12) : "unknown";
+  var escalationReason =
+    "CI loop guard: identical failed run kept re-entering recovery " +
+    "(run " + runId + ", head " + shortSha + ", classification " + classification.type +
+    ", suppress_count=" + suppressCount + ")";
+  replaceCiLoopState(cardId, {
+    status: "escalated",
+    action: "rework_dispatched",
+    fingerprint: fingerprint,
+    base_fingerprint: next.base_fingerprint,
+    classification: classification.type,
+    run_id: String(runId),
+    head_sha: headSha || null,
+    suppress_count: suppressCount,
+    last_reason: classification.reason,
+    last_seen_at: nowIso,
+    blocked_reason: blockedReason || null,
+    first_seen_at: next.first_seen_at || nowIso,
+    escalation_reason: escalationReason,
+    escalated_at: nowIso
+  });
+  upsertPrTracking(
+    cardId,
+    repo,
+    pr ? pr.worktree_path : null,
+    branch,
+    pr ? pr.number : null,
+    headSha || (pr ? pr.sha : null),
+    "escalated",
+    escalationReason
+  );
+  var cards = agentdesk.db.query(
+    "SELECT status FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  var opts = {};
+  if (cards.length > 0 && cards[0].status === "review") {
+    opts.review = true;
+  }
+  escalateToManualIntervention(cardId, escalationReason, opts);
+  return {
+    suppressed: true,
+    escalated: true,
+    fingerprint: fingerprint,
+    baseFingerprint: next.base_fingerprint
+  };
 }
 
 // ── Helper: Find canonical PR info for card via pr_tracking ──
@@ -355,6 +483,7 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.log.info("[ci-recovery] Head SHA changed for card " + cardId + " — resetting recovery state");
     agentdesk.kv.set("ci:" + cardId + ":retry_count", "0", 86400);
     agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
+    noteCiLoopReset(cardId, currentSha, "head_sha_changed");
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha, "wait-ci", null);
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
@@ -429,6 +558,20 @@ function processWaitingCard(cardId, blockedReason) {
   // ── CI passed ──
   if (run.conclusion === "success") {
     agentdesk.log.info("[ci-recovery] CI passed for card " + cardId + " (run " + runId + ")");
+    replaceCiLoopState(cardId, {
+      status: "success",
+      action: "ci_passed",
+      fingerprint: ciLoopFingerprint(cardId, currentSha || run.headSha || pr.sha, runId, "success"),
+      base_fingerprint: ciLoopBaseFingerprint(cardId, currentSha || run.headSha || pr.sha, runId),
+      classification: "success",
+      run_id: String(runId),
+      head_sha: currentSha || run.headSha || pr.sha || null,
+      suppress_count: 0,
+      last_reason: "success",
+      last_seen_at: loopGuardNowIso(),
+      escalation_reason: null,
+      escalated_at: null
+    });
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "merge", null);
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
@@ -447,6 +590,9 @@ function processWaitingCard(cardId, blockedReason) {
 
   // ── CI failed — classify and recover ──
   var classification = classifyFailure(runId, repo, run.conclusion);
+  var effectiveHeadSha = currentSha || run.headSha || pr.sha || null;
+  var baseFingerprint = ciLoopBaseFingerprint(cardId, effectiveHeadSha, runId);
+  var failureFingerprint = ciLoopFingerprint(cardId, effectiveHeadSha, runId, classification.type);
   agentdesk.log.info("[ci-recovery] Card " + cardId + " run " + runId + " classified as: " + classification.type + " (" + classification.reason + ")");
 
   if (classification.type === "retryable_transient") {
@@ -468,6 +614,20 @@ function processWaitingCard(cardId, blockedReason) {
       }
 
       agentdesk.kv.set("ci:" + cardId + ":retry_count", String(retryCount + 1), 86400);
+      replaceCiLoopState(cardId, {
+        status: "active",
+        action: "rerun_requested",
+        fingerprint: failureFingerprint,
+        base_fingerprint: baseFingerprint,
+        classification: classification.type,
+        run_id: String(runId),
+        head_sha: effectiveHeadSha,
+        suppress_count: 0,
+        last_reason: classification.reason,
+        last_seen_at: loopGuardNowIso(),
+        escalation_reason: null,
+        escalated_at: null
+      });
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'ci:rerunning' WHERE id = ?",
         [cardId]
@@ -482,6 +642,20 @@ function processWaitingCard(cardId, blockedReason) {
     }
 
   } else if (classification.type === "code_failure") {
+    var suppression = maybeSuppressDuplicateCodeFailure(
+      cardId,
+      repo,
+      pr,
+      branch,
+      effectiveHeadSha,
+      runId,
+      classification,
+      blockedReason
+    );
+    if (suppression.suppressed) {
+      return;
+    }
+
     // Create rework dispatch to assigned agent
     var cards = agentdesk.db.query(
       "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
@@ -542,6 +716,22 @@ function processWaitingCard(cardId, blockedReason) {
 
     // Move card back to in_progress for rework
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI code failure: " + classification.reason);
+    replaceCiLoopState(cardId, {
+      status: "active",
+      action: "rework_dispatched",
+      fingerprint: suppression.fingerprint,
+      base_fingerprint: suppression.baseFingerprint,
+      classification: classification.type,
+      run_id: String(runId),
+      head_sha: effectiveHeadSha,
+      suppress_count: 0,
+      last_reason: classification.reason,
+      last_seen_at: loopGuardNowIso(),
+      blocked_reason: "ci:rework",
+      first_seen_at: loopGuardNowIso(),
+      escalation_reason: null,
+      escalated_at: null
+    });
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = 'ci:rework' WHERE id = ?",
       [cardId]
@@ -558,12 +748,40 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.kv.delete("ci:" + cardId + ":retry_count");
 
   } else if (classification.type === "manual_intervention") {
+    replaceCiLoopState(cardId, {
+      status: "escalated",
+      action: "manual_intervention",
+      fingerprint: failureFingerprint,
+      base_fingerprint: baseFingerprint,
+      classification: classification.type,
+      run_id: String(runId),
+      head_sha: effectiveHeadSha,
+      suppress_count: 0,
+      last_reason: classification.reason,
+      last_seen_at: loopGuardNowIso(),
+      escalation_reason: classification.reason,
+      escalated_at: loopGuardNowIso()
+    });
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI manual intervention: " + classification.reason);
     escalateToManualDecision(cardId,
       "CI failure — manual intervention required for run " + runId + ": " + classification.reason);
 
   } else {
     // Final fallback — keep ambiguous as a last-resort bucket only.
+    replaceCiLoopState(cardId, {
+      status: "escalated",
+      action: "manual_intervention",
+      fingerprint: failureFingerprint,
+      base_fingerprint: baseFingerprint,
+      classification: classification.type,
+      run_id: String(runId),
+      head_sha: effectiveHeadSha,
+      suppress_count: 0,
+      last_reason: classification.reason,
+      last_seen_at: loopGuardNowIso(),
+      escalation_reason: classification.reason,
+      escalated_at: loopGuardNowIso()
+    });
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI failure ambiguous: " + classification.reason);
     escalateToManualDecision(cardId,
       "CI failure — ambiguous classification for run " + runId + ": " + classification.reason);
