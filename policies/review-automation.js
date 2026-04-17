@@ -582,34 +582,62 @@ function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSh
 // Returns a structured result:
 //   { status: "dispatched" }                      — create-pr dispatch queued
 //   { status: "noop",  reason: "<code>" }         — no PR needed (safe-to-terminal)
-//   { status: "error", reason: "<code>: <msg>" }  — could not create PR / missing metadata
+//   { status: "error", reason: "<code>: <msg>" }  — expected to PR but couldn't
 //
-// Callers MUST distinguish noop from error. `noop` is safe to move to terminal
-// (there is nothing to PR). `error` means PR creation was expected but failed
-// due to missing metadata or a dispatch exception — the card must stay visible
-// (blocked_reason = 'pr:create_failed:...') so it is not silently lost from
-// ci-recovery / merge-automation.
+// Semantics:
+//   - "noop" means there is nothing meaningful to PR: noop_verification review,
+//     or the card carries no completed work target / no repo association.
+//     These cases correspond to cards that never had an implementation worth
+//     shipping; callers can safely move them to terminal.
+//   - "error" means we have enough evidence that a PR was expected (work target
+//     present, agent + repo resolvable) but the final step broke — typically
+//     the `agentdesk.dispatch.create` throw, or a surprising metadata gap on
+//     an already-tracked worktree. On dispatch failure the helper upserts
+//     pr_tracking with last_error so merge-automation.processTrackedMergeQueue
+//     has a row to retry; callers should mark the card terminal + blocked
+//     (via markPrCreateFailed) so the retry loop picks it up.
 function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   if (noopVerification) {
     agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
     return { status: "noop", reason: "noop_verification" };
   }
 
+  // No completed work dispatch → nothing to PR. This is how tests and
+  // review-only cards reach review pass without an implementation; it is
+  // not a failure, so callers should terminal the card.
   var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
-  if (!latestWorkTarget) return { status: "error", reason: "no_work_target" };
+  if (!latestWorkTarget) return { status: "noop", reason: "no_work_target" };
 
   var prCardInfo = agentdesk.db.query(
     "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
     [cardId]
   );
-  if (prCardInfo.length === 0 || !prCardInfo[0].assigned_agent_id) {
-    return { status: "error", reason: "missing_agent" };
-  }
+  // Card metadata is incomplete in a way that rules out a PR entirely.
+  // These are "nothing to PR" cases rather than failures.
+  if (prCardInfo.length === 0) return { status: "noop", reason: "card_missing" };
+  if (!prCardInfo[0].assigned_agent_id) return { status: "noop", reason: "no_agent" };
 
   var agentId = prCardInfo[0].assigned_agent_id;
   var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
-  if (!repoId) return { status: "error", reason: "missing_repo" };
-  if (!latestWorkTarget.branch) return { status: "error", reason: "missing_branch" };
+  if (!repoId) return { status: "noop", reason: "no_repo" };
+
+  // We have a work target AND a repo, so a PR was expected. From here on,
+  // inability to dispatch is a genuine error that the retry loop should see.
+  if (!latestWorkTarget.branch) {
+    // Seed pr_tracking with whatever we have so the retry loop can try again
+    // once the branch recovers (e.g. worktree re-discovered).
+    upsertPrTracking(
+      cardId,
+      repoId,
+      latestWorkTarget.worktree_path,
+      null,
+      null,
+      latestWorkTarget.head_sha,
+      "create-pr",
+      "missing_branch_at_handoff"
+    );
+    return { status: "error", reason: "missing_branch" };
+  }
 
   upsertPrTracking(
     cardId,
@@ -654,18 +682,24 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   }
 }
 
-// #701: Shared helper to mark a card as 'PR creation failed' without losing
-// it to terminal. Preserves card status (it stays in the current
-// in-progress/deploying state), sets a structured blocked_reason so humans
-// and escalation policies can see it, and leaves pipeline_stage_id alone
-// (callers are expected to have cleared it before/after as appropriate).
+// #701: Shared helper for PR-handoff errors. Moves the card to its
+// configured terminal state AND stamps blocked_reason='pr:create_failed:...'
+// so (a) merge-automation.processTrackedMergeQueue can retry the row (the
+// retry loop requires terminal status), (b) the failure is visible on the
+// kanban instead of being silently swallowed, and (c) humans / escalation
+// policies can surface it. For genuine dispatch failures the helper
+// upserts pr_tracking with last_error before returning error, so the
+// retry loop has a row to find.
 function markPrCreateFailed(cardId, reason) {
   var blockedReason = "pr:create_failed:" + (reason || "unknown");
+  var cfg = agentdesk.pipeline.resolveForCard(cardId);
+  var terminalState = agentdesk.pipeline.terminalState(cfg);
   agentdesk.db.execute(
     "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
     [blockedReason, cardId]
   );
-  agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " — staying visible for recovery");
+  agentdesk.kanban.setStatus(cardId, terminalState, true);
+  agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " and moved to " + terminalState + " so merge-automation retry can pick it up");
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
@@ -798,19 +832,24 @@ function processVerdict(cardId, verdict, result, options) {
         // entirely — there is no dev-deploy / e2e-test to create the PR later.
         // Safe relative to ci-recovery: the pipeline stage is cleared in the
         // same statement above, so the card has no active deploy ownership.
-        // Legacy behavior: if create-pr can't run for ANY reason (noop,
-        // missing metadata, dispatch failure), fall through to terminal.
-        // Unlike the deploy-pipeline "all stages complete" branch, there was
-        // no pipeline run here — missing metadata just means "nothing to PR".
+        // All 3 outcomes go terminal so merge-automation.processTrackedMergeQueue
+        // can retry `state='create-pr'` rows (it requires terminal status);
+        // errors additionally stamp blocked_reason='pr:create_failed:...'
+        // for visibility.
         var prResultNoRs = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
         prDispatched = (prResultNoRs.status === "dispatched");
-        if (!prDispatched) {
+        if (prResultNoRs.status === "dispatched") {
+          agentdesk.log.info(
+            "[review] Card " + cardId + " skipping pipeline stages (no .rs changes) — create-pr dispatched, awaiting CI/merge"
+          );
+        } else if (prResultNoRs.status === "error") {
+          markPrCreateFailed(cardId, prResultNoRs.reason);
+        } else {
           agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
+          agentdesk.log.info(
+            "[review] Card " + cardId + " skipping pipeline stages (no .rs changes) → " + reviewPassTarget
+          );
         }
-        agentdesk.log.info(
-          "[review] Card " + cardId + " skipping pipeline stages (no .rs changes)" +
-          (prDispatched ? " — create-pr dispatched, awaiting CI/merge" : " → " + reviewPassTarget)
-        );
       } else {
         // Assign pipeline stage to card
         agentdesk.db.execute(
@@ -844,10 +883,12 @@ function processVerdict(cardId, verdict, result, options) {
             );
             // #701: e2e skipped via DoD gate — same reasoning as the no_rs_changes
             // branch: the pipeline is cleared, so it's safe to seed pr_tracking.
-            // Legacy behavior preserved: non-dispatched → terminal.
+            // noop → terminal; error → markPrCreateFailed (visible + retriable).
             var prResultE2eSkip = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
             prDispatched = (prResultE2eSkip.status === "dispatched");
-            if (!prDispatched) {
+            if (prResultE2eSkip.status === "error") {
+              markPrCreateFailed(cardId, prResultE2eSkip.reason);
+            } else if (prResultE2eSkip.status === "noop") {
               var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
               var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
               agentdesk.kanban.setStatus(cardId, skipTerminal, true);
@@ -908,16 +949,18 @@ function processVerdict(cardId, verdict, result, options) {
 
       // #198/#211/#701: PR creation for the no-pipeline case (and for cards
       // that have completed all configured pipeline stages at review time).
-      // Legacy behavior preserved: non-dispatched → terminal. The
-      // "pipeline succeeded but PR couldn't seed" anomaly is handled by
-      // deploy-pipeline.js's completion branch, not here.
+      // noop → terminal (legacy behavior: no work / no repo / no agent =
+      // nothing to PR). error → markPrCreateFailed (terminal + blocked_reason
+      // so the card is visible AND merge-automation can retry).
       var prResultNoStages = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
       prDispatched = (prResultNoStages.status === "dispatched");
-      if (!prDispatched) {
+      if (prResultNoStages.status === "dispatched") {
+        agentdesk.log.info("[review] Card " + cardId + " passed review — create-pr dispatched, awaiting CI/merge");
+      } else if (prResultNoStages.status === "error") {
+        markPrCreateFailed(cardId, prResultNoStages.reason);
+      } else {
         agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
-      } else {
-        agentdesk.log.info("[review] Card " + cardId + " passed review — create-pr dispatched, awaiting CI/merge");
       }
     }
 

@@ -185,21 +185,20 @@ function advancePipelineStage(cardId) {
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
-        // #701: pipeline exhausted — hand off to PR/CI flow before terminal.
-        // attemptCreatePr returns { status, reason? } — we must distinguish
-        // "dispatched" (await CI), "noop" (safe-to-terminal), and "error"
-        // (metadata missing / dispatch failed — keep visible, don't drop).
+        // #701: pipeline exhausted — hand off to PR/CI flow.
+        // dispatched → await; noop → terminal; error → markPrCreateFailed
+        // (terminal + blocked_reason so merge-automation can retry).
         var skipPrResult = (agentdesk.reviewAutomation && typeof agentdesk.reviewAutomation.attemptCreatePr === "function")
           ? agentdesk.reviewAutomation.attemptCreatePr(cardId)
           : { status: "error", reason: "review_automation_missing" };
         if (skipPrResult.status === "dispatched") {
           agentdesk.log.info("[deploy-pipeline] Card " + cardId + " e2e-skip — create-pr dispatched, awaiting CI/merge");
-        } else if (skipPrResult.status === "noop") {
+        } else if (skipPrResult.status === "error") {
+          agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
+        } else {
           var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
           var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
           agentdesk.kanban.setStatus(cardId, skipTerminal);
-        } else {
-          agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
         }
         return;
       }
@@ -228,11 +227,12 @@ function advancePipelineStage(cardId) {
     //
     // attemptCreatePr returns { status, reason? }:
     //   "dispatched" → create-pr queued; wait for CI/merge (do not terminal).
-    //   "noop"       → nothing to PR (noop_verification); safe to terminal.
-    //   "error"      → missing metadata or dispatch failure; mark card
-    //                  pr:create_failed and KEEP it visible — dropping to
-    //                  terminal here would silently lose pipeline-complete
-    //                  work from ci-recovery / merge-automation.
+    //   "noop"       → nothing to PR (noop_verification / no work target /
+    //                  no repo); safe to terminal.
+    //   "error"      → PR was expected but dispatch failed (or metadata
+    //                  surprise on a tracked worktree). markPrCreateFailed
+    //                  moves the card terminal + blocked_reason so the
+    //                  merge-automation retry loop can recover it.
     agentdesk.db.execute(
       "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]
@@ -242,14 +242,14 @@ function advancePipelineStage(cardId) {
       : { status: "error", reason: "review_automation_missing" };
     if (prResult.status === "dispatched") {
       agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
-    } else if (prResult.status === "noop") {
+    } else if (prResult.status === "error") {
+      agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
+      agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline but PR creation failed: " + prResult.reason);
+    } else {
       var cfg = agentdesk.pipeline.resolveForCard(cardId);
       var terminalState = agentdesk.pipeline.terminalState(cfg);
       agentdesk.kanban.setStatus(cardId, terminalState);
       agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState + " (no PR needed)");
-    } else {
-      agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
-      agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline but PR creation failed: " + prResult.reason);
     }
   }
 }
