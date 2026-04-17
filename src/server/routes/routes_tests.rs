@@ -4669,6 +4669,45 @@ async fn force_transition_succeeds_with_correct_channel() {
 }
 
 #[tokio::test]
+async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configured() {
+    let _lock = env_lock();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_card_with_status(&db, "card-ft4", "requested");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.kanban.manager_channel_id = Some("pmd-chan-123".to_string());
+    let config_path = config_dir.path().join("agentdesk.yaml");
+    crate::config::save_to_path(&config_path, &config).unwrap();
+    let _config_guard = EnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-ft4/force-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "wrong-channel")
+                .body(Body::from(r#"{"status":"done"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "force-transition requires PMD channel authorization"
+    );
+}
+
+#[tokio::test]
 async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_up() {
     crate::pipeline::ensure_loaded();
     let (repo, _repo_override) = setup_test_repo();

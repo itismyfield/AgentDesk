@@ -2188,6 +2188,22 @@ pub(super) fn require_explicit_bearer_token(
         }
     }
 
+    if let Some(expected_channel_id) = config
+        .kanban
+        .manager_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let provided_channel_id = trimmed_header_value(headers, "x-channel-id");
+        if provided_channel_id != Some(expected_channel_id) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": format!("{operation} requires PMD channel authorization")})),
+            ));
+        }
+    }
+
     Ok(())
 }
 
