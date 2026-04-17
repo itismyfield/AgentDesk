@@ -116,27 +116,112 @@ _kickstart_launchd_job_if_needed() {
   return 1
 }
 
+_health_json_has_jq() {
+  command -v jq >/dev/null 2>&1
+}
+
+_health_json_compact() {
+  printf '%s' "$1" | tr -d '\n'
+}
+
+_health_json_get_string_field() {
+  local health_json="$1"
+  local key="$2"
+  local match
+
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -r ".$key // empty" 2>/dev/null
+    return
+  fi
+
+  match=$(
+    _health_json_compact "$health_json" \
+      | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+      | head -n 1 \
+      || true
+  )
+  [ -n "$match" ] || return 0
+  printf '%s' "$match" | sed -E 's/^[^:]*:[[:space:]]*"//; s/"$//'
+}
+
+_health_json_get_string_array_csv() {
+  local health_json="$1"
+  local key="$2"
+  local match
+
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -r "(.${key} // []) | join(\",\")" 2>/dev/null
+    return
+  fi
+
+  match=$(
+    _health_json_compact "$health_json" \
+      | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\\[[^]]*\\]" \
+      | head -n 1 \
+      || true
+  )
+  [ -n "$match" ] || return 0
+
+  printf '%s' "$match" \
+    | sed -E 's/^[^[]*\[//; s/\]$//; s/"[[:space:]]*,[[:space:]]*"/,/g; s/^"//; s/"$//'
+}
+
+_health_json_field_is_true() {
+  local health_json="$1"
+  local key="$2"
+
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e ".$key == true" >/dev/null 2>&1
+    return
+  fi
+
+  _health_json_compact "$health_json" \
+    | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}])"
+}
+
 _health_json_status() {
   local health_json="$1"
-  [ -n "$health_json" ] || return 1
-  printf '%s' "$health_json" | jq -r '.status // empty' 2>/dev/null
+  _health_json_get_string_field "$health_json" "status"
 }
 
 _health_json_reasons() {
   local health_json="$1"
-  [ -n "$health_json" ] || return 1
-  printf '%s' "$health_json" | jq -r '(.degraded_reasons // []) | join(",")' 2>/dev/null
+  _health_json_get_string_array_csv "$health_json" "degraded_reasons"
 }
 
 _health_json_reconcile_only() {
   local health_json="$1"
+  local reasons_csv reason
   [ -n "$health_json" ] || return 1
-  printf '%s' "$health_json" | jq -e '
-    .status == "degraded"
-    and (.db == true)
-    and ((.degraded_reasons // []) | length > 0)
-    and all((.degraded_reasons // [])[]; test("^provider:[^:]+:reconcile_in_progress$"))
-  ' >/dev/null 2>&1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      .status == "degraded"
+      and (.db == true)
+      and ((.degraded_reasons // []) | length > 0)
+      and all((.degraded_reasons // [])[]; test("^provider:[^:]+:reconcile_in_progress$"))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
+
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  [ -n "$reasons_csv" ] || return 1
+
+  while IFS=, read -r reason; do
+    [ -n "$reason" ] || return 1
+    [[ "$reason" =~ ^provider:[^:]+:reconcile_in_progress$ ]] || return 1
+  done <<< "$reasons_csv"
+
+  return 0
 }
 
 health_json_is_ready() {
@@ -145,13 +230,13 @@ health_json_is_ready() {
   local allow_reconcile_degraded="${3:-1}"
 
   [ -n "$health_json" ] || return 1
-  printf '%s' "$health_json" | jq -e '.db == true' >/dev/null 2>&1 || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
 
   if [ "$require_dashboard" = "1" ]; then
-    printf '%s' "$health_json" | jq -e '.dashboard == true' >/dev/null 2>&1 || return 1
+    _health_json_field_is_true "$health_json" "dashboard" || return 1
   fi
 
-  if printf '%s' "$health_json" | jq -e '.status == "healthy"' >/dev/null 2>&1; then
+  if [ "$(_health_json_status "$health_json")" = "healthy" ]; then
     return 0
   fi
 

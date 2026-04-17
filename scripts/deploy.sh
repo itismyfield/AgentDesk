@@ -10,7 +10,11 @@
 #   5. Smoke test (health check)
 #
 # Usage:
-#   ./scripts/deploy.sh [--skip-dashboard] [--skip-build]
+#   ./scripts/deploy.sh [--skip-dashboard] [--skip-build] \
+#     [--codesign-mode=auto|developer-id|adhoc|skip] \
+#     [--codesign-identity="Developer ID Application: ..."]
+#   If no codesign identity is provided, the first available Developer ID
+#   identity will be used automatically when needed.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -31,17 +35,280 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
 SKIP_BUILD=false
 SKIP_DASHBOARD=false
+CODESIGN_MODE="${AGENTDESK_CODESIGN_MODE:-auto}"
+CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-}"
+CODESIGN_IDENTIFIER="${AGENTDESK_CODESIGN_IDENTIFIER:-com.itismyfield.agentdesk}"
+RAW_CODESIGN_MODE="$CODESIGN_MODE"
+RESOLVED_CODESIGN_MODE=""
+RESOLVED_CODESIGN_IDENTITY=""
 
 for arg in "$@"; do
   case "$arg" in
     --skip-build)     SKIP_BUILD=true ;;
     --skip-dashboard) SKIP_DASHBOARD=true ;;
+    --codesign-mode=*) CODESIGN_MODE="${arg#*=}"; RAW_CODESIGN_MODE="$CODESIGN_MODE" ;;
+    --codesign-identity=*) CODESIGN_IDENTITY="${arg#*=}" ;;
   esac
 done
 
 info()  { printf "\033[1;34m[deploy]\033[0m %s\n" "$*"; }
 ok()    { printf "\033[1;32m[deploy]\033[0m %s\n" "$*"; }
-fail()  { printf "\033[1;31m[deploy]\033[0m %s\n" "$*"; exit 1; }
+error() { printf "\033[1;31m[deploy]\033[0m %s\n" "$*" >&2; }
+fail()  { error "$*"; exit 1; }
+
+normalize_codesign_mode() {
+  local raw_mode="${1:-}"
+  raw_mode="$(printf '%s' "$raw_mode" | tr '[:upper:]' '[:lower:]')"
+  case "$raw_mode" in
+    auto|"")
+      printf 'auto\n'
+      ;;
+    developer-id|developer_id|developerid|developer)
+      printf 'developer-id\n'
+      ;;
+    adhoc|ad-hoc|ad_hoc)
+      printf 'adhoc\n'
+      ;;
+    skip|none|preserve|existing)
+      printf 'skip\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+codesign_identity_available() {
+  local identity="$1"
+  if [ "$OS" != "darwin" ] || [ -z "$identity" ]; then
+    return 1
+  fi
+
+  security find-identity -v -p codesigning 2>/dev/null | grep -F -- "$identity" >/dev/null
+}
+
+find_first_developer_id_identity() {
+  local identity
+  if [ "$OS" != "darwin" ]; then
+    return 1
+  fi
+
+  identity="$(
+    security find-identity -v -p codesigning 2>/dev/null |
+      sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' |
+      head -n 1
+  )"
+
+  [ -n "$identity" ] || return 1
+  printf '%s\n' "$identity"
+}
+
+resolve_developer_id_identity() {
+  if [ "$OS" != "darwin" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
+    return 1
+  fi
+
+  if [ -n "$CODESIGN_IDENTITY" ]; then
+    codesign_identity_available "$CODESIGN_IDENTITY" || return 1
+    printf '%s\n' "$CODESIGN_IDENTITY"
+    return 0
+  fi
+
+  find_first_developer_id_identity
+}
+
+resolve_macos_codesign_mode() {
+  RESOLVED_CODESIGN_MODE=""
+  RESOLVED_CODESIGN_IDENTITY=""
+  case "$CODESIGN_MODE" in
+    developer-id)
+      RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity)" || return 1
+      RESOLVED_CODESIGN_MODE="developer-id"
+      ;;
+    adhoc|skip)
+      RESOLVED_CODESIGN_MODE="$CODESIGN_MODE"
+      ;;
+    auto)
+      if [ "$CODESIGN_IDENTITY" = "-" ]; then
+        RESOLVED_CODESIGN_MODE="adhoc"
+      elif [ -n "$CODESIGN_IDENTITY" ]; then
+        RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity)" || return 1
+        RESOLVED_CODESIGN_MODE="developer-id"
+      elif RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
+        RESOLVED_CODESIGN_MODE="developer-id"
+      else
+        RESOLVED_CODESIGN_MODE="adhoc"
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+binary_has_valid_codesign() {
+  local path="$1"
+  if [ "$OS" != "darwin" ] || [ ! -f "$path" ]; then
+    return 1
+  fi
+
+  codesign -v "$path" >/dev/null 2>&1
+}
+
+detect_binary_signature_mode() {
+  local path="$1" info
+  if [ "$OS" != "darwin" ] || [ ! -f "$path" ]; then
+    printf 'unsigned\n'
+    return 0
+  fi
+
+  if ! info="$(codesign -dv --verbose=4 "$path" 2>&1)"; then
+    printf 'unsigned\n'
+    return 0
+  fi
+
+  if printf '%s\n' "$info" | grep -F 'Signature=adhoc' >/dev/null; then
+    printf 'adhoc\n'
+  elif printf '%s\n' "$info" | grep -F 'Authority=Developer ID Application:' >/dev/null; then
+    printf 'developer-id\n'
+  elif binary_has_valid_codesign "$path"; then
+    printf 'signed\n'
+  else
+    printf 'unsigned\n'
+  fi
+}
+
+codesign_binary() {
+  local mode="$1"
+  local target="$2"
+  if [ "$OS" != "darwin" ]; then
+    return 0
+  fi
+
+  case "$mode" in
+    developer-id)
+      [ -n "$RESOLVED_CODESIGN_IDENTITY" ] || {
+        error "Developer ID signing requested but no usable identity was resolved"
+        return 1
+      }
+      codesign_identity_available "$RESOLVED_CODESIGN_IDENTITY" \
+        || {
+          error "Developer ID identity not found in keychain: $RESOLVED_CODESIGN_IDENTITY"
+          return 1
+        }
+      info "Signing $target with Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
+      codesign \
+        -s "$RESOLVED_CODESIGN_IDENTITY" \
+        --options runtime \
+        --identifier "$CODESIGN_IDENTIFIER" \
+        --force \
+        "$target" || {
+          error "Developer ID codesign failed — aborting"
+          return 1
+        }
+      codesign -v "$target" 2>/dev/null \
+        || {
+          error "Developer ID codesign verification failed — aborting"
+          return 1
+        }
+      ;;
+    adhoc)
+      info "Signing $target with ad-hoc identity"
+      codesign \
+        -s - \
+        --identifier "$CODESIGN_IDENTIFIER" \
+        --force \
+        "$target" || {
+          error "Ad-hoc codesign failed — aborting"
+          return 1
+        }
+      codesign -v "$target" 2>/dev/null \
+        || {
+          error "Ad-hoc codesign verification failed — aborting"
+          return 1
+        }
+      ;;
+    *)
+      error "Unsupported codesign mode: $mode"
+      return 1
+      ;;
+  esac
+}
+
+preserve_previous_signature_state_if_needed() {
+  local previous_binary="$1"
+  local previous_mode
+
+  if [ "$OS" != "darwin" ]; then
+    return 0
+  fi
+
+  if binary_has_valid_codesign "$REAL_BIN"; then
+    info "Copied binary already has a valid code signature; leaving it unchanged"
+    return 0
+  fi
+
+  if [ -z "$previous_binary" ] || [ ! -f "$previous_binary" ]; then
+    info "No previous signature state found; leaving $REAL_BIN unsigned"
+    return 0
+  fi
+
+  previous_mode="$(detect_binary_signature_mode "$previous_binary")"
+  case "$previous_mode" in
+    adhoc)
+      info "Previous install used ad-hoc signing; preserving that mode"
+      codesign_binary adhoc "$REAL_BIN"
+      ;;
+    developer-id)
+      if RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
+        info "Previous install used Developer ID signing; preserving that mode"
+        codesign_binary developer-id "$REAL_BIN"
+      else
+        error "Previous install used Developer ID signing, but no usable Developer ID identity is available to preserve it. Provide --codesign-identity or use --codesign-mode=adhoc."
+        return 1
+      fi
+      ;;
+    signed)
+      error "Previous install used a non-standard code signature that cannot be preserved automatically. Use an explicit --codesign-mode."
+      return 1
+      ;;
+    unsigned)
+      info "Previous install was unsigned; leaving $REAL_BIN unsigned"
+      ;;
+  esac
+}
+
+codesign_real_binary_if_needed() {
+  local resolved_mode="$1"
+
+  if [ "$OS" != "darwin" ]; then
+    return 0
+  fi
+
+  case "$resolved_mode" in
+    developer-id)
+      codesign_binary developer-id "$REAL_BIN"
+      ;;
+    adhoc)
+      codesign_binary adhoc "$REAL_BIN"
+      ;;
+    skip)
+      preserve_previous_signature_state_if_needed "${BACKUP_REAL:-}"
+      ;;
+    *)
+      error "Unsupported resolved codesign mode: $resolved_mode"
+      return 1
+      ;;
+  esac
+}
+
+if ! CODESIGN_MODE="$(normalize_codesign_mode "$CODESIGN_MODE")"; then
+  fail "Unsupported --codesign-mode: $RAW_CODESIGN_MODE"
+fi
+
+if [ "$CODESIGN_IDENTITY" = "-" ] && [ "$CODESIGN_MODE" = "developer-id" ]; then
+  fail "Developer ID mode cannot use '-' identity; use --codesign-mode=adhoc instead"
+fi
 
 BACKUP_WRAPPER=""
 BACKUP_REAL=""
@@ -74,27 +341,58 @@ print_recent_macos_binary_logs() {
 }
 
 write_wrapper_script() {
-  cat > "$WRAPPER_BIN" <<EOF
+  local tmp_wrapper
+  tmp_wrapper="$(mktemp "$WRAPPER_BIN.new.XXXXXX")"
+  cat > "$tmp_wrapper" <<EOF
 #!/bin/bash
 exec "$REAL_BIN" "\$@"
 EOF
-  chmod +x "$WRAPPER_BIN"
+  chmod +x "$tmp_wrapper"
+  mv -f "$tmp_wrapper" "$WRAPPER_BIN"
+}
+
+install_file_atomically() {
+  local src="$1"
+  local dest="$2"
+  local mode="${3:-755}"
+  local tmp_dest
+
+  tmp_dest="$(mktemp "$dest.new.XXXXXX")"
+  cp "$src" "$tmp_dest"
+  chmod "$mode" "$tmp_dest"
+  mv -f "$tmp_dest" "$dest"
 }
 
 restore_previous_install() {
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
-    cp "$BACKUP_WRAPPER" "$WRAPPER_BIN"
-    chmod +x "$WRAPPER_BIN"
+    install_file_atomically "$BACKUP_WRAPPER" "$WRAPPER_BIN" 755
   else
     rm -f "$WRAPPER_BIN"
   fi
 
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
-    cp "$BACKUP_REAL" "$REAL_BIN"
-    chmod +x "$REAL_BIN"
+    install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755
   else
     rm -f "$REAL_BIN"
   fi
+}
+
+restore_previous_install_and_fail() {
+  local message="$1"
+  local restore_message="${2:-Restored previous install after failed binary update}"
+  local restore_status
+
+  set +e
+  restore_previous_install
+  restore_status=$?
+  set -e
+
+  if [ "$restore_status" -eq 0 ]; then
+    ok "$restore_message"
+    fail "$message"
+  fi
+
+  fail "$message (previous install restore also failed)"
 }
 
 run_installed_binary_self_check() {
@@ -127,10 +425,9 @@ run_installed_binary_self_check() {
   rm -f "$stdout_file" "$stderr_file"
   print_recent_macos_binary_logs
 
-  restore_previous_install
-  ok "Restored previous install after failed self-check"
-
-  fail "Installed binary self-check failed for $WRAPPER_BIN"
+  restore_previous_install_and_fail \
+    "Installed binary self-check failed for $WRAPPER_BIN" \
+    "Restored previous install after failed self-check"
 }
 
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
@@ -168,15 +465,25 @@ if [ -e "$REAL_BIN" ]; then
   BACKUP_REAL="$(mktemp "$LIBEXEC_DIR/agentdesk.real.backup.XXXXXX")"
   cp "$REAL_BIN" "$BACKUP_REAL"
 fi
-cp "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN"
-chmod +x "$REAL_BIN"
+install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
 if [ "$OS" = "darwin" ]; then
-  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$REAL_BIN" 2>/dev/null || true
-  if ! codesign -v "$REAL_BIN" 2>/dev/null; then
-    fail "Codesign verification failed — aborting"
+  resolve_macos_codesign_mode \
+    || restore_previous_install_and_fail \
+      "Could not resolve macOS codesign mode from: $CODESIGN_MODE" \
+      "Restored previous install after failed codesign resolution"
+  info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
+  if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
+    info "Resolved Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
   fi
+  codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE" \
+    || restore_previous_install_and_fail \
+      "Failed to apply macOS code signature using mode: $RESOLVED_CODESIGN_MODE" \
+      "Restored previous install after failed codesign step"
 fi
-write_wrapper_script
+write_wrapper_script \
+  || restore_previous_install_and_fail \
+    "Failed to update binary wrapper at $WRAPPER_BIN" \
+    "Restored previous install after failed wrapper update"
 ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
 run_installed_binary_self_check
 rm -f "$BIN_DIR/agentdesk-real"
@@ -190,6 +497,12 @@ if [ -d "$PROJECT_DIR/dashboard/dist" ]; then
   mkdir -p "$AD_HOME/dashboard"
   rsync -a --delete "$PROJECT_DIR/dashboard/dist/" "$AD_HOME/dashboard/dist/"
   ok "Dashboard: $AD_HOME/dashboard/dist/"
+fi
+
+if [ -d "$PROJECT_DIR/policies" ]; then
+  mkdir -p "$AD_HOME/policies"
+  rsync -a --delete "$PROJECT_DIR/policies/" "$AD_HOME/policies/"
+  ok "Policies: $AD_HOME/policies/"
 fi
 
 if [ -d "$PROJECT_DIR/skills" ]; then
@@ -271,6 +584,7 @@ info "Restarting service..."
 
 restart_launchd() {
   local PLIST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+  local attempt max_attempts=5
   if [ ! -f "$PLIST" ]; then
     info "Plist not installed — skipping restart"
     return
@@ -280,7 +594,20 @@ restart_launchd() {
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   sleep 1
 
-  # Load
+  # Load with retry because launchd can briefly report
+  # "operation already in progress" immediately after bootout.
+  for attempt in $(seq 1 "$max_attempts"); do
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1; then
+      _kickstart_launchd_job_if_needed "$LABEL" || true
+      ok "Service restarted via launchd"
+      return
+    fi
+
+    info "  launchd bootstrap attempt $attempt/$max_attempts failed — retrying"
+    sleep 1
+  done
+
+  # Surface the real launchctl error on the final attempt.
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "Service restarted via launchd"
 }
@@ -298,25 +625,10 @@ esac
 
 # ── Step 5: Smoke test ────────────────────────────────────────────────────────
 info "Waiting for health check (port $HEALTH_PORT)..."
-
-RETRIES=10
-DELAY=2
-HEALTHY=false
-
-for i in $(seq 1 $RETRIES); do
-  sleep "$DELAY"
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${ADK_DEFAULT_LOOPBACK}:$HEALTH_PORT/api/health" 2>/dev/null || echo "000")
-  if [ "$HTTP_CODE" = "200" ]; then
-    HEALTHY=true
-    break
-  fi
-  info "  Attempt $i/$RETRIES — HTTP $HTTP_CODE"
-done
-
-if [ "$HEALTHY" = true ]; then
-  ok "Health check passed (HTTP 200 on :$HEALTH_PORT/api/health)"
+if wait_for_http_service_health "$LABEL" "$HEALTH_PORT" 10 2 0 1; then
+  ok "Health check passed on :$HEALTH_PORT/api/health"
 else
-  fail "Health check failed after $RETRIES attempts. Check logs:"
+  fail "Health check failed after waiting for :$HEALTH_PORT/api/health. Check logs:"
   echo "  $AD_HOME/logs/dcserver.stdout.log"
   echo "  $AD_HOME/logs/dcserver.stderr.log"
 fi

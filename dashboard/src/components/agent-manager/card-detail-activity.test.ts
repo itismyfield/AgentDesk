@@ -6,6 +6,7 @@ import {
 } from "./card-detail-activity";
 
 const tr = (_ko: string, en: string) => en;
+const trKo = (ko: string, _en: string) => ko;
 
 describe("card-detail-activity helpers", () => {
   it("keeps multi-line dispatch summaries readable", () => {
@@ -34,6 +35,18 @@ describe("card-detail-activity helpers", () => {
       ),
     ).toEqual({
       text: "PM requested rework: Handle the retry edge case",
+      tone: "warn",
+    });
+  });
+
+  it("keeps warning tone under Korean translations", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({ pm_decision: "rework", comment: "재시도 엣지 케이스를 처리" }),
+        trKo,
+      ),
+    ).toEqual({
+      text: "PM 재작업 요청: 재시도 엣지 케이스를 처리",
       tone: "warn",
     });
   });

@@ -567,6 +567,16 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_worktree_session(db: &db::Db, session_key: &str, cwd: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, cwd, last_heartbeat) \
+             VALUES (?1, 'agent-1', 'codex', 'working', ?2, datetime('now'))",
+            rusqlite::params![session_key, cwd],
+        )
+        .unwrap();
+    }
+
     fn set_kv(db: &db::Db, key: &str, value: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -1263,10 +1273,8 @@ mod tests {
 
         #[cfg(windows)]
         {
-            let gh_cmd_path = dir.path().join("gh.cmd");
             let gh_ps1_path = dir.path().join("gh.ps1");
-            let (wrapper, script) = build_mock_gh_script(replies);
-            fs::write(&gh_cmd_path, wrapper).unwrap();
+            let (_wrapper, script) = build_mock_gh_script(replies);
             fs::write(&gh_ps1_path, script).unwrap();
 
             let old_path = std::env::var_os("PATH");
@@ -1281,7 +1289,7 @@ mod tests {
             };
             unsafe {
                 std::env::set_var("PATH", joined);
-                std::env::set_var("AGENTDESK_GH_PATH", &gh_cmd_path);
+                std::env::set_var("AGENTDESK_GH_PATH", &gh_ps1_path);
             }
 
             return MockGhEnv {
@@ -2151,47 +2159,98 @@ mod tests {
         // The two concurrent activate calls must collectively dispatch exactly once.
         // Check via DB rather than response counts — under heavy contention a thread
         // may observe the reservation without its count being reflected in the JSON
-        // response (the entry was already claimed by the other thread).
-        kanban::drain_hook_side_effects(&db, &engine);
+        // response (the entry was already claimed by the other thread). On Windows
+        // the surviving dispatch can become visible a little later than the hook
+        // drain call, so poll briefly for the stabilized row set.
+        let mut dispatch_count = 0;
+        let mut entry_status = String::new();
+        let mut card_status = String::new();
+        let mut latest_dispatch_id: Option<String> = None;
+        let mut dispatch_status: Option<String> = None;
+        let mut entry_dispatch_id: Option<String> = None;
 
-        let conn = db.lock().unwrap();
-        let dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-concurrent'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let entry_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let (card_status, latest_dispatch_id): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-concurrent'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        let dispatch_status: Option<String> =
-            latest_dispatch_id.as_deref().and_then(|dispatch_id| {
-                conn.query_row(
-                    "SELECT status FROM task_dispatches WHERE id = ?1",
-                    [dispatch_id],
-                    |row| row.get(0),
+        for attempt in 0..20 {
+            kanban::drain_hook_side_effects(&db, &engine);
+
+            let (
+                observed_dispatch_count,
+                observed_entry_status,
+                observed_card_status,
+                observed_latest_dispatch_id,
+                observed_dispatch_status,
+                observed_entry_dispatch_id,
+            ) = {
+                let conn = db.lock().unwrap();
+                let observed_dispatch_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-concurrent'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let observed_entry_status: String = conn
+                    .query_row(
+                        "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let (observed_card_status, observed_latest_dispatch_id): (String, Option<String>) =
+                    conn.query_row(
+                        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-concurrent'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                let observed_dispatch_status =
+                    observed_latest_dispatch_id
+                        .as_deref()
+                        .and_then(|dispatch_id| {
+                            conn.query_row(
+                                "SELECT status FROM task_dispatches WHERE id = ?1",
+                                [dispatch_id],
+                                |row| row.get(0),
+                            )
+                            .ok()
+                        });
+                let observed_entry_dispatch_id: Option<String> = conn
+                    .query_row(
+                        "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (
+                    observed_dispatch_count,
+                    observed_entry_status,
+                    observed_card_status,
+                    observed_latest_dispatch_id,
+                    observed_dispatch_status,
+                    observed_entry_dispatch_id,
                 )
-                .ok()
-            });
-        let entry_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+            };
+
+            dispatch_count = observed_dispatch_count;
+            entry_status = observed_entry_status;
+            card_status = observed_card_status;
+            latest_dispatch_id = observed_latest_dispatch_id;
+            dispatch_status = observed_dispatch_status;
+            entry_dispatch_id = observed_entry_dispatch_id;
+
+            if dispatch_count == 1
+                && card_status == "in_progress"
+                && dispatch_status.as_deref() == Some("pending")
+                && entry_status == "dispatched"
+                && entry_dispatch_id == latest_dispatch_id
+            {
+                break;
+            }
+
+            if attempt < 19 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
         assert_eq!(dispatch_count, 1, "only one dispatch row must be created");
         assert_eq!(
             card_status, "in_progress",
@@ -6203,6 +6262,7 @@ mod tests {
             "wt/card-211-direct",
             &feature_commit,
         );
+        seed_worktree_session(&db, "session-211-direct", worktree_path.to_str().unwrap());
 
         engine
             .try_fire_hook_by_name(
@@ -6331,6 +6391,11 @@ mod tests {
             "wt/card-211-push-rejected",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-push-rejected",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6457,6 +6522,11 @@ mod tests {
             worktree_path.to_str().unwrap(),
             "wt/card-211-pr-always",
             &feature_commit,
+        );
+        seed_worktree_session(
+            &db,
+            "session-211-pr-always",
+            worktree_path.to_str().unwrap(),
         );
 
         engine
@@ -6617,6 +6687,11 @@ mod tests {
             "wt/card-211-pr-approved",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-pr-approved",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6744,6 +6819,11 @@ mod tests {
             "wt/card-211-rebase-conflict",
             &feature_commit,
         );
+        seed_worktree_session(
+            &db,
+            "session-211-rebase-conflict",
+            worktree_path.to_str().unwrap(),
+        );
 
         engine
             .try_fire_hook_by_name(
@@ -6857,6 +6937,7 @@ mod tests {
             "wt/card-211-conflict",
             &feature_commit,
         );
+        seed_worktree_session(&db, "session-211-conflict", worktree_path.to_str().unwrap());
 
         engine
             .try_fire_hook_by_name(
@@ -6949,6 +7030,11 @@ mod tests {
             worktree_path.to_str().unwrap(),
             "wt/card-211-create-pr-retry",
             &feature_commit,
+        );
+        seed_worktree_session(
+            &db,
+            "session-211-create-pr-retry",
+            worktree_path.to_str().unwrap(),
         );
         seed_pr_tracking(
             &db,
@@ -7345,6 +7431,109 @@ mod tests {
         assert!(
             !log.contains("run rerun 6901"),
             "dashboard failures must go to rework, not rerun"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_690_code_failure_does_not_redispatch_same_run_after_rework_cycle() {
+        let repo = tempfile::tempdir().unwrap();
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-dashboard-loop",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-loop"),
+                stdout: r#"[{"databaseId":6910,"status":"completed","conclusion":"failure","headSha":"sha-dashboard-loop","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"Script checks","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "generated docs are stale; rerun scripts/generate_inventory_docs.py",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-loop", "review", "test/repo", 696, None);
+        seed_completed_review_dispatch(&db, "review-690-loop-pass", "card-690-loop", "pass");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-loop'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-loop",
+            "test/repo",
+            Some(repo.path().to_str().unwrap()),
+            "wt/card-690-loop",
+            Some(696),
+            Some("sha-dashboard-loop"),
+            "wait-ci",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(count_dispatches_by_type(&db, "card-690-loop", "rework"), 1);
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-loop", "rework"),
+            1,
+            "first CI failure should create exactly one active rework dispatch"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE task_dispatches \
+                 SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') \
+                 WHERE kanban_card_id = 'card-690-loop' AND dispatch_type = 'rework'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards \
+                 SET status = 'review', blocked_reason = NULL, updated_at = datetime('now') \
+                 WHERE id = 'card-690-loop'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            count_dispatches_by_type(&db, "card-690-loop", "rework"),
+            1,
+            "same completed CI run must not spawn another rework dispatch without a new head SHA"
+        );
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-loop", "rework"),
+            0,
+            "rework dispatch should stay completed until a new CI run appears"
+        );
+        assert!(
+            !gh_log(&gh).contains("run rerun 6910"),
+            "same failed CI run should be deduped rather than rerun or redispatched"
         );
     }
 

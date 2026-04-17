@@ -75,7 +75,11 @@ fn persist_bot_auth_to_yaml_checked(
         return Ok(());
     };
 
-    config.discord.owner_id = settings.owner_user_id;
+    // Keep the onboarding-configured owner stable; runtime settings should only
+    // fill the owner when the YAML is still unset.
+    if config.discord.owner_id.is_none() {
+        config.discord.owner_id = settings.owner_user_id;
+    }
 
     if let Some(bot) = config.discord.bots.get_mut(&bot_name) {
         bot.provider = Some(settings.provider.as_str().to_string());

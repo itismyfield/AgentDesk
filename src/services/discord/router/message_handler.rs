@@ -1,5 +1,9 @@
 use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
+#[cfg(test)]
+use super::control_intent::{
+    build_control_intent_system_reminder, detect_natural_language_control_intent,
+};
 use crate::services::memory::{
     RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
     resolve_memory_session_id,
@@ -2970,6 +2974,9 @@ fn resolve_session_id_for_current_turn(
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
+    use super::super::control_intent::{
+        build_control_intent_system_reminder, detect_natural_language_control_intent,
+    };
     use super::*;
     use crate::services::memory::RecallResponse;
     use crate::ui::ai_screen::{HistoryItem, HistoryType};
