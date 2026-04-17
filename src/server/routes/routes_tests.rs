@@ -257,6 +257,48 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
 }
 
 #[tokio::test]
+async fn discord_control_endpoints_require_auth_token_on_non_loopback_host() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn discord_control_endpoints_allow_loopback_without_auth_token() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.host = "127.0.0.1".to_string();
+    let app = test_api_router_with_config(db, engine, config, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn public_domain_router_wraps_plain_server_errors_in_app_error_json() {
     let db = test_db();
     let engine = test_engine(&db);
