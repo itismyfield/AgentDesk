@@ -283,6 +283,8 @@ async fn repeated_findings_after_approach_change_creates_session_reset_rework_di
     let context_json: serde_json::Value =
         serde_json::from_str(context.as_deref().expect("rework context should exist")).unwrap();
     assert_eq!(context_json["force_new_session"], true);
+    assert_eq!(context_json["reset_provider_state"], true);
+    assert_eq!(context_json["recreate_tmux"], false);
 
     let (review_state, session_reset_round): (String, Option<i64>) = conn
         .query_row(

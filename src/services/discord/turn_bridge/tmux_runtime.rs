@@ -3,19 +3,31 @@ use crate::services::provider::CancelToken;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TmuxCleanupPolicy {
+    PreserveSession,
+    CleanupSession {
+        termination_reason_code: Option<&'static str>,
+    },
+}
+
 pub(in crate::services::discord) fn cancel_active_token(
     token: &Arc<CancelToken>,
-    cleanup_tmux: bool,
+    cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
-) {
+) -> bool {
     token.cancelled.store(true, Ordering::Relaxed);
+    let mut termination_recorded = false;
 
     let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     if let Some(pid) = child_pid {
         crate::services::process::kill_pid_tree(pid);
     }
 
-    if cleanup_tmux {
+    if let TmuxCleanupPolicy::CleanupSession {
+        termination_reason_code,
+    } = cleanup_policy
+    {
         if child_pid.is_some() {
             if let Some(name) = token
                 .tmux_session
@@ -33,14 +45,17 @@ pub(in crate::services::discord) fn cancel_active_token(
                             })
                             .unwrap_or(false);
                     if !is_unified {
-                        crate::services::termination_audit::record_termination_for_tmux(
-                            &name,
-                            None,
-                            "turn_bridge",
-                            "explicit_cancel",
-                            Some(&format!("explicit cleanup via {reason}")),
-                            None,
-                        );
+                        if let Some(reason_code) = termination_reason_code {
+                            crate::services::termination_audit::record_termination_for_tmux(
+                                &name,
+                                None,
+                                "turn_bridge",
+                                reason_code,
+                                Some(&format!("explicit cleanup via {reason}")),
+                                None,
+                            );
+                            termination_recorded = true;
+                        }
                         record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
                         crate::services::platform::tmux::kill_session(&name);
                     }
@@ -63,6 +78,8 @@ pub(in crate::services::discord) fn cancel_active_token(
             token.cancel_with_tmux_cleanup();
         }
     }
+
+    termination_recorded
 }
 
 #[cfg(unix)]

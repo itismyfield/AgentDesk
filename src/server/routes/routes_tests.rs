@@ -913,7 +913,7 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
 
 #[tokio::test]
 #[ignore = "requires tmux"]
-async fn stop_agent_turn_force_kills_matching_tmux_session() {
+async fn stop_agent_turn_preserves_matching_tmux_session() {
     let _env_lock = env_lock();
     Command::new("tmux")
         .arg("-V")
@@ -1015,11 +1015,11 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "stopped");
-    assert_eq!(json["tmux_killed"], true);
+    assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["lifecycle_path"], "direct-fallback");
     assert!(
-        !tmux_still_alive,
-        "tmux session should be gone after /turn/stop"
+        tmux_still_alive,
+        "tmux session should stay alive after /turn/stop"
     );
     assert!(
         !inflight_path.exists(),
@@ -1120,7 +1120,7 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
 
 #[tokio::test]
 #[ignore = "requires tmux"]
-async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
+async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
     let _env_lock = env_lock();
     Command::new("tmux")
         .arg("-V")
@@ -1202,12 +1202,12 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["tmux_session"], tmux_name);
-    assert_eq!(json["tmux_killed"], true);
+    assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["lifecycle_path"], "direct-fallback");
     assert_eq!(json["dispatch_cancelled"], "dispatch-turn-cancel");
     assert!(
-        !tmux_still_alive,
-        "tmux session should be gone after /turns/{{channel_id}}/cancel"
+        tmux_still_alive,
+        "tmux session should remain after /turns/{{channel_id}}/cancel"
     );
 
     let conn = db.lock().unwrap();

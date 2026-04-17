@@ -151,7 +151,19 @@ pub(in crate::services::discord) async fn cmd_cc(
                         return Ok(());
                     }
                     ctx.say("Stopping...").await?;
-                    cancel_active_token(&token, true, "/cc stop");
+                    cancel_active_token(
+                        &token,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                        "/cc stop",
+                    );
+                    super::control::notify_turn_stop(
+                        &ctx.serenity_context().http,
+                        &ctx.data().shared,
+                        &ctx.data().provider,
+                        channel_id,
+                        "/cc stop",
+                    )
+                    .await;
                     tracing::info!("  [{ts}] ■ Cancel signal sent");
                 }
                 None => {

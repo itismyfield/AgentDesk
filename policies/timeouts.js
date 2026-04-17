@@ -1353,7 +1353,7 @@ var timeouts = {
     }
   },
 
-  // ─── [O] Idle session TTL cleanup — idle 60분 tmux-backed 세션 force-kill ──
+  // ─── [O] Idle session TTL auto cleanup — idle 60분 tmux-backed 세션 정리 ──
   _section_O: function() {
     var apiPort = agentdesk.config.get("server_port");
     if (!apiPort) {
