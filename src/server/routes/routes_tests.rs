@@ -6660,6 +6660,54 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
+async fn auto_queue_dispatch_rejects_deploy_phases_when_auth_token_is_not_configured() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "project-agentdesk");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-dq-deploy-phase-reject",
+        7401,
+        "ready",
+        "project-agentdesk",
+    );
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [{"issues": [7401]}],
+                        "deploy_phases": [1],
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "deploy_phases requires server.auth_token to be configured"
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_dispatch_rejects_when_live_run_exists_without_force() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -7103,6 +7151,41 @@ async fn auto_queue_add_run_entry_rejects_non_active_runs() {
             .unwrap_or("")
             .contains("status=cancelled"),
         "inactive runs must be rejected with status details: {json}"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_update_run_rejects_deploy_phases_when_auth_token_is_not_configured() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/auto-queue/runs/run-does-not-matter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "deploy_phases": [2]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "deploy_phases requires server.auth_token to be configured"
     );
 }
 

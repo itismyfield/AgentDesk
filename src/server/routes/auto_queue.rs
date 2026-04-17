@@ -158,6 +158,16 @@ struct DependencyParseResult {
     signals: Vec<String>,
 }
 
+fn deploy_phase_api_enabled(state: &AppState) -> bool {
+    state
+        .config
+        .server
+        .auth_token
+        .as_deref()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn load_run_ids_with_status(
     conn: &rusqlite::Connection,
     statuses: &[&str],
@@ -4377,6 +4387,20 @@ pub async fn dispatch(
     State(state): State<AppState>,
     Json(body): Json<DispatchBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if body
+        .deploy_phases
+        .as_ref()
+        .is_some_and(|phases| !phases.is_empty())
+        && !deploy_phase_api_enabled(&state)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "deploy_phases requires server.auth_token to be configured"
+            })),
+        );
+    }
+
     let force = body.force.unwrap_or(false);
     let requested_entries = match normalize_dispatch_entries(&body) {
         Ok(entries) => entries,
@@ -5384,6 +5408,20 @@ pub async fn update_run(
     Path(id): Path<String>,
     Json(body): Json<UpdateRunBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if body
+        .deploy_phases
+        .as_ref()
+        .is_some_and(|phases| !phases.is_empty())
+        && !deploy_phase_api_enabled(&state)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "deploy_phases requires server.auth_token to be configured"
+            })),
+        );
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
