@@ -3,7 +3,6 @@ use super::settings::{
     load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
 };
 use super::*;
-use crate::github::dod::{DodItem, parse_dod_from_body, render_dod_markdown};
 use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
@@ -43,57 +42,6 @@ fn tool_output_efficiency_guidance() -> &'static str {
      - Prefer targeted queries over exhaustive dumps"
 }
 
-fn strip_dod_section(issue_body: &str) -> Option<String> {
-    let mut lines = Vec::new();
-    let mut in_dod_section = false;
-
-    for line in issue_body.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
-            let header = trimmed[3..].trim().to_lowercase();
-            if header == "dod" || header == "definition of done" {
-                in_dod_section = true;
-                continue;
-            }
-            if in_dod_section {
-                in_dod_section = false;
-            }
-        }
-
-        if in_dod_section {
-            continue;
-        }
-
-        lines.push(line);
-    }
-
-    let stripped = lines.join("\n").trim().to_string();
-    (!stripped.is_empty()).then_some(stripped)
-}
-
-fn deferred_dod_items(value: &serde_json::Value) -> Vec<DodItem> {
-    let verified: std::collections::HashSet<String> = value
-        .get("verified")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.as_str())
-        .map(str::to_string)
-        .collect();
-
-    value
-        .get("items")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.as_str())
-        .map(|text| DodItem {
-            text: text.to_string(),
-            checked: verified.contains(text),
-        })
-        .collect()
-}
-
 fn render_current_task_section(current_task: &CurrentTaskContext<'_>) -> Option<String> {
     let mut sections = Vec::new();
 
@@ -111,24 +59,9 @@ fn render_current_task_section(current_task: &CurrentTaskContext<'_>) -> Option<
     {
         sections.push(format!("GitHub URL: {url}"));
     }
-    if let Some(issue_body) = current_task.issue_body.and_then(strip_dod_section) {
-        sections.push(format!("Issue Body:\n{issue_body}"));
-    }
-
-    let dod_items = current_task
-        .deferred_dod
-        .map(deferred_dod_items)
-        .filter(|items| !items.is_empty())
-        .or_else(|| {
-            current_task
-                .issue_body
-                .map(parse_dod_from_body)
-                .filter(|items| !items.is_empty())
-        });
-
-    if let Some(dod_items) = dod_items {
-        sections.push(format!("DoD:\n{}", render_dod_markdown(&dod_items)));
-    }
+    // NOTE(security): issue_body/deferred_dod originate from GitHub issue content
+    // (attacker-controlled in our threat model). Do NOT inject those raw fields into
+    // the system prompt because they can introduce system-level prompt injection.
 
     (!sections.is_empty()).then(|| format!("[Current Task]\n{}", sections.join("\n\n")))
 }
@@ -921,8 +854,8 @@ mod tests {
         assert!(task_index > queued_index);
         assert!(prompt.contains("GitHub URL: https://github.com/itismyfield/AgentDesk/issues/570"));
         assert!(prompt.contains("Title: fix: prompt context"));
-        assert!(prompt.contains("- [x] ship tests"));
-        assert!(!prompt.contains("## DoD"));
+        assert!(!prompt.contains("Issue Body:"));
+        assert!(!prompt.contains("\nDoD:\n"));
     }
 
     #[test]
