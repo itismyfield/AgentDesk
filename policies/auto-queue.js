@@ -223,7 +223,8 @@ var autoQueue = {
   // ── Authoritative auto-queue continuation (#110, #140) ──────────────
   // This is the SINGLE path for done → next queued item.
   // Rust transition_status() already marks auto_queue_entries as 'done'
-  // before firing OnCardTerminal, so we don't re-mark here.
+  // before firing OnCardTerminal and now defers final run completion here so
+  // single-phase runs can still create a phase gate before they finish.
   // kanban-rules.js does NOT touch auto_queue_entries (removed in #110).
   // #140: Group-aware continuation — dispatches next entry in same group,
   //       and starts new groups when slots become available.

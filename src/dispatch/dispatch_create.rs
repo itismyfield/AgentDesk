@@ -245,10 +245,18 @@ fn create_dispatch_core_internal(
         )?
     } else {
         let mut base = serde_json::to_string(&context_with_session_strategy)?;
+        let phase_gate_sidecar = context_with_session_strategy
+            .get("phase_gate")
+            .and_then(|value| value.as_object())
+            .is_some();
         let worktree_target = if let Some((wt_path, wt_branch)) =
             dispatch_context_worktree_target(&context_with_session_strategy)?
         {
             Some((wt_path, wt_branch))
+        } else if phase_gate_sidecar {
+            // Phase-gate sidecars can operate on the recorded gate context alone.
+            // Do not fail dispatch creation just because a repo_dir mapping is absent.
+            None
         } else {
             resolve_card_worktree(db, kanban_card_id, Some(&context_with_session_strategy))?
                 .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))

@@ -1135,6 +1135,51 @@ mod tests {
     }
 
     #[test]
+    fn create_sidecar_phase_gate_skips_repo_lookup_without_explicit_worktree() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-phase-gate-repo", "done");
+        set_card_issue_number(&db, "card-phase-gate-repo", 685);
+        set_card_repo_id(&db, "card-phase-gate-repo", "test/repo");
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-phase-gate-repo",
+            "agent-1",
+            "phase-gate",
+            "Phase Gate Repo",
+            &json!({
+                "phase_gate": {
+                    "run_id": "run-sidecar-repo",
+                    "batch_phase": 0,
+                    "pass_verdict": "phase_gate_passed"
+                }
+            }),
+        )
+        .expect("phase gate sidecar should not require repo_dirs mapping");
+
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+        let conn = db.separate_conn().unwrap();
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert!(
+            context_json.get("worktree_path").is_none(),
+            "phase gate sidecar should not synthesize a repo-derived worktree path"
+        );
+        assert_eq!(
+            context_json["phase_gate"]["run_id"], "run-sidecar-repo",
+            "phase gate payload must remain intact"
+        );
+    }
+
+    #[test]
     fn create_dispatch_core_shares_invariants_with_create_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);

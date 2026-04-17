@@ -2663,7 +2663,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn scenario_6c_review_verdict_pass_closes_issue_and_completes_auto_queue_run() {
+    async fn scenario_6c_review_verdict_pass_closes_issue_and_creates_phase_gate_for_single_phase_run()
+     {
         let gh = install_mock_gh(&[MockGhReply {
             key: "issue:close",
             contains: Some("--repo test/repo"),
@@ -2741,6 +2742,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-s6c' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(conn);
 
         assert_eq!(card_status, "done");
@@ -2748,10 +2759,20 @@ mod tests {
             entry_status, "done",
             "pass verdict terminal transition must close the active auto-queue entry"
         );
+        let phase_gate_json =
+            phase_gate_state(&db, "run-s6c", 0).expect("single-phase run must persist gate state");
         assert_eq!(
-            run_status, "completed",
-            "pass verdict terminal transition must still fire OnCardTerminal auto-queue completion"
+            run_status, "paused",
+            "pass verdict terminal transition must pause for a single-phase gate"
         );
+        assert_eq!(
+            phase_gate_count, 1,
+            "pass verdict terminal transition must create a single-phase gate dispatch"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 0);
+        assert_eq!(phase_gate_json["next_phase"], serde_json::Value::Null);
+        assert_eq!(phase_gate_json["final_phase"], true);
 
         let log = gh_log(&gh);
         assert!(
@@ -2877,7 +2898,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn scenario_655_noop_review_pass_skips_create_pr_and_closes_issue() {
+    async fn scenario_655_noop_review_pass_skips_create_pr_and_creates_phase_gate() {
         let gh = install_mock_gh(&[MockGhReply {
             key: "issue:close",
             contains: Some("--repo test/repo"),
@@ -3003,6 +3024,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-655-pass' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(conn);
 
         assert_eq!(card_status, "done");
@@ -3014,10 +3045,20 @@ mod tests {
             entry_status, "done",
             "#655: noop verification pass must still close the active auto-queue entry"
         );
+        let phase_gate_json = phase_gate_state(&db, "run-655-pass", 0)
+            .expect("#655: single-phase noop pass must persist gate state");
         assert_eq!(
-            run_status, "completed",
-            "#655: noop verification pass must still complete the auto-queue run via terminal review flow"
+            run_status, "paused",
+            "#655: noop verification pass must pause the run for the single-phase gate"
         );
+        assert_eq!(
+            phase_gate_count, 1,
+            "#655: noop verification pass must create a phase-gate dispatch after review passes"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 0);
+        assert_eq!(phase_gate_json["next_phase"], serde_json::Value::Null);
+        assert_eq!(phase_gate_json["final_phase"], true);
 
         let log = gh_log(&gh);
         assert!(
@@ -4211,7 +4252,8 @@ mod tests {
     }
 
     #[test]
-    fn scenario_review_disabled_on_review_enter_closes_issue_and_completes_auto_queue_run() {
+    fn scenario_review_disabled_on_review_enter_closes_issue_and_creates_phase_gate_for_single_phase_run()
+     {
         let gh = install_mock_gh(&[MockGhReply {
             key: "issue:close",
             contains: Some("--repo test/repo"),
@@ -4261,6 +4303,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-review-disabled-gh' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let entry_status: String = conn
             .query_row(
                 "SELECT status FROM auto_queue_entries WHERE id = 'entry-review-disabled-gh'",
@@ -4274,10 +4326,20 @@ mod tests {
             entry_status, "done",
             "terminal review-disabled transition must close the active auto-queue entry"
         );
+        let phase_gate_json = phase_gate_state(&db, "run-review-disabled-gh", 0)
+            .expect("single-phase review-disabled run must persist gate state");
         assert_eq!(
-            run_status, "completed",
-            "review-disabled JS terminal path must still fire OnCardTerminal auto-queue completion"
+            run_status, "paused",
+            "review-disabled JS terminal path must pause the run for single-phase gate"
         );
+        assert_eq!(
+            phase_gate_count, 1,
+            "review-disabled single-phase terminal transition must create a phase-gate dispatch"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 0);
+        assert_eq!(phase_gate_json["next_phase"], serde_json::Value::Null);
+        assert_eq!(phase_gate_json["final_phase"], true);
 
         let log = gh_log(&gh);
         assert!(

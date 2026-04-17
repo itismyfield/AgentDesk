@@ -1824,7 +1824,9 @@ fn maybe_finalize_run_after_terminal_entry(
     run_id: &str,
     new_status: &str,
 ) -> rusqlite::Result<bool> {
-    if new_status == ENTRY_STATUS_DONE && distinct_batch_phase_count(conn, run_id) > 1 {
+    // `done` completion is finalized by the policy-side OnCardTerminal flow so it
+    // can always create or pass through a phase gate, even for single-phase runs.
+    if new_status == ENTRY_STATUS_DONE {
         return Ok(false);
     }
     if run_has_blocking_phase_gate(conn, run_id) {
@@ -1971,17 +1973,6 @@ fn completion_notify_targets_on_conn(
     targets.sort();
     targets.dedup();
     targets
-}
-
-fn distinct_batch_phase_count(conn: &Connection, run_id: &str) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(batch_phase, 0))
-         FROM auto_queue_entries
-         WHERE run_id = ?1",
-        [run_id],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
 }
 
 fn record_entry_transition_on_conn(
@@ -2282,7 +2273,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_transition_done_releases_slots_and_completes_run() {
+    fn entry_transition_done_defers_run_completion_until_policy_hook() {
         let conn = setup_conn();
         conn.execute(
             "INSERT INTO auto_queue_entries (
@@ -2333,7 +2324,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("run status");
-        assert_eq!(run_status, "completed");
+        assert_eq!(run_status, "active");
 
         let slot_run: Option<String> = conn
             .query_row(
@@ -2342,7 +2333,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("slot row");
-        assert!(slot_run.is_none());
+        assert_eq!(slot_run.as_deref(), Some("run-1"));
 
         let audit_rows: i64 = conn
             .query_row(
@@ -2353,16 +2344,13 @@ mod tests {
             .expect("audit count");
         assert_eq!(audit_rows, 2);
 
-        let (target, bot, content): (String, String, String) = conn
-            .query_row(
-                "SELECT target, bot, content FROM message_outbox ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("completion notify");
-        assert_eq!(target, "channel:123");
-        assert_eq!(bot, "notify");
-        assert!(content.contains("자동큐 완료: repo-1 / run run-1 / 1개"));
+        let outbox_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+            .expect("outbox count");
+        assert_eq!(
+            outbox_count, 0,
+            "done transition must wait for policy-side completion before notifying"
+        );
     }
 
     #[test]
@@ -3094,7 +3082,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_transition_rolls_back_when_slot_release_fails() {
+    fn terminal_transition_done_defers_slot_release_failures_until_policy_hook() {
         let conn = setup_conn();
         conn.execute_batch(
             "CREATE TRIGGER fail_slot_release
@@ -3125,15 +3113,14 @@ mod tests {
         )
         .expect("dispatch transition");
 
-        let error = update_entry_status_on_conn(
+        update_entry_status_on_conn(
             &conn,
             "entry-rollback",
             ENTRY_STATUS_DONE,
             "test_done_rollback",
             &EntryStatusUpdateOptions::default(),
         )
-        .expect_err("slot release failure must roll back the terminal transition");
-        assert!(matches!(error, EntryStatusUpdateError::Sql(_)));
+        .expect("done transition should defer slot release until policy hook");
 
         let (status, dispatch_id, completed_at): (String, Option<String>, Option<String>) = conn
             .query_row(
@@ -3144,9 +3131,9 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("entry row");
-        assert_eq!(status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(status, ENTRY_STATUS_DONE);
         assert_eq!(dispatch_id.as_deref(), Some("dispatch-rollback"));
-        assert!(completed_at.is_none());
+        assert!(completed_at.is_some());
 
         let run_status: String = conn
             .query_row(
@@ -3157,6 +3144,15 @@ mod tests {
             .expect("run status");
         assert_eq!(run_status, "active");
 
+        let slot_run: Option<String> = conn
+            .query_row(
+                "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("slot row");
+        assert_eq!(slot_run.as_deref(), Some("run-1"));
+
         let audit_rows: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = 'entry-rollback'",
@@ -3165,8 +3161,8 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(
-            audit_rows, 1,
-            "done transition audit must roll back together"
+            audit_rows, 2,
+            "done transition audit must still be recorded"
         );
     }
 
