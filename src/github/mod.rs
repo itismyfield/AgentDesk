@@ -33,6 +33,20 @@ pub(crate) trait GitHubAdapter: Send + Sync {
 #[derive(Debug, Default)]
 struct GhCliAdapter;
 
+#[cfg(windows)]
+fn is_powershell_script(path: &str) -> bool {
+    PathBuf::from(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("ps1"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_powershell_script(_path: &str) -> bool {
+    false
+}
+
 fn gh_path() -> Option<String> {
     if let Some(override_path) = std::env::var_os(GH_PATH_OVERRIDE_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(override_path).to_string_lossy().to_string());
@@ -46,14 +60,36 @@ fn gh_path() -> Option<String> {
 
 fn gh_command() -> Result<std::process::Command, String> {
     let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
-    let mut command = std::process::Command::new(&gh);
+    let mut command = if cfg!(windows) && is_powershell_script(&gh) {
+        let mut command = std::process::Command::new("pwsh");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&gh);
+        command
+    } else {
+        std::process::Command::new(&gh)
+    };
     apply_runtime_path(&mut command);
     Ok(command)
 }
 
 fn tokio_gh_command() -> Result<tokio::process::Command, String> {
     let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
-    let mut command = tokio::process::Command::new(&gh);
+    let mut command = if cfg!(windows) && is_powershell_script(&gh) {
+        let mut command = tokio::process::Command::new("pwsh");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&gh);
+        command
+    } else {
+        tokio::process::Command::new(&gh)
+    };
     if let Some(path) = crate::services::platform::merged_runtime_path() {
         command.env("PATH", path);
     }

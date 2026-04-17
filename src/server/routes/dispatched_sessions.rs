@@ -290,9 +290,11 @@ pub async fn hook_session(
                 .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
+    // /api/hook/session is intentionally auth-exempt, so never trust a client-supplied
+    // agent_id from this payload. Resolve ownership from session/channel/dispatch context only.
     let agent_id = resolve_session_agent_id(
         &conn,
-        body.agent_id.as_deref(),
+        None,
         Some(&body.session_key),
         body.name.as_deref(),
         thread_channel_id.as_deref(),
@@ -3081,20 +3083,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_session_accepts_explicit_agent_id_for_namespaced_session_key() {
+    async fn direct_session_ignores_explicit_agent_id_without_other_resolution_context() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState::test_state(db.clone(), engine);
-        let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
-        let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
+        let tmux_name = ProviderKind::Codex
+            .build_tmux_session_name("project-skillmanager-extremely-verbose-channel-cdx");
         let session_key = format!("codex/hash123/mac-mini:{tmux_name}");
 
         {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT INTO agents (id, name, discord_channel_alt)
-                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
-                [long_channel],
+                 VALUES ('project-spoofed', 'Spoofed Agent', 'spoofed-channel')",
+                [],
             )
             .unwrap();
         }
@@ -3103,7 +3105,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
-                agent_id: Some("project-skillmanager".to_string()),
+                agent_id: Some("project-spoofed".to_string()),
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
                 session_info: Some("explicit agent".to_string()),
@@ -3128,7 +3130,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
+        assert_eq!(agent_id, None);
     }
 
     #[tokio::test]

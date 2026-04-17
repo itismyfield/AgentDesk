@@ -89,6 +89,29 @@ struct MockGhOverride {
 }
 
 #[cfg(unix)]
+fn install_mock_gh_pr_tracking(
+    repo: &str,
+    branch: &str,
+    pr_number: i64,
+    head_sha: &str,
+) -> MockGhOverride {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_path = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nstate_file=\"$(dirname \"$0\")/created.flag\"\nif [ \"${{1-}}\" = \"--version\" ]; then\n  echo 'gh mock 1.0'\n  exit 0\nfi\nkey=\"${{1-}}:${{2-}}\"\nargs=\"$*\"\nif [ \"$key\" = 'pr:list' ] && printf '%s\\n' \"$args\" | grep -F -q -- '--repo {repo}' && printf '%s\\n' \"$args\" | grep -F -q -- '--head {branch}'; then\n  if [ -f \"$state_file\" ]; then\n    cat <<'JSON'\n[{{\"number\":{pr_number},\"headRefName\":\"{branch}\",\"headRefOid\":\"{head_sha}\"}}]\nJSON\n  else\n    echo '[]'\n  fi\n  exit 0\nfi\nif [ \"$key\" = 'pr:create' ] && printf '%s\\n' \"$args\" | grep -F -q -- '--repo {repo}' && printf '%s\\n' \"$args\" | grep -F -q -- '--head {branch}'; then\n  : > \"$state_file\"\n  echo 'https://github.com/{repo}/pull/{pr_number}'\n  exit 0\nfi\nif [ \"$key\" = 'pr:view' ] && [ \"${{3-}}\" = '{pr_number}' ] && printf '%s\\n' \"$args\" | grep -F -q -- '--repo {repo}' && printf '%s\\n' \"$args\" | grep -F -q -- '--json headRefOid' && printf '%s\\n' \"$args\" | grep -F -q -- '--jq .headRefOid'; then\n  echo '{head_sha}'\n  exit 0\nfi\necho 'gh mock: unexpected args: $*' >&2\nexit 1\n"
+    );
+    fs::write(&gh_path, script).unwrap();
+    let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh_path, perms).unwrap();
+    let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
+    MockGhOverride {
+        _dir: dir,
+        _env: env,
+    }
+}
+
+#[cfg(unix)]
 fn install_mock_gh_issue_view_closed(issue_number: i64, repo: &str) -> MockGhOverride {
     let dir = tempfile::tempdir().unwrap();
     let gh_path = dir.path().join("gh");
@@ -107,11 +130,31 @@ fn install_mock_gh_issue_view_closed(issue_number: i64, repo: &str) -> MockGhOve
 }
 
 #[cfg(windows)]
+fn install_mock_gh_pr_tracking(
+    repo: &str,
+    branch: &str,
+    pr_number: i64,
+    head_sha: &str,
+) -> MockGhOverride {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_path = dir.path().join("gh.ps1");
+    let script = format!(
+        "$stateFile = Join-Path $PSScriptRoot 'created.flag'\n$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'list' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--head {branch}')) {{\n  if (Test-Path $stateFile) {{\n@'\n[{{\"number\":{pr_number},\"headRefName\":\"{branch}\",\"headRefOid\":\"{head_sha}\"}}]\n'@ | Write-Output\n  }} else {{\n    '[]' | Write-Output\n  }}\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'pr' -and $args[1] -eq 'create' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--head {branch}')) {{\n  New-Item -ItemType File -Path $stateFile -Force | Out-Null\n  'https://github.com/{repo}/pull/{pr_number}' | Write-Output\n  exit 0\n}}\nif ($args.Count -ge 3 -and $args[0] -eq 'pr' -and $args[1] -eq 'view' -and $args[2] -eq '{pr_number}' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--json headRefOid') -and $joined.Contains('--jq .headRefOid')) {{\n  '{head_sha}' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
+    );
+    fs::write(&gh_path, script).unwrap();
+    let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
+    MockGhOverride {
+        _dir: dir,
+        _env: env,
+    }
+}
+
+#[cfg(windows)]
 fn install_mock_gh_issue_view_closed(issue_number: i64, repo: &str) -> MockGhOverride {
     let dir = tempfile::tempdir().unwrap();
-    let gh_path = dir.path().join("gh.cmd");
+    let gh_path = dir.path().join("gh.ps1");
     let script = format!(
-        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo gh mock 1.0\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"issue\" if \"%~2\"==\"view\" if \"%~3\"==\"{issue_number}\" (\r\n  echo %* | findstr /C:\"--repo {repo}\" /C:\"--json state\" /C:\"--jq .state\" >nul\r\n  if not errorlevel 1 (\r\n    echo CLOSED\r\n    exit /b 0\r\n  )\r\n)\r\necho gh mock: unexpected args: %* 1>&2\r\nexit /b 1\r\n"
+        "$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 3 -and $args[0] -eq 'issue' -and $args[1] -eq 'view' -and $args[2] -eq '{issue_number}' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--json state') -and $joined.Contains('--jq .state')) {{\n  'CLOSED' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
     );
     fs::write(&gh_path, script).unwrap();
     let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
@@ -133,6 +176,21 @@ fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn run_git_output(repo_dir: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 struct RepoDirOverride {
@@ -198,7 +256,7 @@ fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
 }
 
 #[tokio::test]
-async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
+async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
     let db = test_db();
     let engine = test_engine(&db);
     let mut config = crate::config::Config::default();
@@ -214,6 +272,8 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
                 "/hook/session",
                 axum::routing::post(|| async { StatusCode::CREATED }),
             )
+            .route("/send", axum::routing::post(|| async { StatusCode::OK }))
+            .route("/senddm", axum::routing::post(|| async { StatusCode::OK }))
             .route("/settings", axum::routing::get(|| async { StatusCode::OK })),
         state.clone(),
     )
@@ -245,6 +305,7 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
     assert_eq!(hook_response.status(), StatusCode::CREATED);
 
     let protected_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/settings")
@@ -254,6 +315,75 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
         .await
         .unwrap();
     assert_eq!(protected_response.status(), StatusCode::UNAUTHORIZED);
+
+    let send_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(send_response.status(), StatusCode::UNAUTHORIZED);
+
+    let senddm_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/senddm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(senddm_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn discord_control_endpoints_require_auth_token_on_non_loopback_host() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.host = "0.0.0.0".to_string();
+    let app = test_api_router_with_config(db, engine, config, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn discord_control_endpoints_allow_loopback_without_auth_token() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.host = "127.0.0.1".to_string();
+    let app = test_api_router_with_config(db, engine, config, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -1967,7 +2097,7 @@ async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-manual-backlog");
-    seed_repo(&db, "test-repo");
+    seed_repo(&db, "test/repo");
     ensure_auto_queue_tables(&db);
 
     let tmux_name = format!("manual-backlog-{}", uuid::Uuid::new_v4().simple());
@@ -4599,9 +4729,54 @@ async fn force_transition_succeeds_with_correct_channel() {
 }
 
 #[tokio::test]
-async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_up() {
+async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configured() {
+    let _lock = env_lock();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_card_with_status(&db, "card-ft4", "requested");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.kanban.manager_channel_id = Some("pmd-chan-123".to_string());
+    let config_path = config_dir.path().join("agentdesk.yaml");
+    crate::config::save_to_path(&config_path, &config).unwrap();
+    let _config_guard = EnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-ft4/force-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "wrong-channel")
+                .body(Body::from(r#"{"status":"done"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "force-transition requires PMD channel authorization"
+    );
+}
+
+#[tokio::test]
+async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_it_up() {
     crate::pipeline::ensure_loaded();
     let (repo, _repo_override) = setup_test_repo();
+    let _gh = install_mock_gh_pr_tracking(
+        "test/repo",
+        "wt/card-575-force",
+        905,
+        "feature-sha-575-force",
+    );
     let policy_dir = tempfile::tempdir().unwrap();
     let source_policies = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     for entry in std::fs::read_dir(&source_policies).unwrap() {
@@ -4674,13 +4849,14 @@ async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_u
             "fix: second force-transition merge target (#575)",
         ],
     );
+    let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
 
     let db = test_db();
     let mut config = crate::config::Config::default();
     config.policies.dir = policy_dir.path().to_path_buf();
     let engine = PolicyEngine::new(&config, db.clone()).unwrap();
     seed_agent(&db, "agent-ft-terminal");
-    seed_repo(&db, "test-repo");
+    seed_repo(&db, "test/repo");
     set_pmd_channel(&db, "pmd-chan-123");
 
     {
@@ -4690,7 +4866,7 @@ async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_u
                 id, title, status, priority, assigned_agent_id, repo_id,
                 github_issue_number, latest_dispatch_id, created_at, updated_at, started_at
             ) VALUES (
-                'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test-repo',
+                'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test/repo',
                 575, 'dispatch-ft-terminal', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
             )",
             [],
@@ -4714,6 +4890,16 @@ async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_u
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')",
             [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, cwd, active_dispatch_id, last_heartbeat, created_at
+            ) VALUES (
+                'session-ft-terminal', 'agent-ft-terminal', 'codex', 'working', ?1, 'dispatch-ft-terminal',
+                datetime('now', '-4 minutes'), datetime('now', '-4 minutes')
+            )",
+            [worktree_path.to_string_lossy().to_string()],
         )
         .unwrap();
     }
@@ -4769,48 +4955,125 @@ async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_u
         .unwrap_or((None, None))
     };
 
-    run_git(repo.path(), &["fetch", "origin", "main"]);
-    let merged_feature = Command::new("git")
-        .args(["show", "origin/main:feature.txt"])
+    run_git(
+        repo.path(),
+        &["fetch", "origin", "main", "wt/card-575-force"],
+    );
+    let merged = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &feature_commit,
+            "origin/main",
+        ])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    let pushed_feature = Command::new("git")
+        .args(["show", "origin/wt/card-575-force:feature.txt"])
         .current_dir(repo.path())
         .output()
         .unwrap();
-    let merged_proof = Command::new("git")
-        .args(["show", "origin/main:merge-proof.txt"])
+    let pushed_proof = Command::new("git")
+        .args(["show", "origin/wt/card-575-force:merge-proof.txt"])
         .current_dir(repo.path())
         .output()
         .unwrap();
     assert!(
-        merged_feature.status.success()
-            && merged_proof.status.success()
-            && String::from_utf8_lossy(&merged_feature.stdout) == "force transition merge\n"
-            && String::from_utf8_lossy(&merged_proof.stdout) == "second force transition merge\n",
-        "force-transition terminal path must still hand merge-automation a usable worktree target; pr_tracking={:?}",
+        !merged.success(),
+        "force-transition terminal path must not direct-merge into origin/main when PR+CI is required; pr_tracking={:?}",
+        merge_debug
+    );
+    assert!(
+        pushed_feature.status.success()
+            && pushed_proof.status.success()
+            && String::from_utf8_lossy(&pushed_feature.stdout) == "force transition merge\n"
+            && String::from_utf8_lossy(&pushed_proof.stdout) == "second force transition merge\n",
+        "force-transition terminal path must still push the tracked worktree branch for PR creation; pr_tracking={:?}",
         merge_debug
     );
 
-    let conn = db.lock().unwrap();
-    let (card_status, latest_dispatch_id): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ft-terminal'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    let dispatch_status: String = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let pr_tracking_state: Option<String> = conn
-        .query_row(
-            "SELECT state FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let mut card_status = String::new();
+    let mut latest_dispatch_id: Option<String> = None;
+    let mut blocked_reason: Option<String> = None;
+    let mut dispatch_status = String::new();
+    let mut pr_tracking_state: Option<String> = None;
+    let mut pr_tracking_pr_number: Option<i64> = None;
+    let mut pr_tracking_last_error: Option<String> = None;
+
+    let tracking_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (
+            observed_card_status,
+            observed_latest_dispatch_id,
+            observed_blocked_reason,
+            observed_dispatch_status,
+            observed_pr_tracking_state,
+            observed_pr_tracking_pr_number,
+            observed_pr_tracking_last_error,
+        ) = {
+            let conn = db.lock().unwrap();
+            let (observed_card_status, observed_latest_dispatch_id, observed_blocked_reason): (
+                String,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-ft-terminal'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            let observed_dispatch_status: String = conn
+                .query_row(
+                    "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let (
+                observed_pr_tracking_state,
+                observed_pr_tracking_pr_number,
+                observed_pr_tracking_last_error,
+            ): (Option<String>, Option<i64>, Option<String>) = conn
+                .query_row(
+                    "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap_or((None, None, None));
+            (
+                observed_card_status,
+                observed_latest_dispatch_id,
+                observed_blocked_reason,
+                observed_dispatch_status,
+                observed_pr_tracking_state,
+                observed_pr_tracking_pr_number,
+                observed_pr_tracking_last_error,
+            )
+        };
+
+        card_status = observed_card_status;
+        latest_dispatch_id = observed_latest_dispatch_id;
+        blocked_reason = observed_blocked_reason;
+        dispatch_status = observed_dispatch_status;
+        pr_tracking_state = observed_pr_tracking_state;
+        pr_tracking_pr_number = observed_pr_tracking_pr_number;
+        pr_tracking_last_error = observed_pr_tracking_last_error;
+
+        if pr_tracking_state.as_deref() == Some("wait-ci")
+            && pr_tracking_pr_number == Some(905)
+            && blocked_reason.as_deref() == Some("ci:waiting")
+        {
+            break;
+        }
+
+        if std::time::Instant::now() >= tracking_deadline {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     assert_eq!(card_status, "done");
     assert!(
@@ -4823,9 +5086,12 @@ async fn force_transition_to_done_merges_from_live_work_dispatch_and_cleans_it_u
     );
     assert_eq!(
         pr_tracking_state.as_deref(),
-        Some("closed"),
-        "direct merge success should close PR tracking even when the source dispatch never completed"
+        Some("wait-ci"),
+        "force-transition terminal cleanup should track the created PR and wait for CI"
     );
+    assert_eq!(pr_tracking_pr_number, Some(905));
+    assert_eq!(pr_tracking_last_error, None);
+    assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
 }
 
 #[tokio::test]
@@ -6590,6 +6856,54 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
+async fn auto_queue_dispatch_rejects_deploy_phases_when_auth_token_is_not_configured() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "project-agentdesk");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-dq-deploy-phase-reject",
+        7401,
+        "ready",
+        "project-agentdesk",
+    );
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [{"issues": [7401]}],
+                        "deploy_phases": [1],
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "deploy_phases requires server.auth_token to be configured"
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_dispatch_rejects_when_live_run_exists_without_force() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -7033,6 +7347,41 @@ async fn auto_queue_add_run_entry_rejects_non_active_runs() {
             .unwrap_or("")
             .contains("status=cancelled"),
         "inactive runs must be rejected with status details: {json}"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_update_run_rejects_deploy_phases_when_auth_token_is_not_configured() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/auto-queue/runs/run-does-not-matter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "deploy_phases": [2]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "deploy_phases requires server.auth_token to be configured"
     );
 }
 

@@ -19,6 +19,20 @@ struct DispatchOutboxStats {
     oldest_pending_age: i64,
 }
 
+fn discord_control_endpoints_allowed(config: &crate::config::Config) -> bool {
+    if config
+        .server
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|token| !token.is_empty())
+    {
+        return true;
+    }
+
+    matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
+}
+
 /// GET /api/health — combined DB + Discord provider health.
 /// When HealthRegistry is present, returns Discord provider status.
 /// Always includes DB status and dashboard availability.
@@ -125,6 +139,14 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
 
 /// POST /api/send — agent-to-agent native routing.
 pub async fn send_handler(State(state): State<AppState>, body: Bytes) -> Response {
+    if !discord_control_endpoints_allowed(&state.config) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
     let Some(ref registry) = state.health_registry else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -143,6 +165,14 @@ pub async fn send_handler(State(state): State<AppState>, body: Bytes) -> Respons
 
 /// POST /api/senddm — send a DM to a Discord user.
 pub async fn senddm_handler(State(state): State<AppState>, body: Bytes) -> Response {
+    if !discord_control_endpoints_allowed(&state.config) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
     let Some(ref registry) = state.health_registry else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

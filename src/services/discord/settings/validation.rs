@@ -112,10 +112,10 @@ pub(crate) fn validate_bot_channel_routing_with_provider_channel(
     provider_channel_name: Option<&str>,
     is_dm: bool,
 ) -> Result<(), BotChannelRoutingGuardFailure> {
-    let role_binding = resolve_role_binding(
-        allowlist_channel_id,
-        binding_channel_name.or(provider_channel_name),
-    );
+    // Always resolve role binding against the same channel identity used for
+    // allowlist checks (parent for threads). Do not allow live thread names to
+    // influence agent binding resolution.
+    let role_binding = resolve_role_binding(allowlist_channel_id, provider_channel_name);
 
     if !bot_settings_allow_channel(settings, allowlist_channel_id, is_dm) {
         return Err(BotChannelRoutingGuardFailure::ChannelNotAllowed);

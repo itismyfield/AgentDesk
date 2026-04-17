@@ -11,9 +11,6 @@ use super::{
     mailbox_clear_recovery_marker, mailbox_finish_turn,
 };
 use crate::db::Db;
-use crate::services::discord::dm_reply_store::{
-    delete_pending_dm_reply, register_pending_dm_reply,
-};
 use crate::services::provider::ProviderKind;
 
 /// Per-provider snapshot for the health response.
@@ -1409,10 +1406,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
 
 /// Handle POST /api/senddm — send a DM to a Discord user.
 /// Accepts JSON:
-/// {"user_id":"...", "content":"...", "bot":"announce|notify|claude|codex",
-///  "source_agent":"...", "channel_id":"...", "context":{...}, "ttl_seconds":86400}
-/// When `source_agent` is provided, the endpoint registers a pending DM reply
-/// before delivery and rolls it back if DM delivery fails.
+/// {"user_id":"...", "content":"...", "bot":"announce|notify|claude|codex"}
 pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static str, String) {
     let request = match parse_senddm_body(body) {
         Ok(request) => request,
@@ -1428,48 +1422,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
         Ok(h) => h,
         Err(resp) => return resp,
     };
-    let db = if request.reply_tracking.is_some() {
-        match reply_tracking_db(registry).await {
-            Some(db) => Some(db),
-            None => {
-                return (
-                    "500 Internal Server Error",
-                    r#"{"ok":false,"error":"reply tracking unavailable: no shared db handle"}"#
-                        .to_string(),
-                );
-            }
-        }
-    } else {
-        None
-    };
     let user_id_text = request.user_id.to_string();
-    let mut reply_tracking_id = None;
-    if let (Some(db), Some(tracking)) = (db.as_ref(), request.reply_tracking.as_ref()) {
-        match register_pending_dm_reply(
-            db,
-            &tracking.source_agent,
-            &user_id_text,
-            tracking.channel_id.as_deref(),
-            &tracking.context_json,
-            tracking.ttl_seconds,
-        ) {
-            Ok(id) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] [HTTP] senddm reply-tracking -> user={} agent={} (id={id})",
-                    request.user_id,
-                    tracking.source_agent
-                );
-                reply_tracking_id = Some(id);
-            }
-            Err(error) => {
-                return (
-                    "500 Internal Server Error",
-                    serde_json::json!({"ok": false, "error": error}).to_string(),
-                );
-            }
-        }
-    }
 
     use poise::serenity_prelude::{CreateMessage, UserId};
     let user_id = UserId::new(request.user_id);
@@ -1488,30 +1441,23 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
                         serde_json::json!({
                             "ok": true,
                             "user_id": user_id_text,
-                            "reply_tracking_id": reply_tracking_id,
                         })
                         .to_string(),
                     )
                 }
-                Err(e) => {
-                    rollback_reply_tracking(db.as_ref(), reply_tracking_id);
-                    (
-                        "500 Internal Server Error",
-                        format!(r#"{{"ok":false,"error":"DM send failed: {}"}}"#, e),
-                    )
-                }
+                Err(e) => (
+                    "500 Internal Server Error",
+                    format!(r#"{{"ok":false,"error":"DM send failed: {}"}}"#, e),
+                ),
             }
         }
-        Err(e) => {
-            rollback_reply_tracking(db.as_ref(), reply_tracking_id);
-            (
-                "500 Internal Server Error",
-                format!(
-                    r#"{{"ok":false,"error":"DM channel creation failed: {}"}}"#,
-                    e
-                ),
-            )
-        }
+        Err(e) => (
+            "500 Internal Server Error",
+            format!(
+                r#"{{"ok":false,"error":"DM channel creation failed: {}"}}"#,
+                e
+            ),
+        ),
     }
 }
 
@@ -1520,15 +1466,6 @@ struct SendDmRequest {
     user_id: u64,
     content: String,
     bot: String,
-    reply_tracking: Option<SendDmReplyTracking>,
-}
-
-#[derive(Debug, PartialEq)]
-struct SendDmReplyTracking {
-    source_agent: String,
-    channel_id: Option<String>,
-    context_json: String,
-    ttl_seconds: i64,
 }
 
 fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
@@ -1549,50 +1486,11 @@ fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
         .to_string();
     let bot = parsed["bot"].as_str().unwrap_or("announce").to_string();
 
-    let reply_tracking = parsed["source_agent"]
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|source_agent| SendDmReplyTracking {
-            source_agent: source_agent.to_string(),
-            channel_id: parsed["channel_id"]
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            context_json: {
-                let context_value = parsed
-                    .get("context")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                serde_json::to_string(&context_value).unwrap_or_else(|_| "{}".to_string())
-            },
-            ttl_seconds: parsed["ttl_seconds"].as_i64().unwrap_or(3600),
-        });
-
     Ok(SendDmRequest {
         user_id,
         content,
         bot,
-        reply_tracking,
     })
-}
-
-async fn reply_tracking_db(registry: &HealthRegistry) -> Option<Db> {
-    let providers = registry.providers.lock().await;
-    providers
-        .iter()
-        .find_map(|entry| entry.shared.db.as_ref().cloned())
-}
-
-fn rollback_reply_tracking(db: Option<&Db>, reply_tracking_id: Option<i64>) {
-    let (Some(db), Some(reply_id)) = (db, reply_tracking_id) else {
-        return;
-    };
-    if let Err(error) = delete_pending_dm_reply(db, reply_id) {
-        tracing::warn!("  [senddm] failed to roll back pending_dm_replies id={reply_id}: {error}");
-    }
 }
 
 /// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
@@ -1800,13 +1698,12 @@ mod tests {
                 user_id: 123,
                 content: "hello".to_string(),
                 bot: "claude".to_string(),
-                reply_tracking: None,
             }
         );
     }
 
     #[test]
-    fn test_parse_senddm_body_with_reply_tracking() {
+    fn test_parse_senddm_body_ignores_reply_tracking_fields() {
         let body = r#"{
             "user_id":"123",
             "content":"건강검진 요즘 했어?",
@@ -1818,28 +1715,8 @@ mod tests {
         }"#;
         let parsed = parse_senddm_body(body).expect("senddm body should parse");
         assert_eq!(parsed.user_id, 123);
+        assert_eq!(parsed.content, "건강검진 요즘 했어?");
         assert_eq!(parsed.bot, "claude");
-        let reply_tracking = parsed.reply_tracking.expect("reply tracking should exist");
-        assert_eq!(reply_tracking.source_agent, "family-counsel");
-        assert_eq!(
-            reply_tracking.channel_id.as_deref(),
-            Some("1473922824350601297")
-        );
-        assert_eq!(reply_tracking.ttl_seconds, 86_400);
-        assert!(reply_tracking.context_json.contains("health_checkup"));
-    }
-
-    #[test]
-    fn test_parse_senddm_body_with_reply_tracking_defaults_context_to_empty_object() {
-        let body = r#"{
-            "user_id":"123",
-            "content":"건강검진 요즘 했어?",
-            "source_agent":"family-counsel"
-        }"#;
-        let parsed = parse_senddm_body(body).expect("senddm body should parse");
-        let reply_tracking = parsed.reply_tracking.expect("reply tracking should exist");
-        assert_eq!(reply_tracking.context_json, "{}");
-        assert_eq!(reply_tracking.ttl_seconds, 3_600);
     }
 
     #[test]

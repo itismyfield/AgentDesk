@@ -697,19 +697,22 @@ fn build_user_message(
 }
 
 fn build_pm_message(
+    card_id: &str,
     summary: &CardEscalationSummary,
-    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: Option<&str>,
 ) -> String {
-    let mut lines = vec![format!("⚠️ [PM 결정 요청] {}", format_card_label(summary))];
+    let mut lines = vec![format!("⚠️ [PM 결정 요청] card_id: {card_id}")];
+    if let Some(issue_number) = summary.issue_number {
+        lines.push(format!("issue: #{issue_number}"));
+    }
     if let Some(note) = fallback_note {
         lines.push(format!("fallback: {note}"));
     }
     lines.push("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요.".to_string());
     compose_escalation_message(
         lines,
-        context,
+        None,
         vec![
             "사유:".to_string(),
             format_reason_lines(reasons),
@@ -1033,9 +1036,9 @@ async fn emit_escalation_with_base_url(
                                 &client,
                                 base_url,
                                 &announce_token,
+                                &card_id,
                                 &settings,
                                 &summary,
-                                context.as_ref(),
                                 &reasons,
                                 fallback_note,
                                 requested_mode,
@@ -1091,9 +1094,9 @@ async fn emit_escalation_with_base_url(
             &client,
             base_url,
             &announce_token,
+            &card_id,
             &settings,
             &summary,
-            context.as_ref(),
             &reasons,
             "owner routing unavailable",
             requested_mode,
@@ -1106,9 +1109,9 @@ async fn emit_escalation_with_base_url(
         &client,
         base_url,
         &announce_token,
+        &card_id,
         &settings,
         &summary,
-        context.as_ref(),
         &reasons,
         None,
         requested_mode,
@@ -1121,9 +1124,9 @@ async fn deliver_pm_fallback(
     client: &reqwest::Client,
     base_url: &str,
     announce_token: &str,
+    card_id: &str,
     settings: &EscalationSettings,
     summary: &CardEscalationSummary,
-    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: impl Into<Option<&'static str>>,
     requested_mode: EscalationMode,
@@ -1142,7 +1145,7 @@ async fn deliver_pm_fallback(
     };
     let pm_channel_id = pm_channel_id.to_string();
 
-    let message = build_pm_message(summary, context, reasons, fallback_note);
+    let message = build_pm_message(card_id, summary, reasons, fallback_note);
     match send_channel_message(client, base_url, announce_token, &pm_channel_id, &message).await {
         Ok(()) => (
             StatusCode::OK,
@@ -1346,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn build_pm_message_drops_low_priority_context_sections_to_fit_discord_limit() {
+    fn compose_escalation_message_drops_low_priority_context_sections_to_fit_discord_limit() {
         let summary = CardEscalationSummary {
             title: "Long card".to_string(),
             issue_number: Some(587),
@@ -1371,19 +1374,47 @@ mod tests {
             blocked_reason: Some("blocked ".repeat(60)),
         };
 
-        let message = build_pm_message(
-            &summary,
+        let message = compose_escalation_message(
+            vec![format!("⚠️ [에스컬레이션] {}", format_card_label(&summary))],
             Some(&context),
+            vec![
+                "사유:".to_string(),
+                format_reason_lines(&["manual escalation".to_string()]),
+                "선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string(),
+                "결정 API: `POST /api/pm-decision`".to_string(),
+            ],
+        );
+
+        assert!(message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT);
+        assert!(message.contains("⚠️ [에스컬레이션] #587 Long card"));
+        assert!(message.contains("사유:"));
+    }
+
+    #[test]
+    fn build_pm_message_includes_fallback_metadata() {
+        let summary = CardEscalationSummary {
+            title: "Long card".to_string(),
+            issue_number: Some(587),
+            assigned_agent_id: Some("project-agentdesk".to_string()),
+            description: Some("desc".to_string()),
+            status: "review".to_string(),
+            review_status: Some("dilemma_pending".to_string()),
+            blocked_reason: Some("blocked".to_string()),
+            dispatch_count: 4,
+            last_agent_id: Some("project-agentdesk".to_string()),
+        };
+
+        let message = build_pm_message(
+            "card-587",
+            &summary,
             &["manual escalation".to_string()],
             Some("owner routing unavailable"),
         );
 
         assert!(message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT);
-        assert!(message.contains("📋 이슈:"));
-        assert!(
-            !message.contains("⛔ 기존 차단 사유:"),
-            "lowest-priority section should be dropped first"
-        );
+        assert!(message.contains("card_id: card-587"));
+        assert!(message.contains("issue: #587"));
+        assert!(message.contains("fallback: owner routing unavailable"));
     }
 
     #[tokio::test]
@@ -1655,10 +1686,14 @@ mod tests {
         assert_eq!(body["delivery"], json!("pm_channel"));
         assert_eq!(body["fallback_note"], json!("owner routing unavailable"));
         let sent = &mock.sent_messages.lock().unwrap()[0];
-        assert!(sent.contains("📋 이슈: 오너 라우팅이 불가한 카드입니다."));
-        assert!(sent.contains("📊 진행: review/dilemma_pending"));
-        assert!(sent.contains("📝 최근 결과:"));
-        assert!(sent.contains("⛔ 기존 차단 사유: owner routing unavailable"));
+        assert!(sent.contains("⚠️ [PM 결정 요청] card_id: card-2"));
+        assert!(sent.contains("issue: #434"));
+        assert!(sent.contains("fallback: owner routing unavailable"));
+        assert!(sent.contains("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요."));
+        assert!(sent.contains("사유:"));
+        assert!(sent.contains("owner missing"));
+        assert!(sent.contains("선택지: `resume`, `rework`, `dismiss`, `requeue`"));
+        assert!(sent.contains("결정 API: `POST /api/pm-decision`"));
 
         server.abort();
     }

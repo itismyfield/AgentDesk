@@ -1188,6 +1188,25 @@ pub fn handle_dcserver(token: Option<String>) {
         // Health registry (shared across all providers, passed to axum server)
         let health_registry = std::sync::Arc::new(services::discord::health::HealthRegistry::new());
         health_registry.init_bot_tokens().await;
+        let launch_configs = services::discord::load_discord_bot_launch_configs();
+        let onboarding_mode =
+            should_run_http_only_onboarding(token.as_deref(), launch_configs.len());
+        if onboarding_mode
+            && ad_config
+                .server
+                .auth_token
+                .as_deref()
+                .map(str::is_empty)
+                .unwrap_or(true)
+        {
+            let loopback = config::loopback();
+            if ad_config.server.host != loopback {
+                eprintln!(
+                    "  ⚠ No auth token configured during onboarding; restricting HTTP server to loopback ({loopback})"
+                );
+                ad_config.server.host = loopback;
+            }
+        }
 
         // Initialize SQLite DB — clone handles for Discord bot before moving into HTTP server (#143)
         let mut discord_db: Option<crate::db::Db> = None;
@@ -1311,8 +1330,8 @@ pub fn handle_dcserver(token: Option<String>) {
                 .await;
             }
             None => {
-                let configs = services::discord::load_discord_bot_launch_configs();
-                if should_run_http_only_onboarding(token.as_deref(), configs.len()) {
+                let configs = launch_configs;
+                if onboarding_mode {
                     let settings_display = settings_path
                         .as_deref()
                         .map(|p| p.display().to_string())

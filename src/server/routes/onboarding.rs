@@ -145,6 +145,8 @@ impl OnboardingDraft {
                 "onboarding draft exceeds max provider statuses ({MAX_ONBOARDING_DRAFT_PROVIDER_STATUSES})"
             ));
         }
+        self.owner_id = self.owner_id.trim().to_string();
+        parse_owner_id(Some(self.owner_id.as_str()))?;
         let payload_size = serde_json::to_vec(&self)
             .map_err(|error| {
                 format!("failed to serialize onboarding draft for validation: {error}")
@@ -157,6 +159,15 @@ impl OnboardingDraft {
             ));
         }
         Ok(self)
+    }
+
+    fn redact_secrets(mut self) -> Self {
+        for bot in &mut self.command_bots {
+            bot.token.clear();
+        }
+        self.announce_token.clear();
+        self.notify_token.clear();
+        self
     }
 }
 
@@ -199,10 +210,32 @@ fn onboarding_resume_state(
     }
 }
 
+fn sanitize_legacy_owner_id(owner_id: Option<String>) -> Option<String> {
+    let value = owner_id?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_owner_id(Some(trimmed)).ok().flatten()?;
+    Some(trimmed.to_string())
+}
+
+fn sanitize_draft_owner_id(owner_id: &str) -> String {
+    let trimmed = owner_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if parse_owner_id(Some(trimmed)).ok().flatten().is_some() {
+        trimmed.to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn onboarding_draft_secret_policy_value() -> serde_json::Value {
     json!({
-        "stores_raw_tokens": true,
-        "returns_raw_tokens_in_draft": true,
+        "stores_raw_tokens": false,
+        "returns_raw_tokens_in_draft": false,
         "masked_in_status_after_completion": true,
         "cleared_on_complete": true,
         "cleared_on_delete": true,
@@ -244,13 +277,14 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         )
         .ok();
 
-    let owner_id: Option<String> = conn
-        .query_row(
+    let owner_id = sanitize_legacy_owner_id(
+        conn.query_row(
             "SELECT value FROM kv_meta WHERE key = 'onboarding_owner_id'",
             [],
             |row| row.get(0),
         )
-        .ok();
+        .ok(),
+    );
 
     let agent_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
@@ -321,20 +355,9 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
     let setup_mode = onboarding_setup_mode(completed);
     let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
 
-    // Mask tokens after onboarding is complete to prevent unauthenticated leakage.
-    // Only show full tokens during initial setup (before completion).
-    let mask = |t: Option<String>| -> Option<String> {
-        if !completed {
-            return t;
-        }
-        t.map(|s| {
-            if s.len() > 8 {
-                format!("{}…{}", &s[..4], &s[s.len() - 4..])
-            } else {
-                "***".to_string()
-            }
-        })
-    };
+    // Never return raw onboarding tokens from status.
+    // This endpoint can be reachable without auth, so redact all token values.
+    let redact = |_t: Option<String>| -> Option<String> { None };
 
     (
         StatusCode::OK,
@@ -342,10 +365,10 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             "completed": completed,
             "agent_count": agent_count,
             "bot_tokens": {
-                "command": mask(bot_token),
-                "announce": mask(announce_token),
-                "notify": mask(notify_token),
-                "command2": mask(command_token_2),
+                "command": redact(bot_token),
+                "announce": redact(announce_token),
+                "notify": redact(notify_token),
+                "command2": redact(command_token_2),
             },
             "bot_providers": {
                 "command": primary_provider,
@@ -404,7 +427,8 @@ pub async fn draft_get(State(state): State<AppState>) -> (StatusCode, Json<serde
                 Json(json!({"error": error})),
             );
         }
-    };
+    }
+    .map(OnboardingDraft::redact_secrets);
     let completion_state = match load_onboarding_completion_state(&root) {
         Ok(state) => state,
         Err(error) => {
@@ -453,6 +477,7 @@ pub async fn draft_put(Json(body): Json<OnboardingDraft>) -> (StatusCode, Json<s
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
+    let draft = draft.redact_secrets();
 
     if let Err(error) = save_onboarding_draft(&root, &draft) {
         return (
@@ -855,6 +880,8 @@ fn load_onboarding_draft(runtime_root: &Path) -> Result<Option<OnboardingDraft>,
             return Ok(None);
         }
     };
+    let mut draft = draft;
+    draft.owner_id = sanitize_draft_owner_id(&draft.owner_id);
     Ok(Some(draft))
 }
 
@@ -1324,11 +1351,19 @@ fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     }
 }
 
-fn parse_owner_id(owner_id: Option<&str>) -> Option<u64> {
-    owner_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
+fn parse_owner_id(owner_id: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = owner_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if !(17..=20).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("owner_id must be a Discord user id with 17-20 digits".to_string());
+    }
+
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "owner_id must be a valid Discord user id".to_string())
 }
 
 fn upsert_command_bot(
@@ -1366,7 +1401,7 @@ fn write_agentdesk_discord_config(
     };
 
     config.discord.guild_id = Some(guild_id.trim().to_string());
-    config.discord.owner_id = parse_owner_id(owner_id);
+    config.discord.owner_id = parse_owner_id(owner_id)?;
 
     upsert_command_bot(&mut config, "command", primary_token, primary_provider);
 
@@ -1915,11 +1950,11 @@ fn verify_onboarding_settings_artifacts(
             config.discord.guild_id
         ));
     }
-    if config.discord.owner_id != parse_owner_id(owner_id) {
+    let expected_owner_id = parse_owner_id(owner_id)?;
+    if config.discord.owner_id != expected_owner_id {
         return Err(format!(
             "discord owner mismatch after onboarding: expected {:?} got {:?}",
-            parse_owner_id(owner_id),
-            config.discord.owner_id
+            expected_owner_id, config.discord.owner_id
         ));
     }
 
@@ -2144,6 +2179,19 @@ async fn complete_with_options(
             false,
             None,
             Some("guild_id is required for onboarding completion".to_string()),
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+    }
+    if let Err(error) = parse_owner_id(body.owner_id.as_deref()) {
+        return completion_response(
+            StatusCode::BAD_REQUEST,
+            false,
+            provider,
+            OnboardingRerunPolicy::ReuseExisting,
+            false,
+            None,
+            Some(error),
             Vec::new(),
             serde_json::Map::new(),
         );
@@ -3120,6 +3168,9 @@ mod tests {
         crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap()
     }
 
+    const VALID_OWNER_ID: &str = "123456789012345678";
+    const VALID_OWNER_ID_U64: u64 = 123_456_789_012_345_678;
+
     fn sample_complete_body(
         channel_id: &str,
         channel_name: &str,
@@ -3132,7 +3183,7 @@ mod tests {
             command_token_2: None,
             command_provider_2: None,
             guild_id: "123".to_string(),
-            owner_id: Some("42".to_string()),
+            owner_id: Some(VALID_OWNER_ID.to_string()),
             provider: Some("codex".to_string()),
             channels: vec![ChannelMapping {
                 channel_id: channel_id.to_string(),
@@ -3228,7 +3279,7 @@ mod tests {
                 channel_id: "1234".to_string(),
                 channel_name: "dispatch-room".to_string(),
             }],
-            owner_id: "42".to_string(),
+            owner_id: VALID_OWNER_ID.to_string(),
             has_existing_setup: false,
             confirm_rerun_overwrite: false,
         }
@@ -3274,7 +3325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_api_round_trip_exposes_resume_state_and_secret_policy() {
+    async fn draft_api_round_trip_redacts_tokens_and_exposes_resume_state() {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
@@ -3307,10 +3358,9 @@ mod tests {
             .unwrap();
         let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
         assert_eq!(put_json["ok"], json!(true));
-        assert_eq!(
-            put_json["draft"]["command_bots"][0]["token"],
-            json!("command-token")
-        );
+        assert_eq!(put_json["draft"]["command_bots"][0]["token"], json!(""));
+        assert_eq!(put_json["draft"]["announce_token"], json!(""));
+        assert_eq!(put_json["draft"]["notify_token"], json!(""));
         assert_eq!(put_json["draft"]["updated_at_ms"], json!(1));
         assert_eq!(
             put_json["secret_policy"]["cleared_on_complete"],
@@ -3352,8 +3402,15 @@ mod tests {
             .unwrap();
         let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
         assert_eq!(get_json["available"], json!(true));
+        assert_eq!(get_json["draft"]["command_bots"][0]["token"], json!(""));
+        assert_eq!(get_json["draft"]["announce_token"], json!(""));
+        assert_eq!(get_json["draft"]["notify_token"], json!(""));
         assert_eq!(get_json["draft"]["selected_template"], json!("operations"));
-        assert_eq!(get_json["secret_policy"]["stores_raw_tokens"], json!(true));
+        assert_eq!(get_json["secret_policy"]["stores_raw_tokens"], json!(false));
+        assert_eq!(
+            get_json["secret_policy"]["returns_raw_tokens_in_draft"],
+            json!(false)
+        );
 
         let delete_response = app
             .clone()
@@ -3415,7 +3472,7 @@ mod tests {
             "claude",
             None,
             None,
-            Some("42"),
+            Some(VALID_OWNER_ID),
         )
         .unwrap();
 
@@ -3424,7 +3481,7 @@ mod tests {
             crate::config::load_from_path(&root.join("config").join("agentdesk.yaml")).unwrap();
         assert_eq!(config.server.port, 8791);
         assert_eq!(config.discord.guild_id.as_deref(), Some("guild-123"));
-        assert_eq!(config.discord.owner_id, Some(42));
+        assert_eq!(config.discord.owner_id, Some(VALID_OWNER_ID_U64));
         assert_eq!(
             config.discord.bots["command"].provider.as_deref(),
             Some("claude")
@@ -3447,7 +3504,7 @@ mod tests {
             "claude",
             Some("secondary-token"),
             Some("codex"),
-            Some("42"),
+            Some(VALID_OWNER_ID),
         )
         .unwrap();
         write_credential_token(root, "announce", Some("announce-token")).unwrap();
@@ -3456,7 +3513,7 @@ mod tests {
         let config =
             crate::config::load_from_path(&root.join("config").join("agentdesk.yaml")).unwrap();
         assert_eq!(config.discord.guild_id.as_deref(), Some("guild-123"));
-        assert_eq!(config.discord.owner_id, Some(42));
+        assert_eq!(config.discord.owner_id, Some(VALID_OWNER_ID_U64));
         assert_eq!(config.discord.bots.len(), 2);
         assert_eq!(
             config.discord.bots["command"].provider.as_deref(),
@@ -3492,6 +3549,25 @@ mod tests {
             .unwrap(),
             "announce-token\n"
         );
+    }
+
+    #[test]
+    fn write_agentdesk_discord_config_rejects_short_owner_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let error = write_agentdesk_discord_config(
+            root,
+            "guild-123",
+            "primary-token",
+            "claude",
+            None,
+            None,
+            Some("7"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("owner_id must be a Discord user id"));
     }
 
     #[test]
@@ -3677,6 +3753,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_omits_invalid_legacy_owner_id_from_rerun_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params!["onboarding_owner_id", "42"],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status_code, Json(status_body)) = status(axum::extract::State(state)).await;
+
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(status_body["owner_id"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn draft_get_sanitizes_invalid_legacy_owner_id_from_saved_draft() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let app = Router::new()
+            .route("/draft", axum::routing::get(draft_get))
+            .with_state(state);
+
+        let mut legacy_draft = sample_draft();
+        legacy_draft.owner_id = "42".to_string();
+        save_onboarding_draft(temp.path(), &legacy_draft).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/draft")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["draft"]["owner_id"], json!(""));
+    }
+
+    #[tokio::test]
     async fn complete_retries_from_channels_resolved_partial_state() {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
@@ -3821,6 +3949,44 @@ mod tests {
                 .unwrap_or_default()
                 .contains("max agents")
         );
+    }
+
+    #[tokio::test]
+    async fn draft_put_rejects_invalid_owner_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime = RuntimeRootGuard::new(temp.path());
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let app = Router::new()
+            .route("/draft", axum::routing::put(draft_put))
+            .with_state(state);
+
+        let mut draft = sample_draft();
+        draft.owner_id = "42".to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/draft")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&draft).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("owner_id must be a Discord user id")
+        );
+        assert!(load_onboarding_draft(temp.path()).unwrap().is_none());
     }
 
     #[test]

@@ -249,19 +249,9 @@ async fn handle_reaction_remove(
         return Ok(());
     }
 
-    let (user_name, is_allowed_bot) = {
-        let cached_user = ctx.cache.user(user_id);
-        let user_name = cached_user
-            .as_ref()
-            .map(|user| user.name.clone())
-            .unwrap_or_else(|| format!("user:{}", user_id.get()));
-        let is_allowed_bot = cached_user
-            .as_ref()
-            .map(|user| user.bot && settings_snapshot.allowed_bot_ids.contains(&user_id.get()))
-            .unwrap_or(false);
-        (user_name, is_allowed_bot)
-    };
-    if !is_allowed_bot && !check_auth(user_id, &user_name, &data.shared, &data.token).await {
+    // Reaction-removal controls must never imprint owner state.
+    // Only already-authorized users may trigger queue cancel / turn stop.
+    if !super::super::discord_io::user_is_authorized(&settings_snapshot, user_id.get()) {
         return Ok(());
     }
 
@@ -556,21 +546,34 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
-            // Allow unbound channels for the owner (direct Claude Code usage).
-            // Only skip channels that are explicitly bound to a different provider.
-            // Unowned channels fall through to normal handling.
-
-            // #189: Generic DM reply tracking — consume pending entry if present.
-            // Consumed DM answers must stop here; falling through into normal
-            // message handling produces a bogus "No active session" error in DMs.
-            let text = new_message.content.trim();
-            if !text.is_empty() {
-                if let Some(ref db) = data.shared.db {
-                    if try_handle_pending_dm_reply(db, new_message).await {
+            if !is_dm {
+                match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
+                {
+                    RuntimeChannelBindingStatus::Owned => {}
+                    RuntimeChannelBindingStatus::Unowned => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ⏭ BINDING-GUARD: skipping message {} in unbound channel {} (effective {})",
+                            new_message.id,
+                            channel_id,
+                            effective_channel_id
+                        );
+                        return Ok(());
+                    }
+                    RuntimeChannelBindingStatus::Unknown => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⏭ BINDING-GUARD: skipping message {} because channel binding lookup failed for {} (effective {})",
+                            new_message.id,
+                            channel_id,
+                            effective_channel_id
+                        );
                         return Ok(());
                     }
                 }
             }
+
+            let text = new_message.content.trim();
 
             let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get());
             if is_allowed_bot_sender
@@ -594,6 +597,19 @@ pub(in crate::services::discord) async fn handle_event(
             let is_allowed_bot = is_allowed_bot_sender;
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
+            }
+
+            // #189: Generic DM reply tracking — consume pending entry if present.
+            // Keep this after auth so unauthorized DM senders cannot inject
+            // answers into pending workflows.
+            // Consumed DM answers must stop here; falling through into normal
+            // message handling produces a bogus "No active session" error in DMs.
+            if !text.is_empty() {
+                if let Some(ref db) = data.shared.db {
+                    if try_handle_pending_dm_reply(db, new_message).await {
+                        return Ok(());
+                    }
+                }
             }
 
             // Handle file attachments — download regardless of session state

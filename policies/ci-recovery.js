@@ -552,9 +552,10 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.kanban.setStatus(cardId, ip);
     agentdesk.log.info("[ci-recovery] Card " + cardId + " → " + ip + " for CI rework");
 
-    // Cleanup retry state since this is a code fix path
+    // Cleanup retry state since this is a code fix path.
+    // Keep last_run_id until the PR head SHA changes so the same failed run
+    // cannot spawn another rework loop after the card briefly re-enters review.
     agentdesk.kv.delete("ci:" + cardId + ":retry_count");
-    agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
 
   } else if (classification.type === "manual_intervention") {
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI manual intervention: " + classification.reason);

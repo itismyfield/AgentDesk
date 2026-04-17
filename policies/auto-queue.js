@@ -227,11 +227,25 @@ var autoQueue = {
     var result = {};
     try { result = JSON.parse(dispatch.result || "{}"); } catch (e) { result = {}; }
     var gate = context.phase_gate;
-    if (!gate || !gate.run_id || !gate.batch_phase) {
+    if (!gate || !gate.run_id || gate.batch_phase == null) {
       return;
     }
 
-    var phase = gate.batch_phase || 0;
+    var phase = null;
+    if (typeof gate.batch_phase === "number") {
+      phase = gate.batch_phase;
+    } else if (typeof gate.batch_phase === "string" && gate.batch_phase.trim() !== "") {
+      phase = Number(gate.batch_phase);
+    }
+    if (!Number.isFinite(phase) || Math.floor(phase) !== phase || phase < 0) {
+      autoQueueLog("warn", "Ignoring phase gate completion with invalid batch_phase", {
+        run_id: gate.run_id,
+        dispatch_id: dispatch.id,
+        card_id: dispatch.kanban_card_id,
+        batch_phase: gate.batch_phase
+      });
+      return;
+    }
     var state = loadPhaseGateState(gate.run_id, phase);
     if (!state || !Array.isArray(state.dispatch_ids) || state.dispatch_ids.indexOf(dispatch.id) < 0) {
       return;
@@ -248,6 +262,41 @@ var autoQueue = {
 
     var verdict = result.verdict || result.decision || null;
     var passVerdict = gate.pass_verdict || "phase_gate_passed";
+
+    // #699 fallback: legacy/buggy callers may persist a phase-gate result with
+    // all `checks.*` entries passing but no explicit `verdict`. The server
+    // finalize path now injects the verdict, but this guard handles result
+    // rows stored before the fix shipped. Never infer "pass" when any check
+    // reports fail, and never override an explicit verdict/decision.
+    if (!verdict && result && result.checks && typeof result.checks === "object") {
+      var checkNames = Object.keys(result.checks);
+      if (checkNames.length > 0) {
+        var allPass = true;
+        for (var ci = 0; ci < checkNames.length; ci++) {
+          var entry = result.checks[checkNames[ci]];
+          var entryStatus = null;
+          if (entry && typeof entry === "object") {
+            entryStatus = entry.status || entry.result || null;
+          } else if (typeof entry === "string") {
+            entryStatus = entry;
+          }
+          var normalized = entryStatus ? String(entryStatus).toLowerCase() : null;
+          if (normalized !== "pass" && normalized !== "passed") {
+            allPass = false;
+            break;
+          }
+        }
+        if (allPass) {
+          verdict = passVerdict;
+          autoQueueLog("info", "Inferred phase gate verdict '" + passVerdict + "' for dispatch " + dispatch.id + " (all " + checkNames.length + " checks passed, no explicit verdict)", {
+            run_id: gate.run_id,
+            dispatch_id: dispatch.id,
+            card_id: dispatch.kanban_card_id,
+            batch_phase: phase
+          });
+        }
+      }
+    }
 
     if (verdict !== passVerdict) {
       state.status = "failed";

@@ -135,12 +135,8 @@ pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
     format!("session_retry_context:{}", channel_id.get())
 }
 
-pub(super) fn should_process_allowed_bot_turn_text(_text: &str) -> bool {
-    // All announce bot messages trigger turns — dispatches, agent-to-agent
-    // communication, review instructions, and deadlock alerts all need
-    // processing.  "검토 전용" / "작업 착수 금지" are instructions for the
-    // agent's behavior during the turn, not reasons to skip the turn.
-    true
+pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
+    text.trim_start().starts_with("DISPATCH:")
 }
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
@@ -319,7 +315,7 @@ pub(super) struct DiscordBotSettings {
     pub(super) require_mention_channel_ids: Vec<u64>,
     /// channel_id (string) → persisted model override
     pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
-    /// Discord user ID of the registered owner (imprinting auth)
+    /// Discord user ID of the registered owner (must be configured explicitly)
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
     pub(super) allowed_user_ids: Vec<u64>,
@@ -1144,6 +1140,14 @@ async fn catch_up_missed_messages(
             ) {
                 continue;
             }
+            let is_allowed_bot =
+                msg.author.bot && allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            if !is_allowed_bot {
+                let settings = shared.settings.read().await;
+                if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
+                    continue;
+                }
+            }
             if !should_phase2_recover_message(mid, phase2_checkpoint, &existing_ids) {
                 continue;
             }
@@ -1871,21 +1875,21 @@ mod tests {
     }
 
     #[test]
-    fn allowed_bot_all_messages_accepted() {
+    fn allowed_bot_turns_require_dispatch_prefix() {
         let allowed_bot_ids = vec![123];
-        let review_only = "⚠️ 검토 전용 — 작업 착수 금지";
         let dispatch = "DISPATCH: abc123\n작업 시작";
         let agent_msg = "completion_guard 수정해줘";
 
-        // All announce bot messages trigger turns
-        assert!(should_process_allowed_bot_turn_text(review_only));
+        assert!(!should_process_allowed_bot_turn_text(
+            "⚠️ 검토 전용 — 작업 착수 금지"
+        ));
         assert!(should_process_allowed_bot_turn_text(dispatch));
-        assert!(should_process_allowed_bot_turn_text(agent_msg));
-        assert!(is_allowed_turn_sender(
+        assert!(!should_process_allowed_bot_turn_text(agent_msg));
+        assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,
-            review_only
+            "⚠️ 검토 전용 — 작업 착수 금지"
         ));
         assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
@@ -1893,7 +1897,7 @@ mod tests {
             false,
             dispatch
         ));
-        assert!(is_allowed_turn_sender(
+        assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,

@@ -1683,6 +1683,159 @@ mod tests {
         assert_eq!(completed["result"]["auto_completed"], true);
     }
 
+    // #699 — phase-gate completion with all checks passing but no explicit
+    // `verdict` must inject `verdict = context.phase_gate.pass_verdict` into
+    // the persisted result so auto-queue does not pause the run.
+    #[test]
+    fn finalize_phase_gate_injects_verdict_when_all_checks_pass() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-pass", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699",
+                "batch_phase": 1,
+                "next_phase": 2,
+                "final_phase": false,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed", "build_passed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-pass",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        // Simulate a caller that produced all-pass checks + summary but
+        // omitted the explicit verdict field entirely.
+        let result = json!({
+            "summary": "Phase gate passed",
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "pass" },
+                "build_passed": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            completed["result"]["verdict"], "phase_gate_passed",
+            "server must inject phase_gate_passed when verdict absent and checks all pass",
+        );
+        assert_eq!(completed["result"]["verdict_inferred"], true);
+    }
+
+    // #699 — never infer pass when any check fails. The verdict must remain
+    // absent so auto-queue can classify the gate as failed.
+    #[test]
+    fn finalize_phase_gate_preserves_absent_verdict_when_check_fails() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-fail", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699b",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-fail",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test (fail)",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        let result = json!({
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "fail" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["status"], "completed");
+        assert!(
+            completed["result"].get("verdict").is_none()
+                || completed["result"]["verdict"].is_null(),
+            "verdict must not be inferred when any check is fail"
+        );
+        assert!(
+            completed["result"].get("verdict_inferred").is_none()
+                || completed["result"]["verdict_inferred"].is_null(),
+            "verdict_inferred flag must not be set on failed checks"
+        );
+    }
+
+    // #699 — explicit verdict="fail" must survive verbatim even when every
+    // check status happens to be "pass" in the same payload.
+    #[test]
+    fn finalize_phase_gate_preserves_explicit_verdict_fail() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-explicit", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699c",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-explicit",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test (explicit fail)",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        let result = json!({
+            "verdict": "fail",
+            "summary": "Operator-forced fail",
+            "checks": {
+                "merge_verified": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["result"]["verdict"], "fail");
+        assert!(
+            completed["result"].get("verdict_inferred").is_none()
+                || completed["result"]["verdict_inferred"].is_null(),
+            "explicit verdict must not be flagged as inferred"
+        );
+    }
+
     #[test]
     fn dispatch_events_capture_dispatched_and_completed_transitions() {
         let db = test_db();
@@ -2037,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_card_worktree_uses_target_repo_from_card_description() {
+    fn resolve_card_worktree_ignores_target_repo_from_card_description() {
         let default_repo = init_test_repo();
         let default_repo_dir = default_repo.path().to_str().unwrap();
         let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
@@ -2050,7 +2203,7 @@ mod tests {
             external_repo_dir,
             &["worktree", "add", external_wt_path, "-b", "wt/external-627"],
         );
-        let external_commit = git_commit(external_wt_path, "fix: external target repo (#627)");
+        git_commit(external_wt_path, "fix: external target repo (#627)");
 
         let db = test_db();
         seed_card(&db, "card-desc-target-repo", "ready");
@@ -2062,22 +2215,13 @@ mod tests {
             &format!("target_repo: {}", external_repo_dir),
         );
 
-        let result = resolve_card_worktree(&db, "card-desc-target-repo", None)
-            .unwrap()
-            .expect("external repo worktree should resolve from card description");
-
-        let actual_path = std::fs::canonicalize(&result.0)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_path = std::fs::canonicalize(external_wt_path)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-
-        assert_eq!(actual_path, expected_path);
-        assert_eq!(result.1, "wt/external-627");
-        assert_eq!(result.2, external_commit);
+        let err = resolve_card_worktree(&db, "card-desc-target-repo", None)
+            .expect_err("description target_repo must not bypass missing repo mapping");
+        assert!(
+            err.to_string()
+                .contains("No local repo mapping for 'owner/missing'"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -2223,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn create_dispatch_injects_target_repo_from_card_description() {
+    fn create_dispatch_rejects_target_repo_from_card_description() {
         let default_repo = init_test_repo();
         let default_repo_dir = default_repo.path().to_str().unwrap();
         let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
@@ -2236,7 +2380,7 @@ mod tests {
             external_repo_dir,
             &["worktree", "add", external_wt_path, "-b", "wt/target-627"],
         );
-        let _external_commit = git_commit(external_wt_path, "fix: dispatch target repo (#627)");
+        git_commit(external_wt_path, "fix: dispatch target repo (#627)");
 
         let db = test_db();
         let engine = test_engine(&db);
@@ -2249,7 +2393,7 @@ mod tests {
             &format!("external repo path: {}", external_repo_dir),
         );
 
-        let dispatch = create_dispatch(
+        let err = create_dispatch(
             &db,
             &engine,
             "card-dispatch-target-repo",
@@ -2258,29 +2402,12 @@ mod tests {
             "Implement external repo task",
             &json!({}),
         )
-        .expect("description target_repo should bypass missing repo mapping");
-
-        let ctx = &dispatch["context"];
-        let actual_target_repo = std::fs::canonicalize(ctx["target_repo"].as_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_target_repo = std::fs::canonicalize(external_repo_dir)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let actual_worktree = std::fs::canonicalize(ctx["worktree_path"].as_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_worktree = std::fs::canonicalize(external_wt_path)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-
-        assert_eq!(actual_target_repo, expected_target_repo);
-        assert_eq!(actual_worktree, expected_worktree);
-        assert_eq!(ctx["worktree_branch"], "wt/target-627");
+        .expect_err("description target_repo must not bypass missing repo mapping");
+        assert!(
+            err.to_string()
+                .contains("No local repo mapping for 'owner/missing'"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -2817,7 +2944,7 @@ mod tests {
     }
 
     #[test]
-    fn review_context_accepts_external_work_target_when_card_target_repo_is_known() {
+    fn review_context_accepts_external_work_target_when_target_repo_is_in_context() {
         let db = test_db();
         seed_card(&db, "card-review-external-accept", "review");
         set_card_issue_number(&db, "card-review-external-accept", 627);
@@ -2831,12 +2958,6 @@ mod tests {
         let external_dir = external_repo.path().to_str().unwrap();
         run_git(external_dir, &["checkout", "-b", "codex/627-target-repo"]);
         let external_commit = git_commit(external_dir, "fix: cross repo review target (#627)");
-        set_card_description(
-            &db,
-            "card-review-external-accept",
-            &format!("target_repo: {}", external_dir),
-        );
-
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "INSERT INTO task_dispatches (
@@ -2858,9 +2979,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-external-accept", "agent-1", &json!({}))
-                .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-external-accept",
+            "agent-1",
+            &json!({ "target_repo": external_dir }),
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
             .unwrap()

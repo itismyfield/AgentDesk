@@ -433,11 +433,19 @@ fn init_has_existing_configuration(root: &Path) -> bool {
     init_config_path(root).exists() || crate::runtime_layout::org_schema_path(root).exists()
 }
 
-fn parse_owner_id(owner_id: Option<&str>) -> Option<u64> {
-    owner_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
+fn parse_owner_id(owner_id: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = owner_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if !(17..=20).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("owner_id must be a Discord user id with 17-20 digits".to_string());
+    }
+
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "owner_id must be a valid Discord user id".to_string())
 }
 
 fn upsert_command_bot(
@@ -477,7 +485,7 @@ fn write_agentdesk_discord_config(
     };
 
     config.discord.guild_id = Some(guild_id.trim().to_string());
-    config.discord.owner_id = parse_owner_id(owner_id);
+    config.discord.owner_id = parse_owner_id(owner_id)?;
     upsert_command_bot(&mut config, token, provider, allowed_channel_ids);
 
     let rendered = serde_yaml::to_string(&config)
@@ -486,6 +494,72 @@ fn write_agentdesk_discord_config(
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))?;
 
     Ok(config_path)
+}
+
+fn write_init_artifacts(
+    root: &Path,
+    channel_mappings: &[(String, String, String)],
+    template_idx: usize,
+    guild_id: &str,
+    token: &str,
+    provider: &str,
+    owner_id: Option<&str>,
+    allowed_channel_ids: &[u64],
+    reconfigure: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    // Validate before mutating the runtime layout so invalid owner_id input
+    // never leaves partial init artifacts behind.
+    parse_owner_id(owner_id)?;
+
+    fs::create_dir_all(root)
+        .map_err(|e| format!("Failed to create directory {}: {}", root.display(), e))?;
+    crate::runtime_layout::ensure_runtime_layout(root)
+        .map_err(|e| format!("Failed to prepare runtime layout {}: {}", root.display(), e))?;
+
+    let config_dir = crate::runtime_layout::config_dir(root);
+    let org_path = config_dir.join("org.yaml");
+    let org_yaml = if reconfigure && org_path.exists() {
+        let mut existing = fs::read_to_string(&org_path).unwrap_or_default();
+        for (ch_id, _ch_name, role) in channel_mappings {
+            let marker = format!("\"{}\":", ch_id);
+            if !existing.contains(&marker) {
+                let entry = format!("    \"{}\":\n      agent: {}\n", ch_id, role);
+                if let Some(pos) = existing.find("  by_id:") {
+                    let insert_at = existing[pos..]
+                        .find('\n')
+                        .map(|n| pos + n + 1)
+                        .unwrap_or(existing.len());
+                    existing.insert_str(insert_at, &entry);
+                }
+            }
+        }
+        existing
+    } else {
+        match template_idx {
+            0 => solo_org_yaml(channel_mappings),
+            _ => small_team_org_yaml(channel_mappings),
+        }
+    };
+    write_with_backup(&org_path, &org_yaml, reconfigure)
+        .map_err(|e| format!("Failed to write {}: {}", org_path.display(), e))?;
+
+    let agentdesk_config_path = write_agentdesk_discord_config(
+        root,
+        guild_id,
+        token,
+        provider,
+        owner_id,
+        allowed_channel_ids,
+        reconfigure,
+    )?;
+    if !agentdesk_config_path.exists() {
+        return Err(format!(
+            "Failed to write {}: file was not created",
+            agentdesk_config_path.display()
+        ));
+    }
+
+    Ok((org_path, agentdesk_config_path))
 }
 
 // ── Main init flow ─────────────────────────────────────────────────
@@ -652,50 +726,10 @@ pub fn handle_init(reconfigure: bool) {
 
     // Generate configs
     println!("\nStep 5/5: 설정 파일 생성\n");
-    if let Err(e) = fs::create_dir_all(&root) {
-        eprintln!("Failed to create directory {}: {}", root.display(), e);
-        return;
-    }
-    if let Err(e) = crate::runtime_layout::ensure_runtime_layout(&root) {
-        eprintln!("Failed to prepare runtime layout {}: {}", root.display(), e);
-        return;
-    }
-    let config_dir = crate::runtime_layout::config_dir(&root);
-
-    // org.yaml — fresh install uses template, reconfigure preserves existing
-    let org_path = config_dir.join("org.yaml");
-    let org_yaml = if reconfigure && org_path.exists() {
-        // Preserve existing org.yaml, only update channels.by_id entries
-        let mut existing = fs::read_to_string(&org_path).unwrap_or_default();
-        // Append new channel mappings that aren't already present
-        for (ch_id, _ch_name, role) in &channel_mappings {
-            let marker = format!("\"{}\":", ch_id);
-            if !existing.contains(&marker) {
-                let entry = format!("    \"{}\":\n      agent: {}\n", ch_id, role);
-                if let Some(pos) = existing.find("  by_id:") {
-                    let insert_at = existing[pos..]
-                        .find('\n')
-                        .map(|n| pos + n + 1)
-                        .unwrap_or(existing.len());
-                    existing.insert_str(insert_at, &entry);
-                }
-            }
-        }
-        existing
-    } else {
-        match template_idx {
-            0 => solo_org_yaml(&channel_mappings),
-            _ => small_team_org_yaml(&channel_mappings),
-        }
-    };
-    if let Err(e) = write_with_backup(&org_path, &org_yaml, reconfigure) {
-        eprintln!("Failed to write {}: {}", org_path.display(), e);
-        return;
-    }
-    println!("  [OK] {}", org_path.display());
-
-    let agentdesk_config_path = match write_agentdesk_discord_config(
+    let (org_path, agentdesk_config_path) = match write_init_artifacts(
         &root,
+        &channel_mappings,
+        template_idx,
         &guild.id,
         &token,
         provider,
@@ -703,19 +737,13 @@ pub fn handle_init(reconfigure: bool) {
         &allowed_channel_ids,
         reconfigure,
     ) {
-        Ok(path) => path,
+        Ok(paths) => paths,
         Err(e) => {
-            eprintln!("agentdesk.yaml 생성 실패: {}", e);
+            eprintln!("설정 파일 생성 실패: {}", e);
             return;
         }
     };
-    if !agentdesk_config_path.exists() {
-        eprintln!(
-            "Failed to write {}: file was not created",
-            agentdesk_config_path.display()
-        );
-        return;
-    }
+    println!("  [OK] {}", org_path.display());
     println!("  [OK] {}", agentdesk_config_path.display());
 
     // Create prompts
@@ -812,7 +840,7 @@ pub fn handle_init(reconfigure: bool) {
         println!("  초기 설정 완료!");
         println!("═══════════════════════════════════════");
         println!("\n생성된 파일:");
-        println!("  {} (org.yaml)", config_dir.join("org.yaml").display());
+        println!("  {} (org.yaml)", org_path.display());
         println!("  {} (agentdesk.yaml)", agentdesk_config_path.display());
         println!("  {} (agents)", agents_root.display());
         println!("\n다음 단계:");
@@ -915,6 +943,49 @@ mod tests {
         assert!(plist.contains("<string>abc123</string>"));
         assert!(plist.contains("<key>SAMPLE_FLAG</key>"));
         assert!(plist.contains("<string>enabled</string>"));
+    }
+
+    #[test]
+    fn parse_owner_id_rejects_short_values() {
+        let error = parse_owner_id(Some("7")).unwrap_err();
+        assert!(error.contains("owner_id must be a Discord user id"));
+    }
+
+    #[test]
+    fn parse_owner_id_accepts_discord_snowflakes() {
+        assert_eq!(
+            parse_owner_id(Some("1469509284508340276")).unwrap(),
+            Some(1469509284508340276)
+        );
+    }
+
+    #[test]
+    fn write_init_artifacts_rejects_invalid_owner_id_before_writing_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join(".adk").join("runtime");
+        let org_path = crate::runtime_layout::config_dir(&root).join("org.yaml");
+        let agentdesk_config_path = init_config_path(&root);
+
+        let error = write_init_artifacts(
+            &root,
+            &[(
+                "123456789012345678".to_string(),
+                "general".to_string(),
+                "assistant".to_string(),
+            )],
+            0,
+            "guild-123",
+            "test-token",
+            "claude",
+            Some("7"),
+            &[123456789012345678],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("owner_id must be a Discord user id"));
+        assert!(!org_path.exists());
+        assert!(!agentdesk_config_path.exists());
     }
 }
 

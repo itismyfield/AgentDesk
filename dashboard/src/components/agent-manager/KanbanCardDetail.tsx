@@ -33,6 +33,28 @@ import {
   stringifyCardMetadata,
   type EditorState,
 } from "./kanban-utils";
+import {
+  formatAuditResult,
+  formatDispatchSummary,
+} from "./card-detail-activity";
+
+const ACTIVITY_RESULT_TONE_STYLE = {
+  default: {
+    backgroundColor: "rgba(148,163,184,0.08)",
+    borderColor: "rgba(148,163,184,0.16)",
+    color: "var(--th-text-secondary)",
+  },
+  warn: {
+    backgroundColor: "rgba(245,158,11,0.10)",
+    borderColor: "rgba(245,158,11,0.24)",
+    color: "#fbbf24",
+  },
+  danger: {
+    backgroundColor: "rgba(248,113,113,0.10)",
+    borderColor: "rgba(248,113,113,0.24)",
+    color: "#fca5a5",
+  },
+} as const;
 
 export function canRetryCard(card: KanbanCard | null) {
   return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -742,11 +764,22 @@ export default function KanbanCardDetail({
                         <span>{formatIso(d.created_at, locale)}</span>
                         {d.chain_depth > 0 && <span>depth {d.chain_depth}</span>}
                       </div>
-                      {d.result_summary && (
-                        <div className="mt-1 text-xs truncate" style={{ color: "var(--th-text-secondary)" }}>
-                          {d.result_summary}
-                        </div>
-                      )}
+                      {(() => {
+                        const dispatchSummary = formatDispatchSummary(d.result_summary);
+                        if (!dispatchSummary) return null;
+                        return (
+                          <div
+                            className="mt-2 rounded-lg border px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                            style={{
+                              borderColor: "rgba(148,163,184,0.16)",
+                              backgroundColor: "rgba(148,163,184,0.06)",
+                              color: "var(--th-text-secondary)",
+                            }}
+                          >
+                            {dispatchSummary}
+                          </div>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -770,26 +803,45 @@ export default function KanbanCardDetail({
               </span>
             </h4>
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
-              {auditLog.map((log) => (
-                <div key={log.id} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg" style={{ backgroundColor: "rgba(255,255,255,0.03)" }}>
-                  <span className="shrink-0" style={{ color: "var(--th-text-muted)" }}>
-                    {formatIso(log.created_at, locale)}
-                  </span>
-                  <span style={{ color: TRANSITION_STYLE[log.from_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
-                    {log.from_status ? labelForStatus(log.from_status as KanbanCardStatus, tr) : "—"}
-                  </span>
-                  <span style={{ color: "var(--th-text-muted)" }}>→</span>
-                  <span style={{ color: TRANSITION_STYLE[log.to_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
-                    {log.to_status ? labelForStatus(log.to_status as KanbanCardStatus, tr) : "—"}
-                  </span>
-                  <span className="ml-auto px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
-                    {log.source}
-                  </span>
-                  {log.result && log.result !== "OK" && (
-                    <span className="text-xs" style={{ color: "#f87171" }}>{log.result}</span>
-                  )}
-                </div>
-              ))}
+              {auditLog.map((log) => {
+                const resultPresentation = formatAuditResult(log.result, tr);
+                return (
+                  <div
+                    key={log.id}
+                    className="rounded-lg px-2.5 py-2 text-xs space-y-1.5"
+                    style={{ backgroundColor: "rgba(255,255,255,0.03)" }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                        {formatIso(log.created_at, locale)}
+                      </span>
+                      <span
+                        className="ml-auto px-1.5 py-0.5 rounded text-xs"
+                        style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}
+                      >
+                        {log.source}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span style={{ color: TRANSITION_STYLE[log.from_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
+                        {log.from_status ? labelForStatus(log.from_status as KanbanCardStatus, tr) : "—"}
+                      </span>
+                      <span style={{ color: "var(--th-text-muted)" }}>→</span>
+                      <span style={{ color: TRANSITION_STYLE[log.to_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
+                        {log.to_status ? labelForStatus(log.to_status as KanbanCardStatus, tr) : "—"}
+                      </span>
+                    </div>
+                    {resultPresentation && (
+                      <div
+                        className="rounded-md border px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                        style={ACTIVITY_RESULT_TONE_STYLE[resultPresentation.tone]}
+                      >
+                        {resultPresentation.text}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </SurfaceCard>
         )}

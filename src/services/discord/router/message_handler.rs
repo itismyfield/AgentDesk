@@ -1,5 +1,6 @@
 use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
+#[cfg(test)]
 use super::control_intent::{
     build_control_intent_system_reminder, detect_natural_language_control_intent,
 };
@@ -1004,9 +1005,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
     }
-    if let Some(control_intent) = detect_natural_language_control_intent(user_text) {
-        context_chunks.push(build_control_intent_system_reminder(&control_intent));
-    }
     context_chunks.push(sanitized_input);
     let context_prompt = context_chunks.join("\n\n");
 
@@ -1073,8 +1071,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             dispatch_context: info.context.as_deref(),
             card_title: info.card_title.as_deref(),
             github_issue_url: info.github_issue_url.as_deref(),
-            issue_body: info.issue_body.as_deref(),
-            deferred_dod: info.deferred_dod.as_ref(),
         }
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
@@ -2976,6 +2972,9 @@ fn resolve_session_id_for_current_turn(
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
+    use super::super::control_intent::{
+        build_control_intent_system_reminder, detect_natural_language_control_intent,
+    };
     use super::*;
     use crate::services::memory::RecallResponse;
     use crate::ui::ai_screen::{HistoryItem, HistoryType};

@@ -114,7 +114,7 @@ pub(super) struct DiscordBotSettings {
     pub(super) last_remotes: std::collections::HashMap<String, String>,
     /// channel_id (string) → persisted model override
     pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
-    /// Discord user ID of the registered owner (imprinting auth)
+    /// Discord user ID of the registered owner (must be configured explicitly)
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
     pub(super) allowed_user_ids: Vec<u64>,
