@@ -183,6 +183,12 @@ var reviewAutomation = {
         // the card is terminal — pipeline-originated create-pr dispatches
         // (from deploy-pipeline's post-pipeline handoff) arrive here still
         // non-terminal, and the retry loop skips non-terminal cards.
+        //
+        // Lifecycle guard: only force terminal if the card is still in a
+        // PR-pending state. A delayed create-pr failure that arrives
+        // AFTER the card has been reopened for rework must not overwrite
+        // the newer workflow (terminal transitions cancel live dispatches
+        // and clear review state).
         upsertPrTracking(
           dispatch.kanban_card_id,
           repoId,
@@ -194,14 +200,22 @@ var reviewAutomation = {
           "create-pr completed without canonical repo/branch"
         );
         agentdesk.log.warn("[review] Create-PR completed but canonical tracking is incomplete for card " + dispatch.kanban_card_id);
-        markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking");
+        if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
+          markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking");
+        } else {
+          agentdesk.log.info(
+            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
+            " — card has moved past review lifecycle (likely reopened); pr_tracking row retained for retry"
+          );
+        }
         return;
       }
 
       var pr = findOpenPrByTrackedBranch(repoId, branch);
       if (!pr) {
-        // #701: Same reasoning — seed pr_tracking and force terminal so
-        // merge-automation.processTrackedMergeQueue can retry create-pr.
+        // #701: Same reasoning — seed pr_tracking and (only if lifecycle
+        // still matches) force terminal so merge-automation can retry
+        // create-pr.
         upsertPrTracking(
           dispatch.kanban_card_id,
           repoId,
@@ -213,7 +227,14 @@ var reviewAutomation = {
           "create-pr completed but no open PR found for branch " + branch
         );
         agentdesk.log.warn("[review] Create-PR completed but no open PR was found for card " + dispatch.kanban_card_id + " branch " + branch);
-        markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found");
+        if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
+          markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found");
+        } else {
+          agentdesk.log.info(
+            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
+            " — card has moved past review lifecycle (likely reopened); pr_tracking row retained for retry"
+          );
+        }
         return;
       }
 
@@ -705,6 +726,47 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
     agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — card marked pr:create_failed");
     return { status: "error", reason: "dispatch_failed: " + String(e) };
   }
+}
+
+// #701: Lifecycle guard for create-pr FAILURE completion paths. Returns
+// true iff the card is still in a state where a create-pr failure should
+// force terminal. If the card has moved on (e.g. already terminal with a
+// non-review terminal target, or reopened for rework and now back in an
+// in-progress state), a stale late-arriving create-pr failure must NOT
+// retroactively terminalize — terminal transitions cancel active
+// implementation/rework dispatches and clear review state. We still keep
+// the pr_tracking row around so merge-automation's retry loop can pick
+// it up once the card returns to the review lifecycle naturally.
+function isCardEligibleForPrFailureTerminalize(cardId) {
+  var cfg = agentdesk.pipeline.resolveForCard(cardId);
+  var terminalState = agentdesk.pipeline.terminalState(cfg);
+  var rows = agentdesk.db.query(
+    "SELECT status FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0) return false;
+  var currentStatus = rows[0].status;
+  // Walk the config to find the review state (the from-state of a
+  // gated transition marked with review_passed) without hardcoding the
+  // pipeline shape.
+  var reviewState = null;
+  var reviewPassTarget = terminalState;
+  if (cfg && cfg.transitions) {
+    for (var ti = 0; ti < cfg.transitions.length; ti++) {
+      var tr = cfg.transitions[ti];
+      if (tr.type === "gated" && tr.gates && tr.gates.indexOf("review_passed") >= 0) {
+        reviewState = tr.from;
+        reviewPassTarget = tr.to;
+        break;
+      }
+    }
+  }
+  // Idempotent terminal: already-terminal cards are safe to "terminalize"
+  // again (markPrCreateFailed is idempotent when status matches).
+  // In-review and review-pass-target cards are the expected lifecycle.
+  return currentStatus === terminalState
+    || currentStatus === reviewState
+    || currentStatus === reviewPassTarget;
 }
 
 // #701: Shared helper for PR-handoff errors. Moves the card to its
