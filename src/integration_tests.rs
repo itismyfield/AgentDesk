@@ -5746,8 +5746,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scenario_211_terminal_direct_merge_merges_branch_without_pr() {
-        let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
+    fn scenario_211_terminal_done_card_tracks_pr_instead_of_direct_merge() {
+        let (repo, _remote, _gh) = setup_test_repo_with_origin_and_mock_gh(&[
+            MockGhReply {
+                key: "pr:create",
+                contains: Some("--head wt/card-211-direct"),
+                stdout: "https://github.com/test/repo/pull/901",
+            },
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "feature-sha-211-direct",
+            },
+        ]);
         let worktrees_dir = repo.path().join("worktrees");
         fs::create_dir_all(&worktrees_dir).unwrap();
         run_git(repo.path(), &["branch", "wt/card-211-direct"]);
@@ -5795,22 +5806,26 @@ mod tests {
         kanban::drain_hook_side_effects(&db, &engine);
 
         run_git(repo.path(), &["fetch", "origin", "main"]);
-        let merged_feature = Command::new("git")
-            .args(["show", "origin/main:feature.txt"])
+        let merged = Command::new("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                &feature_commit,
+                "origin/main",
+            ])
             .current_dir(repo.path())
-            .output()
+            .status()
             .unwrap();
         assert!(
-            merged_feature.status.success()
-                && String::from_utf8_lossy(&merged_feature.stdout) == "feature\n",
-            "feature.txt must be present on origin/main after direct merge"
+            !merged.success(),
+            "terminal done cards without tracked PR must use PR+CI flow and keep feature commit out of origin/main"
         );
         assert_eq!(get_card_status(&db, "card-211-direct"), "done");
         assert_eq!(
             pr_tracking_state(&db, "card-211-direct").as_deref(),
-            Some("closed")
+            Some("wait-ci")
         );
-        assert_eq!(pr_tracking_pr_number(&db, "card-211-direct"), None);
+        assert_eq!(pr_tracking_pr_number(&db, "card-211-direct"), Some(901));
 
         let conn = db.lock().unwrap();
         let blocked_reason: Option<String> = conn
@@ -5820,7 +5835,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(blocked_reason, None);
+        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
     }
 
     #[cfg(unix)]

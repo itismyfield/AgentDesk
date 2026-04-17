@@ -569,6 +569,12 @@ function tryDirectMergeOrTrackPr(cardId, tracking) {
   }
 
   var mergeMode = resolveTrackedMergeStrategyMode(cardId);
+  if (mergeMode !== "pr-always") {
+    agentdesk.log.warn(
+      "[merge] Card " + cardId + " requested direct-first merge, but direct merge is disabled; falling back to PR + CI"
+    );
+    mergeMode = "pr-always";
+  }
   persistTrackedMergeStrategyMode(cardId, mergeMode);
 
   if (mergeMode === "pr-always") {
