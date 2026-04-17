@@ -1361,32 +1361,17 @@ mod tests {
             dispatch_count: 4,
             last_agent_id: Some("project-agentdesk".to_string()),
         };
-        let context = CardContext {
-            issue_summary: Some("이슈 요약 ".repeat(80)),
-            progress_summary: Some(
-                "review/dilemma_pending · 4회 디스패치 · 마지막 에이전트: project-agentdesk"
-                    .to_string(),
-            ),
-            recent_results: vec![
-                "review: finding ".repeat(40),
-                "implementation: notes ".repeat(40),
-            ],
-            blocked_reason: Some("blocked ".repeat(60)),
-        };
-
         let message = build_pm_message(
+            "card-587",
             &summary,
-            Some(&context),
             &["manual escalation".to_string()],
             Some("owner routing unavailable"),
         );
 
         assert!(message.chars().count() <= DISCORD_MESSAGE_CHAR_LIMIT);
-        assert!(message.contains("📋 이슈:"));
-        assert!(
-            !message.contains("⛔ 기존 차단 사유:"),
-            "lowest-priority section should be dropped first"
-        );
+        assert!(message.contains("card_id: card-587"));
+        assert!(message.contains("issue: #587"));
+        assert!(message.contains("fallback: owner routing unavailable"));
     }
 
     #[tokio::test]

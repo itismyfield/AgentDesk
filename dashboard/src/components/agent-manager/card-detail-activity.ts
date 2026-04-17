@@ -151,18 +151,22 @@ function toneForText(text: string): ActivityTextPresentation["tone"] {
   return "default";
 }
 
-function buildPresentation(headline: string | null, detail: string | null): ActivityTextPresentation | null {
+function buildPresentation(
+  headline: string | null,
+  detail: string | null,
+  toneHint: ActivityTextPresentation["tone"] | null = null,
+): ActivityTextPresentation | null {
   if (headline && detail && detail !== headline) {
     return {
       text: `${headline}: ${detail}`,
-      tone: toneForText(`${headline} ${detail}`),
+      tone: toneHint ?? toneForText(`${headline} ${detail}`),
     };
   }
   if (headline) {
-    return { text: headline, tone: toneForText(headline) };
+    return { text: headline, tone: toneHint ?? toneForText(headline) };
   }
   if (detail) {
-    return { text: detail, tone: toneForText(detail) };
+    return { text: detail, tone: toneHint ?? toneForText(detail) };
   }
   return null;
 }
@@ -190,7 +194,10 @@ function presentationFromRecord(record: Record<string, unknown>, tr: Translator)
     || null;
 
   const normalizedDetail = detail ? humanizeReasonText(detail, tr) : null;
-  const presentation = buildPresentation(headline, normalizedDetail);
+  const toneHint = toneForText(
+    [pmDecision, decision, verdict, detail].filter(Boolean).join(" "),
+  );
+  const presentation = buildPresentation(headline, normalizedDetail, toneHint);
   if (presentation) return presentation;
 
   for (const key of ["result", "details", "payload"]) {
@@ -260,5 +267,5 @@ export function formatAuditResult(
   }
 
   const text = humanizePlainResult(normalized, tr);
-  return { text, tone: toneForText(text) };
+  return { text, tone: toneForText(normalized) };
 }

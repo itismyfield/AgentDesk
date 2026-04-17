@@ -7350,6 +7350,109 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scenario_690_code_failure_does_not_redispatch_same_run_after_rework_cycle() {
+        let repo = tempfile::tempdir().unwrap();
+        let gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "sha-dashboard-loop",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-690-loop"),
+                stdout: r#"[{"databaseId":6910,"status":"completed","conclusion":"failure","headSha":"sha-dashboard-loop","event":"pull_request"}]"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--json jobs"),
+                stdout: r#"{"jobs":[{"name":"Script checks","conclusion":"failure"}]}"#,
+            },
+            MockGhReply {
+                key: "run:view",
+                contains: Some("--log-failed"),
+                stdout: "generated docs are stale; rerun scripts/generate_inventory_docs.py",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-690-loop", "review", "test/repo", 696, None);
+        seed_completed_review_dispatch(&db, "review-690-loop-pass", "card-690-loop", "pass");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-690-loop'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-690-loop",
+            "test/repo",
+            Some(repo.path().to_str().unwrap()),
+            "wt/card-690-loop",
+            Some(696),
+            Some("sha-dashboard-loop"),
+            "wait-ci",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(count_dispatches_by_type(&db, "card-690-loop", "rework"), 1);
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-loop", "rework"),
+            1,
+            "first CI failure should create exactly one active rework dispatch"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE task_dispatches \
+                 SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') \
+                 WHERE kanban_card_id = 'card-690-loop' AND dispatch_type = 'rework'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards \
+                 SET status = 'review', blocked_reason = NULL, updated_at = datetime('now') \
+                 WHERE id = 'card-690-loop'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            count_dispatches_by_type(&db, "card-690-loop", "rework"),
+            1,
+            "same completed CI run must not spawn another rework dispatch without a new head SHA"
+        );
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-690-loop", "rework"),
+            0,
+            "rework dispatch should stay completed until a new CI run appears"
+        );
+        assert!(
+            !gh_log(&gh).contains("run rerun 6910"),
+            "same failed CI run should be deduped rather than rerun or redispatched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scenario_690_high_risk_recovery_job_failure_becomes_code_rework() {
         let repo = tempfile::tempdir().unwrap();
         let gh = install_mock_gh(&[
