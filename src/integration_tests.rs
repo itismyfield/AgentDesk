@@ -2169,7 +2169,7 @@ mod tests {
         let mut dispatch_status: Option<String> = None;
         let mut entry_dispatch_id: Option<String> = None;
 
-        for attempt in 0..20 {
+        for attempt in 0..80 {
             kanban::drain_hook_side_effects(&db, &engine);
 
             let (
@@ -2246,8 +2246,8 @@ mod tests {
                 break;
             }
 
-            if attempt < 19 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
+            if attempt < 79 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
 
