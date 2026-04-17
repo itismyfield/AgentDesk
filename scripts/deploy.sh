@@ -13,6 +13,8 @@
 #   ./scripts/deploy.sh [--skip-dashboard] [--skip-build] \
 #     [--codesign-mode=auto|developer-id|adhoc|skip] \
 #     [--codesign-identity="Developer ID Application: ..."]
+#   If no codesign identity is provided, the first available Developer ID
+#   identity will be used automatically when needed.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -34,9 +36,10 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 SKIP_BUILD=false
 SKIP_DASHBOARD=false
 CODESIGN_MODE="${AGENTDESK_CODESIGN_MODE:-auto}"
-CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
+CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-}"
 CODESIGN_IDENTIFIER="${AGENTDESK_CODESIGN_IDENTIFIER:-com.itismyfield.agentdesk}"
 RAW_CODESIGN_MODE="$CODESIGN_MODE"
+RESOLVED_CODESIGN_IDENTITY=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -82,15 +85,50 @@ codesign_identity_available() {
   security find-identity -v -p codesigning 2>/dev/null | grep -F -- "$identity" >/dev/null
 }
 
+find_first_developer_id_identity() {
+  local identity
+  if [ "$OS" != "darwin" ]; then
+    return 1
+  fi
+
+  identity="$(
+    security find-identity -v -p codesigning 2>/dev/null |
+      sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' |
+      head -n 1
+  )"
+
+  [ -n "$identity" ] || return 1
+  printf '%s\n' "$identity"
+}
+
+resolve_developer_id_identity() {
+  if [ "$OS" != "darwin" ] || [ "$CODESIGN_IDENTITY" = "-" ]; then
+    return 1
+  fi
+
+  if [ -n "$CODESIGN_IDENTITY" ]; then
+    codesign_identity_available "$CODESIGN_IDENTITY" || return 1
+    printf '%s\n' "$CODESIGN_IDENTITY"
+    return 0
+  fi
+
+  find_first_developer_id_identity
+}
+
 resolve_macos_codesign_mode() {
+  RESOLVED_CODESIGN_IDENTITY=""
   case "$CODESIGN_MODE" in
-    developer-id|adhoc|skip)
+    developer-id)
+      RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity)" || return 1
+      printf 'developer-id\n'
+      ;;
+    adhoc|skip)
       printf '%s\n' "$CODESIGN_MODE"
       ;;
     auto)
       if [ "$CODESIGN_IDENTITY" = "-" ]; then
         printf 'adhoc\n'
-      elif codesign_identity_available "$CODESIGN_IDENTITY"; then
+      elif RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
         printf 'developer-id\n'
       else
         printf 'adhoc\n'
@@ -98,6 +136,117 @@ resolve_macos_codesign_mode() {
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+binary_has_valid_codesign() {
+  local path="$1"
+  if [ "$OS" != "darwin" ] || [ ! -f "$path" ]; then
+    return 1
+  fi
+
+  codesign -v "$path" >/dev/null 2>&1
+}
+
+detect_binary_signature_mode() {
+  local path="$1" info
+  if [ "$OS" != "darwin" ] || [ ! -f "$path" ]; then
+    printf 'unsigned\n'
+    return 0
+  fi
+
+  if ! info="$(codesign -dv --verbose=4 "$path" 2>&1)"; then
+    printf 'unsigned\n'
+    return 0
+  fi
+
+  if printf '%s\n' "$info" | grep -F 'Signature=adhoc' >/dev/null; then
+    printf 'adhoc\n'
+  elif printf '%s\n' "$info" | grep -F 'Authority=Developer ID Application:' >/dev/null; then
+    printf 'developer-id\n'
+  elif binary_has_valid_codesign "$path"; then
+    printf 'signed\n'
+  else
+    printf 'unsigned\n'
+  fi
+}
+
+codesign_binary() {
+  local mode="$1"
+  local target="$2"
+  if [ "$OS" != "darwin" ]; then
+    return 0
+  fi
+
+  case "$mode" in
+    developer-id)
+      [ -n "$RESOLVED_CODESIGN_IDENTITY" ] || fail "Developer ID signing requested but no usable identity was resolved"
+      codesign_identity_available "$RESOLVED_CODESIGN_IDENTITY" \
+        || fail "Developer ID identity not found in keychain: $RESOLVED_CODESIGN_IDENTITY"
+      info "Signing $target with Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
+      codesign \
+        -s "$RESOLVED_CODESIGN_IDENTITY" \
+        --options runtime \
+        --identifier "$CODESIGN_IDENTIFIER" \
+        --force \
+        "$target"
+      codesign -v "$target" 2>/dev/null \
+        || fail "Developer ID codesign verification failed — aborting"
+      ;;
+    adhoc)
+      info "Signing $target with ad-hoc identity"
+      codesign \
+        -s - \
+        --identifier "$CODESIGN_IDENTIFIER" \
+        --force \
+        "$target"
+      codesign -v "$target" 2>/dev/null \
+        || fail "Ad-hoc codesign verification failed — aborting"
+      ;;
+    *)
+      fail "Unsupported codesign mode: $mode"
+      ;;
+  esac
+}
+
+preserve_previous_signature_state_if_needed() {
+  local previous_binary="$1"
+  local previous_mode
+
+  if [ "$OS" != "darwin" ]; then
+    return 0
+  fi
+
+  if binary_has_valid_codesign "$REAL_BIN"; then
+    info "Copied binary already has a valid code signature; leaving it unchanged"
+    return 0
+  fi
+
+  if [ -z "$previous_binary" ] || [ ! -f "$previous_binary" ]; then
+    info "No previous signature state found; leaving $REAL_BIN unsigned"
+    return 0
+  fi
+
+  previous_mode="$(detect_binary_signature_mode "$previous_binary")"
+  case "$previous_mode" in
+    adhoc)
+      info "Previous install used ad-hoc signing; preserving that mode"
+      codesign_binary adhoc "$REAL_BIN"
+      ;;
+    developer-id)
+      if RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
+        info "Previous install used Developer ID signing; preserving that mode"
+        codesign_binary developer-id "$REAL_BIN"
+      else
+        fail "Previous install used Developer ID signing, but no usable Developer ID identity is available to preserve it. Provide --codesign-identity or use --codesign-mode=adhoc."
+      fi
+      ;;
+    signed)
+      fail "Previous install used a non-standard code signature that cannot be preserved automatically. Use an explicit --codesign-mode."
+      ;;
+    unsigned)
+      info "Previous install was unsigned; leaving $REAL_BIN unsigned"
       ;;
   esac
 }
@@ -111,31 +260,13 @@ codesign_real_binary_if_needed() {
 
   case "$resolved_mode" in
     developer-id)
-      [ -n "$CODESIGN_IDENTITY" ] || fail "Developer ID signing requested but no identity was provided"
-      codesign_identity_available "$CODESIGN_IDENTITY" \
-        || fail "Developer ID identity not found in keychain: $CODESIGN_IDENTITY"
-      info "Signing $REAL_BIN with Developer ID identity"
-      codesign \
-        -s "$CODESIGN_IDENTITY" \
-        --options runtime \
-        --identifier "$CODESIGN_IDENTIFIER" \
-        --force \
-        "$REAL_BIN"
-      codesign -v "$REAL_BIN" 2>/dev/null \
-        || fail "Developer ID codesign verification failed — aborting"
+      codesign_binary developer-id "$REAL_BIN"
       ;;
     adhoc)
-      info "Signing $REAL_BIN with ad-hoc identity"
-      codesign \
-        -s - \
-        --identifier "$CODESIGN_IDENTIFIER" \
-        --force \
-        "$REAL_BIN"
-      codesign -v "$REAL_BIN" 2>/dev/null \
-        || fail "Ad-hoc codesign verification failed — aborting"
+      codesign_binary adhoc "$REAL_BIN"
       ;;
     skip)
-      info "Skipping re-sign for $REAL_BIN; preserving existing signature state"
+      preserve_previous_signature_state_if_needed "${BACKUP_REAL:-}"
       ;;
     *)
       fail "Unsupported resolved codesign mode: $resolved_mode"
@@ -294,6 +425,9 @@ if [ "$OS" = "darwin" ]; then
   RESOLVED_CODESIGN_MODE="$(resolve_macos_codesign_mode)" \
     || fail "Could not resolve macOS codesign mode from: $CODESIGN_MODE"
   info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
+  if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
+    info "Resolved Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
+  fi
   codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE"
 fi
 write_wrapper_script
