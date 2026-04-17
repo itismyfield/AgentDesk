@@ -198,7 +198,7 @@ fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
 }
 
 #[tokio::test]
-async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
+async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
     let db = test_db();
     let engine = test_engine(&db);
     let mut config = crate::config::Config::default();
@@ -214,6 +214,8 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
                 "/hook/session",
                 axum::routing::post(|| async { StatusCode::CREATED }),
             )
+            .route("/send", axum::routing::post(|| async { StatusCode::OK }))
+            .route("/senddm", axum::routing::post(|| async { StatusCode::OK }))
             .route("/settings", axum::routing::get(|| async { StatusCode::OK })),
         state.clone(),
     )
@@ -245,6 +247,7 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
     assert_eq!(hook_response.status(), StatusCode::CREATED);
 
     let protected_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/settings")
@@ -254,6 +257,31 @@ async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
         .await
         .unwrap();
     assert_eq!(protected_response.status(), StatusCode::UNAUTHORIZED);
+
+    let send_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(send_response.status(), StatusCode::UNAUTHORIZED);
+
+    let senddm_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/senddm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(senddm_response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
