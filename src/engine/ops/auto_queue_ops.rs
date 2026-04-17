@@ -227,9 +227,9 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.recordDispatchFailure = function(entryId, maxRetries, source) {
+            agentdesk.autoQueue.recordDispatchFailure = function(entryId, maxRetries, source) {
                 var result = JSON.parse(
-                    aq.__recordEntryDispatchFailureRaw(
+                    agentdesk.autoQueue.__recordEntryDispatchFailureRaw(
                         entryId,
                         maxRetries,
                         source || ""
