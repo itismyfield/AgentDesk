@@ -180,9 +180,16 @@ function advancePipelineStage(cardId) {
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
-        var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
-        var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
-        agentdesk.kanban.setStatus(cardId, skipTerminal);
+        // #701: pipeline exhausted — hand off to PR/CI flow before terminal.
+        var skipPrDispatched = false;
+        if (agentdesk.reviewAutomation && typeof agentdesk.reviewAutomation.attemptCreatePr === "function") {
+          skipPrDispatched = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+        }
+        if (!skipPrDispatched) {
+          var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+          var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+          agentdesk.kanban.setStatus(cardId, skipTerminal);
+        }
         return;
       }
       createE2eTestDispatch(cardId, card[0].assigned_agent_id);
@@ -203,15 +210,28 @@ function advancePipelineStage(cardId) {
       }
     }
   } else {
-    // No more stages — done
+    // No more stages — attempt PR creation before going terminal (#701).
+    // Pipeline stages (dev-deploy, e2e-test) run before PR; once they all
+    // succeed the card hands off to the PR/CI flow. ci-recovery and
+    // merge-automation take over from here. If PR creation fails or the card
+    // has no trackable worktree, fall through to terminal so the card is not
+    // stuck mid-state.
     agentdesk.db.execute(
       "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]
     );
-    var cfg = agentdesk.pipeline.resolveForCard(cardId);
-    var terminalState = agentdesk.pipeline.terminalState(cfg);
-    agentdesk.kanban.setStatus(cardId, terminalState);
-    agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState);
+    var prDispatched = false;
+    if (agentdesk.reviewAutomation && typeof agentdesk.reviewAutomation.attemptCreatePr === "function") {
+      prDispatched = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+    }
+    if (prDispatched) {
+      agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
+    } else {
+      var cfg = agentdesk.pipeline.resolveForCard(cardId);
+      var terminalState = agentdesk.pipeline.terminalState(cfg);
+      agentdesk.kanban.setStatus(cardId, terminalState);
+      agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState);
+    }
   }
 }
 

@@ -1085,3 +1085,14 @@ function processVerdict(cardId, verdict, result, options) {
 }
 
 agentdesk.registerPolicy(reviewAutomation);
+
+// #701: Expose the create-pr dispatch helper so deploy-pipeline.js can hand
+// cards back into the PR/CI flow after non-skip pipeline stages (dev-deploy,
+// e2e-test, normal agent) complete. Without this, cards finishing pipeline
+// stages reach terminal state with no PR or tracking row, and ci-recovery /
+// merge-automation never get a chance to close the loop.
+agentdesk.reviewAutomation = {
+  attemptCreatePr: function(cardId) {
+    return attemptCreatePrDispatchForReviewPass(cardId, false);
+  }
+};
