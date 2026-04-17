@@ -227,11 +227,25 @@ var autoQueue = {
     var result = {};
     try { result = JSON.parse(dispatch.result || "{}"); } catch (e) { result = {}; }
     var gate = context.phase_gate;
-    if (!gate || !gate.run_id || !gate.batch_phase) {
+    if (!gate || !gate.run_id || gate.batch_phase == null) {
       return;
     }
 
-    var phase = gate.batch_phase || 0;
+    var phase = null;
+    if (typeof gate.batch_phase === "number") {
+      phase = gate.batch_phase;
+    } else if (typeof gate.batch_phase === "string" && gate.batch_phase.trim() !== "") {
+      phase = Number(gate.batch_phase);
+    }
+    if (!Number.isFinite(phase) || Math.floor(phase) !== phase || phase < 0) {
+      autoQueueLog("warn", "Ignoring phase gate completion with invalid batch_phase", {
+        run_id: gate.run_id,
+        dispatch_id: dispatch.id,
+        card_id: dispatch.kanban_card_id,
+        batch_phase: gate.batch_phase
+      });
+      return;
+    }
     var state = loadPhaseGateState(gate.run_id, phase);
     if (!state || !Array.isArray(state.dispatch_ids) || state.dispatch_ids.indexOf(dispatch.id) < 0) {
       return;
