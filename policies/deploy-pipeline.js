@@ -188,17 +188,33 @@ function advancePipelineStage(cardId) {
         // #701: pipeline exhausted — hand off to PR/CI flow.
         // dispatched → await; noop → terminal; error → markPrCreateFailed
         // (terminal + blocked_reason so merge-automation can retry).
-        var skipPrResult = (agentdesk.reviewAutomation && typeof agentdesk.reviewAutomation.attemptCreatePr === "function")
-          ? agentdesk.reviewAutomation.attemptCreatePr(cardId)
-          : { status: "error", reason: "review_automation_missing" };
-        if (skipPrResult.status === "dispatched") {
-          agentdesk.log.info("[deploy-pipeline] Card " + cardId + " e2e-skip — create-pr dispatched, awaiting CI/merge");
-        } else if (skipPrResult.status === "error") {
-          agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
+        // Degraded mode: if review-automation's exported helpers aren't
+        // loaded (version skew, partial policy reload), handle the failure
+        // inline — fall through to terminal with a visible blocked_reason,
+        // since calling markPrCreateFailed would throw.
+        var skipPrHelperAvailable = agentdesk.reviewAutomation
+          && typeof agentdesk.reviewAutomation.attemptCreatePr === "function"
+          && typeof agentdesk.reviewAutomation.markPrCreateFailed === "function";
+        if (skipPrHelperAvailable) {
+          var skipPrResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+          if (skipPrResult.status === "dispatched") {
+            agentdesk.log.info("[deploy-pipeline] Card " + cardId + " e2e-skip — create-pr dispatched, awaiting CI/merge");
+          } else if (skipPrResult.status === "error") {
+            agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
+          } else {
+            var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+            var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+            agentdesk.kanban.setStatus(cardId, skipTerminal);
+          }
         } else {
-          var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
-          var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
-          agentdesk.kanban.setStatus(cardId, skipTerminal);
+          var skipCfgFallback = agentdesk.pipeline.resolveForCard(cardId);
+          var skipTerminalFallback = agentdesk.pipeline.terminalState(skipCfgFallback);
+          agentdesk.kanban.setStatus(cardId, skipTerminalFallback);
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+            ["pr:create_failed:review_automation_missing", cardId]
+          );
+          agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " e2e-skip with review-automation unavailable — terminal + pr:create_failed");
         }
         return;
       }
@@ -233,23 +249,39 @@ function advancePipelineStage(cardId) {
     //                  surprise on a tracked worktree). markPrCreateFailed
     //                  moves the card terminal + blocked_reason so the
     //                  merge-automation retry loop can recover it.
+    //
+    // Degraded mode: if review-automation's exported helpers aren't loaded
+    // (version skew, partial policy reload), fall through to terminal
+    // inline rather than dereferencing a missing helper.
     agentdesk.db.execute(
       "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]
     );
-    var prResult = (agentdesk.reviewAutomation && typeof agentdesk.reviewAutomation.attemptCreatePr === "function")
-      ? agentdesk.reviewAutomation.attemptCreatePr(cardId)
-      : { status: "error", reason: "review_automation_missing" };
-    if (prResult.status === "dispatched") {
-      agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
-    } else if (prResult.status === "error") {
-      agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
-      agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline but PR creation failed: " + prResult.reason);
+    var prHelperAvailable = agentdesk.reviewAutomation
+      && typeof agentdesk.reviewAutomation.attemptCreatePr === "function"
+      && typeof agentdesk.reviewAutomation.markPrCreateFailed === "function";
+    if (prHelperAvailable) {
+      var prResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+      if (prResult.status === "dispatched") {
+        agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
+      } else if (prResult.status === "error") {
+        agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
+        agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline but PR creation failed: " + prResult.reason);
+      } else {
+        var cfg = agentdesk.pipeline.resolveForCard(cardId);
+        var terminalState = agentdesk.pipeline.terminalState(cfg);
+        agentdesk.kanban.setStatus(cardId, terminalState);
+        agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState + " (no PR needed)");
+      }
     } else {
-      var cfg = agentdesk.pipeline.resolveForCard(cardId);
-      var terminalState = agentdesk.pipeline.terminalState(cfg);
-      agentdesk.kanban.setStatus(cardId, terminalState);
-      agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState + " (no PR needed)");
+      var cfgFallback = agentdesk.pipeline.resolveForCard(cardId);
+      var terminalStateFallback = agentdesk.pipeline.terminalState(cfgFallback);
+      agentdesk.kanban.setStatus(cardId, terminalStateFallback);
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        ["pr:create_failed:review_automation_missing", cardId]
+      );
+      agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline with review-automation unavailable — terminal + pr:create_failed");
     }
   }
 }

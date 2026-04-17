@@ -6056,6 +6056,181 @@ mod tests {
         );
     }
 
+    /// #701 regression (noop_verification + pipeline): when review passes
+    /// with review_mode='noop_verification' (the agent verified there are
+    /// no changes to ship), the card must go straight to terminal and skip
+    /// pipeline entry. Without this short-circuit, a noop card would enter
+    /// a non-skip pipeline, and the post-pipeline
+    /// `agentdesk.reviewAutomation.attemptCreatePr()` call from
+    /// deploy-pipeline.js would dispatch `create-pr` for noop work —
+    /// resulting in an empty PR, wasted CI, and possible auto-merge of
+    /// "no changes".
+    #[tokio::test(flavor = "current_thread")]
+    async fn scenario_701_noop_verification_pass_skips_pipeline_entry() {
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "issue:close",
+            contains: Some("--repo test/repo"),
+            stdout: "",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-701-noop", "review", "test/repo", 711, None);
+
+        // Seed a dev-deploy pipeline stage — without the short-circuit this
+        // would be entered by the review-pass handler.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing', latest_dispatch_id = 'review-701-noop' WHERE id = 'card-701-noop'",
+                [],
+            )
+            .unwrap();
+            // Implementation dispatch completed with work_outcome='noop'.
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, completed_at, created_at, updated_at) \
+                 VALUES ('impl-701-noop', 'card-701-noop', 'agent-1', 'implementation', 'completed', '[Impl noop]', ?1, datetime('now', '-2 minutes'), datetime('now', '-5 minutes'), datetime('now', '-2 minutes'))",
+                rusqlite::params![serde_json::json!({
+                    "work_outcome": "noop",
+                    "completed_without_changes": true,
+                    "notes": "already implemented"
+                }).to_string()],
+            )
+            .unwrap();
+            // The pending review dispatch uses review_mode='noop_verification'.
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
+                 VALUES ('review-701-noop', 'card-701-noop', 'agent-1', 'review', 'pending', '[Review noop]', ?1, datetime('now'), datetime('now'))",
+                rusqlite::params![serde_json::json!({
+                    "review_mode": "noop_verification",
+                    "parent_dispatch_id": "impl-701-noop"
+                }).to_string()],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), engine);
+        let (status, _body) = crate::server::routes::review_verdict::submit_verdict(
+            axum::extract::State(state),
+            axum::Json(crate::server::routes::review_verdict::SubmitVerdictBody {
+                dispatch_id: "review-701-noop".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: Some("noop verification passed".to_string()),
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (card_status, pipeline_stage_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-noop'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let create_pr_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-701-noop' AND dispatch_type = 'create-pr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            card_status, "done",
+            "#701: noop_verification pass must short-circuit to terminal even when a pipeline stage is configured"
+        );
+        assert!(
+            pipeline_stage_id.is_none(),
+            "#701: noop_verification pass must NOT bind the card to any pipeline stage (found {:?})",
+            pipeline_stage_id
+        );
+        assert_eq!(
+            create_pr_count, 0,
+            "#701: noop_verification pass must NOT create a create-pr dispatch (pipeline must be skipped, not just its PR handoff)"
+        );
+    }
+
+    /// #701 regression (markPrCreateFailed ordering): kanban terminal
+    /// transitions clear blocked_reason as part of their cleanup, so
+    /// writing the failure marker BEFORE setStatus wipes it immediately.
+    /// The helper must setStatus first and stamp blocked_reason afterward
+    /// so the pr:create_failed marker survives the transition.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        // Seed a card with review_status set so the terminal transition
+        // has cleanup to do — this is the path that historically cleared
+        // blocked_reason.
+        seed_card_with_repo(
+            &db,
+            "card-701-mark-failed",
+            "review",
+            "test/repo",
+            712,
+            None,
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing' WHERE id = 'card-701-mark-failed'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Invoke the review-automation helper via the JS engine. It is not
+        // exported on `agentdesk.reviewAutomation` by name for arbitrary
+        // reasons (only the curated PR helpers are), but it's reachable
+        // via `agentdesk.reviewAutomation.markPrCreateFailed(...)`.
+        engine
+            .eval_js::<String>(
+                r#"(() => { agentdesk.reviewAutomation.markPrCreateFailed("card-701-mark-failed", "test_reason"); return "ok"; })()"#,
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (card_status, blocked_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-701-mark-failed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            card_status, "done",
+            "#701: markPrCreateFailed must move the card to the configured terminal state so merge-automation retry can see it"
+        );
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("pr:create_failed:test_reason"),
+            "#701: markPrCreateFailed must persist the pr:create_failed marker AFTER setStatus (terminal transitions clear blocked_reason, so the ordering matters)"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {

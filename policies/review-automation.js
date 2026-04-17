@@ -690,15 +690,21 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
 // policies can surface it. For genuine dispatch failures the helper
 // upserts pr_tracking with last_error before returning error, so the
 // retry loop has a row to find.
+//
+// Ordering: setStatus(terminal) FIRST, then write blocked_reason. Terminal
+// transitions clear blocked_reason as part of their cleanup (see the
+// create-pr completion path elsewhere in this file which already documents
+// this same requirement — writing blocked_reason before setStatus would
+// see the marker get wiped immediately).
 function markPrCreateFailed(cardId, reason) {
   var blockedReason = "pr:create_failed:" + (reason || "unknown");
   var cfg = agentdesk.pipeline.resolveForCard(cardId);
   var terminalState = agentdesk.pipeline.terminalState(cfg);
+  agentdesk.kanban.setStatus(cardId, terminalState, true);
   agentdesk.db.execute(
     "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
     [blockedReason, cardId]
   );
-  agentdesk.kanban.setStatus(cardId, terminalState, true);
   agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " and moved to " + terminalState + " so merge-automation retry can pick it up");
 }
 
@@ -780,9 +786,24 @@ function processVerdict(cardId, verdict, result, options) {
     // deploy-pipeline (ci-recovery overwrites `blocked_reason` to `ci:*` and
     // the card would be dropped from the deploy queue — merge could even land
     // before the deploy/e2e finishes). Those pipelines must trigger their own
-    // create-pr on completion; tracking that is out of scope for #701 and
-    // should be a follow-up once the cross-policy contract is redesigned.
+    // create-pr on completion via agentdesk.reviewAutomation.attemptCreatePr.
     var prDispatched = false;
+
+    // #701: noop_verification short-circuit. If the review passed on a
+    // review whose work was "no changes needed", skip pipeline entry
+    // entirely and go straight to terminal. Pipeline stages (dev-deploy,
+    // e2e-test) are meaningless for noop work, and — more importantly —
+    // without this short-circuit a noop card would enter a non-skip
+    // pipeline and, on completion, deploy-pipeline.js calls
+    // agentdesk.reviewAutomation.attemptCreatePr(cardId) which drops the
+    // noop_verification context, resulting in a real create-pr dispatch
+    // being created for noop work (empty PRs, wasted CI, possible
+    // auto-merge of "no changes").
+    if (noopVerification) {
+      agentdesk.log.info("[review] Card " + cardId + " noop_verification pass — skipping pipeline, going terminal directly");
+      agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
+      return;
+    }
 
     // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
