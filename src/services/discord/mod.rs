@@ -1140,6 +1140,14 @@ async fn catch_up_missed_messages(
             ) {
                 continue;
             }
+            let is_allowed_bot =
+                msg.author.bot && allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            if !is_allowed_bot {
+                let settings = shared.settings.read().await;
+                if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
+                    continue;
+                }
+            }
             if !should_phase2_recover_message(mid, phase2_checkpoint, &existing_ids) {
                 continue;
             }
