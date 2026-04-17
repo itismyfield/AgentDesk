@@ -5,7 +5,7 @@ pub mod ops;
 pub mod sql_guard;
 pub mod transition;
 
-use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicBool, mpsc};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::Duration;
 
@@ -79,7 +79,11 @@ enum EngineCommand {
 }
 
 impl PolicyEngineActor {
-    fn spawn(inner: Arc<Mutex<PolicyEngineInner>>, db: Db) -> Result<Arc<Self>> {
+    fn spawn(
+        inner: Arc<Mutex<PolicyEngineInner>>,
+        db: Db,
+        tick_hook_in_flight: Arc<AtomicBool>,
+    ) -> Result<Arc<Self>> {
         let (tx, rx) = mpsc::channel();
         let thread_id = Arc::new(OnceLock::new());
         let actor = Arc::new(Self {
@@ -90,7 +94,9 @@ impl PolicyEngineActor {
         let actor_weak = Arc::downgrade(&actor);
         let handle = thread::Builder::new()
             .name("policy-engine-actor".to_string())
-            .spawn(move || Self::run_loop(actor_weak, inner, db, thread_id, rx))
+            .spawn(move || {
+                Self::run_loop(actor_weak, inner, db, tick_hook_in_flight, thread_id, rx)
+            })
             .map_err(|e| anyhow::anyhow!("failed to spawn policy engine actor: {e}"))?;
         *actor
             .join
@@ -103,6 +109,7 @@ impl PolicyEngineActor {
         actor_weak: Weak<Self>,
         inner: Arc<Mutex<PolicyEngineInner>>,
         db: Db,
+        tick_hook_in_flight: Arc<AtomicBool>,
         thread_id: Arc<OnceLock<ThreadId>>,
         rx: mpsc::Receiver<EngineCommand>,
     ) {
@@ -126,6 +133,7 @@ impl PolicyEngineActor {
                 inner: inner.clone(),
                 actor,
                 db: db.clone(),
+                tick_hook_in_flight: tick_hook_in_flight.clone(),
             };
 
             match command {
@@ -199,6 +207,7 @@ pub struct PolicyEngine {
     actor: Arc<PolicyEngineActor>,
     /// DB handle used by bridge ops and compatibility startup replay.
     db: crate::db::Db,
+    tick_hook_in_flight: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -206,6 +215,7 @@ pub struct PolicyEngineHandle {
     inner: Weak<Mutex<PolicyEngineInner>>,
     actor: Weak<PolicyEngineActor>,
     db: crate::db::Db,
+    tick_hook_in_flight: Arc<AtomicBool>,
 }
 
 /// Summary of a loaded policy (for the /api/policies endpoint).
@@ -278,11 +288,14 @@ impl PolicyEngine {
             policies: store,
             _watcher: watcher,
         }));
-        let actor = PolicyEngineActor::spawn(inner.clone(), db.clone())?;
+        let tick_hook_in_flight = Arc::new(AtomicBool::new(false));
+        let actor =
+            PolicyEngineActor::spawn(inner.clone(), db.clone(), tick_hook_in_flight.clone())?;
         let engine = Self {
             inner,
             actor,
             db: db.clone(),
+            tick_hook_in_flight,
         };
         supervisor_bridge.attach_engine(&engine);
 
@@ -294,11 +307,16 @@ impl PolicyEngine {
             inner: Arc::downgrade(&self.inner),
             actor: Arc::downgrade(&self.actor),
             db: self.db.clone(),
+            tick_hook_in_flight: self.tick_hook_in_flight.clone(),
         }
     }
 
     pub(crate) fn is_actor_thread(&self) -> bool {
         self.actor.is_actor_thread()
+    }
+
+    pub(crate) fn tick_hook_in_flight(&self) -> Arc<AtomicBool> {
+        self.tick_hook_in_flight.clone()
     }
 
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
@@ -874,6 +892,7 @@ impl PolicyEngineHandle {
             inner: self.inner.upgrade()?,
             actor: self.actor.upgrade()?,
             db: self.db.clone(),
+            tick_hook_in_flight: self.tick_hook_in_flight.clone(),
         })
     }
 }

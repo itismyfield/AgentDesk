@@ -26,22 +26,24 @@ const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 static DEPLOY_GATE_RUNNING: AtomicBool = AtomicBool::new(false);
-static POLICY_TICK_HOOK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-struct PolicyTickHookGuard;
+struct PolicyTickHookGuard {
+    in_flight: Arc<AtomicBool>,
+}
 
 impl PolicyTickHookGuard {
-    fn acquire() -> Option<Self> {
-        POLICY_TICK_HOOK_IN_FLIGHT
+    fn acquire(engine: &PolicyEngine) -> Option<Self> {
+        let in_flight = engine.tick_hook_in_flight();
+        in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Self)
+            .map(|_| Self { in_flight })
     }
 }
 
 impl Drop for PolicyTickHookGuard {
     fn drop(&mut self) {
-        POLICY_TICK_HOOK_IN_FLIGHT.store(false, Ordering::Release);
+        self.in_flight.store(false, Ordering::Release);
     }
 }
 
@@ -481,7 +483,7 @@ async fn fire_tick_hook_by_name_with_timeout(
     label: &str,
     hook_timeout: Duration,
 ) -> PolicyTickHookExecution {
-    let Some(in_flight_guard) = PolicyTickHookGuard::acquire() else {
+    let Some(in_flight_guard) = PolicyTickHookGuard::acquire(engine) else {
         tracing::warn!(
             "[policy-tick] {} skipped: previous tick hook is still running",
             label
@@ -601,18 +603,21 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
             rusqlite::params![key_status, status],
         )
         .ok();
-        if label == "legacy" {
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
-                [&now_ms],
-            )
-            .ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', ?1)",
-                [status],
-            )
-            .ok();
-        }
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
+            [&now_ms],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_duration_ms', ?1)",
+            [execution.elapsed.as_millis().to_string()],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', ?1)",
+            [status],
+        )
+        .ok();
     }
 }
 
@@ -731,6 +736,16 @@ mod tests {
 
     fn test_db() -> Db {
         crate::db::test_db()
+    }
+
+    fn server_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn repo_policies_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies")
     }
 
     fn test_engine_with_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
@@ -856,6 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_memory_health_refresh_uses_startup_reason() {
+        let _guard = server_test_lock();
         crate::services::memory::reset_backend_health_for_tests();
         refresh_memory_health_for_startup().await;
         assert_eq!(
@@ -874,6 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn five_min_memory_health_refresh_uses_tick_reason() {
+        let _guard = server_test_lock();
         crate::services::memory::reset_backend_health_for_tests();
         refresh_memory_health_for_five_min_tick().await;
         assert_eq!(
@@ -1079,6 +1096,8 @@ mod tests {
         assert_eq!(kv_value(&db, "probe_30s").as_deref(), Some("hit"));
         assert_eq!(kv_value(&db, "last_tick_30s_status").as_deref(), Some("ok"));
         assert!(kv_value(&db, "last_tick_30s_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
+        assert!(kv_value(&db, "last_tick_ms").is_some());
         assert_eq!(kv_value(&db, "probe_1min"), None);
         assert_eq!(kv_value(&db, "probe_5min"), None);
         assert_eq!(kv_value(&db, "probe_legacy"), None);
@@ -1090,6 +1109,7 @@ mod tests {
             Some("ok")
         );
         assert!(kv_value(&db, "last_tick_1min_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
 
         fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min").await;
         assert_eq!(kv_value(&db, "probe_5min").as_deref(), Some("hit"));
@@ -1098,6 +1118,7 @@ mod tests {
             Some("ok")
         );
         assert!(kv_value(&db, "last_tick_5min_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
 
         fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy").await;
         assert_eq!(kv_value(&db, "probe_legacy").as_deref(), Some("hit"));
@@ -1107,6 +1128,7 @@ mod tests {
         );
         assert!(kv_value(&db, "last_tick_legacy_ms").is_some());
         assert!(kv_value(&db, "last_tick_ms").is_some());
+        assert!(kv_value(&db, "last_tick_duration_ms").is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1178,6 +1200,110 @@ mod tests {
             kv_value(&db, "last_tick_1min_status").as_deref(),
             Some("ok")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tick_in_flight_guard_is_scoped_per_engine_instance() {
+        let blocked_db = test_db();
+        let blocked_dir = tempfile::TempDir::new().unwrap();
+        let blocked_engine = test_engine_with_dir(&blocked_db, blocked_dir.path());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = blocked_engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        let timed_out = fire_tick_hook_by_name_for_test(
+            &blocked_engine,
+            &blocked_db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(timed_out, PolicyTickHookOutcome::Timeout);
+
+        let free_db = test_db();
+        let free_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            free_dir.path().join("tick-probe.js"),
+            r#"
+            agentdesk.registerPolicy({
+                name: "tick-probe",
+                priority: 1,
+                onTick30s: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_engine_local', 'hit')"
+                    );
+                }
+            });
+            "#,
+        )
+        .unwrap();
+        let free_engine = test_engine_with_dir(&free_db, free_dir.path());
+        let free_outcome = fire_tick_hook_by_name_for_test(
+            &free_engine,
+            &free_db,
+            "OnTick30s",
+            "30s",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(free_outcome, PolicyTickHookOutcome::Ok);
+        assert_eq!(
+            kv_value(&free_db, "probe_engine_local").as_deref(),
+            Some("hit")
+        );
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "manual profiling baseline for #735 docs"]
+    async fn profile_real_policy_tick_hooks_empty_db_baseline() {
+        let db = test_db();
+        let config = crate::config::Config::default();
+        seed_startup_runtime_state(&db, &config);
+        let engine = test_engine_with_dir(&db, &repo_policies_dir());
+
+        let started_1min = std::time::Instant::now();
+        let on_tick_1min = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_secs(30),
+        )
+        .await;
+        let elapsed_1min = started_1min.elapsed();
+
+        let started_5min = std::time::Instant::now();
+        let on_tick_5min = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick5min",
+            "5min",
+            Duration::from_secs(30),
+        )
+        .await;
+        let elapsed_5min = started_5min.elapsed();
+
+        println!(
+            "profile_real_policy_tick_hooks_empty_db_baseline onTick1min outcome={on_tick_1min:?} elapsed_ms={}",
+            elapsed_1min.as_millis()
+        );
+        println!(
+            "profile_real_policy_tick_hooks_empty_db_baseline onTick5min outcome={on_tick_5min:?} elapsed_ms={}",
+            elapsed_5min.as_millis()
+        );
+
+        assert_eq!(on_tick_1min, PolicyTickHookOutcome::Ok);
+        assert_eq!(on_tick_5min, PolicyTickHookOutcome::Ok);
     }
 
     #[tokio::test]
