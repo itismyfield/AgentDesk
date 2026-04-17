@@ -527,18 +527,8 @@ mod tests {
             Some("✓ Read: src/config.rs"),
             Some("⚙ Bash: cargo build"),
             "",
-            false,
         );
         assert_eq!(placeholder, "⠋ ⚙ Bash: cargo build");
-
-        let narrated = build_placeholder_status_block(
-            "⠋",
-            Some("✓ Read: src/config.rs"),
-            Some("⚙ Bash: cargo build"),
-            "",
-            true,
-        );
-        assert_eq!(narrated, "⠋ ⚙ Bash: cargo build");
     }
 }
 
@@ -1396,7 +1386,6 @@ pub(super) fn build_placeholder_status_block(
     _prev_tool_status: Option<&str>,
     current_tool_line: Option<&str>,
     full_response: &str,
-    _narrate_progress: bool,
 ) -> String {
     let raw_tool_status = resolve_raw_tool_status(current_tool_line, full_response);
     let tool_status = humanize_tool_status(raw_tool_status);

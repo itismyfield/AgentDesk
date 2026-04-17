@@ -323,7 +323,6 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
-        let narrate_progress = super::settings::load_narrate_progress(shared_owned.db.as_ref());
         let turn_start = std::time::Instant::now();
 
         let _ = save_inflight_state(&inflight_state);
@@ -855,7 +854,6 @@ pub(super) fn spawn_turn_bridge(
                     prev_tool_status.as_deref(),
                     current_tool_line.as_deref(),
                     &full_response,
-                    narrate_progress,
                 );
                 let Some(plan) =
                     super::formatting::plan_streaming_rollover(current_portion, &status_block)
@@ -911,7 +909,6 @@ pub(super) fn spawn_turn_bridge(
                 prev_tool_status.as_deref(),
                 current_tool_line.as_deref(),
                 &full_response,
-                narrate_progress,
             );
             let stable_display_text =
                 super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
