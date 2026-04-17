@@ -4444,6 +4444,98 @@ mod tests {
         );
     }
 
+    // #698: phase 0 is the default starting phase per default-pipeline.yaml.
+    // A falsy guard on `gate.batch_phase` (the pre-fix behavior) would ignore
+    // phase-0 gate completions, stranding the run as `paused` forever.
+    #[tokio::test]
+    async fn auto_queue_phase_gate_completes_for_batch_phase_zero() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-phase-zero", "done");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-phase-zero', 'test/repo', 'agent-1', 'paused', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let phase_gate_dispatch = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-phase-zero",
+            "agent-1",
+            "phase-gate",
+            "[phase-gate P0] Default start",
+            &json!({
+                "auto_queue": true,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-phase-zero",
+                    "batch_phase": 0,
+                    "next_phase": 1,
+                    "final_phase": false,
+                    "pass_verdict": "phase_gate_passed",
+                    "expected_gate_count": 1
+                }
+            }),
+        )
+        .expect("phase 0 gate dispatch should be created");
+        let phase_gate_dispatch_id = phase_gate_dispatch["id"].as_str().unwrap().to_string();
+        set_phase_gate_state(
+            &db,
+            "run-phase-zero",
+            0,
+            "pending",
+            &[phase_gate_dispatch_id.as_str()],
+            Some(1),
+            false,
+            Some("card-phase-zero"),
+            None,
+            None,
+        );
+
+        assert!(
+            phase_gate_state(&db, "run-phase-zero", 0).is_some(),
+            "seeded phase 0 gate state must exist before completion"
+        );
+
+        let completed = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &phase_gate_dispatch_id,
+            &json!({
+                "verdict": "phase_gate_passed",
+                "summary": "phase 0 gate approved"
+            }),
+        )
+        .expect("phase 0 gate completion should succeed");
+        assert_eq!(completed["status"], "completed");
+
+        let run_status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-zero'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            run_status, "paused",
+            "phase 0 gate pass must not leave the run paused (#698)"
+        );
+        assert!(
+            phase_gate_state(&db, "run-phase-zero", 0).is_none(),
+            "phase 0 gate completion must clear the persisted phase gate state (#698)"
+        );
+    }
+
     #[test]
     fn auto_queue_cancel_releases_slots_and_clears_linked_sessions() {
         let db = test_db();
