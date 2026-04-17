@@ -1416,13 +1416,14 @@ export interface DispatchQueueEntry {
   card_id: string;
   priority_rank: number;
   reason: string | null;
-  status: "pending" | "dispatched" | "done" | "skipped";
+  status: "pending" | "dispatched" | "done" | "skipped" | "failed";
   created_at: number;
   dispatched_at: number | null;
   completed_at: number | null;
   card_title?: string;
   github_issue_number?: number | null;
   github_repo?: string | null;
+  retry_count?: number;
   thread_group?: number;
   batch_phase?: number;
   thread_links?: AutoQueueThreadLink[];
@@ -1435,6 +1436,7 @@ export interface ThreadGroupStatus {
   dispatched: number;
   done: number;
   skipped: number;
+  failed: number;
   status: string;
   reason?: string | null;
   entries: {
@@ -1460,7 +1462,7 @@ export interface AutoQueueStatus {
   entries: DispatchQueueEntry[];
   agents: Record<
     string,
-    { pending: number; dispatched: number; done: number; skipped: number }
+    { pending: number; dispatched: number; done: number; skipped: number; failed: number }
   >;
   thread_groups?: Record<string, ThreadGroupStatus>;
   phase_gates?: PhaseGateInfo[];
@@ -1564,6 +1566,21 @@ export async function getPipelineStagesForAgent(
 
 export async function skipAutoQueueEntry(id: string): Promise<{ ok: boolean }> {
   return request(`/api/auto-queue/entries/${id}/skip`, { method: "PATCH" });
+}
+
+export async function updateAutoQueueEntry(
+  id: string,
+  patch: {
+    status?: "pending" | "skipped";
+    thread_group?: number;
+    priority_rank?: number;
+    batch_phase?: number;
+  },
+): Promise<{ ok: boolean; entry: DispatchQueueEntry }> {
+  return request(`/api/auto-queue/entries/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
 
 export async function updateAutoQueueRun(

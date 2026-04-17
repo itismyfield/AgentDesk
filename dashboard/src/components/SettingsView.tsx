@@ -181,6 +181,26 @@ const CATEGORIES: Array<{
     ],
   },
   {
+    id: "autoQueue",
+    titleKo: "자동 큐",
+    titleEn: "Auto Queue",
+    descriptionKo: "auto-queue entry 실패 재시도 상한과 복구 동작을 조절합니다.",
+    descriptionEn: "Controls retry ceilings and recovery behavior for auto-queue entries.",
+    fields: [
+      {
+        key: "maxEntryRetries",
+        labelKo: "Entry 최대 재시도 횟수",
+        labelEn: "Entry max retries",
+        descriptionKo: "dispatch 생성 실패가 이 횟수에 도달하면 entry를 failed로 전환합니다.",
+        descriptionEn: "Turns an entry into failed after this many dispatch creation failures.",
+        unit: "",
+        min: 1,
+        max: 10,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "review",
     titleKo: "리뷰",
     titleEn: "Review",

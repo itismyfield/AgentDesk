@@ -69,6 +69,7 @@ export {
   getAutoQueueStatus,
   getAutoQueueHistory,
   skipAutoQueueEntry,
+  updateAutoQueueEntry,
   updateAutoQueueRun,
   getPipelineStages,
   getPipelineStagesForAgent,

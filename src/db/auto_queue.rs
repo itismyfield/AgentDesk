@@ -5,6 +5,7 @@ pub const ENTRY_STATUS_PENDING: &str = "pending";
 pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";
 pub const ENTRY_STATUS_DONE: &str = "done";
 pub const ENTRY_STATUS_SKIPPED: &str = "skipped";
+pub const ENTRY_STATUS_FAILED: &str = "failed";
 
 #[derive(Debug, Clone, Default)]
 pub struct EntryStatusUpdateOptions {
@@ -32,6 +33,23 @@ pub enum EntryStatusUpdateError {
         from_status: String,
         to_status: String,
     },
+    #[error(transparent)]
+    Sql(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDispatchFailureResult {
+    pub run_id: String,
+    pub from_status: String,
+    pub to_status: String,
+    pub retry_count: i64,
+    pub retry_limit: i64,
+}
+
+#[derive(Debug, Error)]
+pub enum EntryDispatchFailureError {
+    #[error(transparent)]
+    EntryStatus(#[from] EntryStatusUpdateError),
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
 }
@@ -80,6 +98,7 @@ struct EntryStatusRow {
     agent_id: String,
     status: String,
     dispatch_id: Option<String>,
+    retry_count: i64,
     slot_index: Option<i64>,
     thread_group: i64,
     batch_phase: i64,
@@ -216,6 +235,61 @@ pub fn reactivate_done_entry_on_conn(
     })
 }
 
+pub fn record_entry_dispatch_failure_on_conn(
+    conn: &Connection,
+    entry_id: &str,
+    max_retries: i64,
+    trigger_source: &str,
+) -> Result<EntryDispatchFailureResult, EntryDispatchFailureError> {
+    let current = load_entry_status_row(conn, entry_id)?;
+    let retry_limit = max_retries.max(1);
+    let retry_count = current.retry_count.saturating_add(1);
+    let target_status = if retry_count >= retry_limit {
+        ENTRY_STATUS_FAILED
+    } else {
+        ENTRY_STATUS_PENDING
+    };
+
+    conn.execute_batch("SAVEPOINT auto_queue_entry_dispatch_failure")?;
+    let update_result = (|| -> Result<EntryDispatchFailureResult, EntryDispatchFailureError> {
+        let status_result = update_entry_status_with_current_on_conn(
+            conn,
+            entry_id,
+            target_status,
+            trigger_source,
+            &EntryStatusUpdateOptions::default(),
+            current,
+        )?;
+        conn.execute(
+            "UPDATE auto_queue_entries
+             SET retry_count = ?1
+             WHERE id = ?2",
+            rusqlite::params![retry_count, entry_id],
+        )?;
+        Ok(EntryDispatchFailureResult {
+            run_id: status_result.run_id,
+            from_status: status_result.from_status,
+            to_status: status_result.to_status,
+            retry_count,
+            retry_limit,
+        })
+    })();
+
+    match update_result {
+        Ok(result) => {
+            conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
+            Ok(result)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO SAVEPOINT auto_queue_entry_dispatch_failure; \
+                 RELEASE SAVEPOINT auto_queue_entry_dispatch_failure",
+            );
+            Err(error)
+        }
+    }
+}
+
 fn update_entry_status_with_current_on_conn(
     conn: &Connection,
     entry_id: &str,
@@ -269,7 +343,7 @@ fn update_entry_status_with_current_on_conn(
                     || effective_slot_index != current.slot_index
                     || current.completed_at.is_some()
             }
-            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => false,
+            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED => false,
             _ => false,
         };
         let changed = current.status != normalized || metadata_change;
@@ -292,10 +366,14 @@ fn update_entry_status_with_current_on_conn(
                              dispatch_id = NULL,
                              slot_index = NULL,
                              dispatched_at = NULL,
-                             completed_at = NULL
+                             completed_at = NULL,
+                             retry_count = CASE
+                                 WHEN ?3 = 'failed' THEN 0
+                                 ELSE retry_count
+                             END
                          WHERE id = ?1
                            AND status = ?2",
-                    rusqlite::params![entry_id, current.status],
+                    rusqlite::params![entry_id, current.status, current.status],
                 )?,
                 ENTRY_STATUS_DISPATCHED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -325,6 +403,18 @@ fn update_entry_status_with_current_on_conn(
                     "UPDATE auto_queue_entries
                          SET status = 'skipped',
                              dispatch_id = NULL,
+                             slot_index = NULL,
+                             dispatched_at = NULL,
+                             completed_at = datetime('now')
+                         WHERE id = ?1
+                           AND status = ?2",
+                    rusqlite::params![entry_id, current.status],
+                )?,
+                ENTRY_STATUS_FAILED => conn.execute(
+                    "UPDATE auto_queue_entries
+                         SET status = 'failed',
+                             dispatch_id = NULL,
+                             slot_index = NULL,
                              dispatched_at = NULL,
                              completed_at = datetime('now')
                          WHERE id = ?1
@@ -369,7 +459,10 @@ fn update_entry_status_with_current_on_conn(
                 trigger_source,
             )?;
 
-            if matches!(normalized, ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED) {
+            if matches!(
+                normalized,
+                ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
+            ) {
                 maybe_finalize_run_after_terminal_entry(conn, &current.run_id, normalized)?;
             }
 
@@ -593,6 +686,7 @@ pub struct StatusEntryRecord {
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
+    pub retry_count: i64,
     pub created_at: i64,
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -694,6 +788,7 @@ pub fn get_status_entry(
 ) -> rusqlite::Result<Option<StatusEntryRecord>> {
     conn.query_row(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
+                COALESCE(e.retry_count, 0),
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
                 CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
@@ -718,6 +813,7 @@ pub fn list_status_entries(
 ) -> rusqlite::Result<Vec<StatusEntryRecord>> {
     let mut sql = String::from(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
+                COALESCE(e.retry_count, 0),
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
                 CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
@@ -1730,6 +1826,7 @@ fn load_entry_status_row(
                 agent_id,
                 status,
                 dispatch_id,
+                COALESCE(retry_count, 0),
                 slot_index,
                 COALESCE(thread_group, 0),
                 COALESCE(batch_phase, 0),
@@ -1744,10 +1841,11 @@ fn load_entry_status_row(
                 agent_id: row.get(2)?,
                 status: row.get(3)?,
                 dispatch_id: row.get(4)?,
-                slot_index: row.get(5)?,
-                thread_group: row.get(6)?,
-                batch_phase: row.get(7)?,
-                completed_at: row.get(8)?,
+                retry_count: row.get(5)?,
+                slot_index: row.get(6)?,
+                thread_group: row.get(7)?,
+                batch_phase: row.get(8)?,
+                completed_at: row.get(9)?,
             })
         },
     )
@@ -1763,6 +1861,7 @@ fn normalize_entry_status(status: &str) -> Result<&str, EntryStatusUpdateError> 
         ENTRY_STATUS_DISPATCHED => Ok(ENTRY_STATUS_DISPATCHED),
         ENTRY_STATUS_DONE => Ok(ENTRY_STATUS_DONE),
         ENTRY_STATUS_SKIPPED => Ok(ENTRY_STATUS_SKIPPED),
+        ENTRY_STATUS_FAILED => Ok(ENTRY_STATUS_FAILED),
         other => Err(EntryStatusUpdateError::UnsupportedStatus {
             status: other.to_string(),
         }),
@@ -1786,9 +1885,12 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
         (ENTRY_STATUS_PENDING, ENTRY_STATUS_DISPATCHED)
             | (ENTRY_STATUS_PENDING, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_FAILED)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_FAILED, ENTRY_STATUS_PENDING)
+            | (ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DISPATCHED)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DONE)
@@ -1815,6 +1917,9 @@ fn entry_status_row_matches_target(
                 && row.completed_at.is_none()
         }
         ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => true,
+        ENTRY_STATUS_FAILED => {
+            row.dispatch_id.is_none() && row.slot_index.is_none() && row.completed_at.is_some()
+        }
         _ => false,
     }
 }
@@ -2021,19 +2126,20 @@ fn map_status_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StatusEntry
         priority_rank: row.get(3)?,
         reason: row.get(4)?,
         status: row.get(5)?,
-        created_at: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-        dispatched_at: row.get(7)?,
-        completed_at: row.get(8)?,
-        card_title: row.get(9)?,
-        github_issue_number: row.get(10)?,
-        github_repo: row.get(11)?,
-        thread_group: row.get(12)?,
-        slot_index: row.get(13)?,
-        batch_phase: row.get(14)?,
-        channel_thread_map: row.get(15)?,
-        active_thread_id: row.get(16)?,
-        card_status: row.get(17)?,
-        review_round: row.get::<_, Option<i64>>(18)?.unwrap_or(0),
+        retry_count: row.get(6)?,
+        created_at: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+        dispatched_at: row.get(8)?,
+        completed_at: row.get(9)?,
+        card_title: row.get(10)?,
+        github_issue_number: row.get(11)?,
+        github_repo: row.get(12)?,
+        thread_group: row.get(13)?,
+        slot_index: row.get(14)?,
+        batch_phase: row.get(15)?,
+        channel_thread_map: row.get(16)?,
+        active_thread_id: row.get(17)?,
+        card_status: row.get(18)?,
+        review_round: row.get::<_, Option<i64>>(19)?.unwrap_or(0),
     })
 }
 
@@ -2084,11 +2190,13 @@ fn append_card_filters(
 mod tests {
     use super::{
         ConsultationDispatchRecordError, ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE,
-        ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
+        ENTRY_STATUS_FAILED, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation, SlotAllocationError,
-        allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
-        reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn, release_run_slots,
-        release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
+        allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, current_batch_phase,
+        list_entry_dispatch_history, reactivate_done_entry_on_conn,
+        record_consultation_dispatch_on_conn, record_entry_dispatch_failure_on_conn,
+        release_run_slots, release_slot_for_group_agent, save_phase_gate_state_on_conn,
+        update_entry_status_on_conn,
     };
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
@@ -2111,6 +2219,7 @@ mod tests {
                 agent_id TEXT,
                 status TEXT,
                 dispatch_id TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
                 slot_index INTEGER,
                 thread_group INTEGER DEFAULT 0,
                 batch_phase INTEGER DEFAULT 0,
@@ -2222,6 +2331,7 @@ mod tests {
                 agent_id TEXT,
                 status TEXT,
                 dispatch_id TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
                 slot_index INTEGER,
                 thread_group INTEGER DEFAULT 0,
                 batch_phase INTEGER DEFAULT 0,
@@ -2785,6 +2895,118 @@ mod tests {
             error,
             EntryStatusUpdateError::InvalidTransition { .. }
         ));
+    }
+
+    #[test]
+    fn dispatch_failure_moves_entry_to_failed_at_retry_limit_and_manual_retry_resets_counter() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES (
+                 'entry-failure-limit', 'run-1', 'card-failure-limit', 'agent-1', 'dispatched', 'dispatch-1', 0, 0
+             )",
+            [],
+        )
+        .expect("seed dispatched entry");
+
+        let first =
+            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_1")
+                .expect("first dispatch failure");
+        assert_eq!(first.to_status, ENTRY_STATUS_PENDING);
+        assert_eq!(first.retry_count, 1);
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-failure-limit",
+            ENTRY_STATUS_DISPATCHED,
+            "test_retry_dispatch_2",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-2".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("second dispatch reserve");
+        let second =
+            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_2")
+                .expect("second dispatch failure");
+        assert_eq!(second.to_status, ENTRY_STATUS_PENDING);
+        assert_eq!(second.retry_count, 2);
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-failure-limit",
+            ENTRY_STATUS_DISPATCHED,
+            "test_retry_dispatch_3",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-3".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .expect("third dispatch reserve");
+        let third =
+            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_3")
+                .expect("third dispatch failure");
+        assert_eq!(third.to_status, ENTRY_STATUS_FAILED);
+        assert_eq!(third.retry_count, 3);
+
+        let (status, retry_count, dispatch_id): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, dispatch_id
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-failure-limit'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("failed entry row");
+        assert_eq!(status, ENTRY_STATUS_FAILED);
+        assert_eq!(retry_count, 3);
+        assert!(dispatch_id.is_none());
+
+        update_entry_status_on_conn(
+            &conn,
+            "entry-failure-limit",
+            ENTRY_STATUS_PENDING,
+            "manual_update",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("manual retry from failed");
+        let (status, retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-failure-limit'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("retried entry row");
+        assert_eq!(status, ENTRY_STATUS_PENDING);
+        assert_eq!(retry_count, 0);
+    }
+
+    #[test]
+    fn current_batch_phase_ignores_failed_entries() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+             ) VALUES (
+                 'entry-phase-failed', 'run-1', 'card-phase-failed', 'agent-1', 'failed', 0, 0
+             )",
+            [],
+        )
+        .expect("seed failed phase entry");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+             ) VALUES (
+                 'entry-phase-next', 'run-1', 'card-phase-next', 'agent-1', 'pending', 1, 1
+             )",
+            [],
+        )
+        .expect("seed pending phase entry");
+
+        assert_eq!(current_batch_phase(&conn, "run-1"), Some(1));
     }
 
     #[test]

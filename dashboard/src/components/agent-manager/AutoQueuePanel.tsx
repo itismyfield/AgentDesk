@@ -82,6 +82,12 @@ const ENTRY_STATUS_STYLE: Record<
     label: "건너뜀",
     labelEn: "Skipped",
   },
+  failed: {
+    bg: "rgba(239,68,68,0.18)",
+    text: "#f87171",
+    label: "실패",
+    labelEn: "Failed",
+  },
 };
 
 const RUN_STATUS_STYLE: Record<AutoQueueRun["status"], { bg: string; text: string; label: string; labelEn: string }> = {
@@ -145,15 +151,20 @@ function batchPhaseLabel(phase: number): string {
 }
 
 function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
-  return entry.status === "done" || entry.status === "skipped";
+  return (
+    entry.status === "done"
+    || entry.status === "skipped"
+    || entry.status === "failed"
+  );
 }
 
 function sortEntriesForDisplay(entries: DispatchQueueEntryType[]): DispatchQueueEntryType[] {
   const statusOrder: Record<string, number> = {
     dispatched: 0,
     pending: 1,
-    done: 2,
-    skipped: 3,
+    failed: 2,
+    done: 3,
+    skipped: 4,
   };
 
   return [...entries].sort((a, b) => {
@@ -180,7 +191,7 @@ function EntryRow({
   idx,
   tr,
   locale,
-  onSkip,
+  onUpdateStatus,
   isDragging,
   isDropTarget,
   dragHandlers,
@@ -192,7 +203,7 @@ function EntryRow({
   idx: number;
   tr: (ko: string, en: string) => string;
   locale: UiLanguage;
-  onSkip: (id: string) => void;
+  onUpdateStatus: (id: string, status: "pending" | "skipped") => void;
   isDragging?: boolean;
   isDropTarget?: boolean;
   showThreadGroup?: boolean;
@@ -218,6 +229,8 @@ function EntryRow({
       : entry.status;
   const sty = ENTRY_STATUS_STYLE[effectiveDisplayStatus] ?? ENTRY_STATUS_STYLE.pending;
   const isPending = entry.status === "pending";
+  const isFailed = entry.status === "failed";
+  const retryCount = entry.retry_count ?? 0;
   const showReviewRound = (entry.card_status === "review" || entry.card_status === "rework") && (entry.review_round ?? 0) > 0;
   const threadLinks = (entry.thread_links ?? []).filter(
     (link) => Boolean(link.url || link.thread_id),
@@ -229,6 +242,8 @@ function EntryRow({
       style={{
         borderColor: isDropTarget
           ? "rgba(16,185,129,0.6)"
+          : isFailed
+            ? "rgba(239,68,68,0.35)"
           : entry.status === "dispatched"
             ? "rgba(245,158,11,0.3)"
             : "rgba(148,163,184,0.15)",
@@ -236,6 +251,8 @@ function EntryRow({
           ? "rgba(16,185,129,0.12)"
           : isDropTarget
             ? "rgba(16,185,129,0.08)"
+            : isFailed
+              ? "rgba(239,68,68,0.08)"
             : entry.status === "dispatched"
               ? "rgba(245,158,11,0.06)"
               : "var(--th-overlay-medium)",
@@ -392,6 +409,18 @@ function EntryRow({
           {tr(sty.label, sty.labelEn)}
           {showReviewRound && ` R${entry.review_round}`}
         </div>
+        {retryCount > 0 && (
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-mono"
+            style={{
+              backgroundColor: isFailed ? "rgba(239,68,68,0.12)" : "rgba(148,163,184,0.12)",
+              color: isFailed ? "#f87171" : "var(--th-text-muted)",
+            }}
+            title={tr("누적 재시도 횟수", "Accumulated retry count")}
+          >
+            R{retryCount}
+          </span>
+        )}
         {isPending && moveControls && (
           <div
             className="inline-flex shrink-0 overflow-hidden rounded-md border"
@@ -438,7 +467,7 @@ function EntryRow({
         )}
         {isPending && (
           <button
-            onClick={() => onSkip(entry.id)}
+            onClick={() => onUpdateStatus(entry.id, "skipped")}
             className="shrink-0 rounded border px-1.5 py-0.5 text-xs"
             style={{
               borderColor: "rgba(148,163,184,0.2)",
@@ -446,6 +475,31 @@ function EntryRow({
             }}
           >
             {tr("건너뛰기", "Skip")}
+          </button>
+        )}
+        {isFailed && (
+          <button
+            onClick={() => onUpdateStatus(entry.id, "pending")}
+            className="shrink-0 rounded border px-1.5 py-0.5 text-xs"
+            style={{
+              borderColor: "rgba(239,68,68,0.35)",
+              color: "#fca5a5",
+              backgroundColor: "rgba(239,68,68,0.08)",
+            }}
+          >
+            {tr("재시도", "Retry")}
+          </button>
+        )}
+        {isFailed && (
+          <button
+            onClick={() => onUpdateStatus(entry.id, "skipped")}
+            className="shrink-0 rounded border px-1.5 py-0.5 text-xs"
+            style={{
+              borderColor: "rgba(148,163,184,0.2)",
+              color: "var(--th-text-muted)",
+            }}
+          >
+            {tr("제외", "Dismiss")}
           </button>
         )}
         {entry.dispatched_at && (
@@ -721,13 +775,20 @@ export default function AutoQueuePanel({
     }
   };
 
-  const handleSkip = async (entryId: string) => {
+  const handleEntryStatusUpdate = async (
+    entryId: string,
+    status: "pending" | "skipped",
+  ) => {
     try {
-      await api.skipAutoQueueEntry(entryId);
+      await api.updateAutoQueueEntry(entryId, { status });
       await fetchStatus();
     } catch (e) {
       setError(
-        e instanceof Error ? e.message : tr("건너뛰기 실패", "Skip failed"),
+        e instanceof Error
+          ? e.message
+          : status === "pending"
+            ? tr("재시도 실패", "Retry failed")
+            : tr("상태 변경 실패", "Status change failed"),
       );
     }
   };
@@ -774,7 +835,7 @@ export default function AutoQueuePanel({
   }
   const agentStats: Record<
     string,
-    { pending: number; dispatched: number; done: number; skipped: number }
+    { pending: number; dispatched: number; done: number; skipped: number; failed: number }
   > = status?.agents ?? {};
 
   const pendingCount = entries.filter((e) => e.status === "pending").length;
@@ -782,6 +843,9 @@ export default function AutoQueuePanel({
     (e) => e.status === "dispatched",
   ).length;
   const doneCount = entries.filter((e) => e.status === "done").length;
+  const failedCount = entries.filter((e) => e.status === "failed").length;
+  const skippedCount = entries.filter((e) => e.status === "skipped").length;
+  const completedCount = entries.filter(isCompletedEntry).length;
   const totalCount = entries.length;
   const primaryAction = getAutoQueuePrimaryAction(run, pendingCount);
   const showRunStartControls = !!run && (run.status === "generated" || run.status === "active") && pendingCount > 0;
@@ -984,28 +1048,43 @@ export default function AutoQueuePanel({
     groupEntries: DispatchQueueEntryType[],
   ) => {
     const isActive = groupEntries.some((entry) => entry.status === "dispatched");
-    const isDone = groupEntries.every(isCompletedEntry);
+    const hasPending = groupEntries.some((entry) => entry.status === "pending");
+    const hasFailed = groupEntries.some((entry) => entry.status === "failed");
+    const completedEntries = groupEntries.filter(isCompletedEntry).length;
+    const isDone = completedEntries === groupEntries.length && !hasFailed;
     const groupStatusLabel = isActive
       ? tr("진행", "Active")
-      : isDone
-        ? tr("완료", "Done")
+      : hasPending
+        ? tr("대기", "Pending")
+        : hasFailed
+          ? tr("실패", "Failed")
+          : isDone
+            ? tr("완료", "Done")
         : tr("대기", "Pending");
     const color = threadGroupColor(groupNum);
     const reason =
       groupEntries.find((entry) => !!entry.reason)?.reason ??
       threadGroups[String(groupNum)]?.reason;
+    const headerColor = isActive ? "#fbbf24" : hasFailed ? "#f87171" : isDone ? "#4ade80" : "#94a3b8";
+    const borderColor = isActive
+      ? `${color}55`
+      : hasFailed
+        ? "rgba(239,68,68,0.28)"
+        : isDone
+          ? "rgba(34,197,94,0.2)"
+          : "rgba(148,163,184,0.12)";
 
     return (
       <div
         key={groupNum}
         className="rounded-xl border p-2 space-y-1"
         style={{
-          borderColor: isActive
-            ? `${color}55`
-            : isDone
-              ? "rgba(34,197,94,0.2)"
-              : "rgba(148,163,184,0.12)",
-          backgroundColor: isActive ? `${color}0a` : "transparent",
+          borderColor,
+          backgroundColor: isActive
+            ? `${color}0a`
+            : hasFailed
+              ? "rgba(239,68,68,0.04)"
+              : "transparent",
         }}
       >
         <div className="flex items-center gap-2 px-1 mb-1">
@@ -1020,14 +1099,12 @@ export default function AutoQueuePanel({
             style={{
               backgroundColor: isActive
                 ? "rgba(245,158,11,0.18)"
+                : hasFailed
+                  ? "rgba(239,68,68,0.16)"
                 : isDone
                   ? "rgba(34,197,94,0.18)"
                   : "rgba(100,116,139,0.18)",
-              color: isActive
-                ? "#fbbf24"
-                : isDone
-                  ? "#4ade80"
-                  : "#94a3b8",
+              color: headerColor,
             }}
           >
             {groupStatusLabel}
@@ -1040,8 +1117,7 @@ export default function AutoQueuePanel({
             className="text-xs font-mono"
             style={{ color: "var(--th-text-muted)" }}
           >
-            {groupEntries.filter((entry) => entry.status === "done").length}/
-            {groupEntries.length}
+            {completedEntries}/{groupEntries.length}
           </span>
         </div>
         {reason && (
@@ -1059,7 +1135,7 @@ export default function AutoQueuePanel({
             idx={idx}
             tr={tr}
             locale={locale}
-            onSkip={handleSkip}
+            onUpdateStatus={handleEntryStatusUpdate}
             showBatchPhase={hasBatchPhases}
 
           />
@@ -1107,7 +1183,7 @@ export default function AutoQueuePanel({
               className="text-xs px-1.5 py-0.5 rounded bg-surface-medium"
               style={{ color: "var(--th-text-muted)" }}
             >
-              {doneCount}/{totalCount}
+              {completedCount}/{totalCount}
             </span>
           )}
         </button>
@@ -1301,11 +1377,20 @@ export default function AutoQueuePanel({
               }}
             />
           )}
-          {entries.filter((e) => e.status === "skipped").length > 0 && (
+          {failedCount > 0 && (
             <div
               className="rounded-full"
               style={{
-                width: `${(entries.filter((e) => e.status === "skipped").length / totalCount) * 100}%`,
+                width: `${(failedCount / totalCount) * 100}%`,
+                backgroundColor: "#ef4444",
+              }}
+            />
+          )}
+          {skippedCount > 0 && (
+            <div
+              className="rounded-full"
+              style={{
+                width: `${(skippedCount / totalCount) * 100}%`,
                 backgroundColor: "#6b7280",
               }}
             />
@@ -1341,6 +1426,9 @@ export default function AutoQueuePanel({
                       <span style={{ color: "#94a3b8" }}>{stats.pending}</span>
                     )}
                     <span style={{ color: "#4ade80" }}>{stats.done}</span>
+                    {stats.failed > 0 && (
+                      <span style={{ color: "#f87171" }}>!{stats.failed}</span>
+                    )}
                     {stats.skipped > 0 && (
                       <span style={{ color: "#6b7280" }}>-{stats.skipped}</span>
                     )}
@@ -1449,7 +1537,7 @@ export default function AutoQueuePanel({
                                 idx={idx}
                                 tr={tr}
                                 locale={locale}
-                                onSkip={handleSkip}
+                                onUpdateStatus={handleEntryStatusUpdate}
                                 showThreadGroup={hasThreadGroups}
                                 showBatchPhase={hasBatchPhases}
                                 isDragging={allDrag.dragId === entry.id}
@@ -1486,7 +1574,7 @@ export default function AutoQueuePanel({
                         idx={idx}
                         tr={tr}
                         locale={locale}
-                        onSkip={handleSkip}
+                        onUpdateStatus={handleEntryStatusUpdate}
                         showThreadGroup={hasThreadGroups}
                         isDragging={allDrag.dragId === entry.id}
                         isDropTarget={allDrag.dropTargetId === entry.id}
@@ -1566,7 +1654,7 @@ export default function AutoQueuePanel({
                   getAgentLabel={getAgentLabel}
                   tr={tr}
                   locale={locale}
-                  onSkip={handleSkip}
+                  onUpdateStatus={handleEntryStatusUpdate}
                   onReorder={handleReorder}
                   showBatchPhase={hasBatchPhases}
       
@@ -1637,7 +1725,7 @@ function AgentSubQueue({
   getAgentLabel,
   tr,
   locale,
-  onSkip,
+  onUpdateStatus,
   onReorder,
   showBatchPhase,
 }: {
@@ -1646,7 +1734,7 @@ function AgentSubQueue({
   getAgentLabel: (id: string) => string;
   tr: (ko: string, en: string) => string;
   locale: UiLanguage;
-  onSkip: (id: string) => void;
+  onUpdateStatus: (id: string, status: "pending" | "skipped") => void;
   onReorder: (orderedIds: string[], agentId?: string | null) => Promise<void>;
   showBatchPhase?: boolean;
 }) {
@@ -1666,7 +1754,7 @@ function AgentSubQueue({
           style={{ backgroundColor: "rgba(148,163,184,0.15)" }}
         />
         <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-          {agentEntries.filter((e) => e.status === "done").length}/
+          {agentEntries.filter(isCompletedEntry).length}/
           {agentEntries.length}
         </div>
       </div>
@@ -1677,6 +1765,9 @@ function AgentSubQueue({
             const ad = agentEntries.filter((e) => e.status === "done").length;
             const aa = agentEntries.filter(
               (e) => e.status === "dispatched",
+            ).length;
+            const af = agentEntries.filter(
+              (e) => e.status === "failed",
             ).length;
             const as_ = agentEntries.filter(
               (e) => e.status === "skipped",
@@ -1702,6 +1793,15 @@ function AgentSubQueue({
                     }}
                   />
                 )}
+                {af > 0 && (
+                  <div
+                    className="rounded-full"
+                    style={{
+                      width: `${(af / at) * 100}%`,
+                      backgroundColor: "#ef4444",
+                    }}
+                  />
+                )}
                 {as_ > 0 && (
                   <div
                     className="rounded-full"
@@ -1723,7 +1823,7 @@ function AgentSubQueue({
           idx={idx}
           tr={tr}
           locale={locale}
-          onSkip={onSkip}
+          onUpdateStatus={onUpdateStatus}
           showBatchPhase={showBatchPhase}
           isDragging={drag.dragId === entry.id}
           isDropTarget={drag.dropTargetId === entry.id}

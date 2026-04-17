@@ -894,6 +894,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             reason          TEXT,
             status          TEXT DEFAULT 'pending',
             dispatch_id     TEXT,
+            retry_count     INTEGER NOT NULL DEFAULT 0,
             slot_index      INTEGER,
             thread_group    INTEGER DEFAULT 0,
             batch_phase     INTEGER DEFAULT 0,
@@ -1009,6 +1010,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "auto_queue_entries",
         "dispatch_id",
         "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_entries",
+        "retry_count",
+        "ALTER TABLE auto_queue_entries ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
     )?;
     ensure_auto_queue_column(
         conn,
