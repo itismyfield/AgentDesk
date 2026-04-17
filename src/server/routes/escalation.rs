@@ -697,19 +697,22 @@ fn build_user_message(
 }
 
 fn build_pm_message(
+    card_id: &str,
     summary: &CardEscalationSummary,
-    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: Option<&str>,
 ) -> String {
-    let mut lines = vec![format!("⚠️ [PM 결정 요청] {}", format_card_label(summary))];
+    let mut lines = vec![format!("⚠️ [PM 결정 요청] card_id: {card_id}")];
+    if let Some(issue_number) = summary.issue_number {
+        lines.push(format!("issue: #{issue_number}"));
+    }
     if let Some(note) = fallback_note {
         lines.push(format!("fallback: {note}"));
     }
     lines.push("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요.".to_string());
     compose_escalation_message(
         lines,
-        context,
+        None,
         vec![
             "사유:".to_string(),
             format_reason_lines(reasons),
@@ -1033,9 +1036,9 @@ async fn emit_escalation_with_base_url(
                                 &client,
                                 base_url,
                                 &announce_token,
+                                &card_id,
                                 &settings,
                                 &summary,
-                                context.as_ref(),
                                 &reasons,
                                 fallback_note,
                                 requested_mode,
@@ -1091,9 +1094,9 @@ async fn emit_escalation_with_base_url(
             &client,
             base_url,
             &announce_token,
+            &card_id,
             &settings,
             &summary,
-            context.as_ref(),
             &reasons,
             "owner routing unavailable",
             requested_mode,
@@ -1106,9 +1109,9 @@ async fn emit_escalation_with_base_url(
         &client,
         base_url,
         &announce_token,
+        &card_id,
         &settings,
         &summary,
-        context.as_ref(),
         &reasons,
         None,
         requested_mode,
@@ -1121,9 +1124,9 @@ async fn deliver_pm_fallback(
     client: &reqwest::Client,
     base_url: &str,
     announce_token: &str,
+    card_id: &str,
     settings: &EscalationSettings,
     summary: &CardEscalationSummary,
-    context: Option<&CardContext>,
     reasons: &[String],
     fallback_note: impl Into<Option<&'static str>>,
     requested_mode: EscalationMode,
@@ -1142,7 +1145,7 @@ async fn deliver_pm_fallback(
     };
     let pm_channel_id = pm_channel_id.to_string();
 
-    let message = build_pm_message(summary, context, reasons, fallback_note);
+    let message = build_pm_message(card_id, summary, reasons, fallback_note);
     match send_channel_message(client, base_url, announce_token, &pm_channel_id, &message).await {
         Ok(()) => (
             StatusCode::OK,
