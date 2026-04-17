@@ -1421,6 +1421,35 @@ agents:
     }
 
     #[test]
+    fn test_save_bot_settings_does_not_overwrite_yaml_owner_for_unconfigured_bot() {
+        with_temp_home(|temp_home: &TempDir| {
+            let configured_token = "configured-token";
+            let unconfigured_token = "unconfigured-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  owner_id: 7\n  bots:\n    command:\n      token: \"{configured_token}\"\n"
+                ),
+            );
+
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.owner_user_id = Some(42);
+            save_bot_settings(unconfigured_token, &settings);
+
+            let yaml_after = fs::read_to_string(
+                temp_home
+                    .path()
+                    .join(".adk")
+                    .join("config")
+                    .join("agentdesk.yaml"),
+            )
+            .unwrap();
+            assert!(yaml_after.contains("owner_id: 7"));
+            assert!(!yaml_after.contains("owner_id: 42"));
+        });
+    }
+
+    #[test]
     fn test_save_bot_settings_rolls_back_yaml_and_json_when_runtime_write_fails() {
         with_temp_home(|temp_home: &TempDir| {
             struct ResetRuntimeWriteFailureFlag;
