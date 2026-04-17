@@ -457,17 +457,21 @@ pub(super) fn maybe_inject_phase_gate_verdict(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    // Only act on phase-gate dispatches.
-    let (dispatch_type, context_raw): (Option<String>, Option<String>) = conn
+    // #699 (round 2): detect phase-gate completions via the presence of
+    // `context.phase_gate`, not the literal dispatch_type. Phase-gate types
+    // are configurable (e.g. "qa-gate", custom), so hard-coding the string
+    // would silently skip every non-default deployment.
+    let context_raw: Option<String> = conn
         .query_row(
-            "SELECT dispatch_type, context FROM task_dispatches WHERE id = ?1",
+            "SELECT context FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .ok()?;
-    if dispatch_type.as_deref() != Some("phase-gate") {
-        return None;
-    }
+    let ctx: serde_json::Value = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())?;
+    let phase_gate_ctx = ctx.get("phase_gate").and_then(|v| v.as_object())?;
 
     // Explicit verdict/decision already present — never override, even for
     // explicit "fail" cases.
@@ -485,41 +489,50 @@ pub(super) fn maybe_inject_phase_gate_verdict(
         return None;
     }
 
-    // Require a `checks` object with at least one entry, and every entry's
-    // `status` (or equivalent) must be "pass".
-    let checks = result.get("checks").and_then(|v| v.as_object())?;
-    if checks.is_empty() {
+    let checks_obj = result.get("checks").and_then(|v| v.as_object())?;
+    if checks_obj.is_empty() {
         return None;
     }
-    for (_name, entry) in checks.iter() {
+
+    // Round-2 fix: when the dispatch context declares a list of required
+    // checks, every one of those keys must be present in `result.checks` and
+    // pass. Missing keys are treated as no-verdict/failure so a partial
+    // payload cannot advance the gate.
+    let declared_checks: Vec<String> = phase_gate_ctx
+        .get("checks")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for required in &declared_checks {
+        match checks_obj.get(required) {
+            Some(entry) if check_entry_is_pass(entry) => {}
+            _ => return None,
+        }
+    }
+
+    // Also require every *present* check entry to pass — never infer a pass
+    // on the strength of partial "pass"es when some keys report fail/other.
+    for (_name, entry) in checks_obj.iter() {
         if !check_entry_is_pass(entry) {
             return None;
         }
     }
 
-    // Resolve `pass_verdict`: prefer `context.phase_gate.pass_verdict` stored
-    // at dispatch creation; fall back to the system default.
-    let pass_verdict = context_raw
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|ctx| {
-            ctx.get("phase_gate")
-                .and_then(|pg| pg.get("pass_verdict"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+    // Resolve `pass_verdict` from the dispatch's own phase_gate context, with
+    // the system default as a last resort.
+    let pass_verdict = phase_gate_ctx
+        .get("pass_verdict")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
         .unwrap_or_else(|| "phase_gate_passed".to_string());
 
     let mut enriched = result.clone();
     if !enriched.is_object() {
         enriched = serde_json::Value::Object(serde_json::Map::new());
-        if let Some(obj) = enriched.as_object_mut() {
-            if let Some(src) = result.as_object() {
-                for (k, v) in src.iter() {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
     }
     if let Some(obj) = enriched.as_object_mut() {
         obj.insert(
@@ -533,10 +546,11 @@ pub(super) fn maybe_inject_phase_gate_verdict(
     }
 
     tracing::info!(
-        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all {} checks passed)",
+        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all {} declared checks passed, {} entries total)",
         pass_verdict,
         dispatch_id,
-        checks.len()
+        declared_checks.len(),
+        checks_obj.len(),
     );
 
     Some(enriched)

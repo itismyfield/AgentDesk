@@ -93,6 +93,52 @@ function autoQueueLog(level, message, context) {
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
 
+// #699 (round 2): mirror of src/dispatch/dispatch_status.rs
+// maybe_inject_phase_gate_verdict. Infers `pass_verdict` for a phase-gate
+// result only when (a) no explicit verdict/decision is present, (b) every
+// declared `context.phase_gate.checks` entry is present in `result.checks`
+// and passes, and (c) every present entry passes. Returns the inferred
+// verdict or null. Pure function — caller applies the value.
+function _inferPhaseGatePassVerdict(ctx, result) {
+  if (!result || typeof result !== "object") return null;
+  var phaseGate = ctx && ctx.phase_gate;
+  if (!phaseGate || typeof phaseGate !== "object") return null;
+
+  var explicit = result.verdict || result.decision;
+  if (explicit) return null;
+
+  var checks = result.checks;
+  if (!checks || typeof checks !== "object") return null;
+
+  var checkNames = Object.keys(checks);
+  if (checkNames.length === 0) return null;
+
+  function entryIsPass(entry) {
+    var entryStatus = null;
+    if (entry && typeof entry === "object") {
+      entryStatus = entry.status || entry.result || null;
+    } else if (typeof entry === "string") {
+      entryStatus = entry;
+    }
+    var normalized = entryStatus ? String(entryStatus).toLowerCase() : null;
+    return normalized === "pass" || normalized === "passed";
+  }
+
+  var declared = Array.isArray(phaseGate.checks) ? phaseGate.checks : [];
+  for (var di = 0; di < declared.length; di++) {
+    var required = declared[di];
+    if (!required) continue;
+    var entry = checks[required];
+    if (!entryIsPass(entry)) return null;
+  }
+
+  for (var ci = 0; ci < checkNames.length; ci++) {
+    if (!entryIsPass(checks[checkNames[ci]])) return null;
+  }
+
+  return phaseGate.pass_verdict || "phase_gate_passed";
+}
+
 function phaseGateFailureKey(cardId, phase) {
   return "phase_gate_failure:" + cardId + ":" + phase;
 }
@@ -263,38 +309,21 @@ var autoQueue = {
     var verdict = result.verdict || result.decision || null;
     var passVerdict = gate.pass_verdict || "phase_gate_passed";
 
-    // #699 fallback: legacy/buggy callers may persist a phase-gate result with
-    // all `checks.*` entries passing but no explicit `verdict`. The server
-    // finalize path now injects the verdict, but this guard handles result
+    // #699 fallback: legacy callers may have persisted a phase-gate result
+    // with every declared check passing but no explicit `verdict`. The
+    // server finalize path now injects the verdict, but this guard recovers
     // rows stored before the fix shipped. Never infer "pass" when any check
     // reports fail, and never override an explicit verdict/decision.
-    if (!verdict && result && result.checks && typeof result.checks === "object") {
-      var checkNames = Object.keys(result.checks);
-      if (checkNames.length > 0) {
-        var allPass = true;
-        for (var ci = 0; ci < checkNames.length; ci++) {
-          var entry = result.checks[checkNames[ci]];
-          var entryStatus = null;
-          if (entry && typeof entry === "object") {
-            entryStatus = entry.status || entry.result || null;
-          } else if (typeof entry === "string") {
-            entryStatus = entry;
-          }
-          var normalized = entryStatus ? String(entryStatus).toLowerCase() : null;
-          if (normalized !== "pass" && normalized !== "passed") {
-            allPass = false;
-            break;
-          }
-        }
-        if (allPass) {
-          verdict = passVerdict;
-          autoQueueLog("info", "Inferred phase gate verdict '" + passVerdict + "' for dispatch " + dispatch.id + " (all " + checkNames.length + " checks passed, no explicit verdict)", {
-            run_id: gate.run_id,
-            dispatch_id: dispatch.id,
-            card_id: dispatch.kanban_card_id,
-            batch_phase: phase
-          });
-        }
+    if (!verdict) {
+      var inferred = _inferPhaseGatePassVerdict(context, result);
+      if (inferred) {
+        verdict = inferred;
+        autoQueueLog("info", "Inferred phase gate verdict '" + inferred + "' for dispatch " + dispatch.id + " (no explicit verdict)", {
+          run_id: gate.run_id,
+          dispatch_id: dispatch.id,
+          card_id: dispatch.kanban_card_id,
+          batch_phase: phase
+        });
       }
     }
 
@@ -359,6 +388,21 @@ var autoQueue = {
       try { gateResult = JSON.parse(gateDispatch.result || "{}"); } catch (e) { gateResult = {}; }
       var expectedVerdict = (gateContext.phase_gate && gateContext.phase_gate.pass_verdict) || "phase_gate_passed";
       var gateVerdict = gateResult.verdict || gateResult.decision || null;
+      // #699 (round 2): sibling gate dispatches persisted before the server
+      // fix shipped will still be missing `verdict`. Re-run the inference
+      // here so the aggregate gate evaluation does not trip on legacy rows.
+      if (!gateVerdict) {
+        var siblingInferred = _inferPhaseGatePassVerdict(gateContext, gateResult);
+        if (siblingInferred) {
+          gateVerdict = siblingInferred;
+          autoQueueLog("info", "Inferred sibling phase gate verdict '" + siblingInferred + "' for dispatch " + gateDispatch.id + " (legacy row, no explicit verdict)", {
+            run_id: gate.run_id,
+            dispatch_id: gateDispatch.id,
+            card_id: state.anchor_card_id || dispatch.kanban_card_id,
+            batch_phase: phase
+          });
+        }
+      }
       if (gateDispatch.status !== "completed" || gateVerdict !== expectedVerdict) {
         state.status = "failed";
         state.failed_dispatch_id = gateDispatch.id;

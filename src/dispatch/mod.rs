@@ -1789,6 +1789,103 @@ mod tests {
         );
     }
 
+    // #699 (round 2) — non-default phase-gate dispatch types (e.g. "qa-gate")
+    // must also receive verdict injection. Detection goes by
+    // context.phase_gate presence, not dispatch_type string.
+    #[test]
+    fn finalize_phase_gate_injects_verdict_for_custom_dispatch_type() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-qa", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699qa",
+                "batch_phase": 1,
+                "pass_verdict": "qa_passed",
+                "dispatch_type": "qa-gate",
+                "checks": ["merge_verified", "qa_passed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-qa",
+            "agent-1",
+            "qa-gate", // non-default dispatch type
+            "QA gate test",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        let result = json!({
+            "summary": "QA gate passed",
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "qa_passed": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(
+            completed["result"]["verdict"], "qa_passed",
+            "server must inject the configured pass_verdict (qa_passed) for non-default dispatch type",
+        );
+        assert_eq!(completed["result"]["verdict_inferred"], true);
+    }
+
+    // #699 (round 2) — when `result.checks` is missing a required check key
+    // declared in `context.phase_gate.checks`, verdict MUST NOT be inferred.
+    // A partial payload cannot advance the gate.
+    #[test]
+    fn finalize_phase_gate_rejects_inference_when_required_check_absent() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-partial", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699partial",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed", "build_passed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-partial",
+            "agent-1",
+            "phase-gate",
+            "Partial checks test",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        // Only 2 of 3 declared checks are reported; the third is silently missing.
+        let result = json!({
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert!(
+            completed["result"].get("verdict").is_none()
+                || completed["result"]["verdict"].is_null(),
+            "verdict must not be inferred when a declared required check key is absent",
+        );
+    }
+
     // #699 — explicit verdict="fail" must survive verbatim even when every
     // check status happens to be "pass" in the same payload.
     #[test]
@@ -2979,14 +3076,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(
-                &db,
-                "card-review-external-accept",
-                "agent-1",
-                &json!({ "target_repo": external_dir }),
-            )
-            .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-external-accept",
+            "agent-1",
+            &json!({ "target_repo": external_dir }),
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
             .unwrap()
