@@ -20,7 +20,6 @@ struct DispatchExecutionTarget {
 struct CardDispatchInfo {
     issue_number: Option<i64>,
     repo_id: Option<String>,
-    description: Option<String>,
 }
 
 fn execution_target_from_dir(dir: &str) -> Option<DispatchExecutionTarget> {
@@ -164,13 +163,12 @@ fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
 fn load_card_dispatch_info(db: &Db, card_id: &str) -> Option<CardDispatchInfo> {
     db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
-            "SELECT github_issue_number, repo_id, description FROM kanban_cards WHERE id = ?1",
+            "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?1",
             [card_id],
             |row| {
                 Ok(CardDispatchInfo {
                     issue_number: row.get(0)?,
                     repo_id: row.get(1)?,
-                    description: row.get(2)?,
                 })
             },
         )
@@ -233,50 +231,6 @@ pub(crate) fn inject_review_dispatch_identifiers(
         _ => {}
     }
 }
-
-fn normalize_target_repo_token(raw: &str) -> Option<String> {
-    let trimmed = raw
-        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'))
-        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ':' | ';'));
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-fn resolve_target_repo_path_candidate(raw: &str) -> Option<String> {
-    let candidate = normalize_target_repo_token(raw)?;
-    if !crate::services::platform::shell::looks_like_explicit_repo_path(&candidate) {
-        return None;
-    }
-    crate::services::platform::shell::resolve_repo_dir_for_target(Some(&candidate))
-        .ok()
-        .flatten()
-}
-
-fn extract_target_repo_from_description(description: &str) -> Option<String> {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let labeled = RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?i)(?:target_repo|target repo|repo_path|repo path|repo dir|external repo(?: path)?)\s*[:=]\s*([^\s]+)",
-        )
-        .expect("target repo description regex must compile")
-    });
-    for caps in labeled.captures_iter(description) {
-        if let Some(resolved) = caps
-            .get(1)
-            .and_then(|value| resolve_target_repo_path_candidate(value.as_str()))
-        {
-            return Some(resolved);
-        }
-    }
-
-    description
-        .split_whitespace()
-        .filter_map(resolve_target_repo_path_candidate)
-        .next()
-}
-
 pub(super) fn resolve_card_target_repo_ref(
     db: &Db,
     card_id: &str,
@@ -298,10 +252,7 @@ pub(super) fn resolve_card_target_repo_ref(
     }
 
     let info = load_card_dispatch_info(db, card_id)?;
-    info.description
-        .as_deref()
-        .and_then(extract_target_repo_from_description)
-        .or(info.repo_id)
+    info.repo_id
 }
 
 fn resolve_card_repo_dir_with_context(

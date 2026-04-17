@@ -2037,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_card_worktree_uses_target_repo_from_card_description() {
+    fn resolve_card_worktree_ignores_target_repo_from_card_description() {
         let default_repo = init_test_repo();
         let default_repo_dir = default_repo.path().to_str().unwrap();
         let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
@@ -2050,7 +2050,7 @@ mod tests {
             external_repo_dir,
             &["worktree", "add", external_wt_path, "-b", "wt/external-627"],
         );
-        let external_commit = git_commit(external_wt_path, "fix: external target repo (#627)");
+        git_commit(external_wt_path, "fix: external target repo (#627)");
 
         let db = test_db();
         seed_card(&db, "card-desc-target-repo", "ready");
@@ -2062,22 +2062,13 @@ mod tests {
             &format!("target_repo: {}", external_repo_dir),
         );
 
-        let result = resolve_card_worktree(&db, "card-desc-target-repo", None)
-            .unwrap()
-            .expect("external repo worktree should resolve from card description");
-
-        let actual_path = std::fs::canonicalize(&result.0)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_path = std::fs::canonicalize(external_wt_path)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-
-        assert_eq!(actual_path, expected_path);
-        assert_eq!(result.1, "wt/external-627");
-        assert_eq!(result.2, external_commit);
+        let err = resolve_card_worktree(&db, "card-desc-target-repo", None)
+            .expect_err("description target_repo must not bypass missing repo mapping");
+        assert!(
+            err.to_string()
+                .contains("No local repo mapping for 'owner/missing'"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -2223,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn create_dispatch_injects_target_repo_from_card_description() {
+    fn create_dispatch_rejects_target_repo_from_card_description() {
         let default_repo = init_test_repo();
         let default_repo_dir = default_repo.path().to_str().unwrap();
         let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
@@ -2236,7 +2227,7 @@ mod tests {
             external_repo_dir,
             &["worktree", "add", external_wt_path, "-b", "wt/target-627"],
         );
-        let _external_commit = git_commit(external_wt_path, "fix: dispatch target repo (#627)");
+        git_commit(external_wt_path, "fix: dispatch target repo (#627)");
 
         let db = test_db();
         let engine = test_engine(&db);
@@ -2249,7 +2240,7 @@ mod tests {
             &format!("external repo path: {}", external_repo_dir),
         );
 
-        let dispatch = create_dispatch(
+        let err = create_dispatch(
             &db,
             &engine,
             "card-dispatch-target-repo",
@@ -2258,29 +2249,12 @@ mod tests {
             "Implement external repo task",
             &json!({}),
         )
-        .expect("description target_repo should bypass missing repo mapping");
-
-        let ctx = &dispatch["context"];
-        let actual_target_repo = std::fs::canonicalize(ctx["target_repo"].as_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_target_repo = std::fs::canonicalize(external_repo_dir)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let actual_worktree = std::fs::canonicalize(ctx["worktree_path"].as_str().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let expected_worktree = std::fs::canonicalize(external_wt_path)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-
-        assert_eq!(actual_target_repo, expected_target_repo);
-        assert_eq!(actual_worktree, expected_worktree);
-        assert_eq!(ctx["worktree_branch"], "wt/target-627");
+        .expect_err("description target_repo must not bypass missing repo mapping");
+        assert!(
+            err.to_string()
+                .contains("No local repo mapping for 'owner/missing'"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
@@ -2817,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn review_context_accepts_external_work_target_when_card_target_repo_is_known() {
+    fn review_context_accepts_external_work_target_when_target_repo_is_in_context() {
         let db = test_db();
         seed_card(&db, "card-review-external-accept", "review");
         set_card_issue_number(&db, "card-review-external-accept", 627);
@@ -2831,12 +2805,6 @@ mod tests {
         let external_dir = external_repo.path().to_str().unwrap();
         run_git(external_dir, &["checkout", "-b", "codex/627-target-repo"]);
         let external_commit = git_commit(external_dir, "fix: cross repo review target (#627)");
-        set_card_description(
-            &db,
-            "card-review-external-accept",
-            &format!("target_repo: {}", external_dir),
-        );
-
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "INSERT INTO task_dispatches (
@@ -2859,8 +2827,13 @@ mod tests {
         drop(conn);
 
         let context =
-            build_review_context(&db, "card-review-external-accept", "agent-1", &json!({}))
-                .unwrap();
+            build_review_context(
+                &db,
+                "card-review-external-accept",
+                "agent-1",
+                &json!({ "target_repo": external_dir }),
+            )
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
             .unwrap()
