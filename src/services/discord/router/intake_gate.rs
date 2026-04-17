@@ -560,17 +560,7 @@ pub(in crate::services::discord) async fn handle_event(
             // Only skip channels that are explicitly bound to a different provider.
             // Unowned channels fall through to normal handling.
 
-            // #189: Generic DM reply tracking — consume pending entry if present.
-            // Consumed DM answers must stop here; falling through into normal
-            // message handling produces a bogus "No active session" error in DMs.
             let text = new_message.content.trim();
-            if !text.is_empty() {
-                if let Some(ref db) = data.shared.db {
-                    if try_handle_pending_dm_reply(db, new_message).await {
-                        return Ok(());
-                    }
-                }
-            }
 
             let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get());
             if is_allowed_bot_sender
@@ -594,6 +584,19 @@ pub(in crate::services::discord) async fn handle_event(
             let is_allowed_bot = is_allowed_bot_sender;
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
+            }
+
+            // #189: Generic DM reply tracking — consume pending entry if present.
+            // Keep this after auth so unauthorized DM senders cannot inject
+            // answers into pending workflows.
+            // Consumed DM answers must stop here; falling through into normal
+            // message handling produces a bogus "No active session" error in DMs.
+            if !text.is_empty() {
+                if let Some(ref db) = data.shared.db {
+                    if try_handle_pending_dm_reply(db, new_message).await {
+                        return Ok(());
+                    }
+                }
             }
 
             // Handle file attachments — download regardless of session state
