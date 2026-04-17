@@ -267,7 +267,6 @@ const CATEGORIES: Array<{
 const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
   "pm_decision_gate_enabled",
-  "narrate_progress",
 ]);
 
 const NUMERIC_CONFIG_KEYS = new Set([
@@ -347,10 +346,6 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
   context_compact_percent_claude: {
     ko: "Claude 전용 컨텍스트 compact 기준입니다.",
     en: "Provider-specific context compaction threshold for Claude.",
-  },
-  narrate_progress: {
-    ko: "Discord 응답에서 중간 진행 설명을 기본적으로 포함할지 결정합니다.",
-    en: "Controls whether Discord replies include progress narration by default.",
   },
 };
 

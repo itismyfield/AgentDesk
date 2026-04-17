@@ -89,7 +89,6 @@ runtime:
   context_compact_percent: 60
   context_compact_percent_codex: 75
   context_compact_percent_claude: 70
-  narrate_progress: true
   dispatch_poll_sec: 30
   agent_sync_sec: 300
   github_issue_sync_sec: 900

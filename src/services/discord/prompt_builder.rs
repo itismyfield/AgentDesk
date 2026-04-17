@@ -538,7 +538,6 @@ pub(super) fn build_system_prompt(
     channel_id: ChannelId,
     token: &str,
     disabled_notice: &str,
-    narrate_progress: bool,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
     profile: DispatchProfile,
@@ -549,12 +548,6 @@ pub(super) fn build_system_prompt(
     memory_settings: Option<&ResolvedMemorySettings>,
     memento_mcp_available: bool,
 ) -> String {
-    let narration_guidance = if narrate_progress {
-        "\n\nAlways keep the user informed about what you are doing. Briefly explain each step as you work \
-         (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\")."
-    } else {
-        ""
-    };
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
          {}\n\
@@ -563,26 +556,21 @@ pub(super) fn build_system_prompt(
          send it by running this bash command:\n\n\
          agentdesk discord-sendfile <filepath> --channel {} --key {}\n\n\
          This delivers the file directly to the user's Discord channel.\n\
-         Do NOT tell the user to use /down — use the command above instead.{}\n\n\
-         IMPORTANT: When reading, editing, or searching files, ALWAYS mention the specific file path and what you're looking for \
-         (e.g. \"mod.rs:2700 부근의 시스템 프롬프트를 확인합니다\" not just \"코드를 확인합니다\"). \
+         Do NOT tell the user to use /down — use the command above instead.\n\n\
+         When referencing files in your text, include the specific path (e.g. \"mod.rs:2700\"). \
          The user sees only your text output, not the tool calls themselves.\n\n\
          Discord formatting rules:\n\
-         - Minimize code blocks. Use inline `code` for short references. Only use code blocks for actual code snippets the user needs.\n\
-         - Keep messages concise and scannable on mobile screens. Prefer short paragraphs and bullet points.\n\
-         - Avoid long horizontal lines or decorative separators.\n\n\
-         IMPORTANT: The user is on Discord and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
-         All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
+         - Use inline `code` for short references. Reserve code blocks for actual code snippets.\n\
+         - Keep messages concise and scannable on mobile. Prefer short paragraphs and bullet points.\n\
+         - Avoid decorative separators or long horizontal lines.\n\n\
+         This Discord channel does not support interactive prompts. Do NOT call AskUserQuestion, EnterPlanMode, or ExitPlanMode. \
+         Ask in plain text if you need clarification.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
-         not necessarily your most recent message. Prioritize the reply target over the latest message when interpreting user intent. \
-         If ambiguous, ask which message the user is responding to. \
-         Avoid mixing status reports and action questions in a single message — it makes the reply target unclear.{}",
+         not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.{}",
         discord_context,
         current_path,
         channel_id.get(),
         discord_token_hash(token),
-        narration_guidance,
         disabled_notice
     );
     system_prompt_owned.push_str("\n\n");
@@ -752,7 +740,6 @@ mod tests {
             ChannelId::new(channel_id),
             token,
             disabled_notice,
-            true,  // narrate_progress
             None,  // role_binding
             false, // queued_turn
             DispatchProfile::Full,
@@ -803,11 +790,11 @@ mod tests {
     fn test_build_system_prompt_disables_interactive_tools() {
         let output = call_build("ctx", "/tmp", 1, "tok", "", false);
         assert!(
-            output.contains("CANNOT interact with any interactive prompts"),
+            output.contains("does not support interactive prompts"),
             "System prompt should warn that interactive tools are disabled"
         );
         assert!(
-            output.contains("Never use tools that expect user interaction"),
+            output.contains("Do NOT call AskUserQuestion"),
             "System prompt should instruct not to use interactive tools"
         );
     }
@@ -837,38 +824,6 @@ mod tests {
         assert!(output.contains("GET /api/docs/{category}"));
         assert!(output.contains("API_FRICTION:"));
         assert!(output.contains("topic=api-friction"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_includes_narration_when_enabled() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
-        assert!(output.contains("Always keep the user informed about what you are doing."));
-        assert!(!output.contains("The user cannot see your tool calls"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_omits_narration_when_disabled() {
-        let output = build_system_prompt(
-            "ctx",
-            "/tmp",
-            ChannelId::new(1),
-            "tok",
-            "",
-            false,
-            None,
-            false,
-            DispatchProfile::Full,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        );
-
-        assert!(!output.contains("Always keep the user informed about what you are doing."));
-        assert!(!output.contains("The user cannot see your tool calls"));
-        assert!(output.contains("ALWAYS mention the specific file path"));
     }
 
     #[test]
@@ -911,7 +866,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::Full,
@@ -936,7 +890,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -961,7 +914,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -995,7 +947,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -1012,7 +963,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -1052,7 +1002,6 @@ mod tests {
             ChannelId::new(1488022491992424448),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1087,7 +1036,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1111,7 +1059,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::Full,
@@ -1150,7 +1097,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1188,7 +1134,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::Full,
@@ -1216,7 +1161,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -1252,7 +1196,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             true,
             DispatchProfile::Full,
@@ -1312,7 +1255,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -1373,7 +1315,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -1409,7 +1350,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::Full,
@@ -1440,7 +1380,6 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            true,
             None,
             false,
             DispatchProfile::Full,

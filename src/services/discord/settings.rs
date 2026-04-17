@@ -43,8 +43,7 @@ pub(super) use content::{
 };
 pub(crate) use memory::{memory_settings_for_binding, resolve_memory_settings};
 pub(super) use read::{
-    load_bot_settings, load_last_remote_profile, load_last_session_path, load_narrate_progress,
-    save_last_session_runtime,
+    load_bot_settings, load_last_remote_profile, load_last_session_path, save_last_session_runtime,
 };
 pub use read::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -386,9 +385,9 @@ mod tests {
     use super::{
         BotChannelRoutingGuardFailure, bot_settings_allow_agent, bot_settings_allow_channel,
         channel_supports_provider, discord_token_hash, list_registered_channel_bindings,
-        load_bot_settings, load_discord_bot_launch_configs, load_narrate_progress,
-        load_peer_agents, render_peer_agent_guidance, resolve_memory_settings,
-        resolve_role_binding, save_bot_settings, validate_bot_channel_routing,
+        load_bot_settings, load_discord_bot_launch_configs, load_peer_agents,
+        render_peer_agent_guidance, resolve_memory_settings, resolve_role_binding,
+        save_bot_settings, validate_bot_channel_routing,
         validate_bot_channel_routing_with_provider_channel,
     };
 
@@ -782,7 +781,6 @@ memory:
                         ChannelId::new(1),
                         "tok",
                         "",
-                        true,
                         None,
                         false,
                         super::super::prompt_builder::DispatchProfile::Full,
@@ -861,26 +859,6 @@ memory:
                 vec!["WebFetch".to_string(), "Bash".to_string()]
             );
         });
-    }
-
-    #[test]
-    fn test_load_narrate_progress_defaults_true_without_db() {
-        assert!(load_narrate_progress(None));
-    }
-
-    #[test]
-    fn test_load_narrate_progress_reads_false_from_db() {
-        let db = crate::db::test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('narrate_progress', 'false')",
-                [],
-            )
-            .unwrap();
-        }
-
-        assert!(!load_narrate_progress(Some(&db)));
     }
 
     #[test]
@@ -2045,7 +2023,7 @@ agents:
             let rendered = render_peer_agent_guidance("ch-pd").unwrap();
             assert!(rendered.contains("ch-td"));
             assert!(!rendered.contains("ch-pd (PD"));
-            assert!(rendered.contains("name the 1-2 most suitable peer agents"));
+            assert!(rendered.contains("Name 1-2 peer agents"));
         });
     }
 

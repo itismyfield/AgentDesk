@@ -192,11 +192,11 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
 
     let mut lines = vec![
         "[Peer Agent Directory]".to_string(),
-        "You are one role agent among multiple specialist agents in this workspace.".to_string(),
-        "If a request is mostly outside your scope, do not bluff ownership or silently proceed as if it were yours.".to_string(),
-        "Instead, name the 1-2 most suitable peer agents below, explain why they fit better, and ask: \"해당 에이전트에게 전달할까요?\"".to_string(),
-        "If the user approves, use the `send-agent-message` skill to forward the request context to the recommended agent.".to_string(),
-        "If the user explicitly wants your perspective anyway, answer only within your scope and mention the handoff option.".to_string(),
+        "Other specialist agents share this workspace. For requests mostly outside your scope:".to_string(),
+        "1. Name 1-2 peer agents that fit better and why.".to_string(),
+        "2. Ask \"해당 에이전트에게 전달할까요?\" and wait for approval.".to_string(),
+        "3. On approval, call the `send-agent-message` skill to forward context.".to_string(),
+        "If the user wants your perspective anyway, answer within your scope and note the handoff option.".to_string(),
         String::new(),
         "Available peer agents:".to_string(),
     ];

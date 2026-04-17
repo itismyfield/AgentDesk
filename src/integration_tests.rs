@@ -5909,6 +5909,479 @@ mod tests {
         );
     }
 
+    /// #701 non-skip path: review pass with an active non-skip pipeline stage
+    /// (e.g. `dev-deploy`) keeps PR creation deferred so `ci-recovery` cannot
+    /// race `deploy-pipeline` for ownership. The card still enters the stage
+    /// (pipeline_stage_id set, status=in_progress, blocked_reason=deploy:waiting)
+    /// but no create-pr dispatch is seeded here — the follow-up on completion
+    /// path is tracked separately (scope deliberately limited in this PR).
+    #[test]
+    fn scenario_701_review_pass_with_pipeline_stage_enters_stage_without_early_pr() {
+        let (repo, _repo_guard) = setup_test_repo();
+        run_git(repo.path(), &["checkout", "-b", "wt/card-701-pipeline"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        // Seed a dev-deploy-like pipeline stage (trigger_after=review_pass,
+        // provider=self, skip_condition=no_rs_changes). Without a mock gh,
+        // `hasRsChanges` falls back to `true`, so the stage is entered (not
+        // skipped) — this exercises the non-skip path.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider, skip_condition) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self', 'no_rs_changes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-pipeline",
+            "review",
+            "test/repo",
+            701,
+            Some("123456789012345679"),
+        );
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-701-pipeline",
+            "card-701-pipeline",
+            "implementation",
+        );
+        seed_completed_review_dispatch(&db, "review-701-pass", "card-701-pipeline", "pass");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnReviewVerdict",
+                serde_json::json!({"card_id": "card-701-pipeline", "verdict": "pass"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // Non-skip path: the stage owns the card. No create-pr dispatch is
+        // seeded here — that would race `ci-recovery` with `deploy-pipeline`.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-pipeline", "create-pr"),
+            0,
+            "#701: non-skip path must NOT seed create-pr — pipeline stage owns the card"
+        );
+        assert!(
+            pr_tracking_state(&db, "card-701-pipeline").is_none(),
+            "#701: non-skip path must NOT seed pr_tracking"
+        );
+        // The card is bound to the pipeline stage (TEXT column per schema).
+        let conn = db.lock().unwrap();
+        let (stage_id, blocked, status): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT pipeline_stage_id, blocked_reason, status FROM kanban_cards WHERE id = 'card-701-pipeline'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            stage_id.is_some(),
+            "#701: non-skip path should bind the card to the pipeline stage"
+        );
+        assert_eq!(blocked.as_deref(), Some("deploy:waiting"));
+        assert_eq!(status, "in_progress");
+    }
+
+    /// #701 regression (skip path): when pipeline stage's `skip_condition`
+    /// matches (e.g. no_rs_changes with a PR that touches no .rs files),
+    /// the card must still get a create-pr dispatch AND `pipeline_stage_id`
+    /// must be cleared to NULL per DoD.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_review_pass_with_skipped_pipeline_stage_still_dispatches_create_pr() {
+        // `hasRsChanges` short-circuits to false when pr:list returns a PR AND
+        // the subsequent `repos/.../pulls/N/files` reply contains no .rs paths.
+        // `setup_test_repo_with_mock_gh` holds a single env-lock guard for both
+        // the repo override and the mock gh binary — using `install_mock_gh`
+        // and `setup_test_repo` separately deadlocks because each tries to
+        // re-acquire the same static env lock.
+        let (repo, _env) = setup_test_repo_with_mock_gh(&[
+            MockGhReply {
+                key: "pr:list",
+                contains: None,
+                stdout: "[{\"number\":902}]",
+            },
+            MockGhReply {
+                key: "api:repos/test/repo/pulls/902/files",
+                contains: None,
+                stdout: "README.md\ndashboard/src/App.tsx",
+            },
+        ]);
+        run_git(repo.path(), &["checkout", "-b", "wt/card-701-skip"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider, skip_condition) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self', 'no_rs_changes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-skip",
+            "review",
+            "test/repo",
+            702,
+            Some("123456789012345680"),
+        );
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-701-skip",
+            "card-701-skip",
+            "implementation",
+        );
+        seed_completed_review_dispatch(&db, "review-701-skip", "card-701-skip", "pass");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnReviewVerdict",
+                serde_json::json!({"card_id": "card-701-skip", "verdict": "pass"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // DoD: create-pr dispatch exists even when the pipeline stage was skipped.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-skip", "create-pr"),
+            1,
+            "#701: skip path must still create a create-pr dispatch"
+        );
+        assert_eq!(
+            pr_tracking_state(&db, "card-701-skip").as_deref(),
+            Some("create-pr")
+        );
+        // DoD: pipeline_stage_id must be cleared on skip.
+        let conn = db.lock().unwrap();
+        let stage_id: Option<i64> = conn
+            .query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-skip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stage_id.is_none(),
+            "#701 DoD: pipeline_stage_id must be NULL after skip_condition match"
+        );
+    }
+
+    /// #701 regression (counter-stage DoD gate): `advancePipelineStage`'s
+    /// counter-provider skip gate reads `card.description` to decide whether
+    /// the DoD requires E2E. The initial card SELECT must include
+    /// `description` — omitting it caused `dodText` to collapse to "" and
+    /// silently bypass every E2E stage, so a card with "E2E test coverage"
+    /// in its DoD could reach terminal (and, after the #701 handoff, PR/CI)
+    /// without ever running E2E.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_advance_to_counter_e2e_respects_description_dod_gate() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        // Two stages: a pre-e2e stage (order 50) so the card has a valid
+        // current pipeline_stage_id, and a counter-provider e2e-test stage
+        // at order 100 that advancePipelineStage will advance into.
+        let pre_stage_id: i64;
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider) \
+                 VALUES ('test/repo', 'pre-e2e-gate', 50, 'review_pass', 'self')",
+                [],
+            )
+            .unwrap();
+            pre_stage_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, provider) \
+                 VALUES ('test/repo', 'e2e-test', 100, 'counter')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-e2e-required",
+            "in_progress",
+            "test/repo",
+            703,
+            Some("123456789012345681"),
+        );
+        // DoD explicitly lists E2E — the counter skip gate MUST NOT skip.
+        // Also bind the card to pre_stage_id so advancePipelineStage finds
+        // the counter e2e-test stage as the next stage.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET description = ?1, pipeline_stage_id = ?2, updated_at = datetime('now') \
+                 WHERE id = 'card-701-e2e-required'",
+                rusqlite::params!["- [ ] E2E test coverage", pre_stage_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        // Seed a completed e2e-test dispatch with a "pass" verdict directly
+        // in the DB — create_dispatch_core requires a resolvable worktree,
+        // which we don't need here. Firing OnDispatchCompleted manually
+        // triggers deploy-pipeline.onDispatchCompleted, which calls
+        // advancePipelineStage and hits the counter-stage skip gate.
+        let dispatch_id = "e2e-701-required-bootstrap";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                    result, created_at, updated_at, completed_at
+                ) VALUES (
+                    ?1, 'card-701-e2e-required', 'agent-1', 'e2e-test', 'completed',
+                    '[E2E Test bootstrap]',
+                    '{\"verdict\":\"pass\"}',
+                    datetime('now', '-1 minute'), datetime('now', '-1 minute'), datetime('now', '-1 minute')
+                )",
+                rusqlite::params![dispatch_id],
+            )
+            .unwrap();
+        }
+        engine
+            .try_fire_hook_by_name(
+                "OnDispatchCompleted",
+                serde_json::json!({"dispatch_id": dispatch_id}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // The DoD explicitly lists E2E, so the counter-stage skip gate must
+        // NOT skip — the card must advance INTO the counter e2e-test stage,
+        // not past it to terminal/PR. We assert on pipeline_stage_id because
+        // the e2e-test dispatch creation itself requires worktree resolution
+        // that this minimal test harness doesn't provide; the gate's
+        // observable effect (stage advancement vs stage clear) is what
+        // actually distinguishes the bug.
+        //
+        // Before the fix: the SELECT omitted description, dodText was "",
+        //   indexOf("e2e") === -1 was true → skip taken → pipeline_stage_id
+        //   cleared to NULL and card handed to attemptCreatePr (which could
+        //   silently ship code without E2E).
+        // After the fix: description is loaded, dodText contains "e2e" →
+        //   skip NOT taken → pipeline_stage_id advanced to counter stage
+        //   (non-NULL, pointing at the e2e-test stage).
+        let conn = db.lock().unwrap();
+        let stage_id_after: Option<String> = conn
+            .query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-e2e-required'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            stage_id_after.is_some(),
+            "#701: counter-stage dodText gate must honor description — E2E in DoD means NO skip (pipeline_stage_id must advance, not clear)"
+        );
+        // Pipeline is still running — no PR handoff may have happened.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-e2e-required", "create-pr"),
+            0,
+            "#701: counter-stage gate did not skip — no create-pr may leak through"
+        );
+    }
+
+    /// #701 regression (noop_verification + pipeline): when review passes
+    /// with review_mode='noop_verification' (the agent verified there are
+    /// no changes to ship), the card must go straight to terminal and skip
+    /// pipeline entry. Without this short-circuit, a noop card would enter
+    /// a non-skip pipeline, and the post-pipeline
+    /// `agentdesk.reviewAutomation.attemptCreatePr()` call from
+    /// deploy-pipeline.js would dispatch `create-pr` for noop work —
+    /// resulting in an empty PR, wasted CI, and possible auto-merge of
+    /// "no changes".
+    #[tokio::test(flavor = "current_thread")]
+    async fn scenario_701_noop_verification_pass_skips_pipeline_entry() {
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "issue:close",
+            contains: Some("--repo test/repo"),
+            stdout: "",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-701-noop", "review", "test/repo", 711, None);
+
+        // Seed a dev-deploy pipeline stage — without the short-circuit this
+        // would be entered by the review-pass handler.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider) \
+                 VALUES ('test/repo', 'dev-deploy', 100, 'review_pass', 'self')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing', latest_dispatch_id = 'review-701-noop' WHERE id = 'card-701-noop'",
+                [],
+            )
+            .unwrap();
+            // Implementation dispatch completed with work_outcome='noop'.
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, completed_at, created_at, updated_at) \
+                 VALUES ('impl-701-noop', 'card-701-noop', 'agent-1', 'implementation', 'completed', '[Impl noop]', ?1, datetime('now', '-2 minutes'), datetime('now', '-5 minutes'), datetime('now', '-2 minutes'))",
+                rusqlite::params![serde_json::json!({
+                    "work_outcome": "noop",
+                    "completed_without_changes": true,
+                    "notes": "already implemented"
+                }).to_string()],
+            )
+            .unwrap();
+            // The pending review dispatch uses review_mode='noop_verification'.
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
+                 VALUES ('review-701-noop', 'card-701-noop', 'agent-1', 'review', 'pending', '[Review noop]', ?1, datetime('now'), datetime('now'))",
+                rusqlite::params![serde_json::json!({
+                    "review_mode": "noop_verification",
+                    "parent_dispatch_id": "impl-701-noop"
+                }).to_string()],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), engine);
+        let (status, _body) = crate::server::routes::review_verdict::submit_verdict(
+            axum::extract::State(state),
+            axum::Json(crate::server::routes::review_verdict::SubmitVerdictBody {
+                dispatch_id: "review-701-noop".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: Some("noop verification passed".to_string()),
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (card_status, pipeline_stage_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-noop'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let create_pr_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-701-noop' AND dispatch_type = 'create-pr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            card_status, "done",
+            "#701: noop_verification pass must short-circuit to terminal even when a pipeline stage is configured"
+        );
+        assert!(
+            pipeline_stage_id.is_none(),
+            "#701: noop_verification pass must NOT bind the card to any pipeline stage (found {:?})",
+            pipeline_stage_id
+        );
+        assert_eq!(
+            create_pr_count, 0,
+            "#701: noop_verification pass must NOT create a create-pr dispatch (pipeline must be skipped, not just its PR handoff)"
+        );
+    }
+
+    /// #701 regression (markPrCreateFailed ordering): kanban terminal
+    /// transitions clear blocked_reason as part of their cleanup, so
+    /// writing the failure marker BEFORE setStatus wipes it immediately.
+    /// The helper must setStatus first and stamp blocked_reason afterward
+    /// so the pr:create_failed marker survives the transition.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        // Seed a card with review_status set so the terminal transition
+        // has cleanup to do — this is the path that historically cleared
+        // blocked_reason.
+        seed_card_with_repo(
+            &db,
+            "card-701-mark-failed",
+            "review",
+            "test/repo",
+            712,
+            None,
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing' WHERE id = 'card-701-mark-failed'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Invoke the review-automation helper via the JS engine. It is not
+        // exported on `agentdesk.reviewAutomation` by name for arbitrary
+        // reasons (only the curated PR helpers are), but it's reachable
+        // via `agentdesk.reviewAutomation.markPrCreateFailed(...)`.
+        engine
+            .eval_js::<String>(
+                r#"(() => { agentdesk.reviewAutomation.markPrCreateFailed("card-701-mark-failed", "test_reason"); return "ok"; })()"#,
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (card_status, blocked_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-701-mark-failed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            card_status, "done",
+            "#701: markPrCreateFailed must move the card to the configured terminal state so merge-automation retry can see it"
+        );
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("pr:create_failed:test_reason"),
+            "#701: markPrCreateFailed must persist the pr:create_failed marker AFTER setStatus (terminal transitions clear blocked_reason, so the ordering matters)"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {

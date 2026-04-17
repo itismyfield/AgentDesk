@@ -585,7 +585,6 @@ pub(super) async fn tmux_output_watcher(
         let mut state = StreamLineState::new();
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
-        let narrate_progress = super::settings::load_narrate_progress(shared.db.as_ref());
 
         // Create a placeholder message for real-time status display
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -769,7 +768,6 @@ pub(super) async fn tmux_output_watcher(
                             tool_state.prev_tool_status.as_deref(),
                             tool_state.current_tool_line.as_deref(),
                             &full_response,
-                            narrate_progress,
                         );
                         let Some(msg_id) = placeholder_msg_id else {
                             break;
@@ -841,7 +839,6 @@ pub(super) async fn tmux_output_watcher(
                         tool_state.prev_tool_status.as_deref(),
                         tool_state.current_tool_line.as_deref(),
                         &full_response,
-                        narrate_progress,
                     );
                     let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
                     let display_text =

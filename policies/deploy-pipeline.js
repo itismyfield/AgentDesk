@@ -142,8 +142,13 @@ function cleanupDeploySession(sessionName) {
 // ── Pipeline stage advancement ───────────────────────────────
 
 function advancePipelineStage(cardId) {
+  // #701: `description` is read by the counter-provider skip gate below to
+  // decide whether the DoD requires E2E. Without it, `card[0].description`
+  // was always undefined, `dodText` collapsed to "", and the E2E stage was
+  // unconditionally bypassed — a silent skip that now hands the card
+  // directly into PR/CI via attemptCreatePr() and could ship untested code.
   var card = agentdesk.db.query(
-    "SELECT pipeline_stage_id, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?",
+    "SELECT pipeline_stage_id, repo_id, assigned_agent_id, description FROM kanban_cards WHERE id = ?",
     [cardId]
   );
   if (card.length === 0) return;
@@ -180,9 +185,75 @@ function advancePipelineStage(cardId) {
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
-        var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
-        var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
-        agentdesk.kanban.setStatus(cardId, skipTerminal);
+        // #701: pipeline exhausted — hand off to PR/CI flow.
+        // dispatched → await; noop → terminal; error → markPrCreateFailed
+        // (terminal + blocked_reason so merge-automation can retry).
+        // Degraded mode: if review-automation's exported helpers aren't
+        // loaded (version skew, partial policy reload), handle the failure
+        // inline — fall through to terminal with a visible blocked_reason,
+        // since calling markPrCreateFailed would throw.
+        var skipPrHelperAvailable = agentdesk.reviewAutomation
+          && typeof agentdesk.reviewAutomation.attemptCreatePr === "function"
+          && typeof agentdesk.reviewAutomation.markPrCreateFailed === "function";
+        if (skipPrHelperAvailable) {
+          var skipPrResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+          if (skipPrResult.status === "dispatched") {
+            // #701: Mark the card as owned by the PR/CI flow. Without a
+            // blocked_reason the card would look like naked in_progress
+            // work to stale-work detection (timeouts.js [B] skips cards
+            // with any blocked_reason). Cleared to 'ci:waiting' by the
+            // create-pr completion handler.
+            agentdesk.db.execute(
+              "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') WHERE id = ?",
+              [cardId]
+            );
+            agentdesk.log.info("[deploy-pipeline] Card " + cardId + " e2e-skip — create-pr dispatched, awaiting CI/merge");
+          } else if (skipPrResult.status === "error") {
+            agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
+          } else {
+            var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+            var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+            agentdesk.kanban.setStatus(cardId, skipTerminal);
+          }
+        } else {
+          // #701: Seed a pr_tracking row in the degraded-mode fallback so
+          // merge-automation.processTrackedMergeQueue can retry create-pr
+          // once the review-automation helper is reloaded. Without this
+          // row the retry loop never sees the card. prTracking.upsert is
+          // a Rust-backed op so it works without the JS helper.
+          var skipFallbackCardInfo = agentdesk.db.query(
+            "SELECT repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
+            [cardId]
+          );
+          var skipFallbackRepo = null;
+          if (skipFallbackCardInfo.length > 0) {
+            skipFallbackRepo = skipFallbackCardInfo[0].repo_id;
+            if (!skipFallbackRepo && skipFallbackCardInfo[0].github_issue_url) {
+              var m = /github\.com\/([^\/]+\/[^\/]+)/.exec(skipFallbackCardInfo[0].github_issue_url);
+              if (m) skipFallbackRepo = m[1];
+            }
+          }
+          if (skipFallbackRepo) {
+            agentdesk.prTracking.upsert(
+              cardId, skipFallbackRepo, null, null, null, null,
+              "create-pr", "review_automation_missing"
+            );
+          }
+          // Force the terminal transition (the card is still in an
+          // in_progress pipeline state and the direct transition to
+          // terminal may be illegal without force). Without force the
+          // setStatus can silently fail while we still stamp the marker,
+          // leaving the card non-terminal and invisible to the retry loop.
+          var skipCfgFallback = agentdesk.pipeline.resolveForCard(cardId);
+          var skipTerminalFallback = agentdesk.pipeline.terminalState(skipCfgFallback);
+          agentdesk.kanban.setStatus(cardId, skipTerminalFallback, true);
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+            ["pr:create_failed:review_automation_missing", cardId]
+          );
+          agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " e2e-skip with review-automation unavailable — terminal + pr:create_failed" +
+            (skipFallbackRepo ? " (pr_tracking seeded for retry)" : " (no repo_id — manual recovery required)"));
+        }
         return;
       }
       createE2eTestDispatch(cardId, card[0].assigned_agent_id);
@@ -203,15 +274,86 @@ function advancePipelineStage(cardId) {
       }
     }
   } else {
-    // No more stages — done
+    // No more stages — attempt PR creation before going terminal (#701).
+    // Pipeline stages (dev-deploy, e2e-test) run before PR; once they all
+    // succeed the card hands off to the PR/CI flow. ci-recovery and
+    // merge-automation take over from here.
+    //
+    // attemptCreatePr returns { status, reason? }:
+    //   "dispatched" → create-pr queued; wait for CI/merge (do not terminal).
+    //   "noop"       → nothing to PR (noop_verification / no work target /
+    //                  no repo); safe to terminal.
+    //   "error"      → PR was expected but dispatch failed (or metadata
+    //                  surprise on a tracked worktree). markPrCreateFailed
+    //                  moves the card terminal + blocked_reason so the
+    //                  merge-automation retry loop can recover it.
+    //
+    // Degraded mode: if review-automation's exported helpers aren't loaded
+    // (version skew, partial policy reload), fall through to terminal
+    // inline rather than dereferencing a missing helper.
     agentdesk.db.execute(
       "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]
     );
-    var cfg = agentdesk.pipeline.resolveForCard(cardId);
-    var terminalState = agentdesk.pipeline.terminalState(cfg);
-    agentdesk.kanban.setStatus(cardId, terminalState);
-    agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState);
+    var prHelperAvailable = agentdesk.reviewAutomation
+      && typeof agentdesk.reviewAutomation.attemptCreatePr === "function"
+      && typeof agentdesk.reviewAutomation.markPrCreateFailed === "function";
+    if (prHelperAvailable) {
+      var prResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
+      if (prResult.status === "dispatched") {
+        // #701: Mark the card as owned by the PR/CI flow — see the
+        // e2e-skip path above for rationale (stale-work detection skips
+        // cards with any blocked_reason; create-pr completion clears to
+        // 'ci:waiting').
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') WHERE id = ?",
+          [cardId]
+        );
+        agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
+      } else if (prResult.status === "error") {
+        agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
+        agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline but PR creation failed: " + prResult.reason);
+      } else {
+        var cfg = agentdesk.pipeline.resolveForCard(cardId);
+        var terminalState = agentdesk.pipeline.terminalState(cfg);
+        agentdesk.kanban.setStatus(cardId, terminalState);
+        agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages -> " + terminalState + " (no PR needed)");
+      }
+    } else {
+      // #701: Seed a pr_tracking row so merge-automation can retry once
+      // review-automation is reloaded — the retry loop scans canonical
+      // pr_tracking rows, not blocked_reason. Without this seed, the
+      // exact partial-reload / version-skew case this fallback handles
+      // becomes invisible to auto-recovery.
+      var fallbackCardInfo = agentdesk.db.query(
+        "SELECT repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
+        [cardId]
+      );
+      var fallbackRepo = null;
+      if (fallbackCardInfo.length > 0) {
+        fallbackRepo = fallbackCardInfo[0].repo_id;
+        if (!fallbackRepo && fallbackCardInfo[0].github_issue_url) {
+          var m = /github\.com\/([^\/]+\/[^\/]+)/.exec(fallbackCardInfo[0].github_issue_url);
+          if (m) fallbackRepo = m[1];
+        }
+      }
+      if (fallbackRepo) {
+        agentdesk.prTracking.upsert(
+          cardId, fallbackRepo, null, null, null, null,
+          "create-pr", "review_automation_missing"
+        );
+      }
+      // Force the transition — see the e2e-skip fallback above.
+      var cfgFallback = agentdesk.pipeline.resolveForCard(cardId);
+      var terminalStateFallback = agentdesk.pipeline.terminalState(cfgFallback);
+      agentdesk.kanban.setStatus(cardId, terminalStateFallback, true);
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        ["pr:create_failed:review_automation_missing", cardId]
+      );
+      agentdesk.log.warn("[deploy-pipeline] Card " + cardId + " completed pipeline with review-automation unavailable — terminal + pr:create_failed" +
+        (fallbackRepo ? " (pr_tracking seeded for retry)" : " (no repo_id — manual recovery required)"));
+    }
   }
 }
 

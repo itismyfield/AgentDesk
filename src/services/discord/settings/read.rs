@@ -198,34 +198,6 @@ pub(crate) fn save_last_session_runtime(
     }
 }
 
-fn parse_boolish_config_value(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-pub(crate) fn load_narrate_progress(db: Option<&crate::db::Db>) -> bool {
-    let Some(db) = db else {
-        return true;
-    };
-    let Ok(conn) = db.read_conn() else {
-        return true;
-    };
-    let value: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'narrate_progress'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-    value
-        .as_deref()
-        .and_then(parse_boolish_config_value)
-        .unwrap_or(true)
-}
-
 pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let configured = agentdesk_config::find_discord_bot_by_token(token);
     let legacy = load_legacy_bot_settings_entry(token);

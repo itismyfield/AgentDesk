@@ -19,6 +19,7 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_percent",
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
+    "narrate_progress",
 ];
 
 /// GET /api/settings
@@ -198,13 +199,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "Claude Context Compact Threshold (%)",
         None,
     ),
-    (
-        "narrate_progress",
-        "system",
-        "진행 상황 내레이션",
-        "Narrate Progress",
-        Some("true"),
-    ),
 ];
 
 fn stringified_bool(value: Option<bool>) -> Option<String> {
@@ -236,7 +230,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "context_compact_percent_claude" => {
             stringified_number(config.runtime.context_compact_percent_claude)
         }
-        "narrate_progress" => stringified_bool(config.runtime.narrate_progress),
         _ => None,
     }
 }
@@ -558,7 +551,6 @@ mod tests {
 
         assert!(keys.contains("context_compact_percent_codex"));
         assert!(keys.contains("context_compact_percent_claude"));
-        assert!(keys.contains("narrate_progress"));
         assert!(keys.contains("merge_automation_enabled"));
         assert!(keys.contains("merge_strategy"));
         assert!(keys.contains("merge_strategy_mode"));
@@ -662,12 +654,11 @@ mod tests {
                 "merge_allowed_authors": "itismyfield,octocat",
                 "context_compact_percent_codex": "85",
                 "context_compact_percent_claude": "75",
-                "narrate_progress": false,
             })),
         )
         .await;
         assert_eq!(patch_status, StatusCode::OK);
-        assert_eq!(patch_body["updated"], json!(7));
+        assert_eq!(patch_body["updated"], json!(6));
         assert_eq!(patch_body["rejected"], json!([]));
 
         let (get_status, Json(get_body)) = get_config_entries(State(state)).await;
@@ -687,7 +678,6 @@ mod tests {
             values.get("context_compact_percent_claude"),
             Some(&Some("75"))
         );
-        assert_eq!(values.get("narrate_progress"), Some(&Some("false")));
         assert_eq!(values.get("merge_automation_enabled"), Some(&Some("true")));
         assert_eq!(values.get("merge_strategy"), Some(&Some("rebase")));
         assert_eq!(values.get("merge_strategy_mode"), Some(&Some("pr-always")));
@@ -726,24 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn seed_config_defaults_inserts_narrate_progress_true() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        db::schema::migrate(&conn).unwrap();
-
-        seed_config_defaults(&conn, &crate::config::Config::default());
-
-        let value: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'narrate_progress'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(value, "true");
-    }
-
-    #[test]
     fn seed_config_defaults_removes_retired_config_keys() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -764,12 +736,17 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('narrate_progress', 'true')",
+            [],
+        )
+        .unwrap();
 
         seed_config_defaults(&conn, &crate::config::Config::default());
 
         let retired_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM kv_meta WHERE key IN ('max_chain_depth', 'context_clear_percent', 'counter_model_review_enabled')",
+                "SELECT COUNT(*) FROM kv_meta WHERE key IN ('max_chain_depth', 'context_clear_percent', 'counter_model_review_enabled', 'narrate_progress')",
                 [],
                 |row| row.get(0),
             )

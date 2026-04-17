@@ -1063,7 +1063,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Non-Claude providers receive SAK in the user context instead.
     let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
-    let narrate_progress = settings::load_narrate_progress(shared.db.as_ref());
     let current_task_context = active_dispatch_info.as_ref().map(|info| {
         super::super::prompt_builder::CurrentTaskContext {
             dispatch_id: active_dispatch_id_for_prompt.as_deref(),
@@ -1082,7 +1081,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id,
         token,
         &disabled_notice,
-        narrate_progress,
         role_binding.as_ref(),
         reply_to_user_message,
         dispatch_profile,
