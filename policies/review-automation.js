@@ -576,36 +576,40 @@ function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSh
   return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
 }
 
-// #701: Create-PR dispatch helper used by review-pass flow.
-// Runs regardless of whether a pipeline stage follows, so repos with
-// dev-deploy/e2e-test stages still get their PR created before stage
-// handling. Returns true when a create-pr dispatch was actually created.
+// #701: Create-PR dispatch helper used by review-pass flow and exposed to
+// deploy-pipeline.js for post-pipeline handoff.
 //
-// Skips silently (returns false) when:
-//   - noop_verification review pass (no source changes to PR)
-//   - card has no completed work dispatch target (worktree/branch unknown)
-//   - card has no assigned_agent_id, repo_id, or branch
+// Returns a structured result:
+//   { status: "dispatched" }                      — create-pr dispatch queued
+//   { status: "noop",  reason: "<code>" }         — no PR needed (safe-to-terminal)
+//   { status: "error", reason: "<code>: <msg>" }  — could not create PR / missing metadata
 //
-// On dispatch failure, pr_tracking is still upserted with last_error so the
-// OnTick5min retry loop can pick it up.
+// Callers MUST distinguish noop from error. `noop` is safe to move to terminal
+// (there is nothing to PR). `error` means PR creation was expected but failed
+// due to missing metadata or a dispatch exception — the card must stay visible
+// (blocked_reason = 'pr:create_failed:...') so it is not silently lost from
+// ci-recovery / merge-automation.
 function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   if (noopVerification) {
     agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
-    return false;
+    return { status: "noop", reason: "noop_verification" };
   }
 
   var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
-  if (!latestWorkTarget) return false;
+  if (!latestWorkTarget) return { status: "error", reason: "no_work_target" };
 
   var prCardInfo = agentdesk.db.query(
     "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
     [cardId]
   );
-  if (prCardInfo.length === 0 || !prCardInfo[0].assigned_agent_id) return false;
+  if (prCardInfo.length === 0 || !prCardInfo[0].assigned_agent_id) {
+    return { status: "error", reason: "missing_agent" };
+  }
 
   var agentId = prCardInfo[0].assigned_agent_id;
   var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
-  if (!repoId || !latestWorkTarget.branch) return false;
+  if (!repoId) return { status: "error", reason: "missing_repo" };
+  if (!latestWorkTarget.branch) return { status: "error", reason: "missing_branch" };
 
   upsertPrTracking(
     cardId,
@@ -633,7 +637,7 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
       }
     );
     agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
-    return true;
+    return { status: "dispatched" };
   } catch (e) {
     upsertPrTracking(
       cardId,
@@ -645,9 +649,23 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
       "create-pr",
       String(e)
     );
-    agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
-    return false;
+    agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — card marked pr:create_failed");
+    return { status: "error", reason: "dispatch_failed: " + String(e) };
   }
+}
+
+// #701: Shared helper to mark a card as 'PR creation failed' without losing
+// it to terminal. Preserves card status (it stays in the current
+// in-progress/deploying state), sets a structured blocked_reason so humans
+// and escalation policies can see it, and leaves pipeline_stage_id alone
+// (callers are expected to have cleared it before/after as appropriate).
+function markPrCreateFailed(cardId, reason) {
+  var blockedReason = "pr:create_failed:" + (reason || "unknown");
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+    [blockedReason, cardId]
+  );
+  agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " — staying visible for recovery");
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
@@ -780,7 +798,12 @@ function processVerdict(cardId, verdict, result, options) {
         // entirely — there is no dev-deploy / e2e-test to create the PR later.
         // Safe relative to ci-recovery: the pipeline stage is cleared in the
         // same statement above, so the card has no active deploy ownership.
-        prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+        // Legacy behavior: if create-pr can't run for ANY reason (noop,
+        // missing metadata, dispatch failure), fall through to terminal.
+        // Unlike the deploy-pipeline "all stages complete" branch, there was
+        // no pipeline run here — missing metadata just means "nothing to PR".
+        var prResultNoRs = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+        prDispatched = (prResultNoRs.status === "dispatched");
         if (!prDispatched) {
           agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         }
@@ -821,7 +844,9 @@ function processVerdict(cardId, verdict, result, options) {
             );
             // #701: e2e skipped via DoD gate — same reasoning as the no_rs_changes
             // branch: the pipeline is cleared, so it's safe to seed pr_tracking.
-            prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+            // Legacy behavior preserved: non-dispatched → terminal.
+            var prResultE2eSkip = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+            prDispatched = (prResultE2eSkip.status === "dispatched");
             if (!prDispatched) {
               var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
               var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
@@ -882,11 +907,17 @@ function processVerdict(cardId, verdict, result, options) {
       }
 
       // #198/#211/#701: PR creation for the no-pipeline case (and for cards
-      // that have completed all configured pipeline stages).
-      prDispatched = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+      // that have completed all configured pipeline stages at review time).
+      // Legacy behavior preserved: non-dispatched → terminal. The
+      // "pipeline succeeded but PR couldn't seed" anomaly is handled by
+      // deploy-pipeline.js's completion branch, not here.
+      var prResultNoStages = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
+      prDispatched = (prResultNoStages.status === "dispatched");
       if (!prDispatched) {
         agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
+      } else {
+        agentdesk.log.info("[review] Card " + cardId + " passed review — create-pr dispatched, awaiting CI/merge");
       }
     }
 
@@ -1091,8 +1122,15 @@ agentdesk.registerPolicy(reviewAutomation);
 // e2e-test, normal agent) complete. Without this, cards finishing pipeline
 // stages reach terminal state with no PR or tracking row, and ci-recovery /
 // merge-automation never get a chance to close the loop.
+//
+// Returns the structured { status, reason? } object from
+// attemptCreatePrDispatchForReviewPass. Callers MUST distinguish
+// "dispatched" / "noop" / "error" — see the helper's docstring.
 agentdesk.reviewAutomation = {
   attemptCreatePr: function(cardId) {
     return attemptCreatePrDispatchForReviewPass(cardId, false);
+  },
+  markPrCreateFailed: function(cardId, reason) {
+    markPrCreateFailed(cardId, reason);
   }
 };

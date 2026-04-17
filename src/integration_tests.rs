@@ -5931,6 +5931,131 @@ mod tests {
         );
     }
 
+    /// #701 regression (counter-stage DoD gate): `advancePipelineStage`'s
+    /// counter-provider skip gate reads `card.description` to decide whether
+    /// the DoD requires E2E. The initial card SELECT must include
+    /// `description` — omitting it caused `dodText` to collapse to "" and
+    /// silently bypass every E2E stage, so a card with "E2E test coverage"
+    /// in its DoD could reach terminal (and, after the #701 handoff, PR/CI)
+    /// without ever running E2E.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_701_advance_to_counter_e2e_respects_description_dod_gate() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+
+        // Two stages: a pre-e2e stage (order 50) so the card has a valid
+        // current pipeline_stage_id, and a counter-provider e2e-test stage
+        // at order 100 that advancePipelineStage will advance into.
+        let pre_stage_id: i64;
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider) \
+                 VALUES ('test/repo', 'pre-e2e-gate', 50, 'review_pass', 'self')",
+                [],
+            )
+            .unwrap();
+            pre_stage_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, provider) \
+                 VALUES ('test/repo', 'e2e-test', 100, 'counter')",
+                [],
+            )
+            .unwrap();
+        }
+
+        seed_card_with_repo(
+            &db,
+            "card-701-e2e-required",
+            "in_progress",
+            "test/repo",
+            703,
+            Some("123456789012345681"),
+        );
+        // DoD explicitly lists E2E — the counter skip gate MUST NOT skip.
+        // Also bind the card to pre_stage_id so advancePipelineStage finds
+        // the counter e2e-test stage as the next stage.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET description = ?1, pipeline_stage_id = ?2, updated_at = datetime('now') \
+                 WHERE id = 'card-701-e2e-required'",
+                rusqlite::params!["- [ ] E2E test coverage", pre_stage_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        // Seed a completed e2e-test dispatch with a "pass" verdict directly
+        // in the DB — create_dispatch_core requires a resolvable worktree,
+        // which we don't need here. Firing OnDispatchCompleted manually
+        // triggers deploy-pipeline.onDispatchCompleted, which calls
+        // advancePipelineStage and hits the counter-stage skip gate.
+        let dispatch_id = "e2e-701-required-bootstrap";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                    result, created_at, updated_at, completed_at
+                ) VALUES (
+                    ?1, 'card-701-e2e-required', 'agent-1', 'e2e-test', 'completed',
+                    '[E2E Test bootstrap]',
+                    '{\"verdict\":\"pass\"}',
+                    datetime('now', '-1 minute'), datetime('now', '-1 minute'), datetime('now', '-1 minute')
+                )",
+                rusqlite::params![dispatch_id],
+            )
+            .unwrap();
+        }
+        engine
+            .try_fire_hook_by_name(
+                "OnDispatchCompleted",
+                serde_json::json!({"dispatch_id": dispatch_id}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        // The DoD explicitly lists E2E, so the counter-stage skip gate must
+        // NOT skip — the card must advance INTO the counter e2e-test stage,
+        // not past it to terminal/PR. We assert on pipeline_stage_id because
+        // the e2e-test dispatch creation itself requires worktree resolution
+        // that this minimal test harness doesn't provide; the gate's
+        // observable effect (stage advancement vs stage clear) is what
+        // actually distinguishes the bug.
+        //
+        // Before the fix: the SELECT omitted description, dodText was "",
+        //   indexOf("e2e") === -1 was true → skip taken → pipeline_stage_id
+        //   cleared to NULL and card handed to attemptCreatePr (which could
+        //   silently ship code without E2E).
+        // After the fix: description is loaded, dodText contains "e2e" →
+        //   skip NOT taken → pipeline_stage_id advanced to counter stage
+        //   (non-NULL, pointing at the e2e-test stage).
+        let conn = db.lock().unwrap();
+        let stage_id_after: Option<String> = conn
+            .query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-701-e2e-required'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(
+            stage_id_after.is_some(),
+            "#701: counter-stage dodText gate must honor description — E2E in DoD means NO skip (pipeline_stage_id must advance, not clear)"
+        );
+        // Pipeline is still running — no PR handoff may have happened.
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-701-e2e-required", "create-pr"),
+            0,
+            "#701: counter-stage gate did not skip — no create-pr may leak through"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {
