@@ -34,8 +34,11 @@ _read_default() {
 # During install, defaults.json may exist in the extracted tarball or cloned repo
 _DEFAULTS_SRC="${TMPDIR_BUILD:-${TMPDIR_DL:-}}/defaults.json"
 DEFAULT_PORT=$(_read_default port 8791 "$_DEFAULTS_SRC")
-DEFAULT_HOST=$(_read_default host "0.0.0.0" "$_DEFAULTS_SRC")
+DEFAULT_HOST=$(_read_default host "127.0.0.1" "$_DEFAULTS_SRC")
 DEFAULT_LOOPBACK=$(_read_default loopback "127.0.0.1" "$_DEFAULTS_SRC")
+if [ "$DEFAULT_HOST" = "0.0.0.0" ]; then
+  DEFAULT_HOST="$DEFAULT_LOOPBACK"
+fi
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -335,7 +338,6 @@ if [ "$OS" = "darwin" ]; then
   FW=/usr/libexec/ApplicationFirewall/socketfilterfw
   if [ -f "$FW" ]; then
     sudo "$FW" --add "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
-    sudo "$FW" --unblockapp "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
   fi
 fi
 
