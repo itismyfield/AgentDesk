@@ -321,20 +321,9 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
     let setup_mode = onboarding_setup_mode(completed);
     let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
 
-    // Mask tokens after onboarding is complete to prevent unauthenticated leakage.
-    // Only show full tokens during initial setup (before completion).
-    let mask = |t: Option<String>| -> Option<String> {
-        if !completed {
-            return t;
-        }
-        t.map(|s| {
-            if s.len() > 8 {
-                format!("{}…{}", &s[..4], &s[s.len() - 4..])
-            } else {
-                "***".to_string()
-            }
-        })
-    };
+    // Never return raw onboarding tokens from status.
+    // This endpoint can be reachable without auth, so redact all token values.
+    let redact = |_t: Option<String>| -> Option<String> { None };
 
     (
         StatusCode::OK,
@@ -342,10 +331,10 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             "completed": completed,
             "agent_count": agent_count,
             "bot_tokens": {
-                "command": mask(bot_token),
-                "announce": mask(announce_token),
-                "notify": mask(notify_token),
-                "command2": mask(command_token_2),
+                "command": redact(bot_token),
+                "announce": redact(announce_token),
+                "notify": redact(notify_token),
+                "command2": redact(command_token_2),
             },
             "bot_providers": {
                 "command": primary_provider,
