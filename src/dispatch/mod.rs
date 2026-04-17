@@ -1683,6 +1683,159 @@ mod tests {
         assert_eq!(completed["result"]["auto_completed"], true);
     }
 
+    // #699 — phase-gate completion with all checks passing but no explicit
+    // `verdict` must inject `verdict = context.phase_gate.pass_verdict` into
+    // the persisted result so auto-queue does not pause the run.
+    #[test]
+    fn finalize_phase_gate_injects_verdict_when_all_checks_pass() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-pass", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699",
+                "batch_phase": 1,
+                "next_phase": 2,
+                "final_phase": false,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed", "build_passed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-pass",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        // Simulate a caller that produced all-pass checks + summary but
+        // omitted the explicit verdict field entirely.
+        let result = json!({
+            "summary": "Phase gate passed",
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "pass" },
+                "build_passed": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            completed["result"]["verdict"], "phase_gate_passed",
+            "server must inject phase_gate_passed when verdict absent and checks all pass",
+        );
+        assert_eq!(completed["result"]["verdict_inferred"], true);
+    }
+
+    // #699 — never infer pass when any check fails. The verdict must remain
+    // absent so auto-queue can classify the gate as failed.
+    #[test]
+    fn finalize_phase_gate_preserves_absent_verdict_when_check_fails() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-fail", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699b",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed"],
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-fail",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test (fail)",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        let result = json!({
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "fail" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["status"], "completed");
+        assert!(
+            completed["result"].get("verdict").is_none()
+                || completed["result"]["verdict"].is_null(),
+            "verdict must not be inferred when any check is fail"
+        );
+        assert!(
+            completed["result"].get("verdict_inferred").is_none()
+                || completed["result"]["verdict_inferred"].is_null(),
+            "verdict_inferred flag must not be set on failed checks"
+        );
+    }
+
+    // #699 — explicit verdict="fail" must survive verbatim even when every
+    // check status happens to be "pass" in the same payload.
+    #[test]
+    fn finalize_phase_gate_preserves_explicit_verdict_fail() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pg-explicit", "in_progress");
+
+        let context = json!({
+            "auto_queue": true,
+            "sidecar_dispatch": true,
+            "phase_gate": {
+                "run_id": "run-699c",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+            }
+        });
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-pg-explicit",
+            "agent-1",
+            "phase-gate",
+            "Phase gate test (explicit fail)",
+            &context,
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        let result = json!({
+            "verdict": "fail",
+            "summary": "Operator-forced fail",
+            "checks": {
+                "merge_verified": { "status": "pass" },
+            }
+        });
+        let completed =
+            finalize_dispatch(&db, &engine, &dispatch_id, "api", Some(&result)).unwrap();
+
+        assert_eq!(completed["result"]["verdict"], "fail");
+        assert!(
+            completed["result"].get("verdict_inferred").is_none()
+                || completed["result"]["verdict_inferred"].is_null(),
+            "explicit verdict must not be flagged as inferred"
+        );
+    }
+
     #[test]
     fn dispatch_events_capture_dispatched_and_completed_transitions() {
         let db = test_db();
