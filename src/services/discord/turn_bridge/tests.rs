@@ -1136,25 +1136,22 @@ fn review_decision_parser_accepts_keyword_in_tail() {
     );
     assert_eq!(
         extract_review_decision("기여자가 직접 머지 가능하게 처리하겠습니다."),
-        Some("dismiss")
+        None
     );
 }
 
 #[test]
-fn review_decision_parser_accepts_korean_dismiss_synonyms() {
+fn review_decision_parser_rejects_korean_dismiss_synonyms_without_explicit_dismiss() {
     assert_eq!(
         extract_review_decision("결정: 리뷰 우회\n직접 머지로 진행합니다."),
-        Some("dismiss")
+        None
     );
     assert_eq!(
         extract_review_decision("결정: 기여자가 직접 머지\n리뷰는 여기서 닫겠습니다."),
-        Some("dismiss")
+        None
     );
-    assert_eq!(extract_review_decision("결정: 리뷰 스킵"), Some("dismiss"));
-    assert_eq!(
-        extract_review_decision("결정: direct merge"),
-        Some("dismiss")
-    );
+    assert_eq!(extract_review_decision("결정: 리뷰 스킵"), None);
+    assert_eq!(extract_review_decision("결정: direct merge"), None);
 }
 
 #[test]
