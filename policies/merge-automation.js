@@ -444,6 +444,49 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
     return null;
   }
 
+  var session = findLatestSessionForWorktree(worktreePath);
+  if (!session) {
+    agentdesk.log.warn(
+      "[merge] Card " + cardId + " terminal merge skipped: untrusted worktree_path (no session match): " +
+      worktreePath
+    );
+    return null;
+  }
+
+  if (
+    card.assigned_agent_id &&
+    session.agent_id &&
+    String(session.agent_id) !== String(card.assigned_agent_id)
+  ) {
+    agentdesk.log.warn(
+      "[merge] Card " + cardId + " terminal merge skipped: worktree owner mismatch (" +
+      session.agent_id + " != " + card.assigned_agent_id + ")"
+    );
+    return null;
+  }
+
+  // Resolve branch from the trusted worktree session path; ignore dispatch-provided
+  // branch values if they disagree.
+  var canonicalBranchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
+  if (
+    !canonicalBranchResult ||
+    canonicalBranchResult.indexOf("ERROR") === 0 ||
+    !canonicalBranchResult.trim()
+  ) {
+    agentdesk.log.warn(
+      "[merge] Card " + cardId + " terminal merge skipped: failed to resolve branch from trusted worktree"
+    );
+    return null;
+  }
+  var canonicalBranch = canonicalBranchResult.trim();
+  if (branch && branch !== canonicalBranch) {
+    agentdesk.log.warn(
+      "[merge] Card " + cardId + " terminal merge: dispatch branch mismatch (" +
+      branch + " -> " + canonicalBranch + "); using canonical branch"
+    );
+  }
+  branch = canonicalBranch;
+
   return {
     card: card,
     repo_id: repoId,
