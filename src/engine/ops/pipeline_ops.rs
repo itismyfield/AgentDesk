@@ -68,17 +68,14 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     // JS wrapper with convenience methods
     ctx.eval::<(), _>(r#"
         (function() {
-            var rawConfig = agentdesk.pipeline.__getConfigRaw;
-            var rawResolve = agentdesk.pipeline.__resolveForCardRaw;
-
             agentdesk.pipeline.getConfig = function() {
-                return JSON.parse(rawConfig());
+                return JSON.parse(agentdesk.pipeline.__getConfigRaw());
             };
             // Backward-compatible alias used by older policies.
             agentdesk.pipeline.config = agentdesk.pipeline.getConfig;
 
             agentdesk.pipeline.resolveForCard = function(cardId) {
-                return JSON.parse(rawResolve(cardId));
+                return JSON.parse(agentdesk.pipeline.__resolveForCardRaw(cardId));
             };
 
             agentdesk.pipeline.resolvePhaseGate = function(config) {

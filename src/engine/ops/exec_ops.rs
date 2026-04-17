@@ -84,7 +84,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
 
     ad.set(
-        "exec",
+        "__execRaw",
         Function::new(
             ctx.clone(),
             |cmd: String, args_json: String, timeout_ms: Option<u64>| -> String {
@@ -121,7 +121,6 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var rawExec = agentdesk.exec;
             function normalizeExecArgs(args) {
                 if (typeof args === "string") return args;
                 return JSON.stringify(args || []);
@@ -148,7 +147,11 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             }
 
             agentdesk.exec = function(cmd, args, options) {
-                return rawExec(cmd, normalizeExecArgs(args), normalizeExecTimeoutMs(options));
+                return agentdesk.__execRaw(
+                    cmd,
+                    normalizeExecArgs(args),
+                    normalizeExecTimeoutMs(options)
+                );
             };
         })();
     "#,
@@ -157,7 +160,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     // agentdesk.inflight.list() — list active inflight turns with started_at
     let inflight_obj = rquickjs::Object::new(ctx.clone())?;
     inflight_obj.set(
-        "list",
+        "__listRaw",
         Function::new(ctx.clone(), || -> String {
             let mut results = Vec::new();
             if let Some(root) = crate::cli::agentdesk_runtime_root() {
@@ -210,7 +213,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         }),
     )?;
     inflight_obj.set(
-        "remove",
+        "__removeRaw",
         Function::new(
             ctx.clone(),
             |provider: String, channel_id: String| -> String {
@@ -234,13 +237,11 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var rawList = agentdesk.inflight.list;
-            var rawRemove = agentdesk.inflight.remove;
             agentdesk.inflight.list = function() {
-                return JSON.parse(rawList());
+                return JSON.parse(agentdesk.inflight.__listRaw());
             };
             agentdesk.inflight.remove = function(provider, channelId) {
-                return JSON.parse(rawRemove(provider, "" + channelId));
+                return JSON.parse(agentdesk.inflight.__removeRaw(provider, "" + channelId));
             };
         })();
     "#,

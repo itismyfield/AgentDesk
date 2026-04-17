@@ -49,24 +49,25 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var review = agentdesk.review;
-            review.getVerdict = function(cardId) {
-                var result = JSON.parse(review.__getVerdictRaw(cardId || ""));
+            agentdesk.review.getVerdict = function(cardId) {
+                var result = JSON.parse(agentdesk.review.__getVerdictRaw(cardId || ""));
                 if (result.error) throw new Error(result.error);
                 return result.review || null;
             };
-            review.entryContext = function(cardId) {
-                var result = JSON.parse(review.__entryContextRaw(cardId || ""));
+            agentdesk.review.entryContext = function(cardId) {
+                var result = JSON.parse(agentdesk.review.__entryContextRaw(cardId || ""));
                 if (result.error) throw new Error(result.error);
                 return result.entry || null;
             };
-            review.recordEntry = function(cardId, opts) {
-                var result = JSON.parse(review.__recordEntryRaw(cardId || "", JSON.stringify(opts || {})));
+            agentdesk.review.recordEntry = function(cardId, opts) {
+                var result = JSON.parse(
+                    agentdesk.review.__recordEntryRaw(cardId || "", JSON.stringify(opts || {}))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            review.hasActiveWork = function(cardId) {
-                var result = JSON.parse(review.__hasActiveWorkRaw(cardId || ""));
+            agentdesk.review.hasActiveWork = function(cardId) {
+                var result = JSON.parse(agentdesk.review.__hasActiveWorkRaw(cardId || ""));
                 if (result.error) throw new Error(result.error);
                 return !!result.has_active_work;
             };

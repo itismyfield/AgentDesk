@@ -43,17 +43,15 @@ pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var rawQuery = agentdesk.db.__query_raw;
-            var rawExec = agentdesk.db.__execute_raw;
-            var rawGuard = agentdesk.db.__guard_raw;
-
             agentdesk.db.query = function(sql, params) {
-                var result = JSON.parse(rawQuery(sql, JSON.stringify(params || [])));
+                var result = JSON.parse(
+                    agentdesk.db.__query_raw(sql, JSON.stringify(params || []))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
             agentdesk.db.execute = function(sql, params) {
-                var guard = JSON.parse(rawGuard(sql));
+                var guard = JSON.parse(agentdesk.db.__guard_raw(sql));
                 if (guard.blocked) {
                     agentdesk.log.warn(guard.warning);
                     throw new Error(guard.error);
@@ -62,7 +60,9 @@ pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 // dispatch.create and kanban.setStatus use intent/transition model;
                 // converting db.execute to intents requires typed intents for each
                 // mutation pattern (card_review_state, kv_meta, agents, etc.).
-                var result = JSON.parse(rawExec(sql, JSON.stringify(params || [])));
+                var result = JSON.parse(
+                    agentdesk.db.__execute_raw(sql, JSON.stringify(params || []))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };

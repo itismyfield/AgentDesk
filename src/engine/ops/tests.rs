@@ -1491,3 +1491,123 @@ fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
         assert_eq!(parsed["thread_group"], 3);
     });
 }
+
+#[test]
+fn js_wrappers_keep_resolving_raw_functions_after_gc_cycles() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('gc_safe_config_key', 'still_here')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+
+        let baseline: String = ctx
+            .eval(
+                r#"
+                JSON.stringify({
+                    config: agentdesk.config.get("gc_safe_config_key"),
+                    pipeline_initial: agentdesk.pipeline.initialState(),
+                    review_active: agentdesk.review.hasActiveWork("missing-card"),
+                    dispatch_active: agentdesk.dispatch.hasActiveWork("missing-card"),
+                    agent_primary: agentdesk.agents.resolvePrimaryChannel("missing-agent"),
+                    card_missing: agentdesk.cards.get("missing-card") === null,
+                    kanban_missing: agentdesk.kanban.getCard("missing-card") === null,
+                    queue_pending_type: typeof agentdesk.queue.status().dispatches.pending,
+                    http_error: agentdesk.http.post("http://example.com", {}).error,
+                    exec_error: agentdesk.exec("definitely-not-allowed", []),
+                    inflight_is_array: Array.isArray(agentdesk.inflight.list())
+                })
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        assert_eq!(parsed["config"], "still_here");
+        assert_eq!(parsed["pipeline_initial"], "backlog");
+        assert_eq!(parsed["review_active"], false);
+        assert_eq!(parsed["dispatch_active"], false);
+        assert_eq!(parsed["agent_primary"], serde_json::Value::Null);
+        assert_eq!(parsed["card_missing"], true);
+        assert_eq!(parsed["kanban_missing"], true);
+        assert_eq!(parsed["queue_pending_type"], "number");
+        assert_eq!(parsed["http_error"], "only localhost allowed");
+        assert!(
+            parsed["exec_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not allowed"),
+            "exec wrapper should still call the raw function: {parsed}"
+        );
+        assert_eq!(parsed["inflight_is_array"], true);
+    });
+
+    for _ in 0..8 {
+        ctx.with(|ctx| {
+            let _: rquickjs::Value = ctx
+                .eval(
+                    r#"
+                    globalThis.__gc_stress = [];
+                    for (var i = 0; i < 5000; i++) {
+                        __gc_stress.push({
+                            index: i,
+                            label: "gc-" + i,
+                            payload: { nested: [i, i + 1, i + 2] }
+                        });
+                    }
+                    undefined;
+                    "#,
+                )
+                .unwrap();
+        });
+        rt.run_gc();
+    }
+
+    ctx.with(|ctx| {
+        let after_gc: String = ctx
+            .eval(
+                r#"
+                JSON.stringify({
+                    config: agentdesk.config.get("gc_safe_config_key"),
+                    pipeline_initial: agentdesk.pipeline.initialState(),
+                    review_active: agentdesk.review.hasActiveWork("missing-card"),
+                    dispatch_active: agentdesk.dispatch.hasActiveWork("missing-card"),
+                    agent_primary: agentdesk.agents.resolvePrimaryChannel("missing-agent"),
+                    card_missing: agentdesk.cards.get("missing-card") === null,
+                    kanban_missing: agentdesk.kanban.getCard("missing-card") === null,
+                    queue_pending_type: typeof agentdesk.queue.status().dispatches.pending,
+                    http_error: agentdesk.http.post("http://example.com", {}).error,
+                    exec_error: agentdesk.exec("definitely-not-allowed", []),
+                    inflight_is_array: Array.isArray(agentdesk.inflight.list())
+                })
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after_gc).unwrap();
+        assert_eq!(parsed["config"], "still_here");
+        assert_eq!(parsed["pipeline_initial"], "backlog");
+        assert_eq!(parsed["review_active"], false);
+        assert_eq!(parsed["dispatch_active"], false);
+        assert_eq!(parsed["agent_primary"], serde_json::Value::Null);
+        assert_eq!(parsed["card_missing"], true);
+        assert_eq!(parsed["kanban_missing"], true);
+        assert_eq!(parsed["queue_pending_type"], "number");
+        assert_eq!(parsed["http_error"], "only localhost allowed");
+        assert!(
+            parsed["exec_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not allowed"),
+            "exec wrapper should survive GC cycles: {parsed}"
+        );
+        assert_eq!(parsed["inflight_is_array"], true);
+    });
+}

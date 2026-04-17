@@ -112,8 +112,7 @@ pub(super) fn register_auto_queue_ops<'js>(
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var aq = agentdesk.autoQueue;
-            aq.activate = function(runIdOrBody, threadGroup) {
+            agentdesk.autoQueue.activate = function(runIdOrBody, threadGroup) {
                 var body;
                 if (runIdOrBody && typeof runIdOrBody === "object" && !Array.isArray(runIdOrBody)) {
                     body = Object.assign({}, runIdOrBody);
@@ -129,7 +128,7 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (body.active_only === undefined) {
                     body.active_only = true;
                 }
-                if (aq.__shouldDeferActivateRaw()) {
+                if (agentdesk.autoQueue.__shouldDeferActivateRaw()) {
                     agentdesk.__pendingIntents.push({
                         type: "activate_auto_queue",
                         body: body
@@ -141,13 +140,13 @@ pub(super) fn register_auto_queue_ops<'js>(
                         dispatched: []
                     };
                 }
-                var result = JSON.parse(aq.__activateRaw(JSON.stringify(body)));
+                var result = JSON.parse(agentdesk.autoQueue.__activateRaw(JSON.stringify(body)));
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.updateEntryStatus = function(entryId, status, source, opts) {
+            agentdesk.autoQueue.updateEntryStatus = function(entryId, status, source, opts) {
                 var result = JSON.parse(
-                    aq.__updateEntryStatusRaw(
+                    agentdesk.autoQueue.__updateEntryStatusRaw(
                         entryId,
                         status,
                         source || "",
@@ -157,23 +156,23 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.pauseRun = function(runId, source) {
+            agentdesk.autoQueue.pauseRun = function(runId, source) {
                 var result = JSON.parse(
-                    aq.__pauseRunRaw(runId, source || "")
+                    agentdesk.autoQueue.__pauseRunRaw(runId, source || "")
                 );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.resumeRun = function(runId, source) {
+            agentdesk.autoQueue.resumeRun = function(runId, source) {
                 var result = JSON.parse(
-                    aq.__resumeRunRaw(runId, source || "")
+                    agentdesk.autoQueue.__resumeRunRaw(runId, source || "")
                 );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.completeRun = function(runId, source, opts) {
+            agentdesk.autoQueue.completeRun = function(runId, source, opts) {
                 var result = JSON.parse(
-                    aq.__completeRunRaw(
+                    agentdesk.autoQueue.__completeRunRaw(
                         runId,
                         source || "",
                         JSON.stringify(opts || {})
@@ -182,9 +181,9 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.savePhaseGateState = function(runId, phase, state) {
+            agentdesk.autoQueue.savePhaseGateState = function(runId, phase, state) {
                 var result = JSON.parse(
-                    aq.__savePhaseGateStateRaw(
+                    agentdesk.autoQueue.__savePhaseGateStateRaw(
                         runId,
                         phase,
                         JSON.stringify(state || {})
@@ -193,16 +192,16 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.clearPhaseGateState = function(runId, phase) {
+            agentdesk.autoQueue.clearPhaseGateState = function(runId, phase) {
                 var result = JSON.parse(
-                    aq.__clearPhaseGateStateRaw(runId, phase)
+                    agentdesk.autoQueue.__clearPhaseGateStateRaw(runId, phase)
                 );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            aq.recordConsultationDispatch = function(entryId, cardId, dispatchId, source, metadata) {
+            agentdesk.autoQueue.recordConsultationDispatch = function(entryId, cardId, dispatchId, source, metadata) {
                 var result = JSON.parse(
-                    aq.__recordConsultationDispatchRaw(
+                    agentdesk.autoQueue.__recordConsultationDispatchRaw(
                         entryId,
                         cardId,
                         dispatchId,
