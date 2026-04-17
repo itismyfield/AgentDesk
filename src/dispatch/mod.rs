@@ -2979,14 +2979,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(
-                &db,
-                "card-review-external-accept",
-                "agent-1",
-                &json!({ "target_repo": external_dir }),
-            )
-            .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-external-accept",
+            "agent-1",
+            &json!({ "target_repo": external_dir }),
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
             .unwrap()

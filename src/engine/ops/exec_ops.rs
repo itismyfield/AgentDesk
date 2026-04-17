@@ -35,13 +35,38 @@ fn resolve_exec_timeout_ms(timeout_ms: Option<u64>) -> u64 {
         .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS)
 }
 
+#[cfg(windows)]
+fn is_powershell_script(path: &OsStr) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("ps1"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_powershell_script(_path: &OsStr) -> bool {
+    false
+}
+
 fn run_exec_command(
     label: &str,
     command_path: &OsStr,
     args: &[String],
     timeout_ms: u64,
 ) -> Result<Output, String> {
-    let mut command = Command::new(command_path);
+    let mut command = if cfg!(windows) && is_powershell_script(command_path) {
+        let mut command = Command::new("pwsh");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(command_path);
+        command
+    } else {
+        Command::new(command_path)
+    };
     command
         .args(args)
         .stdin(Stdio::null())

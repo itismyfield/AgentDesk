@@ -2086,7 +2086,10 @@ mod tests {
         }
 
         // Mismatched URL repo must be rejected.
-        assert_eq!(github_sync_target_for_card(&db, "card-github-sync-guard"), None);
+        assert_eq!(
+            github_sync_target_for_card(&db, "card-github-sync-guard"),
+            None
+        );
 
         {
             let conn = db.lock().unwrap();
@@ -2099,7 +2102,10 @@ mod tests {
             .unwrap();
         }
         // Matching repo but not registered must still be rejected.
-        assert_eq!(github_sync_target_for_card(&db, "card-github-sync-guard"), None);
+        assert_eq!(
+            github_sync_target_for_card(&db, "card-github-sync-guard"),
+            None
+        );
 
         {
             let conn = db.lock().unwrap();
