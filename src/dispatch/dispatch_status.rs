@@ -316,12 +316,19 @@ fn complete_dispatch_inner(
 
     validate_dispatch_completion_evidence_on_conn(&conn, dispatch_id, result)?;
 
+    // #699: phase-gate callers occasionally omit `verdict` even when every
+    // declared `checks.*` entry passed. Auto-queue then reads the missing
+    // verdict as failure and pauses the run. Inject `verdict = pass_verdict`
+    // defensively so the run can progress.
+    let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
+    let result_ref = result_owned.as_ref().unwrap_or(result);
+
     let changed = set_dispatch_status_on_conn(
         &conn,
         dispatch_id,
         "completed",
-        Some(result),
-        result
+        Some(result_ref),
+        result_ref
             .get("completion_source")
             .and_then(|value| value.as_str())
             .unwrap_or("complete_dispatch"),
@@ -435,4 +442,116 @@ fn complete_dispatch_inner(
     }
 
     Ok(dispatch)
+}
+
+/// #699: inject `verdict = context.phase_gate.pass_verdict` into a phase-gate
+/// dispatch result when every declared `checks.*` entry passed but the caller
+/// forgot the explicit verdict field.
+///
+/// Returns `Some(enriched)` only when an injection happened — callers should
+/// fall back to the original `result` otherwise. Never overrides an explicit
+/// verdict/decision (even `"fail"`) and never injects when any check is not
+/// `pass`.
+pub(super) fn maybe_inject_phase_gate_verdict(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    // Only act on phase-gate dispatches.
+    let (dispatch_type, context_raw): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT dispatch_type, context FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    if dispatch_type.as_deref() != Some("phase-gate") {
+        return None;
+    }
+
+    // Explicit verdict/decision already present — never override, even for
+    // explicit "fail" cases.
+    let has_verdict = result
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let has_decision = result
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if has_verdict || has_decision {
+        return None;
+    }
+
+    // Require a `checks` object with at least one entry, and every entry's
+    // `status` (or equivalent) must be "pass".
+    let checks = result.get("checks").and_then(|v| v.as_object())?;
+    if checks.is_empty() {
+        return None;
+    }
+    for (_name, entry) in checks.iter() {
+        if !check_entry_is_pass(entry) {
+            return None;
+        }
+    }
+
+    // Resolve `pass_verdict`: prefer `context.phase_gate.pass_verdict` stored
+    // at dispatch creation; fall back to the system default.
+    let pass_verdict = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|ctx| {
+            ctx.get("phase_gate")
+                .and_then(|pg| pg.get("pass_verdict"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "phase_gate_passed".to_string());
+
+    let mut enriched = result.clone();
+    if !enriched.is_object() {
+        enriched = serde_json::Value::Object(serde_json::Map::new());
+        if let Some(obj) = enriched.as_object_mut() {
+            if let Some(src) = result.as_object() {
+                for (k, v) in src.iter() {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    if let Some(obj) = enriched.as_object_mut() {
+        obj.insert(
+            "verdict".to_string(),
+            serde_json::Value::String(pass_verdict.clone()),
+        );
+        obj.insert(
+            "verdict_inferred".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    tracing::info!(
+        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all {} checks passed)",
+        pass_verdict,
+        dispatch_id,
+        checks.len()
+    );
+
+    Some(enriched)
+}
+
+fn check_entry_is_pass(entry: &serde_json::Value) -> bool {
+    // Accept either `{"status": "pass"}` (canonical) or a bare string "pass".
+    if let Some(status) = entry.get("status").and_then(|v| v.as_str()) {
+        return status.eq_ignore_ascii_case("pass") || status.eq_ignore_ascii_case("passed");
+    }
+    if let Some(outcome) = entry.get("result").and_then(|v| v.as_str()) {
+        return outcome.eq_ignore_ascii_case("pass") || outcome.eq_ignore_ascii_case("passed");
+    }
+    if let Some(s) = entry.as_str() {
+        return s.eq_ignore_ascii_case("pass") || s.eq_ignore_ascii_case("passed");
+    }
+    false
 }
