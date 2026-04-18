@@ -186,7 +186,7 @@
 | `services::claude` | `src/services/claude.rs` | 2321 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1538 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 525 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 2149 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 2180 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 978 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 41 |  |
@@ -207,7 +207,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 1402 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 293 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 1961 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 1993 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 381 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 270 |  |
 | `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3433 | giant-file |
@@ -224,10 +224,10 @@
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 908 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 13 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1074 | giant-file |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1077 | giant-file |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3445 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1340 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1346 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1594 | giant-file |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 2421 | giant-file |

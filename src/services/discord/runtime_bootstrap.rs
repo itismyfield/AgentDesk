@@ -795,6 +795,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             let settings = shared_for_tmux2.settings.read().await;
                             settings.allowed_bot_ids.clone()
                         };
+                        let announce_bot_id_for_restore =
+                            super::resolve_announce_bot_user_id(&shared_for_tmux2).await;
                         // P1-1: Restore dispatch_role_overrides from queue snapshots
                         for (thread_channel_id, alt_channel_id) in &restored_overrides {
                             if !matches!(
@@ -834,9 +836,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 let mut existing_ids = recovery_known_message_ids(&snapshot);
                                 let mut queue = snapshot.intervention_queue;
                                 for item in items {
-                                    if allowed_bot_ids_for_restore.contains(&item.author_id.get())
-                                        && !should_process_allowed_bot_turn_text(&item.text)
-                                    {
+                                    if !super::is_allowed_turn_sender(
+                                        &allowed_bot_ids_for_restore,
+                                        announce_bot_id_for_restore,
+                                        item.author_id.get(),
+                                        true,
+                                        &item.text,
+                                    ) {
                                         skipped += 1;
                                         continue;
                                     }

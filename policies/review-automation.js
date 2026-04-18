@@ -21,12 +21,21 @@ function notifyPmdPendingDecision(cardId, reason) {
 }
 
 function reviewLoopFingerprintInfo(cardId) {
-  var tracking = loadPrTracking(cardId);
-  var headSha = tracking && tracking.head_sha ? String(tracking.head_sha) : null;
+  // #751: Prefer the latest completed work dispatch's head_sha. It is
+  // updated immediately on every implementation/rework completion. The
+  // pr_tracking.head_sha value is only refreshed by the CI recovery
+  // polling path (merge-automation onTick1min) and can lag multiple
+  // rework cycles behind during fast review/rework loops, causing the
+  // fingerprint to stay stale and trip the loop guard on genuinely
+  // different heads.
+  var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
+  var headSha = latestWorkTarget && latestWorkTarget.head_sha
+    ? String(latestWorkTarget.head_sha)
+    : null;
   if (!headSha) {
-    var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
-    if (latestWorkTarget && latestWorkTarget.head_sha) {
-      headSha = String(latestWorkTarget.head_sha);
+    var tracking = loadPrTracking(cardId);
+    if (tracking && tracking.head_sha) {
+      headSha = String(tracking.head_sha);
     }
   }
   if (!headSha) {
