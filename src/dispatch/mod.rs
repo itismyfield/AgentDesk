@@ -2936,6 +2936,140 @@ mod tests {
         assert_eq!(parsed["worktree_path"], repo_dir);
     }
 
+    /// #682 (Codex round 2, [high]): An issue-bearing card whose recorded
+    /// target_repo differs from the card's canonical repo must recover its
+    /// worktree via target_repo, not card-scoped repo resolution. The
+    /// historical completion dispatch carries the external target_repo
+    /// that must be honored during refresh.
+    #[test]
+    fn review_context_refreshes_issue_bearing_external_target_repo_stale_worktree() {
+        let db = test_db();
+        seed_card(&db, "card-review-external-tr", "review");
+        set_card_issue_number(&db, "card-review-external-tr", 685);
+
+        let (_card_default_repo, _repo_override) = setup_test_repo();
+        // Separate external repo — the completion actually ran here.
+        let external_repo = tempfile::tempdir().unwrap();
+        let external_repo_dir = external_repo.path().to_str().unwrap();
+        run_git(external_repo_dir, &["init", "-b", "main"]);
+        run_git(
+            external_repo_dir,
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(external_repo_dir, &["config", "user.name", "Test"]);
+        run_git(
+            external_repo_dir,
+            &["commit", "--allow-empty", "-m", "initial"],
+        );
+        let reviewed_commit = git_commit(
+            external_repo_dir,
+            "fix: external issue target_repo refresh (#685)",
+        );
+        let stale_wt_path = external_repo.path().join("wt-685-external-deleted");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-external-tr', 'card-review-external-tr', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_wt_path,
+                    "completed_branch": "wt/685-external-deleted",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-external-tr", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        let actual_wt = parsed["worktree_path"].as_str().unwrap();
+        let canonical_external = std::fs::canonicalize(external_repo_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let canonical_actual = std::fs::canonicalize(actual_wt)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            canonical_actual, canonical_external,
+            "issue-bearing external-repo review must honor historical target_repo during refresh"
+        );
+    }
+
+    /// #682 (Codex round 2, [high]): A recorded worktree path that still
+    /// exists but whose HEAD has advanced past reviewed_commit (follow-up
+    /// work on the same branch) must NOT be reused as-is. The reviewer
+    /// would otherwise see the descendant filesystem state, not the
+    /// reviewed state. git_commit_exists and merge-base --is-ancestor both
+    /// accept this case — only exact HEAD match is safe.
+    #[test]
+    fn review_context_rejects_recorded_worktree_with_descendant_head() {
+        let db = test_db();
+        seed_card(&db, "card-review-descendant", "review");
+        set_card_issue_number(&db, "card-review-descendant", 686);
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        let wt_dir = repo.path().join("wt-686-descendant");
+        let wt_path = wt_dir.to_str().unwrap();
+        run_git(
+            repo_dir,
+            &["worktree", "add", "-b", "wt/686-descendant", wt_path],
+        );
+        let reviewed_commit = git_commit(wt_path, "fix: reviewed commit on descendant wt (#686)");
+        // HEAD advances past the reviewed commit — follow-up commit on the
+        // same branch in the same worktree.
+        let _descendant_commit = git_commit(wt_path, "chore: follow-up work beyond reviewed");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-descendant', 'card-review-descendant', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": wt_path,
+                    "completed_branch": "wt/686-descendant",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-descendant", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        // Recorded path must NOT be reused — HEAD advanced past the reviewed
+        // commit. Fallback should use repo_dir (where the reviewed commit
+        // is also reachable but the filesystem state is under our control).
+        assert_ne!(
+            parsed["worktree_path"].as_str(),
+            Some(wt_path),
+            "recorded worktree with advanced HEAD must be rejected"
+        );
+    }
+
     #[test]
     fn review_context_includes_merge_base_for_branch_review() {
         let db = test_db();

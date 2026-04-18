@@ -342,19 +342,29 @@ fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
         .is_some_and(|output| output.status.success())
 }
 
-/// #682: Stronger check than git_commit_exists — returns true only when
-/// `commit_sha` is reachable from the worktree's *current* HEAD. Git's
-/// object store is shared across worktrees of the same repo, so
-/// git_commit_exists is satisfied by any commit anywhere in the repo;
-/// that is insufficient when the worktree directory still exists but was
-/// recycled for a different checkout.
-fn worktree_head_reaches_commit(dir: &str, commit_sha: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", commit_sha, "HEAD"])
+/// #682: Exact-HEAD check — returns true only when the worktree's current
+/// HEAD resolves to `commit_sha`. Git's object store is shared across
+/// worktrees of the same repo, so `git cat-file -e` (git_commit_exists)
+/// is satisfied by any commit anywhere in the repo; `merge-base --is-ancestor`
+/// additionally accepts any descendant HEAD, which means a path that was
+/// recycled for follow-up work still passes — but the filesystem state the
+/// reviewer sees is the descendant, not the reviewed commit. Exact HEAD
+/// match is the only way to guarantee the on-disk state matches the
+/// reviewed commit.
+fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
+    let Some(output) = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
         .current_dir(dir)
         .output()
         .ok()
-        .is_some_and(|output| output.status.success())
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    head == commit_sha
 }
 
 fn resolve_review_target_branch(
@@ -394,7 +404,7 @@ fn refresh_review_target_worktree(
     // the reviewed state is actually what is checked out.
     if let Some(recorded) = target.worktree_path.as_deref() {
         if std::path::Path::new(recorded).is_dir()
-            && worktree_head_reaches_commit(recorded, &target.reviewed_commit)
+            && worktree_head_matches_commit(recorded, &target.reviewed_commit)
         {
             return Ok(Some(target.clone()));
         }
@@ -409,10 +419,31 @@ fn refresh_review_target_worktree(
         );
     }
 
+    // #682 (Codex round 2, [high]): resolve_card_worktree picks the repo
+    // from the current card/context, not the historical completion's
+    // target_repo. For an external-repo completion whose card's canonical
+    // repo differs, this would miss the right worktree. Inject target_repo
+    // into a local context copy so resolve_card_worktree's repo lookup
+    // honors the completion's recorded repo before falling back to the
+    // card's default.
+    let resolve_context = if let Some(tr) = target.target_repo.as_deref() {
+        let mut merged = context.clone();
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("target_repo".to_string(), json!(tr));
+        }
+        std::borrow::Cow::Owned(merged)
+    } else {
+        std::borrow::Cow::Borrowed(context)
+    };
+
     if let Some((wt_path, wt_branch, _wt_commit)) =
-        resolve_card_worktree(db, card_id, Some(context))?
+        resolve_card_worktree(db, card_id, Some(resolve_context.as_ref()))?
     {
-        if git_commit_exists(&wt_path, &target.reviewed_commit) {
+        // Use the exact-HEAD check here too — a worktree whose HEAD has
+        // advanced past reviewed_commit still satisfies git_commit_exists
+        // via the shared object store, but the files on disk are the
+        // descendant state, not what was reviewed.
+        if worktree_head_matches_commit(&wt_path, &target.reviewed_commit) {
             let branch = resolve_review_target_branch(
                 db,
                 card_id,
@@ -436,7 +467,7 @@ fn refresh_review_target_worktree(
         }
 
         tracing::warn!(
-            "[dispatch] Review dispatch for card {}: active issue worktree does not contain commit {} — skipping path refresh",
+            "[dispatch] Review dispatch for card {}: active issue worktree HEAD does not match reviewed commit {} — skipping path refresh",
             card_id,
             &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
         );
