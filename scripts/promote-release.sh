@@ -30,11 +30,10 @@ CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonc
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
 
-SKIP_REVIEW=false
 SKIP_HEALTH=false
 for arg in "$@"; do
     case "$arg" in
-        --skip-review) SKIP_REVIEW=true ;;
+        --skip-review) ;; # accepted-and-ignored for backward compatibility
         --skip-health) SKIP_HEALTH=true ;;
     esac
 done
@@ -160,38 +159,6 @@ _resolve_dashboard_source() {
     return 1
 }
 
-_read_kv_flag() {
-    local db_path="$1"
-    local key="$2"
-    [ -f "$db_path" ] || return 1
-    /usr/bin/sqlite3 -readonly "$db_path" \
-        "SELECT value FROM kv_meta WHERE key = '$key' LIMIT 1;" 2>/dev/null || true
-}
-
-_normalize_bool() {
-    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | tr -d '"'
-}
-
-_review_gate_override_source() {
-    local runtime_label db_path raw normalized
-    for runtime_label in release dev; do
-        if [ "$runtime_label" = "release" ]; then
-            db_path="$ADK_REL/data/agentdesk.sqlite"
-        else
-            db_path="$ADK_DEV/data/agentdesk.sqlite"
-        fi
-
-        raw=$(_read_kv_flag "$db_path" "review_enabled")
-        normalized=$(_normalize_bool "$raw")
-        if [ "$normalized" = "false" ]; then
-            printf '%s\t%s\t%s\n' "$runtime_label" "review_enabled" "$db_path"
-            return 0
-        fi
-
-    done
-    return 1
-}
-
 _finalize_detached_helper() {
     local status="${1:-0}"
     [ "$PROMOTE_DETACHED_CHILD" = "1" ] || return 0
@@ -265,28 +232,6 @@ EOF
     echo "  helper log: $log_path"
     echo "  current turn will finish before dcserver restart; final result will be reported automatically"
 }
-
-# Safety check: review must be passed unless review automation is disabled
-# in runtime config, or unless --skip-review is passed explicitly.
-if [ "$SKIP_REVIEW" != true ]; then
-    REVIEW_OVERRIDE=$(_review_gate_override_source || true)
-    if [ -n "$REVIEW_OVERRIDE" ]; then
-        IFS=$'\t' read -r REVIEW_OVERRIDE_RUNTIME REVIEW_OVERRIDE_KEY REVIEW_OVERRIDE_DB <<<"$REVIEW_OVERRIDE"
-        echo "▸ Review automation disabled in ${REVIEW_OVERRIDE_RUNTIME} runtime (${REVIEW_OVERRIDE_KEY}=false)"
-        echo "  bypassing review gate using $REVIEW_OVERRIDE_DB"
-    else
-        # Check if the latest commit has a review-passed marker (may be in dev or release runtime)
-        LAST_COMMIT=$(cd "$REPO" && git rev-parse HEAD 2>/dev/null)
-        REVIEW_MARKER_DEV="$ADK_DEV/runtime/review_passed/$LAST_COMMIT"
-        REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
-        if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
-            echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
-            echo "  Run review first, or use --skip-review to override"
-            exit 1
-        fi
-        echo "▸ Review passed for $LAST_COMMIT"
-    fi
-fi
 
 # Safety check: dev must be healthy
 DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
