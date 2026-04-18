@@ -9,7 +9,7 @@ use axum::Router;
 use axum::routing::get;
 use rusqlite::Connection;
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tower_http::services::ServeDir;
 
@@ -26,6 +26,28 @@ const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 static DEPLOY_GATE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Monotonically increasing count of policy tick hook timeouts (#747).
+/// Incremented each time `fire_tick_hook_by_name_with_timeout` returns
+/// because the wall-clock timeout elapsed before the spawn_blocking task
+/// finished. Observable via `policy_tick_timeout_count()` in tests or logs.
+static POLICY_TICK_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonically increasing count of tick hooks that *did* finish, but only
+/// after their owning call already timed out (#747). Helps operators notice
+/// when the tick actor is holding onto work well past the user-visible
+/// deadline, which is the failure mode this counter was added to track.
+static POLICY_TICK_POST_TIMEOUT_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn policy_tick_timeout_count() -> u64 {
+    POLICY_TICK_TIMEOUT_COUNT.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn policy_tick_post_timeout_completions() -> u64 {
+    POLICY_TICK_POST_TIMEOUT_COMPLETIONS.load(Ordering::Acquire)
+}
 
 struct PolicyTickHookGuard {
     in_flight: Arc<AtomicBool>,
@@ -496,19 +518,22 @@ async fn fire_tick_hook_by_name_with_timeout(
     };
 
     let start = std::time::Instant::now();
-    let engine = engine.clone();
-    let hook_name = hook_name.to_string();
-    let label = label.to_string();
+    let engine_for_task = engine.clone();
+    let hook_name_owned = hook_name.to_string();
+    let label_owned = label.to_string();
     let timed_out = std::sync::Arc::new(AtomicBool::new(false));
     let timed_out_for_task = timed_out.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
         let _guard = in_flight_guard;
-        let result = engine.try_fire_hook_by_name(&hook_name, serde_json::json!({}));
+        let result = engine_for_task.try_fire_hook_by_name(&hook_name_owned, serde_json::json!({}));
         let elapsed = start.elapsed();
         if timed_out_for_task.load(Ordering::Acquire) {
+            POLICY_TICK_POST_TIMEOUT_COMPLETIONS.fetch_add(1, Ordering::AcqRel);
             tracing::warn!(
-                "[policy-tick] {} finished after timeout in {}ms",
-                label,
+                engine_label = engine_for_task.actor_label(),
+                queue_depth = engine_for_task.actor_queue_depth(),
+                "[policy-tick] {} finished after timeout in {}ms (post-timeout completion)",
+                label_owned,
                 elapsed.as_millis()
             );
         }
@@ -537,6 +562,14 @@ async fn fire_tick_hook_by_name_with_timeout(
         },
         _ = tokio::time::sleep(hook_timeout) => {
             timed_out.store(true, Ordering::Release);
+            POLICY_TICK_TIMEOUT_COUNT.fetch_add(1, Ordering::AcqRel);
+            tracing::warn!(
+                engine_label = engine.actor_label(),
+                queue_depth = engine.actor_queue_depth(),
+                timeout_ms = hook_timeout.as_millis() as u64,
+                "[policy-tick] {} hook timed out; tick actor continues running in background",
+                label
+            );
             PolicyTickHookExecution {
                 outcome: PolicyTickHookOutcome::Timeout,
                 elapsed: start.elapsed(),
@@ -1257,6 +1290,194 @@ mod tests {
         assert_eq!(
             kv_value(&free_db, "probe_engine_local").as_deref(),
             Some("hit")
+        );
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+    }
+
+    /// Regression for #747: when the tick engine's actor is stuck executing a
+    /// long-running hook, firing a regular hook on the *main* engine must not
+    /// be queued behind that tick hook. The two engines run on independent
+    /// actor threads, so the main engine's fire_hook should return promptly.
+    ///
+    /// Also verifies that the timeout + post-timeout observability counters
+    /// move as expected when the tick hook eventually finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stuck_tick_hook_does_not_block_main_engine_hook_calls() {
+        use crate::engine::hooks::Hook;
+
+        let db = test_db();
+
+        // Main engine — this is what HTTP/Discord callers use.
+        let main_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            main_dir.path().join("main-probe.js"),
+            r#"
+            agentdesk.registerPolicy({
+                name: "main-probe",
+                priority: 1,
+                onTick30s: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('main_engine_hit', 'yes')"
+                    );
+                }
+            });
+            "#,
+        )
+        .unwrap();
+        let main_engine = test_engine_with_dir(&db, main_dir.path());
+
+        // Tick engine — has its own actor. Completely separate from `main_engine`.
+        let tick_dir = tempfile::TempDir::new().unwrap();
+        let tick_engine = test_engine_with_dir(&db, tick_dir.path());
+
+        let timeout_before = policy_tick_timeout_count();
+        let post_timeout_before = policy_tick_post_timeout_completions();
+
+        // Block the tick engine's actor so any tick hook send() sits in the
+        // actor queue until we release the blocker.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = tick_engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        // Tick hook against the stuck tick engine — should time out quickly.
+        let tick_outcome = fire_tick_hook_by_name_for_test(
+            &tick_engine,
+            &db,
+            "OnTick30s",
+            "30s",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(tick_outcome, PolicyTickHookOutcome::Timeout);
+        // The counter is a global static; other tick tests may bump it in
+        // parallel. Assert monotonic growth instead of an exact delta.
+        assert!(
+            policy_tick_timeout_count() > timeout_before,
+            "timed-out tick should bump the timeout counter (before={} after={})",
+            timeout_before,
+            policy_tick_timeout_count()
+        );
+
+        // The tick actor is still holding the BlockActor command. Now fire a
+        // regular hook against the *main* engine — this must return promptly
+        // because the main engine has its own independent actor thread.
+        let main_start = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            // Run the engine call on the current-thread runtime via
+            // spawn_blocking so fire_hook doesn't wedge the reactor.
+            tokio::task::spawn_blocking({
+                let main_engine = main_engine.clone();
+                move || {
+                    main_engine
+                        .fire_hook(Hook::OnTick30s, serde_json::json!({}))
+                        .unwrap()
+                }
+            })
+            .await
+            .unwrap();
+        })
+        .await
+        .expect("main engine fire_hook must complete while the tick engine is stuck");
+        let main_elapsed = main_start.elapsed();
+        assert!(
+            main_elapsed < Duration::from_millis(500),
+            "main engine hook should not wait on the blocked tick engine (elapsed={:?})",
+            main_elapsed
+        );
+        assert_eq!(
+            kv_value(&db, "main_engine_hit").as_deref(),
+            Some("yes"),
+            "main engine hook must have actually fired its side effect"
+        );
+
+        // Release the blocked tick actor so it drains the queued BlockActor
+        // command. Once the background fire_hook task finishes, it records a
+        // post-timeout completion log + counter bump.
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        // Drain any remaining queued tick hook so the post-timeout counter
+        // reflects its completion. We loop until skipped_inflight clears.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let outcome = fire_tick_hook_by_name_for_test(
+                    &tick_engine,
+                    &db,
+                    "OnTick30s",
+                    "30s",
+                    Duration::from_millis(200),
+                )
+                .await;
+                if outcome == PolicyTickHookOutcome::Ok {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tick engine eventually drains once unblocked");
+
+        assert!(
+            policy_tick_post_timeout_completions() > post_timeout_before,
+            "post-timeout completion counter must record the late finish (before={} after={})",
+            post_timeout_before,
+            policy_tick_post_timeout_completions()
+        );
+    }
+
+    /// Regression for #747: a timed-out tick hook must NOT leak its in-flight
+    /// guard, so a later (non-concurrent) tick call on the same engine can
+    /// acquire it again once the stuck work finishes. Together with
+    /// `timed_out_tick_marks_status_and_skips_overlapping_runs`, this pins the
+    /// `skipped_inflight` contract in place across the engine split.
+    #[tokio::test(flavor = "current_thread")]
+    async fn tick_skipped_inflight_guard_still_blocks_overlap_on_tick_engine() {
+        let db = test_db();
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = test_engine_with_dir(&db, dir.path());
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        let timed_out = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick30s",
+            "30s",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(timed_out, PolicyTickHookOutcome::Timeout);
+
+        // Second call while the previous hook is still running on the actor
+        // must hit the skipped_inflight guard.
+        let skipped = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick30s",
+            "30s",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(
+            skipped,
+            PolicyTickHookOutcome::SkippedInFlight,
+            "skipped_inflight contract must hold even with the split engines"
         );
 
         release_tx.send(()).unwrap();
