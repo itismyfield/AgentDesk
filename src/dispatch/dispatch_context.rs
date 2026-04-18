@@ -342,6 +342,21 @@ fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
         .is_some_and(|output| output.status.success())
 }
 
+/// #682: Stronger check than git_commit_exists — returns true only when
+/// `commit_sha` is reachable from the worktree's *current* HEAD. Git's
+/// object store is shared across worktrees of the same repo, so
+/// git_commit_exists is satisfied by any commit anywhere in the repo;
+/// that is insufficient when the worktree directory still exists but was
+/// recycled for a different checkout.
+fn worktree_head_reaches_commit(dir: &str, commit_sha: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", commit_sha, "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
 fn resolve_review_target_branch(
     db: &Db,
     card_id: &str,
@@ -367,19 +382,30 @@ fn refresh_review_target_worktree(
     context: &serde_json::Value,
     target: &DispatchExecutionTarget,
 ) -> Result<Option<DispatchExecutionTarget>> {
-    if target
-        .worktree_path
-        .as_deref()
-        .is_some_and(|path| std::path::Path::new(path).is_dir())
-    {
-        return Ok(Some(target.clone()));
+    // #682 (Codex review, [medium]): the recorded worktree_path may still
+    // exist as a directory but point at a *different* checkout now (e.g. a
+    // later session recycled the path for another issue). Accept the
+    // recorded path only when the reviewed_commit is reachable from the
+    // worktree's current HEAD; otherwise fall through to recovery.
+    //
+    // git_commit_exists is insufficient here — git's object store is
+    // shared across worktrees of the same repo, so any commit anywhere
+    // in the repo satisfies it. worktree_head_reaches_commit confirms
+    // the reviewed state is actually what is checked out.
+    if let Some(recorded) = target.worktree_path.as_deref() {
+        if std::path::Path::new(recorded).is_dir()
+            && worktree_head_reaches_commit(recorded, &target.reviewed_commit)
+        {
+            return Ok(Some(target.clone()));
+        }
     }
 
     if let Some(stale_path) = target.worktree_path.as_deref() {
         tracing::warn!(
-            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer exists — attempting fallback",
+            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer holds commit {} — attempting fallback",
             card_id,
-            stale_path
+            stale_path,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
         );
     }
 
@@ -416,12 +442,31 @@ fn refresh_review_target_worktree(
         );
     }
 
-    if let Some(repo_dir) = resolve_card_repo_dir_with_context(
-        db,
-        card_id,
-        Some(context),
-        "recover review target repo",
-    )? {
+    // #682 (Codex review, [high]): prefer the explicit target_repo recorded
+    // on the completion before falling back to card-scoped repo resolution.
+    // Issue-less cards that ran against an external repo (recorded as
+    // target_repo on the work dispatch) would otherwise lose the original
+    // repo when their worktree was cleaned up.
+    let fallback_repo_dir = target
+        .target_repo
+        .as_deref()
+        .and_then(|value| {
+            crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+                .ok()
+                .flatten()
+        })
+        .or_else(|| {
+            resolve_card_repo_dir_with_context(
+                db,
+                card_id,
+                Some(context),
+                "recover review target repo",
+            )
+            .ok()
+            .flatten()
+        });
+
+    if let Some(repo_dir) = fallback_repo_dir {
         if git_commit_exists(&repo_dir, &target.reviewed_commit) {
             let branch = resolve_review_target_branch(
                 db,
