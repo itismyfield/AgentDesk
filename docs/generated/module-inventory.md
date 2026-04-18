@@ -61,7 +61,7 @@
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 239 |  |
 | `db::agents` | `src/db/agents.rs` | 609 |  |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 4920 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 4927 | giant-file |
 | `db::builtin_pipeline` | `src/db/builtin_pipeline.rs` | 27 |  |
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
 | `db::kanban` | `src/db/kanban.rs` | 162 |  |
@@ -130,14 +130,14 @@
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1081 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1184 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 92 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10523 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10526 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 134 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 317 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 164 |  |
-| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3495 | giant-file |
+| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3649 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5265 | giant-file |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5188 | giant-file |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1993 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1089 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
@@ -266,7 +266,7 @@
 | `services::memory::mem0` | `src/services/memory/mem0.rs` | 1011 | giant-file |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 1866 | giant-file |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 572 |  |
-| `services::message_outbox` | `src/services/message_outbox.rs` | 194 |  |
+| `services::message_outbox` | `src/services/message_outbox.rs` | 256 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 19 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 878 |  |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
