@@ -179,6 +179,10 @@ async fn send_restore_notification(
 struct DispatchContextHints {
     worktree_path: Option<String>,
     stale_worktree_path: Option<String>,
+    /// #762: when the dispatch context explicitly pins a `target_repo` (e.g. an
+    /// external-repo review), propagate it so bootstrap fallbacks can resolve
+    /// to the correct repo instead of the default AgentDesk workspace.
+    target_repo: Option<String>,
     reset_provider_state: bool,
     recreate_tmux: bool,
 }
@@ -194,6 +198,13 @@ fn parse_dispatch_context_hints(
         .and_then(|v| v.get("worktree_path"))
         .and_then(|v| v.as_str())
         .map(String::from);
+    let target_repo = parsed
+        .as_ref()
+        .and_then(|v| v.get("target_repo"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
     let strategy =
         crate::dispatch::dispatch_session_strategy_from_context(parsed.as_ref(), dispatch_type);
     DispatchContextHints {
@@ -202,8 +213,36 @@ fn parse_dispatch_context_hints(
             .filter(|p| std::path::Path::new(p).exists())
             .map(str::to_string),
         stale_worktree_path: requested_worktree_path.filter(|p| !std::path::Path::new(p).exists()),
+        target_repo,
         reset_provider_state: strategy.reset_provider_state,
         recreate_tmux: strategy.recreate_tmux,
+    }
+}
+
+/// #762: Resolve a bootstrap fallback path for a dispatch without a usable
+/// `worktree_path`. When the context pins an external `target_repo`, the
+/// dispatch must land in that repo's configured directory rather than the
+/// default AgentDesk workspace — otherwise external-repo reviews silently
+/// review this repo's default HEAD.
+///
+/// Returns `None` when `target_repo` is unset or cannot be resolved; callers
+/// fall back to `resolve_repo_dir()` / session CWD as before.
+fn resolve_dispatch_target_repo_dir(target_repo: Option<&str>) -> Option<String> {
+    let target_repo = target_repo
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    match crate::services::platform::shell::resolve_repo_dir_for_target(Some(target_repo)) {
+        Ok(Some(path)) => std::path::Path::new(&path).is_dir().then_some(path),
+        Ok(None) => None,
+        Err(err) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ Dispatch target_repo '{}' could not be resolved: {}",
+                target_repo,
+                err
+            );
+            None
+        }
     }
 }
 
@@ -525,14 +564,26 @@ pub(in crate::services::discord) async fn handle_text_message(
     );
     let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
     let dispatch_stale_worktree_path = dispatch_context_hints.stale_worktree_path.clone();
+    let dispatch_target_repo = dispatch_context_hints.target_repo.clone();
     let dispatch_reset_provider_state = dispatch_context_hints.reset_provider_state;
     let dispatch_recreate_tmux = dispatch_context_hints.recreate_tmux;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
     }
-    let dispatch_default_path = crate::services::platform::resolve_repo_dir()
-        .filter(|p| std::path::Path::new(p).is_dir())
+    // #762: when the dispatch pins an external target_repo but emits no
+    // worktree_path (e.g. refresh fell back without a usable path), resolve
+    // the repo's configured directory first instead of dropping straight into
+    // the default AgentDesk repo. Otherwise external-repo reviews silently
+    // execute in the wrong repo.
+    let dispatch_target_repo_path =
+        resolve_dispatch_target_repo_dir(dispatch_target_repo.as_deref());
+    let dispatch_default_path = dispatch_target_repo_path
+        .clone()
+        .or_else(|| {
+            crate::services::platform::resolve_repo_dir()
+                .filter(|p| std::path::Path::new(p).is_dir())
+        })
         .unwrap_or_else(|| current_path.clone());
     let dispatch_effective_path = dispatch_worktree_path
         .clone()
@@ -547,6 +598,16 @@ pub(in crate::services::discord) async fn handle_text_message(
                 "  [{ts}] ⚠ Dispatch {did}: context worktree_path no longer exists: {} — falling back to {}",
                 stale_path,
                 dispatch_effective_path
+            );
+        } else if let (Some(did), Some(tr), Some(tr_path)) = (
+            dispatch_id_for_thread.as_deref(),
+            dispatch_target_repo.as_deref(),
+            dispatch_target_repo_path.as_deref(),
+        ) {
+            tracing::info!(
+                "  [{ts}] 🌱 Dispatch {did}: no worktree_path; honoring target_repo '{}' at {}",
+                tr,
+                tr_path
             );
         } else {
             tracing::info!(
@@ -3422,6 +3483,107 @@ mod tests {
         );
         assert!(!hints.reset_provider_state);
         assert!(hints.recreate_tmux);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_extracts_target_repo() {
+        let hints = parse_dispatch_context_hints(
+            Some(r#"{"target_repo":"/tmp/external-762","worktree_path":null}"#),
+            Some("review"),
+        );
+        assert_eq!(hints.target_repo.as_deref(), Some("/tmp/external-762"));
+        assert!(hints.worktree_path.is_none());
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_target_repo_rejects_blank_values() {
+        let hints = parse_dispatch_context_hints(
+            Some(r#"{"target_repo":"   ","worktree_path":null}"#),
+            Some("review"),
+        );
+        assert!(hints.target_repo.is_none());
+    }
+
+    /// #762 (B): when the dispatch context pins an external `target_repo` but
+    /// emits `worktree_path: null` (e.g. the completion lives in repo HEAD
+    /// but HEAD has drifted, so refresh suppressed worktree_path per #682
+    /// round 3), bootstrap must land in the external repo instead of the
+    /// default AgentDesk workspace. Prior behavior always fell back to
+    /// `resolve_repo_dir()` because `DispatchContextHints` dropped
+    /// `target_repo` on the floor.
+    #[test]
+    fn resolve_dispatch_target_repo_dir_honors_external_target_repo_when_worktree_path_is_null() {
+        // Build a real git worktree at a path that is explicitly NOT the
+        // default AgentDesk workspace. `resolve_repo_dir_for_target` treats
+        // absolute paths as explicit and only accepts them if the directory
+        // is a valid git worktree.
+        let external = tempfile::tempdir().unwrap();
+        let external_dir = external.path().to_str().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(external_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(external_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(external_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "initial"])
+            .current_dir(external_dir)
+            .output()
+            .unwrap();
+
+        let raw = serde_json::json!({
+            "target_repo": external_dir,
+            "worktree_path": serde_json::Value::Null,
+            "reviewed_commit": "0123456789abcdef0123456789abcdef01234567",
+        })
+        .to_string();
+        let hints = parse_dispatch_context_hints(Some(&raw), Some("review"));
+
+        assert_eq!(hints.target_repo.as_deref(), Some(external_dir));
+        assert!(
+            hints.worktree_path.is_none(),
+            "null worktree_path must not be synthesized from target_repo by the hints parser"
+        );
+
+        // This is the specific regression: bootstrap must resolve to the
+        // external repo, NOT the default AgentDesk workspace. Prior code
+        // called `resolve_repo_dir()` unconditionally when `worktree_path`
+        // was absent.
+        let resolved = resolve_dispatch_target_repo_dir(hints.target_repo.as_deref())
+            .expect("external target_repo with null worktree_path must resolve to the repo dir");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap(),
+            std::fs::canonicalize(external_dir).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_target_repo_dir_returns_none_for_missing_target_repo() {
+        assert!(resolve_dispatch_target_repo_dir(None).is_none());
+        assert!(resolve_dispatch_target_repo_dir(Some("")).is_none());
+        assert!(resolve_dispatch_target_repo_dir(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn resolve_dispatch_target_repo_dir_rejects_nonexistent_path() {
+        // A target_repo that references a path outside any configured
+        // mapping cannot be resolved — bootstrap falls back to the default
+        // workspace, not to the (nonexistent) requested path.
+        assert!(
+            resolve_dispatch_target_repo_dir(Some(
+                "/tmp/agentdesk-issue-762-definitely-not-a-repo"
+            ))
+            .is_none()
+        );
     }
 
     #[test]

@@ -844,6 +844,70 @@ fn apply_review_target_warning(
     obj.insert("review_target_warning".to_string(), json!(warning));
 }
 
+/// #762: Normalize a `target_repo` value for comparison.
+///
+/// Two repo references describe the same local repo iff their
+/// `resolve_repo_dir_for_target` results canonicalize to the same path. This
+/// handles mixed "org/name" / "/abs/path" / "~/path" forms without tripping on
+/// trivial string differences.
+fn normalized_target_repo_path(target_repo: Option<&str>) -> Option<std::path::PathBuf> {
+    let target_repo = target_repo
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let resolved = crate::services::platform::shell::resolve_repo_dir_for_target(Some(target_repo))
+        .ok()
+        .flatten()?;
+    Some(std::fs::canonicalize(&resolved).unwrap_or_else(|_| std::path::PathBuf::from(&resolved)))
+}
+
+/// #762: Decide whether the historical work dispatch's `target_repo` risks
+/// silently redirecting a review to unrelated code when card-scoped
+/// fallbacks run.
+///
+/// A recorded `work_target_repo` is safe iff it demonstrably resolves to the
+/// same local repo as the card's canonical scope. Any other outcome —
+/// different resolved path, unresolvable work_target_repo, or no card-side
+/// anchor — is treated as "external and unrecoverable" to fail closed.
+fn historical_target_repo_differs_from_card(
+    work_target_repo: Option<&str>,
+    card_scope_repo: Option<&str>,
+) -> bool {
+    let Some(work) = work_target_repo
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let card = card_scope_repo
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    // Cheap string compare first — avoids touching the filesystem on the
+    // common case where the two references were copied from the same source.
+    if let Some(card_str) = card.as_deref() {
+        if work == card_str {
+            return false;
+        }
+    }
+
+    let work_path = normalized_target_repo_path(Some(work));
+    let card_path = card.and_then(|value| normalized_target_repo_path(Some(value)));
+    match (work_path, card_path) {
+        (Some(w), Some(c)) => w != c,
+        // If only one side resolves, we cannot prove the two references
+        // describe the same repo — treat as external-divergent so the
+        // card-scoped fallback path does not silently redirect.
+        (Some(_), None) => true,
+        (None, Some(_)) => true,
+        (None, None) => {
+            // Neither side resolves: no local anchor either way — stay
+            // conservative and let the downstream warning path handle it
+            // instead of claiming we can fail closed on a meaningful repo.
+            false
+        }
+    }
+}
+
 pub(crate) const REVIEW_QUALITY_SCOPE_REMINDER: &str =
     "기존 DoD/기능 검증과 함께 아래 품질 항목도 반드시 확인하세요.";
 pub(crate) const REVIEW_VERDICT_IMPROVE_GUIDANCE: &str = "기능이 맞더라도 아래 품질 항목에서 실제 문제가 하나라도 보이면 `VERDICT: improve`로 판정하세요.";
@@ -1093,6 +1157,12 @@ pub(super) fn build_review_context(
     context: &serde_json::Value,
     trust: ReviewTargetTrust,
 ) -> Result<String> {
+    // #762 (A): snapshot the caller's original target_repo signal BEFORE
+    // we merge in the card-scoped default below. The fail-closed logic for
+    // unrecoverable external target_repos must distinguish between "the
+    // caller pinned this repo" (safe to use card-scoped fallback) and
+    // "this came from our own card.repo_id fallback injection" (unsafe).
+    let caller_supplied_target_repo = json_string_field(context, "target_repo").is_some();
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
 
     // #761: Strip untrusted review-target fields before any downstream code
@@ -1187,7 +1257,55 @@ pub(super) fn build_review_context(
                         &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                     );
                 }
-                if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
+
+                // #762 (A): if the historical work target was recorded against
+                // an EXTERNAL `target_repo` that differs from the card's
+                // canonical repo, and refresh failed, the card-scoped
+                // fallbacks below (`resolve_card_worktree`,
+                // `resolve_card_issue_commit_target`, repo-HEAD fallback) will
+                // silently redirect the reviewer to unrelated code in the
+                // card's default repo. Fail closed instead.
+                //
+                // Exception: when the caller explicitly pinned `target_repo`
+                // on the invocation context, `ctx_snapshot` already carries
+                // the correct repo scope — `resolve_card_worktree` et al. will
+                // honor it and no silent redirect can happen. We only fail
+                // closed when the caller provided no override.
+                let card_repo_id =
+                    load_card_issue_repo(db, kanban_card_id).and_then(|(_, repo_id)| repo_id);
+                let historical_external_repo_unrecoverable = latest_work_target
+                    .as_ref()
+                    .filter(|_| validated_work_target.is_none())
+                    .filter(|_| !caller_supplied_target_repo)
+                    .and_then(|target| target.target_repo.as_deref())
+                    .filter(|work_repo| {
+                        historical_target_repo_differs_from_card(
+                            Some(work_repo),
+                            card_repo_id.as_deref(),
+                        )
+                    })
+                    .map(|value| value.to_string());
+
+                if let Some(external_repo) = historical_external_repo_unrecoverable {
+                    apply_review_target_warning(
+                        obj,
+                        "external_target_repo_unrecoverable",
+                        "리뷰 대상 커밋을 원래 외부 target_repo에서 복구할 수 없습니다. 카드 기본 레포로 폴백하면 무관한 코드가 리뷰되므로 중단합니다.",
+                    );
+                    // Preserve the historical target_repo so downstream
+                    // consumers (prompt builder, bootstrap) at least know
+                    // which repo the reviewer should have been pointed at.
+                    // Overwrite any card-scoped target_repo that may have
+                    // been pre-injected by resolve_card_target_repo_ref —
+                    // the failed external reference is the meaningful signal
+                    // here, not the card's default repo.
+                    obj.insert("target_repo".to_string(), json!(external_repo.clone()));
+                    tracing::warn!(
+                        "[dispatch] Review dispatch for card {}: historical external target_repo '{}' is unrecoverable — suppressing card-scoped fallback",
+                        kanban_card_id,
+                        external_repo
+                    );
+                } else if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
                     resolve_card_worktree(db, kanban_card_id, Some(&ctx_snapshot))?
                 {
                     apply_review_target_context(

@@ -3774,6 +3774,125 @@ mod tests {
         );
     }
 
+    /// #762 (A): If the historical work dispatch ran against an external
+    /// `target_repo` whose reviewed commit can no longer be recovered, the
+    /// review must NOT silently fall back to the card's canonical worktree.
+    /// Prior behavior consulted `resolve_card_worktree`/
+    /// `resolve_card_issue_commit_target` with `ctx_snapshot` (card-scoped),
+    /// which silently redirected the reviewer to unrelated code whenever the
+    /// card had its own live issue worktree. Fail closed instead.
+    #[test]
+    fn review_context_fails_closed_when_external_target_repo_is_unrecoverable() {
+        let db = test_db();
+        seed_card(&db, "card-review-762-external-fail", "review");
+        set_card_issue_number(&db, "card-review-762-external-fail", 762);
+
+        // Card's canonical repo: this is where the silent-redirect bug would
+        // have sent the reviewer. It has a LIVE worktree for issue 762.
+        let (card_repo, _repo_override) = setup_test_repo();
+        let card_repo_dir = card_repo.path().to_str().unwrap();
+        set_card_repo_id(&db, "card-review-762-external-fail", card_repo_dir);
+        let card_live_wt_dir = card_repo.path().join("wt-762-card-live");
+        let card_live_wt_path = card_live_wt_dir.to_str().unwrap();
+        run_git(
+            card_repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt/762-card-live",
+                card_live_wt_path,
+            ],
+        );
+        let _card_live_commit = git_commit(
+            card_live_wt_path,
+            "feat: unrelated ongoing work on card issue (#762)",
+        );
+
+        // External repo where the historical work ran. We create the
+        // reviewed_commit here (subject references #762 so the validity
+        // check passes) but then blow the whole directory away — this is
+        // the "external repo unrecoverable" scenario.
+        let external_repo = tempfile::tempdir().unwrap();
+        let external_repo_dir = external_repo.path().to_str().unwrap();
+        run_git(external_repo_dir, &["init", "-b", "main"]);
+        run_git(
+            external_repo_dir,
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(external_repo_dir, &["config", "user.name", "Test"]);
+        run_git(
+            external_repo_dir,
+            &["commit", "--allow-empty", "-m", "initial"],
+        );
+        let reviewed_commit = git_commit(
+            external_repo_dir,
+            "fix: external unrecoverable commit (#762)",
+        );
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-762-external-fail', 'card-review-762-external-fail', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path":
+                        external_repo.path().join("wt-762-external-deleted"),
+                    "completed_branch": "wt/762-external-deleted",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Make the external repo genuinely unrecoverable. After this, the
+        // path exists but is not a git repo, so resolve_repo_dir_for_target
+        // errors and refresh cannot locate reviewed_commit via target_repo
+        // or via the card repo (card repo never had that commit).
+        std::fs::remove_dir_all(external_repo_dir).unwrap();
+
+        let context =
+            build_review_context(&db, "card-review-762-external-fail", "agent-1", &json!({}))
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert!(
+            parsed.get("reviewed_commit").is_none(),
+            "unrecoverable external target_repo must not emit a reviewed_commit from card scope"
+        );
+        assert!(
+            parsed.get("worktree_path").is_none(),
+            "unrecoverable external target_repo must not redirect to card's live issue worktree: got {:?}",
+            parsed.get("worktree_path")
+        );
+        assert!(
+            parsed.get("branch").is_none(),
+            "unrecoverable external target_repo must not inject a card-scoped branch"
+        );
+        assert_eq!(
+            parsed["review_target_reject_reason"],
+            "external_target_repo_unrecoverable"
+        );
+        assert!(
+            parsed["review_target_warning"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("target_repo"),
+            "warning must mention target_repo so operators can investigate"
+        );
+        // The original external target_repo is preserved on the context so
+        // downstream prompt builders can surface it to the reviewer even
+        // when the commit itself cannot be located.
+        assert_eq!(parsed["target_repo"], external_repo_dir);
+    }
+
     #[test]
     fn review_context_allows_explicit_noop_latest_work_dispatch_when_review_mode_is_noop_verification()
      {
