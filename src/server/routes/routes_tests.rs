@@ -1,7 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::Row;
 use std::ffi::OsString;

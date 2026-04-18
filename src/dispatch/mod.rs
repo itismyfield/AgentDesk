@@ -3108,7 +3108,7 @@ mod tests {
                 'dispatch-review-no-issue', 'card-review-no-issue', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_wt_path,
@@ -3183,7 +3183,7 @@ mod tests {
                 'dispatch-review-no-issue-tr', 'card-review-no-issue-tr', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_wt_path,
@@ -3262,7 +3262,7 @@ mod tests {
                 'dispatch-review-recycled', 'card-review-recycled-wt', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": recycled_wt_path,
@@ -3352,7 +3352,7 @@ mod tests {
                 'dispatch-review-external-tr', 'card-review-external-tr', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_wt_path,
@@ -3442,7 +3442,7 @@ mod tests {
                 'dispatch-review-descendant', 'card-review-descendant', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": wt_path,
@@ -4041,7 +4041,7 @@ mod tests {
                 'dispatch-review-762-external-fail', 'card-review-762-external-fail', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
                 serde_json::json!({
                     "completed_worktree_path":
@@ -4161,7 +4161,7 @@ mod tests {
                 'dispatch-review-762-a-core', 'card-review-762-a-core', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
                 serde_json::json!({
                     "completed_worktree_path":
@@ -4259,7 +4259,7 @@ mod tests {
                 'dispatch-review-762-a-caller', 'card-review-762-a-caller', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": external_dir,
@@ -4334,7 +4334,7 @@ mod tests {
                 'dispatch-review-762-c-none-none', 'card-review-762-c-none-none', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({ "target_repo": bogus_external }).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": format!("{bogus_external}/wt-gone"),
