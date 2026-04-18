@@ -56,6 +56,30 @@ pub(crate) struct DispatchSessionStrategy {
     pub recreate_tmux: bool,
 }
 
+/// #762: Provenance of the `target_repo` field in a review dispatch context.
+///
+/// `build_review_context` needs to know whether the caller *actually* pinned
+/// a `target_repo` on this invocation, or whether the field was auto-injected
+/// by the dispatch create path from the card's canonical scope. When the
+/// external `target_repo` becomes unrecoverable, card-scoped fallbacks
+/// silently redirect the reviewer to unrelated code UNLESS we can distinguish
+/// "caller said so" (safe to fallback) from "we made it up" (must fail closed).
+///
+/// Prior behavior inferred this from the (possibly mutated) context passed in,
+/// which broke the moment any upstream injected `target_repo` before calling
+/// `build_review_context` (see `dispatch_create.rs`). Make the signal explicit
+/// instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetRepoSource {
+    /// Caller (e.g. REST API client) pinned `target_repo` explicitly on this
+    /// dispatch request. Card-scoped fallbacks may honor it.
+    CallerSupplied,
+    /// `target_repo` was either absent from the caller context OR was
+    /// auto-injected by the dispatch create path from `card.repo_id`.
+    /// Treat as card-scoped default — fail closed on unrecoverable externals.
+    CardScopeDefault,
+}
+
 pub(crate) fn dispatch_type_session_strategy_default(
     dispatch_type: Option<&str>,
 ) -> Option<DispatchSessionStrategy> {
@@ -899,12 +923,16 @@ fn historical_target_repo_differs_from_card(
         // card-scoped fallback path does not silently redirect.
         (Some(_), None) => true,
         (None, Some(_)) => true,
-        (None, None) => {
-            // Neither side resolves: no local anchor either way — stay
-            // conservative and let the downstream warning path handle it
-            // instead of claiming we can fail closed on a meaningful repo.
-            false
-        }
+        // #762 (C): when NEITHER side resolves we still have a concrete
+        // `work_target_repo` string recorded against the historical work
+        // dispatch. We cannot prove it matches the card scope — in fact the
+        // card scope is unresolvable too. Previously this returned `false`
+        // and let the card-scoped fallback chain run, which made
+        // `resolve_repo_dir_for_target(None)` redirect the reviewer into the
+        // default repo. Treat this as divergent so the caller fails closed
+        // on an unrecoverable external target_repo instead of silently
+        // reviewing unrelated code in the default repo.
+        (None, None) => true,
     }
 }
 
@@ -1156,13 +1184,18 @@ pub(super) fn build_review_context(
     to_agent_id: &str,
     context: &serde_json::Value,
     trust: ReviewTargetTrust,
+    target_repo_source: TargetRepoSource,
 ) -> Result<String> {
-    // #762 (A): snapshot the caller's original target_repo signal BEFORE
-    // we merge in the card-scoped default below. The fail-closed logic for
-    // unrecoverable external target_repos must distinguish between "the
-    // caller pinned this repo" (safe to use card-scoped fallback) and
-    // "this came from our own card.repo_id fallback injection" (unsafe).
-    let caller_supplied_target_repo = json_string_field(context, "target_repo").is_some();
+    // #762 (A): the caller tells us explicitly whether `target_repo` in
+    // `context` originated from their request or from our own fallback
+    // injection. Inferring this from `context["target_repo"].is_some()` is
+    // unreliable because upstream (`dispatch_create.rs`) pre-injects
+    // `target_repo` into the context from the card's scope BEFORE calling
+    // this function — which would make every dispatch look caller-supplied
+    // and silently disable the `external_target_repo_unrecoverable` filter.
+    let caller_supplied_target_repo =
+        matches!(target_repo_source, TargetRepoSource::CallerSupplied)
+            && json_string_field(context, "target_repo").is_some();
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
 
     // #761: Strip untrusted review-target fields before any downstream code
@@ -1712,6 +1745,7 @@ mod tests {
                 "reviewed_commit": reviewed_commit,
             }),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();

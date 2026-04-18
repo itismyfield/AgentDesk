@@ -273,6 +273,35 @@ fn session_runtime_state_after_redirect(
     load_session_runtime_state(sessions, effective_channel_id).unwrap_or(original_state)
 }
 
+/// #762 (B): Decide whether a dispatch's `dispatch_effective_path` should
+/// overwrite the active session's current_path.
+///
+/// Triggers when any of the following holds:
+/// - The dispatch emitted a concrete `worktree_path` (classic #259 path —
+///   review/rework sessions must execute inside the checked-out worktree).
+/// - The dispatch pinned a `target_repo` whose resolved directory differs
+///   from the session's current path. This covers reused threads where
+///   `bootstrap_thread_session` returned early because the thread already
+///   had a session: without this branch the session keeps its stale
+///   `current_path` and an external-repo review quietly executes inside
+///   the previous repo.
+///
+/// Returns `true` when the effective path should overwrite the session path.
+fn dispatch_session_path_should_update(
+    has_dispatch: bool,
+    has_worktree_path: bool,
+    current_path: &str,
+    dispatch_effective_path: &str,
+) -> bool {
+    if !has_dispatch {
+        return false;
+    }
+    if has_worktree_path {
+        return true;
+    }
+    dispatch_effective_path != current_path
+}
+
 fn build_race_requeued_intervention(
     request_owner: UserId,
     user_msg_id: MessageId,
@@ -810,10 +839,34 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     // #259: Override current_path with the pre-computed dispatch worktree path.
     // Also update the in-memory session so the worktree sticks for subsequent turns.
-    let current_path = if dispatch_worktree_path.is_some() {
+    //
+    // #762 (B): Reused threads (where `bootstrap_thread_session` returned
+    // early because the thread already had a session) carry their existing
+    // `session.current_path`. Without this branch, a review dispatch that
+    // pins only `target_repo` (no `worktree_path`, e.g. because the
+    // external-repo worktree was cleaned up but `target_repo` still
+    // resolves to the external repo root) would re-execute inside the
+    // previous repo — the prompt and `adk_cwd` would both be built from
+    // the stale path. Propagate `dispatch_effective_path` into the
+    // session whenever it differs from the current path, regardless of
+    // whether `worktree_path` was supplied.
+    let current_path = if dispatch_session_path_should_update(
+        dispatch_id_for_thread.is_some(),
+        dispatch_worktree_path.is_some(),
+        &current_path,
+        &dispatch_effective_path,
+    ) {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.current_path = Some(dispatch_effective_path.clone());
+            if session.current_path.as_deref() != Some(dispatch_effective_path.as_str()) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔄 Dispatch session CWD update: {:?} → {}",
+                    session.current_path,
+                    dispatch_effective_path
+                );
+                session.current_path = Some(dispatch_effective_path.clone());
+            }
         }
         dispatch_effective_path.clone()
     } else {
@@ -3615,6 +3668,59 @@ mod tests {
         assert_eq!(resolved.0, None);
         assert!(!resolved.1);
         assert_eq!(resolved.2, thread_dir.path().to_str().unwrap());
+    }
+
+    /// #762 round-2 (B): reused threads that bypass `bootstrap_thread_session`
+    /// still need their session CWD refreshed whenever the new dispatch
+    /// points at a different effective path — even when no `worktree_path`
+    /// is supplied. Prior behavior only updated session.current_path when
+    /// `dispatch_worktree_path.is_some()`, so external-repo reviews that
+    /// emitted only `target_repo` quietly executed inside the previous
+    /// implementation's repo.
+    #[test]
+    fn dispatch_session_path_should_update_when_target_repo_diverges_without_worktree() {
+        // Reused thread: dispatch present, no worktree_path, but
+        // target_repo resolved to a different directory than the
+        // session's stale current_path. Must update.
+        assert!(
+            dispatch_session_path_should_update(
+                true,  // has_dispatch
+                false, // has_worktree_path
+                "/tmp/stale-impl-repo",
+                "/tmp/external-target-repo",
+            ),
+            "reused thread with divergent target_repo must update session CWD"
+        );
+    }
+
+    #[test]
+    fn dispatch_session_path_should_update_still_triggers_for_worktree_path_dispatch() {
+        // Classic #259 path: dispatch has worktree_path. Always update,
+        // even when stale current_path already happens to match.
+        assert!(
+            dispatch_session_path_should_update(true, true, "/tmp/impl-wt", "/tmp/impl-wt",),
+            "worktree_path dispatches must always update session CWD"
+        );
+        assert!(
+            dispatch_session_path_should_update(true, true, "/tmp/stale", "/tmp/fresh-wt",),
+            "worktree_path dispatches with divergent path must update"
+        );
+    }
+
+    #[test]
+    fn dispatch_session_path_should_update_skips_when_paths_match() {
+        // No dispatch → leave alone.
+        assert!(!dispatch_session_path_should_update(
+            false, false, "/tmp/a", "/tmp/b",
+        ));
+        // Dispatch present but worktree_path absent AND effective path
+        // matches current path → nothing to update.
+        assert!(!dispatch_session_path_should_update(
+            true,
+            false,
+            "/tmp/same",
+            "/tmp/same",
+        ));
     }
 
     #[test]

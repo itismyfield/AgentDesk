@@ -23,7 +23,9 @@ pub(crate) use dispatch_context::{
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]
-use dispatch_context::{ReviewTargetTrust, build_review_context, inject_review_merge_base_context};
+use dispatch_context::{
+    ReviewTargetTrust, TargetRepoSource, build_review_context, inject_review_merge_base_context,
+};
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_conn;
 #[allow(unused_imports)]
@@ -2763,6 +2765,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -2825,6 +2828,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -2880,6 +2884,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -2937,6 +2942,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3011,6 +3017,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3089,6 +3096,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3178,6 +3186,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3267,6 +3276,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3347,6 +3357,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3411,6 +3422,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3462,6 +3474,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3521,6 +3534,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3549,6 +3563,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .expect_err("dirty repo root must block repo HEAD fallback");
 
@@ -3593,6 +3608,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .expect_err("dirty repo root must block fallback after commitless completion");
 
@@ -3655,6 +3671,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3745,6 +3762,7 @@ mod tests {
             "agent-1",
             &json!({ "target_repo": external_dir }),
             ReviewTargetTrust::Trusted,
+            TargetRepoSource::CallerSupplied,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3858,9 +3876,15 @@ mod tests {
         // or via the card repo (card repo never had that commit).
         std::fs::remove_dir_all(external_repo_dir).unwrap();
 
-        let context =
-            build_review_context(&db, "card-review-762-external-fail", "agent-1", &json!({}))
-                .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-762-external-fail",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Trusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert!(
@@ -3891,6 +3915,277 @@ mod tests {
         // downstream prompt builders can surface it to the reviewer even
         // when the commit itself cannot be located.
         assert_eq!(parsed["target_repo"], external_repo_dir);
+    }
+
+    /// #762 round-2 (A): when `create_dispatch_core` pre-injects the card's
+    /// `target_repo` into the context before calling `build_review_context`,
+    /// the fail-closed filter for unrecoverable external target_repos must
+    /// STILL engage. Previous behavior snapshotted `context["target_repo"]`
+    /// after the pre-injection and treated every dispatch as
+    /// caller-supplied — silently disabling the filter and letting
+    /// card-scoped fallbacks redirect the reviewer to unrelated code.
+    #[test]
+    fn create_dispatch_core_review_path_still_fails_closed_on_unrecoverable_external_target_repo() {
+        let db = test_db();
+        seed_card(&db, "card-review-762-a-core", "review");
+        set_card_issue_number(&db, "card-review-762-a-core", 762);
+
+        // Card's canonical repo — carries a LIVE worktree for the same
+        // issue. A silent redirect would point the reviewer here.
+        let (card_repo, _repo_override) = setup_test_repo();
+        let card_repo_dir = card_repo.path().to_str().unwrap();
+        set_card_repo_id(&db, "card-review-762-a-core", card_repo_dir);
+        let card_live_wt = card_repo.path().join("wt-762-a-core-live");
+        let card_live_wt_path = card_live_wt.to_str().unwrap();
+        run_git(
+            card_repo_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt/762-a-core-live",
+                card_live_wt_path,
+            ],
+        );
+        let _ = git_commit(card_live_wt_path, "feat: unrelated live card work (#762)");
+
+        // External repo where the historical work ran — then deleted to
+        // simulate the unrecoverable case.
+        let external_repo = tempfile::tempdir().unwrap();
+        let external_repo_dir = external_repo.path().to_str().unwrap();
+        run_git(external_repo_dir, &["init", "-b", "main"]);
+        run_git(
+            external_repo_dir,
+            &["config", "user.email", "test@test.com"],
+        );
+        run_git(external_repo_dir, &["config", "user.name", "Test"]);
+        run_git(
+            external_repo_dir,
+            &["commit", "--allow-empty", "-m", "initial"],
+        );
+        let reviewed_commit = git_commit(
+            external_repo_dir,
+            "fix: external unrecoverable from core path (#762)",
+        );
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-762-a-core', 'card-review-762-a-core', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({ "target_repo": external_repo_dir }).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path":
+                        external_repo.path().join("wt-762-a-core-deleted"),
+                    "completed_branch": "wt/762-a-core-deleted",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        std::fs::remove_dir_all(external_repo_dir).unwrap();
+
+        // Invoke the real production path. The caller passes NO target_repo
+        // override — `dispatch_create` will inject `card.repo_id`
+        // (`card_repo_dir`) before calling `build_review_context`.
+        let (dispatch_id, _, _) = create_dispatch_core(
+            &db,
+            "card-review-762-a-core",
+            "agent-1",
+            "review",
+            "Review dispatch for 762-a",
+            &json!({}),
+        )
+        .unwrap();
+
+        let conn = db.separate_conn().unwrap();
+        let context_str: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context_str).unwrap();
+
+        assert_eq!(
+            parsed["review_target_reject_reason"], "external_target_repo_unrecoverable",
+            "full dispatch_create → build_review_context path must fail closed even though upstream injects card.repo_id as target_repo; got context: {parsed:#?}"
+        );
+        assert!(
+            parsed.get("worktree_path").is_none(),
+            "must not silently redirect to card's live worktree"
+        );
+        assert!(
+            parsed.get("reviewed_commit").is_none(),
+            "must not emit a reviewed_commit from card scope after rejection"
+        );
+        assert_eq!(
+            parsed["target_repo"], external_repo_dir,
+            "historical external target_repo must be preserved (not replaced with card.repo_id)"
+        );
+    }
+
+    /// #762 round-2 (A) positive case: when a TRUSTED internal caller supplies a
+    /// `target_repo`, `build_review_context` must honor it and use card-scoped
+    /// fallbacks against that repo. The provenance marker
+    /// (`TargetRepoSource::CallerSupplied`) is what distinguishes this from the
+    /// auto-injection case and bypasses the unrecoverable-external fail-closed
+    /// filter.
+    ///
+    /// #761 merge note: under the merged design, the production
+    /// `create_dispatch_core` → `build_review_context` path always passes
+    /// `ReviewTargetTrust::Untrusted`, which strips caller-supplied
+    /// `target_repo` regardless of provenance. Trusted internal callers that
+    /// legitimately pre-seed `target_repo` must therefore bypass
+    /// `create_dispatch_core` and invoke `build_review_context` directly with
+    /// `ReviewTargetTrust::Trusted` + `TargetRepoSource::CallerSupplied`, which
+    /// is exactly what this test now exercises.
+    #[test]
+    fn create_dispatch_core_review_path_honors_caller_supplied_target_repo() {
+        let db = test_db();
+        seed_card(&db, "card-review-762-a-caller", "review");
+        set_card_issue_number(&db, "card-review-762-a-caller", 627);
+        set_card_repo_id(&db, "card-review-762-a-caller", "owner/missing");
+
+        let default_repo = init_test_repo();
+        let default_repo_dir = default_repo.path().to_str().unwrap();
+        let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
+
+        let external_repo = init_test_repo();
+        let external_dir = external_repo.path().to_str().unwrap();
+        run_git(
+            external_dir,
+            &["checkout", "-b", "codex/627-caller-supplied"],
+        );
+        let external_commit = git_commit(external_dir, "fix: caller-supplied target repo (#627)");
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-762-a-caller', 'card-review-762-a-caller', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": external_dir,
+                    "completed_branch": "codex/627-caller-supplied",
+                    "completed_commit": external_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Trusted internal invocation — simulates an in-process Rust caller
+        // that legitimately pre-pins `target_repo`. Public API clients cannot
+        // reach this path (see #761: dispatch_create_core_internal always
+        // passes ReviewTargetTrust::Untrusted).
+        let context_str = build_review_context(
+            &db,
+            "card-review-762-a-caller",
+            "agent-1",
+            &json!({ "target_repo": external_dir }),
+            ReviewTargetTrust::Trusted,
+            TargetRepoSource::CallerSupplied,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context_str).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], external_commit);
+        assert_eq!(parsed["branch"], "codex/627-caller-supplied");
+        assert!(
+            parsed.get("review_target_reject_reason").is_none(),
+            "caller-supplied target_repo must not trigger the unrecoverable filter: {parsed:#?}"
+        );
+    }
+
+    /// #762 round-2 (C): when the historical work dispatch recorded a
+    /// `target_repo` we cannot resolve AND the card has no resolvable
+    /// `repo_id`, `historical_target_repo_differs_from_card` must treat the
+    /// situation as divergent. Previous behavior returned `false` (not
+    /// divergent), which let `resolve_repo_dir_for_target(None)` redirect to
+    /// the default repo — silent external redirect.
+    #[test]
+    fn review_context_fails_closed_when_both_work_and_card_target_repos_are_unresolvable() {
+        let db = test_db();
+        seed_card(&db, "card-review-762-c-none-none", "review");
+        set_card_issue_number(&db, "card-review-762-c-none-none", 762);
+        // NOTE: intentionally DO NOT set_card_repo_id — card has no
+        // resolvable repo_id, so `card_repo_id` side of the comparison is
+        // `None`.
+
+        // Set the default repo so card-scoped fallback would resolve into
+        // an unrelated repo if the bug triggers.
+        let default_repo = init_test_repo();
+        let default_repo_dir = default_repo.path().to_str().unwrap();
+        let _env = DispatchEnvOverride::new(Some(default_repo_dir), None);
+        // Seed an unrelated commit in the default repo — if the silent
+        // redirect happens, reviewed_commit would be this unrelated HEAD.
+        let default_head = git_commit(default_repo_dir, "chore: unrelated default repo work");
+
+        // Historical dispatch recorded a `target_repo` pointing at a
+        // directory that does NOT resolve to any known repo (doesn't
+        // exist). This makes `normalized_target_repo_path(work)` return
+        // None, and card is None → (None, None).
+        let bogus_external = "/tmp/agentdesk-762-nonexistent-external-xyz";
+        let reviewed_commit = default_head.clone(); // any sha; won't be used
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-762-c-none-none', 'card-review-762-c-none-none', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({ "target_repo": bogus_external }).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": format!("{bogus_external}/wt-gone"),
+                    "completed_branch": "wt/762-c-gone",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context = build_review_context(
+            &db,
+            "card-review-762-c-none-none",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Trusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(
+            parsed["review_target_reject_reason"], "external_target_repo_unrecoverable",
+            "when work_target_repo is unresolvable AND card has no resolvable repo_id, must fail closed instead of redirecting to default repo: {parsed:#?}"
+        );
+        assert!(
+            parsed.get("reviewed_commit").is_none(),
+            "must not redirect to default repo HEAD"
+        );
+        assert_ne!(
+            parsed.get("reviewed_commit").and_then(|v| v.as_str()),
+            Some(default_head.as_str()),
+            "default repo HEAD must never be injected when both sides unresolvable"
+        );
     }
 
     #[test]
@@ -3929,6 +4224,7 @@ mod tests {
                 "noop_reason": "spec already satisfied"
             }),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .expect("explicit noop work should still create a noop_verification review dispatch");
         let parsed: serde_json::Value =
@@ -3959,6 +4255,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -4005,6 +4302,7 @@ mod tests {
             "agent-1",
             &json!({}),
             ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();

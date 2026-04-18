@@ -7,9 +7,10 @@ use crate::engine::PolicyEngine;
 
 use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
 use super::dispatch_context::{
-    ReviewTargetTrust, build_review_context, dispatch_context_with_session_strategy,
-    dispatch_context_worktree_target, inject_review_dispatch_identifiers,
-    resolve_card_target_repo_ref, resolve_card_worktree, resolve_parent_dispatch_context,
+    ReviewTargetTrust, TargetRepoSource, build_review_context,
+    dispatch_context_with_session_strategy, dispatch_context_worktree_target,
+    inject_review_dispatch_identifiers, json_string_field, resolve_card_target_repo_ref,
+    resolve_card_worktree, resolve_parent_dispatch_context,
 };
 use super::dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, record_dispatch_status_event_on_conn,
@@ -226,6 +227,17 @@ fn create_dispatch_core_internal(
     let (parent_dispatch_id, chain_depth) =
         resolve_parent_dispatch_context(&conn, kanban_card_id, context)?;
 
+    // #762 (A): Capture whether the caller explicitly supplied target_repo
+    // BEFORE we inject our card-scoped fallback below. Downstream
+    // `build_review_context` needs this provenance signal to decide whether
+    // an unrecoverable external target_repo can safely fall back to
+    // card-scoped recovery. Inferring from the post-injection context would
+    // make every dispatch look caller-supplied.
+    let caller_target_repo_source = if json_string_field(context, "target_repo").is_some() {
+        TargetRepoSource::CallerSupplied
+    } else {
+        TargetRepoSource::CardScopeDefault
+    };
     let mut context_with_session_strategy =
         dispatch_context_with_session_strategy(dispatch_type, context);
     let target_repo =
@@ -253,6 +265,7 @@ fn create_dispatch_core_internal(
             to_agent_id,
             &context_with_session_strategy,
             ReviewTargetTrust::Untrusted,
+            caller_target_repo_source,
         )?
     } else {
         let mut base = serde_json::to_string(&context_with_session_strategy)?;
