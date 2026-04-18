@@ -2310,7 +2310,9 @@ mod tests {
                 target TEXT,
                 content TEXT,
                 bot TEXT,
-                source TEXT
+                source TEXT,
+                reason_code TEXT,
+                session_key TEXT
             );
             CREATE TABLE task_dispatches (
                 id TEXT PRIMARY KEY,

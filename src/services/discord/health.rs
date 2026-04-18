@@ -224,33 +224,42 @@ fn runtime_stop_wait_timeout() -> std::time::Duration {
     }
 }
 
-pub async fn stop_provider_channel_runtime(
+async fn stop_provider_channel_runtime_with_policy(
     registry: &HealthRegistry,
     provider_name: &str,
     channel_id: ChannelId,
     reason: &str,
+    cleanup_policy: super::TmuxCleanupPolicy,
 ) -> Option<RuntimeTurnStopResult> {
     let provider = ProviderKind::from_str(provider_name)?;
     let shared = shared_for_provider(registry, &provider).await?;
     let result = mailbox_cancel_active_turn(&shared, channel_id).await;
+    let cleanup_requested = matches!(
+        cleanup_policy,
+        super::TmuxCleanupPolicy::CleanupSession { .. }
+    );
 
     if let Some(token) = result.token.as_ref() {
-        if !result.already_stopping {
-            super::turn_bridge::cancel_active_token(token, true, reason);
-        }
+        let termination_recorded = if !result.already_stopping || cleanup_requested {
+            super::turn_bridge::cancel_active_token(token, cleanup_policy, reason)
+        } else {
+            false
+        };
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
             return Some(RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
                 queue_depth: snapshot.intervention_queue.len(),
-                termination_recorded: result.token.is_some(),
+                termination_recorded,
             });
         }
     }
 
     let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
+    let mut termination_recorded = false;
     if let Some(token) = finish.removed_token.as_ref() {
-        super::turn_bridge::cancel_active_token(token, true, reason);
+        termination_recorded =
+            super::turn_bridge::cancel_active_token(token, cleanup_policy, reason);
     }
     apply_runtime_hard_stop_cleanup(
         &shared,
@@ -272,8 +281,43 @@ pub async fn stop_provider_channel_runtime(
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
         queue_depth,
-        termination_recorded: finish.removed_token.is_some(),
+        termination_recorded,
     })
+}
+
+pub async fn stop_provider_channel_runtime(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+    reason: &str,
+) -> Option<RuntimeTurnStopResult> {
+    stop_provider_channel_runtime_with_policy(
+        registry,
+        provider_name,
+        channel_id,
+        reason,
+        super::TmuxCleanupPolicy::PreserveSession,
+    )
+    .await
+}
+
+pub async fn force_kill_provider_channel_runtime(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+    reason: &str,
+    termination_reason_code: &'static str,
+) -> Option<RuntimeTurnStopResult> {
+    stop_provider_channel_runtime_with_policy(
+        registry,
+        provider_name,
+        channel_id,
+        reason,
+        super::TmuxCleanupPolicy::CleanupSession {
+            termination_reason_code: Some(termination_reason_code),
+        },
+    )
+    .await
 }
 
 pub async fn active_request_owner_for_channel(
@@ -550,7 +594,11 @@ pub async fn clear_provider_channel_runtime(
 
     let cleared = mailbox_clear_channel(&shared, &provider, channel_id).await;
     if let Some(token) = cleared.removed_token {
-        super::turn_bridge::cancel_active_token(&token, true, "auto-queue slot clear");
+        super::turn_bridge::cancel_active_token(
+            &token,
+            super::TmuxCleanupPolicy::PreserveSession,
+            "auto-queue slot clear",
+        );
         decrement_counter(shared.global_active.as_ref());
     }
 
@@ -566,12 +614,14 @@ pub async fn clear_provider_channel_runtime(
     }
 
     #[cfg(unix)]
-    if provider == ProviderKind::Claude {
-        if let Some(name) = tmux_name {
+    if let Some(name) = tmux_name {
+        if provider == ProviderKind::Claude {
             let _ = tokio::task::spawn_blocking(move || {
                 crate::services::platform::tmux::send_keys(&name, &["/clear", "Enter"])
             })
             .await;
+        } else if provider.uses_managed_tmux_backend() {
+            super::commands::reset_managed_process_session(&name);
         }
     }
 

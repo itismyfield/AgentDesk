@@ -104,12 +104,29 @@ fn render_dispatch_context_section(
         sections.push("Dispatch Trigger: auto-queue".to_string());
     }
 
-    if context
-        .get("force_new_session")
+    let reset_provider_state = context
+        .get("reset_provider_state")
         .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        sections.push("Session Strategy: force a fresh session before working".to_string());
+        .or_else(|| {
+            context
+                .get("force_new_session")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false);
+    let recreate_tmux = context
+        .get("recreate_tmux")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if reset_provider_state || recreate_tmux {
+        let strategy = match (reset_provider_state, recreate_tmux) {
+            (true, true) => {
+                "Session Strategy: hard reset provider state and recreate tmux before working"
+            }
+            (true, false) => "Session Strategy: reset provider/model state before working",
+            (false, true) => "Session Strategy: recreate tmux before working",
+            (false, false) => unreachable!(),
+        };
+        sections.push(strategy.to_string());
     }
 
     let review_branch = context

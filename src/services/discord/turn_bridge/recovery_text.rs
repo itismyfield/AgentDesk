@@ -72,6 +72,24 @@ pub(in crate::services::discord) fn store_session_retry_context(
     }
 }
 
+pub(in crate::services::discord) fn store_session_retry_context_with_notify(
+    db: &crate::db::Db,
+    channel_id: u64,
+    history: &str,
+    session_key: Option<&str>,
+) -> Result<bool, String> {
+    store_session_retry_context(Some(db), channel_id, history)?;
+    Ok(
+        crate::services::message_outbox::enqueue_lifecycle_notification(
+            db,
+            &format!("channel:{channel_id}"),
+            session_key,
+            "lifecycle.recovery_context",
+            "📋 최근 Discord 메시지를 복원 컨텍스트로 저장했습니다. 다음 턴에 자동 주입합니다.",
+        ),
+    )
+}
+
 pub(in crate::services::discord) fn take_session_retry_context(
     db: Option<&crate::db::Db>,
     channel_id: u64,
@@ -154,7 +172,20 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some(ref hist) = history {
-        let _ = store_session_retry_context(shared.db.as_ref(), channel_id.get(), hist);
+        if let Some(db) = shared.db.as_ref() {
+            let session_key =
+                super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
+                    .await
+                    .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
+            let _ = store_session_retry_context_with_notify(
+                db,
+                channel_id.get(),
+                hist,
+                Some(session_key.as_str()),
+            );
+        } else {
+            let _ = store_session_retry_context(shared.db.as_ref(), channel_id.get(), hist);
+        }
     }
 
     // Discord message: short notice only — history stays LLM-side

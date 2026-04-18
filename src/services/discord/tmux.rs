@@ -6,6 +6,7 @@ use serenity::ChannelId;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
+use crate::services::message_outbox::enqueue_lifecycle_notification;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_backend::StreamLineState;
 use crate::services::tmux_diagnostics::{
@@ -46,6 +47,21 @@ pub(super) struct WatcherLineOutcome {
     pub provider_overload_message: Option<String>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
+}
+
+fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("force-kill")
+        || lower.contains("deadlock")
+        || lower.contains("prompt too long")
+        || lower.contains("auth")
+    {
+        "lifecycle.force_kill"
+    } else if lower.contains("idle") || lower.contains("turn cap") || lower.contains("cleanup") {
+        "lifecycle.auto_cleanup"
+    } else {
+        "lifecycle.tmux_terminated"
+    }
 }
 
 fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsage> {
@@ -530,29 +546,36 @@ pub(super) async fn tmux_output_watcher(
                 );
             }
             // Notify: tmux session termination with reason
-            // Skip if force-kill already sent its own notification via dispatched_sessions.rs
             {
                 let reason_short = read_tmux_exit_reason(&tmux_session_name)
                     .unwrap_or_else(|| "unknown".to_string());
-                let is_force_kill = reason_short.contains("force-kill");
-                if !is_force_kill {
-                    // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
-                    let reason_text = reason_short
-                        .strip_prefix('[')
-                        .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-                        .unwrap_or(&reason_short);
-                    let reason_truncated: String = reason_text.chars().take(100).collect();
-                    if let Some(ref db) = shared.db {
-                        if let Ok(conn) = db.lock() {
-                            let _ = conn.execute(
-                                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                                rusqlite::params![
-                                    format!("channel:{}", channel_id.get()),
-                                    format!("🔴 세션 종료: {reason_truncated}"),
-                                ],
-                            );
-                        }
-                    }
+                // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
+                let reason_text = reason_short
+                    .strip_prefix('[')
+                    .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
+                    .unwrap_or(&reason_short);
+                let reason_truncated: String = reason_text.chars().take(100).collect();
+                let session_key = super::adk_session::build_adk_session_key(
+                    &shared,
+                    channel_id,
+                    &watcher_provider,
+                )
+                .await
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}:{}",
+                        crate::services::platform::hostname_short(),
+                        tmux_session_name
+                    )
+                });
+                if let Some(ref db) = shared.db {
+                    enqueue_lifecycle_notification(
+                        db,
+                        &format!("channel:{}", channel_id.get()),
+                        Some(session_key.as_str()),
+                        lifecycle_reason_code_for_tmux_exit(reason_text),
+                        &format!("🔴 세션 종료: {reason_truncated}"),
+                    );
                 }
             }
             if !prompt_too_long_killed && !turn_result_relayed {

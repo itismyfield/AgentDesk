@@ -172,7 +172,8 @@ async fn send_restore_notification(
 struct DispatchContextHints {
     worktree_path: Option<String>,
     stale_worktree_path: Option<String>,
-    force_new_session: bool,
+    reset_provider_state: bool,
+    recreate_tmux: bool,
 }
 
 fn parse_dispatch_context_hints(
@@ -181,24 +182,21 @@ fn parse_dispatch_context_hints(
 ) -> DispatchContextHints {
     let parsed =
         dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-    let default_force_new_session =
-        crate::dispatch::dispatch_type_force_new_session_default(dispatch_type).unwrap_or(false);
     let requested_worktree_path = parsed
         .as_ref()
         .and_then(|v| v.get("worktree_path"))
         .and_then(|v| v.as_str())
         .map(String::from);
+    let strategy =
+        crate::dispatch::dispatch_session_strategy_from_context(parsed.as_ref(), dispatch_type);
     DispatchContextHints {
         worktree_path: requested_worktree_path
             .as_deref()
             .filter(|p| std::path::Path::new(p).exists())
             .map(str::to_string),
         stale_worktree_path: requested_worktree_path.filter(|p| !std::path::Path::new(p).exists()),
-        force_new_session: parsed
-            .as_ref()
-            .and_then(|v| v.get("force_new_session"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(default_force_new_session),
+        reset_provider_state: strategy.reset_provider_state,
+        recreate_tmux: strategy.recreate_tmux,
     }
 }
 
@@ -520,7 +518,8 @@ pub(in crate::services::discord) async fn handle_text_message(
     );
     let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
     let dispatch_stale_worktree_path = dispatch_context_hints.stale_worktree_path.clone();
-    let dispatch_force_new_session = dispatch_context_hints.force_new_session;
+    let dispatch_reset_provider_state = dispatch_context_hints.reset_provider_state;
+    let dispatch_recreate_tmux = dispatch_context_hints.recreate_tmux;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
@@ -752,22 +751,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         current_path
     };
-    if dispatch_force_new_session {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.clear_provider_session();
-        }
-        drop(data);
-        session_id = None;
-        memento_context_loaded = false;
-        if let Some(ref did) = dispatch_id_for_thread {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ♻️ Dispatch {did}: force_new_session=true, skipping provider session reuse"
-            );
-        }
-    }
-
     // Sanitize input
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
@@ -811,6 +794,34 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
+    if dispatch_reset_provider_state || dispatch_recreate_tmux {
+        super::super::commands::reset_channel_provider_state(
+            &ctx.http,
+            shared,
+            &provider,
+            channel_id,
+            if dispatch_recreate_tmux {
+                "dispatch hard reset"
+            } else {
+                "dispatch provider reset"
+            },
+            dispatch_reset_provider_state,
+            false,
+            dispatch_recreate_tmux,
+        )
+        .await;
+        session_id = None;
+        memento_context_loaded = false;
+        if let Some(ref did) = dispatch_id_for_thread {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ♻️ Dispatch {did}: reset_provider_state={}, recreate_tmux={}, skipping provider session reuse",
+                dispatch_reset_provider_state,
+                dispatch_recreate_tmux
+            );
+        }
+    }
+
     super::super::commands::reset_provider_session_if_pending(
         &ctx.http, shared, &provider, channel_id,
     )
@@ -840,10 +851,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
     if session_id.is_none() {
-        if dispatch_force_new_session {
+        if dispatch_reset_provider_state || dispatch_recreate_tmux {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for forced fresh dispatch turn"
+                "  [{ts}] ↻ Skipping DB provider session restore for dispatch reset_provider_state={} recreate_tmux={}",
+                dispatch_reset_provider_state,
+                dispatch_recreate_tmux
             );
         } else if let Some(reason) = session_reset_reason {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1248,7 +1261,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     // → mailbox_finish_turn canonical cleanup
                     super::super::turn_bridge::cancel_active_token(
                         &watchdog_token,
-                        true,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "watchdog timeout",
                     );
 
@@ -2083,7 +2096,19 @@ pub(super) async fn handle_text_command(
                 let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                 match stop_lookup {
                     TextStopLookup::Stop(token) => {
-                        super::super::turn_bridge::cancel_active_token(&token, true, "!stop");
+                        super::super::turn_bridge::cancel_active_token(
+                            &token,
+                            super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                            "!stop",
+                        );
+                        super::super::commands::notify_turn_stop(
+                            &ctx.http,
+                            &data.shared,
+                            &data.provider,
+                            channel_id,
+                            "!stop",
+                        )
+                        .await;
                     }
                     TextStopLookup::AlreadyStopping => {
                         let _ = msg.reply(&ctx.http, "Already stopping...").await;
@@ -2826,8 +2851,18 @@ Any other message is sent to {p}.
                         match stop_lookup {
                             TextStopLookup::Stop(token) => {
                                 super::super::turn_bridge::cancel_active_token(
-                                    &token, true, "!cc stop",
+                                    &token,
+                                    super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                                    "!cc stop",
                                 );
+                                super::super::commands::notify_turn_stop(
+                                    &ctx.http,
+                                    &data.shared,
+                                    &data.provider,
+                                    channel_id,
+                                    "!cc stop",
+                                )
+                                .await;
                                 let _ = msg.reply(&ctx.http, "Stopping...").await;
                             }
                             TextStopLookup::AlreadyStopping => {
@@ -3307,11 +3342,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_context_hints_extracts_force_new_session_and_worktree() {
+    fn parse_dispatch_context_hints_extracts_session_strategy_and_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let raw = serde_json::json!({
             "worktree_path": temp.path(),
-            "force_new_session": true
+            "reset_provider_state": true,
+            "recreate_tmux": true
         })
         .to_string();
 
@@ -3319,11 +3355,12 @@ mod tests {
 
         assert_eq!(hints.worktree_path.as_deref(), temp.path().to_str());
         assert!(hints.stale_worktree_path.is_none());
-        assert!(hints.force_new_session);
+        assert!(hints.reset_provider_state);
+        assert!(hints.recreate_tmux);
     }
 
     #[test]
-    fn parse_dispatch_context_hints_tracks_missing_path_but_keeps_reset_flag() {
+    fn parse_dispatch_context_hints_tracks_missing_path_but_keeps_legacy_reset_flag() {
         let hints = parse_dispatch_context_hints(
             Some(r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#),
             Some("review-decision"),
@@ -3334,7 +3371,8 @@ mod tests {
             hints.stale_worktree_path.as_deref(),
             Some("/definitely/missing")
         );
-        assert!(hints.force_new_session);
+        assert!(hints.reset_provider_state);
+        assert!(!hints.recreate_tmux);
     }
 
     #[test]
@@ -3343,22 +3381,37 @@ mod tests {
         let review = parse_dispatch_context_hints(None, Some("review"));
         let rework = parse_dispatch_context_hints(None, Some("rework"));
 
-        assert!(implementation.force_new_session);
-        assert!(review.force_new_session);
-        assert!(rework.force_new_session);
+        assert!(implementation.reset_provider_state);
+        assert!(!implementation.recreate_tmux);
+        assert!(review.reset_provider_state);
+        assert!(!review.recreate_tmux);
+        assert!(rework.reset_provider_state);
+        assert!(!rework.recreate_tmux);
     }
 
     #[test]
     fn parse_dispatch_context_hints_defaults_warm_resume_for_review_decision() {
         let hints = parse_dispatch_context_hints(None, Some("review-decision"));
-        assert!(!hints.force_new_session);
+        assert!(!hints.reset_provider_state);
+        assert!(!hints.recreate_tmux);
     }
 
     #[test]
     fn parse_dispatch_context_hints_respects_explicit_override_over_dispatch_type_default() {
         let hints =
             parse_dispatch_context_hints(Some(r#"{"force_new_session":false}"#), Some("rework"));
-        assert!(!hints.force_new_session);
+        assert!(!hints.reset_provider_state);
+        assert!(!hints.recreate_tmux);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_allows_tmux_recreate_without_legacy_alias() {
+        let hints = parse_dispatch_context_hints(
+            Some(r#"{"reset_provider_state":false,"recreate_tmux":true}"#),
+            Some("review-decision"),
+        );
+        assert!(!hints.reset_provider_state);
+        assert!(hints.recreate_tmux);
     }
 
     #[test]

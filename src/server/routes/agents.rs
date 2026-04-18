@@ -10,6 +10,8 @@ use std::sync::OnceLock;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 // ── Query types ──────────────────────────────────────────────
 
@@ -34,6 +36,7 @@ struct AgentTurnSession {
     last_heartbeat: Option<String>,
     created_at: Option<String>,
     thread_channel_id: Option<String>,
+    runtime_channel_id: Option<String>,
     effective_status: &'static str,
     effective_active_dispatch_id: Option<String>,
     is_working: bool,
@@ -378,11 +381,19 @@ fn find_agent_turn_session(
     agent_id: &str,
 ) -> Result<Option<AgentTurnSession>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(session_key, ''), provider, status, active_dispatch_id,
-                last_heartbeat, created_at, thread_channel_id
-         FROM sessions
-         WHERE agent_id = ?1
-         ORDER BY last_heartbeat DESC, created_at DESC, id DESC",
+        "SELECT COALESCE(s.session_key, ''), s.provider, s.status, s.active_dispatch_id,
+                s.last_heartbeat, s.created_at, s.thread_channel_id,
+                COALESCE(
+                    s.thread_channel_id,
+                    a.discord_channel_id,
+                    a.discord_channel_alt,
+                    a.discord_channel_cc,
+                    a.discord_channel_cdx
+                ) AS runtime_channel_id
+         FROM sessions s
+         LEFT JOIN agents a ON a.id = s.agent_id
+         WHERE s.agent_id = ?1
+         ORDER BY s.last_heartbeat DESC, s.created_at DESC, s.id DESC",
     )?;
 
     let rows = stmt.query_map([agent_id], |row| {
@@ -394,6 +405,7 @@ fn find_agent_turn_session(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
 
@@ -409,6 +421,7 @@ fn find_agent_turn_session(
             last_heartbeat,
             created_at,
             thread_channel_id,
+            runtime_channel_id,
         ) = row?;
         let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
         let effective = resolver.resolve(
@@ -423,6 +436,7 @@ fn find_agent_turn_session(
             last_heartbeat,
             created_at,
             thread_channel_id,
+            runtime_channel_id,
             effective_status: effective.status,
             effective_active_dispatch_id: effective.active_dispatch_id,
             is_working: effective.is_working,
@@ -906,13 +920,42 @@ pub async fn stop_agent_turn(
     }
 
     let session_key = session.session_key.clone();
-    let (status, Json(mut body)) = super::dispatched_sessions::force_kill_session_impl_with_reason(
-        &state,
-        &session_key,
-        false,
+    let tmux_name = session_key.split(':').next_back().unwrap_or(&session_key);
+    let lifecycle = stop_turn_preserving_queue(
+        state.health_registry.as_deref(),
+        &TurnLifecycleTarget {
+            provider: session.provider.as_deref().and_then(ProviderKind::from_str),
+            channel_id: session
+                .runtime_channel_id
+                .as_deref()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(poise::serenity_prelude::ChannelId::new),
+            tmux_name: tmux_name.to_string(),
+        },
         &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
     )
     .await;
+
+    if let Ok(conn) = state.db.lock() {
+        conn.execute(
+            "UPDATE sessions
+             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+             WHERE session_key = ?1",
+            [&session_key],
+        )
+        .ok();
+    }
+
+    let status = StatusCode::OK;
+    let Json(mut body) = Json(json!({
+        "ok": true,
+        "session_key": session_key,
+        "tmux_session": tmux_name,
+        "tmux_killed": lifecycle.tmux_killed,
+        "lifecycle_path": lifecycle.lifecycle_path,
+        "queued_remaining": lifecycle.queue_depth,
+        "queue_preserved": lifecycle.queue_preserved,
+    }));
     body["agent_id"] = json!(id);
     body["session_key"] = json!(session_key);
     body["status"] = json!(if status == StatusCode::OK {

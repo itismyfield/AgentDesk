@@ -11,6 +11,7 @@ pub mod gemini;
 pub mod kanban;
 pub mod mcp_config;
 pub mod memory;
+pub mod message_outbox;
 pub mod platform;
 pub mod process;
 pub mod provider;

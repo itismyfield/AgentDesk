@@ -13,8 +13,9 @@ use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
     parse_thread_channel_name, resolve_agent_id_for_session as resolve_session_agent_id,
 };
+use crate::services::message_outbox::enqueue_lifecycle_notification;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
 const STALE_THREAD_SESSION_MAX_AGE_SQL: &str = "-1 hour";
@@ -1170,7 +1171,10 @@ pub(crate) async fn force_kill_session_impl_with_reason(
         }
     };
 
-    let lifecycle = stop_turn_preserving_queue(
+    let (termination_reason_code, lifecycle_reason_code) =
+        classify_session_termination_reason(reason);
+
+    let lifecycle = force_kill_turn(
         state.health_registry.as_deref(),
         &TurnLifecycleTarget {
             provider: provider_info
@@ -1184,6 +1188,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             tmux_name: tmux_name.clone(),
         },
         reason,
+        termination_reason_code,
     )
     .await;
 
@@ -1334,7 +1339,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             session_key,
             active_dispatch_id.as_deref(),
             "force_kill_api",
-            "force_kill",
+            termination_reason_code,
             Some(reason),
             None,
             None,
@@ -1362,15 +1367,13 @@ pub(crate) async fn force_kill_session_impl_with_reason(
                 }
             })
             .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
-        if let Ok(conn) = state.db.lock() {
-            let _ = conn.execute(
-                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                rusqlite::params![
-                    format!("channel:{channel_id_str}"),
-                    format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
-                ],
-            );
-        }
+        enqueue_lifecycle_notification(
+            &state.db,
+            &format!("channel:{channel_id_str}"),
+            Some(session_key),
+            lifecycle_reason_code,
+            &format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
+        );
     }
 
     (
@@ -1387,6 +1390,20 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             "queue_activation_requested": queue_activation_requested,
         })),
     )
+}
+
+fn classify_session_termination_reason(reason: &str) -> (&'static str, &'static str) {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("idle")
+        || lower.contains("auto cleanup")
+        || lower.contains("자동 정리")
+        || lower.contains("turn cap")
+        || lower.contains("cleanup")
+    {
+        ("auto_cleanup", "lifecycle.auto_cleanup")
+    } else {
+        ("force_kill", "lifecycle.force_kill")
+    }
 }
 
 /// POST /api/sessions/{session_key}/force-kill

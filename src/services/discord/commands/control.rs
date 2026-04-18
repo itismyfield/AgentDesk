@@ -15,13 +15,13 @@ use super::super::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedSessionClearBehavior {
     NativeProviderClear,
-    TerminateManagedSession,
+    ResetManagedProcess,
     Noop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedSessionResetBehavior {
-    TerminateManagedSession,
+    ResetManagedProcess,
     Noop,
 }
 
@@ -29,18 +29,53 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
     match provider {
         ProviderKind::Claude => ManagedSessionClearBehavior::NativeProviderClear,
         ProviderKind::Codex | ProviderKind::Qwen => {
-            ManagedSessionClearBehavior::TerminateManagedSession
+            ManagedSessionClearBehavior::ResetManagedProcess
         }
         ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionClearBehavior::Noop,
     }
 }
 
 fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionResetBehavior {
-    if provider.uses_managed_tmux_backend() {
-        ManagedSessionResetBehavior::TerminateManagedSession
-    } else {
-        ManagedSessionResetBehavior::Noop
+    match provider {
+        ProviderKind::Claude => ManagedSessionResetBehavior::Noop,
+        ProviderKind::Codex | ProviderKind::Qwen => {
+            ManagedSessionResetBehavior::ResetManagedProcess
+        }
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
     }
+}
+
+pub(in crate::services::discord) fn reset_managed_process_session(session_name: &str) -> bool {
+    let lingering_pid =
+        crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
+    if let Some(handle) = crate::services::session_backend::remove_process_session(session_name) {
+        crate::services::session_backend::terminate_process_handle(handle);
+        return true;
+    }
+    if let Some(pid) = lingering_pid {
+        if let Ok(pid) = u32::try_from(pid) {
+            crate::services::process::kill_pid_tree(pid);
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn recreate_tmux_session(session_name: &str, reset_source: &str) -> bool {
+    if !crate::services::platform::tmux::has_session(session_name) {
+        return false;
+    }
+    crate::services::tmux_diagnostics::record_tmux_exit_reason(
+        session_name,
+        &format!("hard reset via {reset_source}"),
+    );
+    crate::services::platform::tmux::kill_session(session_name)
+}
+
+#[cfg(not(unix))]
+fn recreate_tmux_session(_session_name: &str, _reset_source: &str) -> bool {
+    false
 }
 
 async fn resolve_session_key_for_clear(
@@ -101,6 +136,78 @@ fn build_fallback_session_key_for_clear(
     super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
 }
 
+pub(in crate::services::discord) async fn reset_channel_provider_state(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    reset_source: &str,
+    reset_provider_state: bool,
+    clear_history: bool,
+    recreate_tmux: bool,
+) -> Option<String> {
+    let tmux_name = {
+        let mut data = shared.core.lock().await;
+        data.sessions.get_mut(&channel_id).and_then(|session| {
+            if reset_provider_state {
+                session.session_id = None;
+                session.clear_provider_session();
+            }
+            if clear_history {
+                session.history.clear();
+            }
+            session
+                .channel_name
+                .as_ref()
+                .map(|channel_name| provider.build_tmux_session_name(channel_name))
+        })
+    };
+
+    if reset_provider_state
+        && let Some(session_key) =
+            resolve_session_key_for_clear(http, shared, channel_id, provider).await
+    {
+        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    }
+
+    if let Some(name) = tmux_name.as_deref() {
+        if reset_provider_state {
+            match managed_session_reset_behavior(provider) {
+                ManagedSessionResetBehavior::ResetManagedProcess => {
+                    reset_managed_process_session(name);
+                }
+                ManagedSessionResetBehavior::Noop => {}
+            }
+        }
+        if recreate_tmux {
+            recreate_tmux_session(name, reset_source);
+        }
+    }
+
+    tmux_name
+}
+
+pub(in crate::services::discord) async fn notify_turn_stop(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    stop_source: &str,
+) {
+    let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider)
+        .await
+        .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
+    if let Some(db) = shared.db.as_ref() {
+        crate::services::message_outbox::enqueue_lifecycle_notification(
+            db,
+            &format!("channel:{}", channel_id.get()),
+            Some(&session_key),
+            "lifecycle.stop_turn",
+            &format!("🛑 현재 턴 중단 ({stop_source}) — tmux는 유지됩니다."),
+        );
+    }
+}
+
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -115,31 +222,17 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         return;
     }
 
-    let tmux_name = {
-        let mut data = shared.core.lock().await;
-        data.sessions.get_mut(&channel_id).and_then(|session| {
-            session.session_id = None;
-            session
-                .channel_name
-                .as_ref()
-                .map(|channel_name| provider.build_tmux_session_name(channel_name))
-        })
-    };
-
-    if let Some(session_key) =
-        resolve_session_key_for_clear(http, shared, channel_id, provider).await
-    {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-
-    match managed_session_reset_behavior(provider) {
-        ManagedSessionResetBehavior::TerminateManagedSession => {
-            if let Some(name) = tmux_name {
-                crate::services::claude::terminate_local_session(&name);
-            }
-        }
-        ManagedSessionResetBehavior::Noop => {}
-    }
+    let _ = reset_channel_provider_state(
+        http,
+        shared,
+        provider,
+        channel_id,
+        "model session reset pending",
+        true,
+        false,
+        false,
+    )
+    .await;
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(
@@ -180,15 +273,18 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     shared.model_session_reset_pending.remove(&channel_id);
 
     if let Some(token) = cleared.removed_token {
-        cancel_active_token(&token, true, clear_source);
+        cancel_active_token(
+            &token,
+            super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+            clear_source,
+        );
     }
 
-    if let Some(session_key) =
-        resolve_session_key_for_clear(http, shared, channel_id, provider).await
-    {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider).await;
+    if let Some(session_key) = session_key.as_deref() {
+        super::super::adk_session::clear_provider_session_id(session_key, shared.api_port).await;
         super::super::adk_session::post_adk_session_status(
-            Some(session_key.as_str()),
+            Some(session_key),
             None,
             None,
             "idle",
@@ -215,25 +311,23 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
                 .await;
             }
         }
-        ManagedSessionClearBehavior::TerminateManagedSession => {
+        ManagedSessionClearBehavior::ResetManagedProcess => {
             if let Some(name) = tmux_name {
-                crate::services::claude::terminate_local_session(&name);
+                reset_managed_process_session(&name);
             }
         }
         ManagedSessionClearBehavior::Noop => {}
     }
 
     // Notify bot message for session clear visibility
-    if let Some(ref db) = shared.db {
-        if let Ok(conn) = db.lock() {
-            let _ = conn.execute(
-                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                rusqlite::params![
-                    format!("channel:{}", channel_id.get()),
-                    format!("🧹 세션 클리어 ({})", clear_source),
-                ],
-            );
-        }
+    if let Some(db) = shared.db.as_ref() {
+        crate::services::message_outbox::enqueue_lifecycle_notification(
+            db,
+            &format!("channel:{}", channel_id.get()),
+            session_key.as_deref(),
+            "lifecycle.soft_clear",
+            &format!("🧹 세션 클리어 ({clear_source})"),
+        );
     }
 }
 
@@ -264,7 +358,19 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
 
             ctx.say("Stopping...").await?;
 
-            cancel_active_token(&token, true, "/stop");
+            cancel_active_token(
+                &token,
+                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                "/stop",
+            );
+            notify_turn_stop(
+                &ctx.serenity_context().http,
+                &ctx.data().shared,
+                &ctx.data().provider,
+                channel_id,
+                "/stop",
+            )
+            .await;
             tracing::info!("  [{ts}] ■ Cancel signal sent");
         }
         None => {
@@ -380,11 +486,11 @@ mod tests {
         );
         assert_eq!(
             managed_session_clear_behavior(&ProviderKind::Codex),
-            ManagedSessionClearBehavior::TerminateManagedSession
+            ManagedSessionClearBehavior::ResetManagedProcess
         );
         assert_eq!(
             managed_session_clear_behavior(&ProviderKind::Qwen),
-            ManagedSessionClearBehavior::TerminateManagedSession
+            ManagedSessionClearBehavior::ResetManagedProcess
         );
         assert_eq!(
             managed_session_clear_behavior(&ProviderKind::Gemini),
@@ -396,15 +502,15 @@ mod tests {
     fn managed_session_reset_behavior_matches_provider_transport() {
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Claude),
-            ManagedSessionResetBehavior::TerminateManagedSession
+            ManagedSessionResetBehavior::Noop
         );
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Codex),
-            ManagedSessionResetBehavior::TerminateManagedSession
+            ManagedSessionResetBehavior::ResetManagedProcess
         );
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Qwen),
-            ManagedSessionResetBehavior::TerminateManagedSession
+            ManagedSessionResetBehavior::ResetManagedProcess
         );
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Gemini),

@@ -11,7 +11,7 @@ use super::memory_lifecycle::{
 };
 use super::recovery_text::{
     build_session_retry_context_from_history, store_session_retry_context,
-    take_session_retry_context,
+    store_session_retry_context_with_notify, take_session_retry_context,
 };
 use super::retry_state::{
     clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
@@ -649,6 +649,53 @@ fn stored_retry_context_is_consumed_once() {
         Some("User: hi\nAssistant: hello".to_string())
     );
     assert_eq!(take_session_retry_context(Some(&db), 42), None);
+}
+
+#[test]
+fn storing_retry_context_enqueues_deduped_lifecycle_notification() {
+    let db = crate::db::test_db();
+
+    assert!(
+        store_session_retry_context_with_notify(
+            &db,
+            42,
+            "User: hi\nAssistant: hello",
+            Some("session-a"),
+        )
+        .expect("store retry context with notify")
+    );
+    assert!(
+        !store_session_retry_context_with_notify(
+            &db,
+            42,
+            "User: hi\nAssistant: hello again",
+            Some("session-a"),
+        )
+        .expect("dedupe retry context notify")
+    );
+
+    let conn = db.read_conn().unwrap();
+    let (reason_code, session_key, content, count): (Option<String>, Option<String>, String, i64) =
+        conn.query_row(
+            "SELECT
+                MAX(reason_code),
+                MAX(session_key),
+                MAX(content),
+                COUNT(*)
+             FROM message_outbox",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+
+    assert_eq!(count, 1);
+    assert_eq!(reason_code.as_deref(), Some("lifecycle.recovery_context"));
+    assert_eq!(session_key.as_deref(), Some("session-a"));
+    assert!(content.contains("복원 컨텍스트로 저장했습니다"));
+    assert_eq!(
+        take_session_retry_context(Some(&db), 42),
+        Some("User: hi\nAssistant: hello again".to_string())
+    );
 }
 
 #[allow(clippy::await_holding_lock)]

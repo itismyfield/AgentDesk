@@ -1394,7 +1394,12 @@ mod tests {
                         payload.agent_id,
                         "rework",
                         "Contextful dispatch",
-                        { force_new_session: true, reset_reason: "repeated_findings" }
+                        {
+                            reset_provider_state: true,
+                            recreate_tmux: false,
+                            force_new_session: true,
+                            reset_reason: "repeated_findings"
+                        }
                     );
                     agentdesk.db.execute(
                         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dyn_dispatch_ctx_id', '" + id + "')",
@@ -1450,6 +1455,8 @@ mod tests {
             .expect("dispatch row should persist context");
         let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
         assert_eq!(context_json["force_new_session"], true);
+        assert_eq!(context_json["reset_provider_state"], true);
+        assert_eq!(context_json["recreate_tmux"], false);
         assert_eq!(context_json["reset_reason"], "repeated_findings");
     }
 

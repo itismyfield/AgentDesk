@@ -320,7 +320,7 @@ async fn handle_reaction_remove(
                 super::message_handler::TextStopLookup::Stop(token) => {
                     super::super::turn_bridge::cancel_active_token(
                         &token,
-                        true,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "reaction remove ⏳",
                     );
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -329,6 +329,14 @@ async fn handle_reaction_remove(
                         removed_reaction.message_id,
                         channel_id
                     );
+                    super::super::commands::notify_turn_stop(
+                        &ctx.http,
+                        &data.shared,
+                        &data.provider,
+                        channel_id,
+                        "reaction remove ⏳",
+                    )
+                    .await;
                     send_reaction_control_reply(
                         ctx,
                         &data.shared,

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::AppState;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
 /// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.
 pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
@@ -151,7 +151,7 @@ async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], rea
             .last()
             .unwrap_or(&target.session_key)
             .to_string();
-        let lifecycle = stop_turn_preserving_queue(
+        let lifecycle = force_kill_turn(
             state.health_registry.as_deref(),
             &TurnLifecycleTarget {
                 provider: target.provider.as_deref().and_then(ProviderKind::from_str),
@@ -163,6 +163,7 @@ async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], rea
                 tmux_name: tmux_name.clone(),
             },
             reason,
+            "kanban_backlog_revert",
         )
         .await;
 

@@ -1383,7 +1383,11 @@ function processVerdict(cardId, verdict, result, options) {
             assignedAgent,
             "rework",
             resetPrompt,
-            { force_new_session: true }
+            {
+              reset_provider_state: true,
+              recreate_tmux: false,
+              force_new_session: true
+            }
           );
           agentdesk.log.info("[review] #420 Session-reset rework dispatch created: " + resetDispatchId);
 

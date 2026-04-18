@@ -50,25 +50,64 @@ pub(super) fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> 
         .filter(|s| !s.is_empty())
 }
 
-pub(crate) fn dispatch_type_force_new_session_default(dispatch_type: Option<&str>) -> Option<bool> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DispatchSessionStrategy {
+    pub reset_provider_state: bool,
+    pub recreate_tmux: bool,
+}
+
+pub(crate) fn dispatch_type_session_strategy_default(
+    dispatch_type: Option<&str>,
+) -> Option<DispatchSessionStrategy> {
     match dispatch_type {
-        Some("implementation") | Some("review") | Some("rework") => Some(true),
-        Some("review-decision") => Some(false),
+        Some("implementation") | Some("review") | Some("rework") => Some(DispatchSessionStrategy {
+            reset_provider_state: true,
+            recreate_tmux: false,
+        }),
+        Some("review-decision") => Some(DispatchSessionStrategy::default()),
         _ => None,
     }
+}
+
+pub(crate) fn dispatch_type_force_new_session_default(dispatch_type: Option<&str>) -> Option<bool> {
+    dispatch_type_session_strategy_default(dispatch_type)
+        .map(|strategy| strategy.reset_provider_state)
 }
 
 pub(crate) fn dispatch_type_uses_thread_routing(dispatch_type: Option<&str>) -> bool {
     !matches!(dispatch_type, Some("phase-gate"))
 }
 
+pub(crate) fn dispatch_session_strategy_from_context(
+    context: Option<&serde_json::Value>,
+    dispatch_type: Option<&str>,
+) -> DispatchSessionStrategy {
+    let default = dispatch_type_session_strategy_default(dispatch_type).unwrap_or_default();
+    let reset_provider_state = context
+        .and_then(|value| value.get("reset_provider_state"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            context
+                .and_then(|value| value.get("force_new_session"))
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(default.reset_provider_state);
+    let recreate_tmux = context
+        .and_then(|value| value.get("recreate_tmux"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(default.recreate_tmux);
+
+    DispatchSessionStrategy {
+        reset_provider_state,
+        recreate_tmux,
+    }
+}
+
 pub(super) fn dispatch_context_with_session_strategy(
     dispatch_type: &str,
     context: &serde_json::Value,
 ) -> serde_json::Value {
-    let Some(default_force_new_session) =
-        dispatch_type_force_new_session_default(Some(dispatch_type))
-    else {
+    let Some(_) = dispatch_type_session_strategy_default(Some(dispatch_type)) else {
         return context.clone();
     };
 
@@ -78,9 +117,17 @@ pub(super) fn dispatch_context_with_session_strategy(
         json!({})
     };
 
+    let strategy = dispatch_session_strategy_from_context(Some(&context), Some(dispatch_type));
     if let Some(obj) = context.as_object_mut() {
-        obj.entry("force_new_session".to_string())
-            .or_insert(json!(default_force_new_session));
+        obj.insert(
+            "reset_provider_state".to_string(),
+            json!(strategy.reset_provider_state),
+        );
+        obj.insert("recreate_tmux".to_string(), json!(strategy.recreate_tmux));
+        obj.insert(
+            "force_new_session".to_string(),
+            json!(strategy.reset_provider_state),
+        );
     }
 
     context

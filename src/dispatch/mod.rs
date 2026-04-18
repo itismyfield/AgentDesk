@@ -15,9 +15,11 @@ mod dispatch_status;
 use dispatch_channel::provider_from_channel_suffix;
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
-    REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER, REVIEW_VERDICT_IMPROVE_GUIDANCE,
-    commit_belongs_to_card_issue, dispatch_type_force_new_session_default,
-    dispatch_type_uses_thread_routing, inject_review_dispatch_identifiers, resolve_card_worktree,
+    DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
+    REVIEW_VERDICT_IMPROVE_GUIDANCE, commit_belongs_to_card_issue,
+    dispatch_session_strategy_from_context, dispatch_type_force_new_session_default,
+    dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
+    inject_review_dispatch_identifiers, resolve_card_worktree,
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]
@@ -1269,6 +1271,40 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_type_session_strategy_defaults_split_by_dispatch_type() {
+        assert_eq!(
+            dispatch_type_session_strategy_default(Some("implementation")),
+            Some(DispatchSessionStrategy {
+                reset_provider_state: true,
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            dispatch_type_session_strategy_default(Some("review")),
+            Some(DispatchSessionStrategy {
+                reset_provider_state: true,
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            dispatch_type_session_strategy_default(Some("rework")),
+            Some(DispatchSessionStrategy {
+                reset_provider_state: true,
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            dispatch_type_session_strategy_default(Some("review-decision")),
+            Some(DispatchSessionStrategy::default())
+        );
+        assert_eq!(
+            dispatch_type_session_strategy_default(Some("consultation")),
+            None
+        );
+        assert_eq!(dispatch_type_session_strategy_default(None), None);
+    }
+
+    #[test]
     fn dispatch_type_thread_routing_keeps_phase_gate_in_primary_channel() {
         assert!(dispatch_type_uses_thread_routing(Some("implementation")));
         assert!(dispatch_type_uses_thread_routing(Some("review")));
@@ -1303,6 +1339,8 @@ mod tests {
             .unwrap();
         let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
         assert_eq!(context_json["force_new_session"], true);
+        assert_eq!(context_json["reset_provider_state"], true);
+        assert_eq!(context_json["recreate_tmux"], false);
         assert_eq!(context_json["key"], "value");
     }
 
@@ -1331,6 +1369,8 @@ mod tests {
             .unwrap();
         let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
         assert_eq!(context_json["force_new_session"], false);
+        assert_eq!(context_json["reset_provider_state"], false);
+        assert_eq!(context_json["recreate_tmux"], false);
     }
 
     #[test]
@@ -1358,6 +1398,8 @@ mod tests {
             .unwrap();
         let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
         assert_eq!(context_json["force_new_session"], false);
+        assert_eq!(context_json["reset_provider_state"], false);
+        assert_eq!(context_json["recreate_tmux"], false);
         assert_eq!(context_json["verdict"], "improve");
     }
 

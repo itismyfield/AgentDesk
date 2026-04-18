@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::engine::{PolicyEngine, PolicyEngineHandle};
 use crate::error::{AppError, ErrorCode};
+use crate::services::message_outbox::enqueue;
 
 const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
+const ORPHAN_CONFIRM_KEY_PREFIX: &str = "runtime_supervisor:orphan_confirm:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorSignal {
@@ -87,6 +89,13 @@ struct OrphanCandidate {
     repo_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct OrphanConfirmMarker {
+    card_id: String,
+    card_status: String,
+    assigned_agent_id: Option<String>,
+}
+
 impl RuntimeSupervisor {
     pub fn new(db: Db, engine: PolicyEngine) -> Self {
         Self { db, engine }
@@ -136,77 +145,82 @@ impl RuntimeSupervisor {
         let candidate = self.load_orphan_candidate(&dispatch_id)?;
 
         if let Some(candidate) = candidate {
-            chosen_action = SupervisorAction::Resume;
-
-            // Orphan recovery: fail the dispatch and return card to ready.
-            // The dispatch had no active session, so no work was done.
-            // Completing it would falsely advance the card through review → done.
-            let fail_result = self.mark_dispatch_failed(&dispatch_id)?;
-            if fail_result == 0 {
-                note = Some("dispatch already terminal or missing".to_string());
-                chosen_action = SupervisorAction::Probe;
+            if !self.confirm_orphan_candidate(&dispatch_id, &candidate)? {
+                note = Some("orphan candidate awaiting confirm".to_string());
             } else {
-                #[cfg(test)]
-                self.apply_orphan_fault_injection(&dispatch_id, &candidate.card_id);
+                chosen_action = SupervisorAction::Resume;
 
-                // Return card to ready for re-dispatch instead of advancing to review
-                let ready_target = {
-                    let conn = self
-                        .db
-                        .separate_conn()
-                        .map_err(|e| format!("db connection: {e}"))?;
-                    crate::pipeline::ensure_loaded();
-                    let effective = crate::pipeline::resolve_for_card(
-                        &conn,
-                        candidate.repo_id.as_deref(),
-                        candidate.assigned_agent_id.as_deref(),
-                    );
-                    // Use the dispatchable state (ready) as target
-                    effective
-                        .dispatchable_states()
-                        .first()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "ready".to_string())
-                };
-
-                let current = self.current_card_head(&candidate.card_id)?;
-                if current
-                    .as_ref()
-                    .is_some_and(|(status, latest_dispatch_id)| {
-                        status == &candidate.card_status
-                            && latest_dispatch_id.as_deref() == Some(dispatch_id.as_str())
-                    })
-                {
-                    match crate::kanban::transition_status_with_opts(
-                        &self.db,
-                        &self.engine,
-                        &candidate.card_id,
-                        &ready_target,
-                        SUPERVISOR_ACTOR,
-                        true,
-                    ) {
-                        Ok(_) => {
-                            executed = true;
-                            self.notify_orphan_recovery(&candidate, &ready_target);
-                        }
-                        Err(e) => {
-                            note = Some(format!("resume transition skipped: {e}"));
-                        }
-                    }
+                // Orphan recovery: fail the dispatch and return card to ready.
+                // The dispatch had no active session, so no work was done.
+                // Completing it would falsely advance the card through review → done.
+                let fail_result = self.mark_dispatch_failed(&dispatch_id)?;
+                if fail_result == 0 {
+                    note = Some("dispatch already terminal or missing".to_string());
+                    chosen_action = SupervisorAction::Probe;
                 } else {
-                    let moved = current
-                        .map(|(status, latest_dispatch_id)| {
-                            format!(
-                                "card moved to status={} latest_dispatch_id={}",
-                                status,
-                                latest_dispatch_id.unwrap_or_else(|| "null".to_string())
-                            )
+                    #[cfg(test)]
+                    self.apply_orphan_fault_injection(&dispatch_id, &candidate.card_id);
+
+                    // Return card to ready for re-dispatch instead of advancing to review
+                    let ready_target = {
+                        let conn = self
+                            .db
+                            .separate_conn()
+                            .map_err(|e| format!("db connection: {e}"))?;
+                        crate::pipeline::ensure_loaded();
+                        let effective = crate::pipeline::resolve_for_card(
+                            &conn,
+                            candidate.repo_id.as_deref(),
+                            candidate.assigned_agent_id.as_deref(),
+                        );
+                        // Use the dispatchable state (ready) as target
+                        effective
+                            .dispatchable_states()
+                            .first()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "ready".to_string())
+                    };
+
+                    let current = self.current_card_head(&candidate.card_id)?;
+                    if current
+                        .as_ref()
+                        .is_some_and(|(status, latest_dispatch_id)| {
+                            status == &candidate.card_status
+                                && latest_dispatch_id.as_deref() == Some(dispatch_id.as_str())
                         })
-                        .unwrap_or_else(|| "card disappeared before transition".to_string());
-                    note = Some(moved);
+                    {
+                        match crate::kanban::transition_status_with_opts(
+                            &self.db,
+                            &self.engine,
+                            &candidate.card_id,
+                            &ready_target,
+                            SUPERVISOR_ACTOR,
+                            true,
+                        ) {
+                            Ok(_) => {
+                                executed = true;
+                                self.notify_orphan_recovery(&candidate, &ready_target);
+                            }
+                            Err(e) => {
+                                note = Some(format!("resume transition skipped: {e}"));
+                            }
+                        }
+                    } else {
+                        let moved = current
+                            .map(|(status, latest_dispatch_id)| {
+                                format!(
+                                    "card moved to status={} latest_dispatch_id={}",
+                                    status,
+                                    latest_dispatch_id.unwrap_or_else(|| "null".to_string())
+                                )
+                            })
+                            .unwrap_or_else(|| "card disappeared before transition".to_string());
+                        note = Some(moved);
+                    }
                 }
             }
         } else {
+            self.clear_orphan_confirmation(&dispatch_id);
             note = Some("stale or non-orphan candidate".to_string());
         }
 
@@ -268,6 +282,61 @@ impl RuntimeSupervisor {
         )
         .optional()
         .map_err(|e| format!("load orphan candidate: {e}"))
+    }
+
+    fn clear_orphan_confirmation(&self, dispatch_id: &str) {
+        let Ok(conn) = self.db.separate_conn() else {
+            return;
+        };
+        let _ = conn.execute(
+            "DELETE FROM kv_meta WHERE key = ?1",
+            [format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}")],
+        );
+    }
+
+    fn load_orphan_confirmation(&self, dispatch_id: &str) -> Option<OrphanConfirmMarker> {
+        let conn = self.db.separate_conn().ok()?;
+        let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
+        let raw: Option<String> = conn
+            .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten();
+        raw.and_then(|value| serde_json::from_str::<OrphanConfirmMarker>(&value).ok())
+    }
+
+    fn confirm_orphan_candidate(
+        &self,
+        dispatch_id: &str,
+        candidate: &OrphanCandidate,
+    ) -> Result<bool, String> {
+        let marker = OrphanConfirmMarker {
+            card_id: candidate.card_id.clone(),
+            card_status: candidate.card_status.clone(),
+            assigned_agent_id: candidate.assigned_agent_id.clone(),
+        };
+
+        if self.load_orphan_confirmation(dispatch_id).as_ref() == Some(&marker) {
+            self.clear_orphan_confirmation(dispatch_id);
+            return Ok(true);
+        }
+
+        let conn = self
+            .db
+            .separate_conn()
+            .map_err(|e| format!("db connection: {e}"))?;
+        let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
+        let marker_json =
+            serde_json::to_string(&marker).map_err(|e| format!("serialize orphan marker: {e}"))?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, marker_json],
+        )
+        .map_err(|e| format!("store orphan marker: {e}"))?;
+        Ok(false)
     }
 
     #[allow(dead_code)]
@@ -377,10 +446,16 @@ impl RuntimeSupervisor {
             "🔄 [고아 디스패치 복구] {} — {}\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → {} 전이",
             agent, candidate.title, review_target
         );
-        let _ = conn.execute(
-            "INSERT INTO message_outbox (target, content, bot, source)
-             VALUES (?1, ?2, 'announce', 'system')",
-            rusqlite::params![format!("channel:{channel_id}"), content],
+        let _ = enqueue(
+            &conn,
+            crate::services::message_outbox::OutboxMessage {
+                target: &format!("channel:{channel_id}"),
+                content: &content,
+                bot: "announce",
+                source: "system",
+                reason_code: Some("lifecycle.orphan_recovery"),
+                session_key: Some(&candidate.card_id),
+            },
         );
     }
 
