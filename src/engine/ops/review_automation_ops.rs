@@ -392,10 +392,18 @@ fn reseed_pr_tracking_tx(db: &Db, card_id: &str) -> anyhow::Result<serde_json::V
     }
 
     // Read the latest completed work dispatch's head_sha (if any) so the new
-    // pr_tracking row tracks the candidate commit.
+    // pr_tracking row tracks the candidate commit. Field preference matches
+    // the JS loader loadLatestCompletedWorkTarget (result first, context
+    // fallback; completed_commit / reviewed_commit / head_sha).
     let latest_head: Option<String> = tx
         .query_row(
-            "SELECT json_extract(td.result, '$.head_sha') FROM task_dispatches td \
+            "SELECT COALESCE( \
+               json_extract(td.result, '$.head_sha'), \
+               json_extract(td.result, '$.completed_commit'), \
+               json_extract(td.result, '$.reviewed_commit'), \
+               json_extract(td.context, '$.completed_commit'), \
+               json_extract(td.context, '$.reviewed_commit') \
+             ) FROM task_dispatches td \
              WHERE td.kanban_card_id = ?1 \
                AND td.status = 'completed' \
                AND td.dispatch_type IN ('implementation', 'rework') \

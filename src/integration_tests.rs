@@ -6571,6 +6571,240 @@ mod tests {
         );
     }
 
+    /// #743: pr:create_failed card with NO pr_tracking row → escalate to
+    /// manual intervention via blocked_reason='pr:create_failed_escalated:no_tracking'
+    /// rather than silently deferring to processTrackedMergeQueue (which has
+    /// nothing to retry against).
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_terminal_no_tracking_with_create_failed_escalates() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-743-notrack", "done", "test/repo", 1001, None);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed:handoff_crashed' WHERE id = 'card-743-notrack'",
+                [],
+            )
+            .unwrap();
+        }
+        set_kv(&db, "merge_automation_enabled", "true");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-743-notrack"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-743-notrack'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("pr:create_failed_escalated:no_tracking"),
+            "#743: missing pr_tracking at terminal must escalate, not silently defer"
+        );
+    }
+
+    /// #743: pr:create_failed_escalated:* marker is a terminal-state
+    /// noop — don't re-escalate on subsequent OnCardTerminal fires.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_terminal_already_escalated_is_noop() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-743-esc", "done", "test/repo", 1002, None);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed_escalated:max_retries' WHERE id = 'card-743-esc'",
+                [],
+            )
+            .unwrap();
+        }
+        set_kv(&db, "merge_automation_enabled", "true");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-743-esc"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-743-esc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("pr:create_failed_escalated:max_retries"),
+            "#743: already-escalated marker must be preserved (no re-escalation loop)"
+        );
+    }
+
+    /// #743: pr_tracking with state='create-pr' whose dispatch_generation
+    /// differs from the currently-active create-pr dispatch's stamped
+    /// generation is stale — reseed so the retry loop targets the current
+    /// lifecycle rather than a superseded one.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_terminal_stale_generation_reseeds_tracking() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-743-stale-gen", "done", "test/repo", 1003, None);
+        set_kv(&db, "merge_automation_enabled", "true");
+
+        // Seed a create-pr dispatch with generation=G_ACTIVE. Use the helper
+        // that stamps both dispatch and pr_tracking with matching gen, then
+        // overwrite the pr_tracking gen with a different (stale) value.
+        seed_stamped_create_pr_state(
+            &db,
+            "disp-743-stale",
+            "card-743-stale-gen",
+            "test/repo",
+            None,
+            "wt/card-743-stale",
+            None,
+            Some("sha-current"),
+            "create-pr",
+            "pending",
+        );
+        let stale_generation = "00000000-0000-0000-0000-stale0stale01".to_string();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE pr_tracking SET dispatch_generation = ?1 WHERE card_id = 'card-743-stale-gen'",
+                [&stale_generation],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-743-stale-gen"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (new_gen, retry_count, last_error): (Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT dispatch_generation, retry_count, last_error FROM pr_tracking WHERE card_id = 'card-743-stale-gen'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_ne!(
+            new_gen.as_deref(),
+            Some(stale_generation.as_str()),
+            "#743: stale generation must be replaced by reseedPrTracking"
+        );
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+
+        let active_dispatch: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'disp-743-stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            active_dispatch.as_deref(),
+            Some("cancelled"),
+            "#743: reseedPrTracking must cancel the active stale dispatch so the partial unique index does not block the next handoff"
+        );
+    }
+
+    /// #743: pr_tracking.head_sha divergence from the latest completed work
+    /// dispatch's head_sha → reseed (the candidate commit moved).
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_terminal_divergent_head_sha_reseeds_tracking() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-743-headdiv", "done", "test/repo", 1004, None);
+        set_kv(&db, "merge_automation_enabled", "true");
+
+        // Latest work dispatch with head_sha=new_head_sha.
+        seed_completed_work_dispatch_target(
+            &db,
+            "impl-743-headdiv",
+            "card-743-headdiv",
+            "implementation",
+            "/tmp/wt/card-743-headdiv",
+            "wt/card-743-headdiv",
+            "new_head_sha",
+        );
+
+        // Seed tracking with head_sha=old_head_sha but matching generation
+        // on the active dispatch so only the head_sha path is exercised.
+        seed_stamped_create_pr_state(
+            &db,
+            "disp-743-headdiv",
+            "card-743-headdiv",
+            "test/repo",
+            None,
+            "wt/card-743-headdiv",
+            None,
+            Some("old_head_sha"),
+            "create-pr",
+            "pending",
+        );
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-743-headdiv"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let head_sha: Option<String> = conn
+            .query_row(
+                "SELECT head_sha FROM pr_tracking WHERE card_id = 'card-743-headdiv'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            head_sha.as_deref(),
+            Some("new_head_sha"),
+            "#743: divergent head_sha must be reseeded to the latest completed work head_sha"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {
