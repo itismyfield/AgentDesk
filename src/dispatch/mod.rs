@@ -2592,15 +2592,14 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-review-target", "review");
 
-        let repo_dir = crate::services::platform::resolve_repo_dir()
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|path| path.display().to_string())
-            })
-            .unwrap();
-        let completed_commit = crate::services::platform::git_head_commit(&repo_dir)
-            .unwrap_or_else(|| "ci-detached-head".to_string());
+        // #682: Use a dedicated test repo instead of resolve_repo_dir() to
+        // avoid picking up another test's leaked RepoDirOverride (a tempdir
+        // that may have been dropped, which would fail the new exact-HEAD
+        // check in refresh_review_target_worktree). The test is exercising
+        // the "recorded worktree still exists with matching HEAD" reuse path.
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap().to_string();
+        let completed_commit = crate::services::platform::git_head_commit(&repo_dir).unwrap();
         let completed_branch = crate::services::platform::shell::git_branch_name(&repo_dir);
 
         let conn = db.separate_conn().unwrap();
@@ -2936,11 +2935,14 @@ mod tests {
         assert_eq!(parsed["worktree_path"], repo_dir);
     }
 
-    /// #682 (Codex round 2, [high]): An issue-bearing card whose recorded
+    /// #682 (Codex round 2+3, [high]): An issue-bearing card whose recorded
     /// target_repo differs from the card's canonical repo must recover its
-    /// worktree via target_repo, not card-scoped repo resolution. The
-    /// historical completion dispatch carries the external target_repo
-    /// that must be honored during refresh.
+    /// worktree via target_repo, not card-scoped repo resolution. This test
+    /// specifically exercises the resolve_card_worktree path (not the
+    /// repo_dir fallback) by creating a LIVE issue worktree in the external
+    /// repo with reviewed_commit as HEAD. If resolve_card_worktree failed
+    /// to honor target_repo, recovery would fall through to the repo_dir
+    /// branch and the worktree-path + HEAD assertions would catch it.
     #[test]
     fn review_context_refreshes_issue_bearing_external_target_repo_stale_worktree() {
         let db = test_db();
@@ -2961,10 +2963,22 @@ mod tests {
             external_repo_dir,
             &["commit", "--allow-empty", "-m", "initial"],
         );
-        let reviewed_commit = git_commit(
+
+        // Live issue worktree in the external repo whose branch name
+        // encodes the issue (685) so find_worktree_for_issue picks it up.
+        let live_wt_dir = external_repo.path().join("wt-685-live");
+        let live_wt_path = live_wt_dir.to_str().unwrap();
+        run_git(
             external_repo_dir,
+            &["worktree", "add", "-b", "wt/685-live", live_wt_path],
+        );
+        let reviewed_commit = git_commit(
+            live_wt_path,
             "fix: external issue target_repo refresh (#685)",
         );
+
+        // Stale (deleted) worktree that the completion dispatch originally
+        // ran on — must NOT be returned.
         let stale_wt_path = external_repo.path().join("wt-685-external-deleted");
 
         let conn = db.separate_conn().unwrap();
@@ -2994,7 +3008,7 @@ mod tests {
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
         let actual_wt = parsed["worktree_path"].as_str().unwrap();
-        let canonical_external = std::fs::canonicalize(external_repo_dir)
+        let canonical_live = std::fs::canonicalize(live_wt_path)
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -3003,8 +3017,24 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(
-            canonical_actual, canonical_external,
-            "issue-bearing external-repo review must honor historical target_repo during refresh"
+            canonical_actual, canonical_live,
+            "issue-bearing external-repo review must resolve to the live issue worktree via target_repo (not the repo root fallback)"
+        );
+        // Verify the returned path actually has reviewed_commit as HEAD —
+        // this is what makes the test bite even if target_repo injection
+        // silently misrouted to repo_dir (repo_dir HEAD is just the
+        // initial empty commit, not reviewed_commit).
+        let head_output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(actual_wt)
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head_output.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            head, reviewed_commit,
+            "returned worktree must have reviewed_commit as HEAD"
         );
     }
 
@@ -3061,13 +3091,35 @@ mod tests {
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
         // Recorded path must NOT be reused — HEAD advanced past the reviewed
-        // commit. Fallback should use repo_dir (where the reviewed commit
-        // is also reachable but the filesystem state is under our control).
+        // commit.
         assert_ne!(
             parsed["worktree_path"].as_str(),
             Some(wt_path),
             "recorded worktree with advanced HEAD must be rejected"
         );
+        // #682 (Codex round 3, [high]): when a worktree_path IS emitted, it
+        // must have HEAD==reviewed_commit. Otherwise the reviewer sees the
+        // wrong filesystem state. Acceptable outcomes:
+        //   (a) worktree_path is None (reviewer falls back to default repo)
+        //   (b) worktree_path is a path with HEAD exactly at reviewed_commit
+        // (c) worktree_path is the recorded wt_path — which is the failure
+        //     this test guards against.
+        if let Some(emitted) = parsed["worktree_path"].as_str() {
+            let head_output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(emitted)
+                .output()
+                .unwrap();
+            let head = String::from_utf8_lossy(&head_output.stdout)
+                .trim()
+                .to_string();
+            assert_eq!(
+                head, reviewed_commit,
+                "if worktree_path is emitted after rejecting the recorded path, HEAD must be exactly reviewed_commit (got {} at {})",
+                head, emitted
+            );
+        }
+        _ = repo_dir; // silence unused warning when worktree_path is None
     }
 
     #[test]

@@ -498,7 +498,13 @@ fn refresh_review_target_worktree(
         });
 
     if let Some(repo_dir) = fallback_repo_dir {
-        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+        // #682 (Codex round 3, [high]): require the repo_dir's HEAD to be
+        // exactly reviewed_commit before emitting it as worktree_path. The
+        // shared git object store makes git_commit_exists trivially pass
+        // for any commit anywhere in the repo — but if HEAD is checked out
+        // at something else, the reviewer sees unrelated filesystem state.
+        // Exact HEAD match guarantees the on-disk state is what was reviewed.
+        if worktree_head_matches_commit(&repo_dir, &target.reviewed_commit) {
             let branch = resolve_review_target_branch(
                 db,
                 card_id,
@@ -516,6 +522,31 @@ fn refresh_review_target_worktree(
                 reviewed_commit: target.reviewed_commit.clone(),
                 branch,
                 worktree_path: Some(repo_dir),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: repo_dir '{}' HEAD does not match reviewed commit {} — emitting reviewed_commit without worktree_path",
+            card_id,
+            repo_dir,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+        // We know the commit exists in this repo (cat-file via the earlier
+        // branch); hand back reviewed_commit and let the reviewer inspect
+        // it via git commands, without misleading worktree_path.
+        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch(
+                db,
+                card_id,
+                &repo_dir,
+                &target.reviewed_commit,
+                target.branch.as_deref(),
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: None,
                 target_repo: target.target_repo.clone(),
             }));
         }
