@@ -68,11 +68,11 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `db::turns` | `src/db/turns.rs` | 451 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 3816 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 3908 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1533 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 695 |  |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 571 |  |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 608 |  |
 | `engine` | `src/engine/mod.rs` | 1555 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 812 |  |
@@ -104,7 +104,7 @@
 | `github::dod` | `src/github/dod.rs` | 395 |  |
 | `github::sync` | `src/github/sync.rs` | 496 |  |
 | `github::triage` | `src/github/triage.rs` | 247 |  |
-| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1218 | giant-file |
+| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1189 | giant-file |
 | `kanban` | `src/kanban.rs` | 2143 | giant-file |
 | `launch` | `src/launch.rs` | 32 |  |
 | `logging` | `src/logging.rs` | 160 |  |
@@ -134,8 +134,8 @@
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3357 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3898 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1377 | giant-file |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 3907 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 1386 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 901 |  |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 67 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 2053 | giant-file |
@@ -225,7 +225,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 13 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1085 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3498 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3508 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1346 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
