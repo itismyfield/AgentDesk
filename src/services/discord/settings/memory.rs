@@ -25,6 +25,18 @@ fn configured_memory_backend_name() -> Option<String> {
     runtime_memory_backend_config().map(|config| config.backend)
 }
 
+fn configured_auto_remember_enabled() -> bool {
+    runtime_memory_backend_config()
+        .map(|config| config.auto_remember.enabled)
+        .unwrap_or(false)
+}
+
+fn configured_query_recall_after_bootstrap() -> bool {
+    runtime_memory_backend_config()
+        .map(|config| config.query_recall_after_bootstrap)
+        .unwrap_or(false)
+}
+
 fn memento_backend_available() -> bool {
     crate::services::memory::backend_is_active(MemoryBackendKind::Memento)
 }
@@ -145,12 +157,18 @@ fn merge_memory_config(
         backend: override_cfg
             .and_then(|cfg| cfg.backend.clone())
             .or_else(|| base.and_then(|cfg| cfg.backend.clone())),
+        query_recall_after_bootstrap: override_cfg
+            .and_then(|cfg| cfg.query_recall_after_bootstrap)
+            .or_else(|| base.and_then(|cfg| cfg.query_recall_after_bootstrap)),
         recall_timeout_ms: override_cfg
             .and_then(|cfg| cfg.recall_timeout_ms)
             .or_else(|| base.and_then(|cfg| cfg.recall_timeout_ms)),
         capture_timeout_ms: override_cfg
             .and_then(|cfg| cfg.capture_timeout_ms)
             .or_else(|| base.and_then(|cfg| cfg.capture_timeout_ms)),
+        auto_remember_enabled: override_cfg
+            .and_then(|cfg| cfg.auto_remember_enabled)
+            .or_else(|| base.and_then(|cfg| cfg.auto_remember_enabled)),
         mem0: Some(merge_mem0_config(
             base.and_then(|cfg| cfg.mem0.as_ref()),
             override_cfg.and_then(|cfg| cfg.mem0.as_ref()),
@@ -166,6 +184,9 @@ pub(crate) fn resolve_memory_settings(
     let mem0_override = merged.mem0.as_ref();
     ResolvedMemorySettings {
         backend: resolve_memory_backend(merged.backend.as_deref()),
+        query_recall_after_bootstrap: merged
+            .query_recall_after_bootstrap
+            .unwrap_or_else(configured_query_recall_after_bootstrap),
         recall_timeout_ms: clamp_timeout(
             "memory.recall_timeout_ms",
             merged
@@ -184,6 +205,9 @@ pub(crate) fn resolve_memory_settings(
             MAX_MEMORY_CAPTURE_TIMEOUT_MS,
             DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
         ),
+        auto_remember_enabled: merged
+            .auto_remember_enabled
+            .unwrap_or_else(configured_auto_remember_enabled),
         mem0: Mem0ResolvedSettings {
             profile: resolve_mem0_profile(mem0_override.and_then(|cfg| cfg.profile.as_deref())),
             ingestion: Mem0IngestionSettings {

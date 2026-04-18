@@ -741,9 +741,19 @@ pub struct MemoryConfig {
     #[serde(default = "default_memory_backend")]
     pub backend: String,
     #[serde(default)]
+    pub query_recall_after_bootstrap: bool,
+    #[serde(default)]
     pub file: FileMemoryConfig,
     #[serde(default)]
     pub mcp: McpMemoryConfig,
+    #[serde(default)]
+    pub auto_remember: AutoRememberConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutoRememberConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1190,8 +1200,8 @@ pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
-        DEFAULT_MEMENTO_MCP_SERVER_NAME, DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR,
+        AgentChannel, AgentChannels, AgentDef, AutoRememberConfig, AutomationConfig, BotConfig,
+        Config, DEFAULT_MEMENTO_MCP_SERVER_NAME, DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR,
         DEFAULT_MEMENTO_MCP_URL, DiscordBotAuthConfig, EscalationConfig, EscalationMode,
         EscalationScheduleConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig,
         McpServerAuthConfig, McpServerAuthType, McpServerConfig, MemoryConfig, ReviewConfig,
@@ -1462,6 +1472,7 @@ mod tests {
         };
         config.memory = Some(MemoryConfig {
             backend: "memento".to_string(),
+            query_recall_after_bootstrap: true,
             file: FileMemoryConfig {
                 sak_path: "/tmp/shared.md".to_string(),
                 sam_path: "/tmp/sam".to_string(),
@@ -1472,6 +1483,7 @@ mod tests {
                 endpoint: "http://127.0.0.1:8765".to_string(),
                 access_key_env: "MEMENTO_API_KEY".to_string(),
             },
+            auto_remember: AutoRememberConfig { enabled: true },
         });
 
         save_to_path(&path, &config).unwrap();
@@ -1623,6 +1635,13 @@ mod tests {
         assert_eq!(
             loaded.memory.as_ref().map(|memory| memory.backend.as_str()),
             Some("memento")
+        );
+        assert_eq!(
+            loaded
+                .memory
+                .as_ref()
+                .map(|memory| memory.query_recall_after_bootstrap),
+            Some(true)
         );
         assert_eq!(
             loaded

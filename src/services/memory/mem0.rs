@@ -497,6 +497,7 @@ impl MemoryBackend for Mem0Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::memory::RecallMode;
     use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
     use crate::services::provider::ProviderKind;
     use std::time::Duration;
@@ -607,6 +608,7 @@ mod tests {
         };
         let search = backend.build_search_body(
             &RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,
@@ -665,6 +667,7 @@ mod tests {
         };
         let search = backend.build_search_body(
             &RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "critic".to_string(),
                 channel_id: 7,
@@ -758,6 +761,7 @@ mod tests {
         let backend = Mem0Backend::new(mem0_settings());
         let response = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,
@@ -805,6 +809,7 @@ mod tests {
         let backend = Mem0Backend::new(mem0_settings());
         let response = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,
@@ -829,6 +834,7 @@ mod tests {
 
         let response = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,
@@ -929,6 +935,7 @@ mod tests {
 
         let response = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,
@@ -981,6 +988,7 @@ mod tests {
 
         let response = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,

@@ -1514,6 +1514,23 @@ pub(super) async fn restore_inflight_turns(
             lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get())
                 .await
                 .or_else(|| parse_dispatch_id(&state.user_text));
+        let dispatch_profile = shared
+            .db
+            .as_ref()
+            .and_then(|db| {
+                recovery_dispatch_id.as_deref().and_then(|dispatch_id| {
+                    db.separate_conn().ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+                            [dispatch_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                })
+            })
+            .map(|dispatch_type| DispatchProfile::from_dispatch_type(Some(dispatch_type.as_str())))
+            .unwrap_or(DispatchProfile::Full);
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
@@ -1540,6 +1557,7 @@ pub(super) async fn restore_inflight_turns(
                 adk_session_info: Some(adk_session_info),
                 adk_cwd: last_path.clone(),
                 dispatch_id: recovery_dispatch_id,
+                dispatch_profile,
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,

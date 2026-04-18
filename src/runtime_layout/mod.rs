@@ -45,9 +45,13 @@ pub struct MemoryBackendConfig {
     #[serde(default = "default_memory_backend")]
     pub backend: String,
     #[serde(default)]
+    pub query_recall_after_bootstrap: bool,
+    #[serde(default)]
     pub file: FileMemoryBackendConfig,
     #[serde(default)]
     pub mcp: McpMemoryBackendConfig,
+    #[serde(default)]
+    pub auto_remember: AutoRememberConfig,
     #[serde(default, rename = "sak_path", skip_serializing)]
     legacy_sak_path: Option<String>,
     #[serde(default, rename = "sam_path", skip_serializing)]
@@ -61,8 +65,10 @@ impl Default for MemoryBackendConfig {
         Self {
             version: default_memory_layout_version(),
             backend: default_memory_backend(),
+            query_recall_after_bootstrap: false,
             file: FileMemoryBackendConfig::default(),
             mcp: McpMemoryBackendConfig::default(),
+            auto_remember: AutoRememberConfig::default(),
             legacy_sak_path: None,
             legacy_sam_path: None,
             legacy_ltm_root: None,
@@ -196,6 +202,12 @@ fn normalize_file_memory_path(
 pub struct McpMemoryBackendConfig {
     pub endpoint: String,
     pub access_key_env: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRememberConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -413,6 +425,7 @@ fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBack
     MemoryBackendConfig {
         version: MEMORY_LAYOUT_VERSION,
         backend: config.backend,
+        query_recall_after_bootstrap: config.query_recall_after_bootstrap,
         file: FileMemoryBackendConfig {
             sak_path: config.file.sak_path,
             sam_path: config.file.sam_path,
@@ -422,6 +435,9 @@ fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBack
         mcp: McpMemoryBackendConfig {
             endpoint: config.mcp.endpoint,
             access_key_env: config.mcp.access_key_env,
+        },
+        auto_remember: AutoRememberConfig {
+            enabled: config.auto_remember.enabled,
         },
         legacy_sak_path: None,
         legacy_sam_path: None,
@@ -1094,6 +1110,7 @@ agents:
   port: 9001
 memory:
   backend: memento
+  query_recall_after_bootstrap: true
   file:
     sak_path: /tmp/yaml/shared.md
     sam_path: /tmp/yaml/sam
@@ -1122,6 +1139,7 @@ memory:
 
         assert_eq!(backend.version, 2);
         assert_eq!(backend.backend, "memento");
+        assert!(backend.query_recall_after_bootstrap);
         assert_eq!(backend.file.sak_path, "/tmp/yaml/shared.md");
         assert_eq!(backend.file.sam_path, "/tmp/yaml/sam");
         assert_eq!(backend.file.ltm_root, "/tmp/yaml/ltm");
@@ -1154,6 +1172,7 @@ memory:
             serde_json::json!({
                 "version": 2,
                 "backend": "memento",
+                "query_recall_after_bootstrap": true,
                 "file": {
                     "sak_path": "/tmp/custom/shared.md",
                     "sam_path": "/tmp/custom/sam",
@@ -1173,6 +1192,7 @@ memory:
         assert!(!report.migrated);
         assert_eq!(backend.version, 2);
         assert_eq!(backend.backend, "memento");
+        assert!(backend.query_recall_after_bootstrap);
         assert_eq!(backend.file.sak_path, "/tmp/custom/shared.md");
         assert_eq!(backend.file.sam_path, "/tmp/custom/sam");
         assert_eq!(backend.file.ltm_root, "/tmp/custom/ltm");

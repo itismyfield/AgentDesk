@@ -147,8 +147,10 @@ const KNOWN_MEM0_PROFILES: &[&str] = &["default", "strict"];
 #[serde(default)]
 pub(crate) struct MemoryConfigOverride {
     pub backend: Option<String>,
+    pub query_recall_after_bootstrap: Option<bool>,
     pub recall_timeout_ms: Option<u64>,
     pub capture_timeout_ms: Option<u64>,
+    pub auto_remember_enabled: Option<bool>,
     pub mem0: Option<Mem0ConfigOverride>,
 }
 
@@ -210,8 +212,10 @@ impl Default for Mem0ResolvedSettings {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedMemorySettings {
     pub backend: MemoryBackendKind,
+    pub query_recall_after_bootstrap: bool,
     pub recall_timeout_ms: u64,
     pub capture_timeout_ms: u64,
+    pub auto_remember_enabled: bool,
     pub mem0: Mem0ResolvedSettings,
 }
 
@@ -219,8 +223,10 @@ impl Default for ResolvedMemorySettings {
     fn default() -> Self {
         Self {
             backend: MemoryBackendKind::File,
+            query_recall_after_bootstrap: false,
             recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
             capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
+            auto_remember_enabled: false,
             mem0: Mem0ResolvedSettings::default(),
         }
     }
@@ -501,11 +507,65 @@ mod tests {
                 assert_eq!(resolved.backend, super::MemoryBackendKind::File);
                 assert_eq!(resolved.recall_timeout_ms, 500);
                 assert_eq!(resolved.capture_timeout_ms, 5_000);
+                assert!(!resolved.auto_remember_enabled);
+                assert!(!resolved.query_recall_after_bootstrap);
                 assert_eq!(resolved.mem0.profile, "default");
                 assert!(resolved.mem0.ingestion.infer.is_none());
                 assert!(resolved.mem0.ingestion.custom_instructions.is_none());
                 assert!(resolved.mem0.ingestion.confidence_threshold.is_none());
             });
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_auto_remember_uses_runtime_default_and_override() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "file",
+                    "auto_remember": {
+                        "enabled": true
+                    }
+                }),
+            );
+
+            let runtime_default = resolve_memory_settings(None, None);
+            assert!(runtime_default.auto_remember_enabled);
+
+            let channel_override = super::MemoryConfigOverride {
+                auto_remember_enabled: Some(false),
+                ..Default::default()
+            };
+            let resolved = resolve_memory_settings(None, Some(&channel_override));
+            assert!(!resolved.auto_remember_enabled);
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_query_recall_uses_runtime_default_and_override() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "memento",
+                    "query_recall_after_bootstrap": true
+                }),
+            );
+
+            let runtime_default = resolve_memory_settings(None, None);
+            assert!(runtime_default.query_recall_after_bootstrap);
+
+            let channel_override = super::MemoryConfigOverride {
+                query_recall_after_bootstrap: Some(false),
+                ..Default::default()
+            };
+            let resolved = resolve_memory_settings(None, Some(&channel_override));
+            assert!(!resolved.query_recall_after_bootstrap);
         });
     }
 
@@ -523,8 +583,10 @@ mod tests {
 
             let agent = super::MemoryConfigOverride {
                 backend: Some("mem0".to_string()),
+                query_recall_after_bootstrap: None,
                 recall_timeout_ms: Some(50),
                 capture_timeout_ms: Some(60_000),
+                auto_remember_enabled: None,
                 mem0: Some(super::Mem0ConfigOverride {
                     profile: Some("strict".to_string()),
                     ingestion: Some(super::Mem0IngestionConfigOverride {
@@ -536,8 +598,10 @@ mod tests {
             };
             let channel = super::MemoryConfigOverride {
                 backend: Some("mem0".to_string()),
+                query_recall_after_bootstrap: None,
                 recall_timeout_ms: Some(5_000),
                 capture_timeout_ms: Some(100),
+                auto_remember_enabled: None,
                 mem0: Some(super::Mem0ConfigOverride {
                     profile: Some("unknown-profile".to_string()),
                     ingestion: Some(super::Mem0IngestionConfigOverride {

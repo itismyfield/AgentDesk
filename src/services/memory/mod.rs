@@ -1,3 +1,5 @@
+mod auto_remember;
+mod auto_remember_store;
 mod local;
 mod mem0;
 mod memento;
@@ -12,6 +14,9 @@ use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
 use crate::services::provider::ProviderKind;
 
+pub(crate) use auto_remember::{
+    AutoRememberExecutionResult, AutoRememberTurnRequest, run_auto_remember,
+};
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use mem0::Mem0Backend;
 pub(crate) use memento::{
@@ -45,9 +50,17 @@ impl TokenUsage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RecallMode {
+    Bootstrap,
+    #[default]
+    Query,
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(crate) struct RecallRequest {
+    pub mode: RecallMode,
     pub provider: ProviderKind,
     pub role_id: String,
     pub channel_id: u64,

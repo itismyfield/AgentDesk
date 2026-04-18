@@ -614,6 +614,137 @@ fn turn_end_memory_plan_keeps_recall_feedback_analysis_for_normal_memento_turns(
 }
 
 #[test]
+fn should_spawn_auto_remember_requires_full_memento_persisted_turn() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        auto_remember_enabled: true,
+        ..ResolvedMemorySettings::default()
+    };
+
+    assert!(super::should_spawn_auto_remember(
+        true,
+        &settings,
+        crate::services::discord::DispatchProfile::Full,
+        true,
+    ));
+    assert!(!super::should_spawn_auto_remember(
+        false,
+        &settings,
+        crate::services::discord::DispatchProfile::Full,
+        true,
+    ));
+    assert!(!super::should_spawn_auto_remember(
+        true,
+        &settings,
+        crate::services::discord::DispatchProfile::ReviewLite,
+        true,
+    ));
+    assert!(!super::should_spawn_auto_remember(
+        true,
+        &settings,
+        crate::services::discord::DispatchProfile::Full,
+        false,
+    ));
+    assert!(!super::should_spawn_auto_remember(
+        true,
+        &ResolvedMemorySettings {
+            backend: MemoryBackendKind::File,
+            auto_remember_enabled: true,
+            ..ResolvedMemorySettings::default()
+        },
+        crate::services::discord::DispatchProfile::Full,
+        true,
+    ));
+    assert!(!super::should_spawn_auto_remember(
+        true,
+        &ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            auto_remember_enabled: false,
+            ..ResolvedMemorySettings::default()
+        },
+        crate::services::discord::DispatchProfile::Full,
+        true,
+    ));
+}
+
+#[test]
+fn build_background_memory_jobs_can_queue_reflect_and_auto_remember_together() {
+    let reflect_request = crate::services::memory::ReflectRequest {
+        provider: ProviderKind::Claude,
+        role_id: "project-agentdesk".to_string(),
+        channel_id: 42,
+        session_id: "session-1".to_string(),
+        reason: crate::services::memory::SessionEndReason::LocalSessionReset,
+        transcript: "user\nassistant".to_string(),
+    };
+
+    let jobs = super::build_background_memory_jobs(
+        &ProviderKind::Claude,
+        ChannelId::new(42),
+        "turn-1",
+        "project-agentdesk",
+        Some("session-1"),
+        Some("dispatch-1"),
+        "user asks",
+        "원인은 MCP 세션 ID 누락이다.",
+        &[],
+        false,
+        true,
+        Some(reflect_request),
+    );
+
+    assert_eq!(jobs.len(), 2);
+    match &jobs[0] {
+        super::TurnEndMemoryJob::Reflect(request) => {
+            assert_eq!(request.session_id, "session-1");
+            assert_eq!(
+                request.reason,
+                crate::services::memory::SessionEndReason::LocalSessionReset
+            );
+        }
+        other => panic!("expected reflect job, got {other:?}"),
+    }
+    match &jobs[1] {
+        super::TurnEndMemoryJob::AutoRemember(request) => {
+            assert_eq!(request.turn_id, "turn-1");
+            assert_eq!(request.role_id, "project-agentdesk");
+            assert_eq!(request.channel_id, 42);
+            assert_eq!(request.assistant_text, "원인은 MCP 세션 ID 누락이다.");
+        }
+        other => panic!("expected auto-remember job, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_background_memory_jobs_keeps_capture_without_auto_remember() {
+    let jobs = super::build_background_memory_jobs(
+        &ProviderKind::Claude,
+        ChannelId::new(42),
+        "turn-2",
+        "project-agentdesk",
+        Some("session-2"),
+        Some("dispatch-2"),
+        "user asks",
+        "assistant answers",
+        &[],
+        true,
+        false,
+        None,
+    );
+
+    assert_eq!(jobs.len(), 1);
+    match &jobs[0] {
+        super::TurnEndMemoryJob::Capture(request) => {
+            assert_eq!(request.session_id, "session-2");
+            assert_eq!(request.dispatch_id.as_deref(), Some("dispatch-2"));
+            assert_eq!(request.user_text, "user asks");
+            assert_eq!(request.assistant_text, "assistant answers");
+        }
+        other => panic!("expected capture job, got {other:?}"),
+    }
+}
+
+#[test]
 fn retry_context_history_keeps_last_ten_visible_messages() {
     let history = (0..12)
         .flat_map(|idx| {

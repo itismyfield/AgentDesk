@@ -1,6 +1,4 @@
-use super::{
-    CaptureRequest, CaptureResult, MemoryBackend, MemoryFuture, RecallRequest, RecallResponse,
-};
+use super::{CaptureRequest, CaptureResult, MemoryBackend, MemoryFuture, RecallRequest, RecallResponse};
 use crate::services::discord::settings::load_longterm_memory_catalog;
 use crate::services::discord::shared_memory::load_shared_knowledge;
 
@@ -31,6 +29,7 @@ impl MemoryBackend for LocalMemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::memory::RecallMode;
     use crate::runtime_layout::{long_term_memory_root, shared_agent_knowledge_path};
     use crate::services::discord::DispatchProfile;
     use crate::services::provider::ProviderKind;
@@ -72,6 +71,7 @@ mod tests {
         let backend = LocalMemoryBackend;
         let recall = backend
             .recall(RecallRequest {
+                mode: RecallMode::Query,
                 provider: ProviderKind::Codex,
                 role_id: "codex".to_string(),
                 channel_id: 1,

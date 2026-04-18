@@ -1,6 +1,7 @@
 mod completion_guard;
 mod context_window;
 mod memory_lifecycle;
+mod memory_postprocess;
 mod recall_feedback;
 mod recovery_text;
 mod retry_state;
@@ -17,8 +18,10 @@ use super::restart_report::{RestartCompletionReport, clear_restart_report, save_
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned_on_separate_conn};
+use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::memory::{
-    CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
+    AutoRememberTurnRequest, CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage,
+    resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 use crate::utils::format::tail_with_ellipsis;
@@ -43,9 +46,9 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{persisted_context_tokens, resolve_done_response};
 use memory_lifecycle::{
-    optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
-    spawn_memory_reflect_task, take_memento_reflect_request,
+    optional_metric_token_fields, plan_turn_end_memory, take_memento_reflect_request,
 };
+use memory_postprocess::{TurnEndMemoryJob, spawn_memory_postprocess_task};
 use recall_feedback::{
     analyze_recall_feedback_turn, submit_pending_feedbacks,
     transcript_contains_explicit_memento_tool_call,
@@ -74,6 +77,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) adk_session_info: Option<String>,
     pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
+    pub(super) dispatch_profile: DispatchProfile,
     pub(super) memory_recall_usage: TokenUsage,
     pub(super) current_msg_id: MessageId,
     pub(super) response_sent_offset: usize,
@@ -115,6 +119,61 @@ fn turn_duration_ms(started_at: std::time::Instant) -> i64 {
 
 fn response_portion_after_offset(full_response: &str, response_sent_offset: usize) -> &str {
     full_response.get(response_sent_offset..).unwrap_or("")
+}
+
+fn should_spawn_auto_remember(
+    transcript_persisted: bool,
+    memory_settings: &ResolvedMemorySettings,
+    dispatch_profile: DispatchProfile,
+    memento_backend_active: bool,
+) -> bool {
+    transcript_persisted
+        && memory_settings.auto_remember_enabled
+        && memory_settings.backend == MemoryBackendKind::Memento
+        && memento_backend_active
+        && dispatch_profile == DispatchProfile::Full
+}
+
+fn build_background_memory_jobs(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    turn_id: &str,
+    memory_role_id: &str,
+    session_id_to_persist: Option<&str>,
+    dispatch_id: Option<&str>,
+    user_text: &str,
+    assistant_text: &str,
+    transcript_events: &[SessionTranscriptEvent],
+    should_spawn_memory_capture: bool,
+    should_spawn_auto_remember: bool,
+    reflect_request: Option<ReflectRequest>,
+) -> Vec<TurnEndMemoryJob> {
+    let mut jobs = Vec::new();
+    if let Some(reflect_request) = reflect_request {
+        jobs.push(TurnEndMemoryJob::Reflect(reflect_request));
+    }
+    if should_spawn_memory_capture {
+        jobs.push(TurnEndMemoryJob::Capture(CaptureRequest {
+            provider: provider.clone(),
+            role_id: memory_role_id.to_string(),
+            channel_id: channel_id.get(),
+            session_id: resolve_memory_session_id(session_id_to_persist, channel_id.get()),
+            dispatch_id: dispatch_id.map(str::to_string),
+            user_text: user_text.to_string(),
+            assistant_text: assistant_text.to_string(),
+        }));
+    }
+    if should_spawn_auto_remember {
+        jobs.push(TurnEndMemoryJob::AutoRemember(AutoRememberTurnRequest {
+            turn_id: turn_id.to_string(),
+            role_id: memory_role_id.to_string(),
+            channel_id: channel_id.get(),
+            user_text: user_text.to_string(),
+            assistant_text: assistant_text.to_string(),
+            transcript_events: transcript_events.to_vec(),
+        }));
+    }
+    jobs
 }
 
 fn total_model_input_tokens(
@@ -271,6 +330,7 @@ pub(super) fn spawn_turn_bridge(
         let adk_session_info = bridge.adk_session_info.clone();
         let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
+        let dispatch_profile = bridge.dispatch_profile;
         let bridge_span = tracing::info_span!(
             "discord_turn_bridge",
             channel_id = channel_id.get(),
@@ -1694,9 +1754,10 @@ pub(super) fn spawn_turn_bridge(
             output_tokens: accumulated_output_tokens,
         };
 
+        let mut transcript_persisted = false;
         if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
             let channel_id_text = channel_id.get().to_string();
-            if let Err(e) = crate::db::session_transcripts::persist_turn_db(
+            match crate::db::session_transcripts::persist_turn_db(
                 db,
                 shared_owned.pg_pool.as_ref(),
                 crate::db::session_transcripts::PersistSessionTranscript {
@@ -1715,9 +1776,14 @@ pub(super) fn spawn_turn_bridge(
                 },
             )
             .await
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+            ) {
+                Ok(persisted) => {
+                    transcript_persisted = persisted;
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+                }
             }
 
             if !api_friction_reports.is_empty() {
@@ -1833,35 +1899,34 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        let mut background_memory_task = None;
-        if let Some(reflect_request) = reflect_request {
-            background_memory_task = Some(spawn_memory_reflect_task(
-                channel_id,
-                capture_memory_settings.clone(),
-                reflect_request,
-            ));
-        }
-        if should_spawn_memory_capture {
-            let capture_request = CaptureRequest {
-                provider: provider.clone(),
-                role_id: memory_role_id,
-                channel_id: channel_id.get(),
-                session_id: resolve_memory_session_id(
-                    session_id_to_persist.as_deref(),
-                    channel_id.get(),
-                ),
-                dispatch_id: dispatch_id.clone(),
-                user_text: user_text_owned.clone(),
-                assistant_text: full_response.clone(),
-            };
-            background_memory_task = Some(spawn_memory_capture_task(
+        let should_spawn_auto_remember = should_spawn_auto_remember(
+            transcript_persisted,
+            &capture_memory_settings,
+            dispatch_profile,
+            crate::services::memory::backend_is_active(MemoryBackendKind::Memento),
+        );
+
+        let background_memory_jobs = build_background_memory_jobs(
+            &provider,
+            channel_id,
+            &turn_id,
+            &memory_role_id,
+            session_id_to_persist.as_deref(),
+            dispatch_id.as_deref(),
+            &user_text_owned,
+            &full_response,
+            &transcript_events,
+            should_spawn_memory_capture,
+            should_spawn_auto_remember,
+            reflect_request,
+        );
+
+        if !background_memory_jobs.is_empty() {
+            let memory_task = spawn_memory_postprocess_task(
                 channel_id,
                 capture_memory_settings,
-                capture_request,
-            ));
-        }
-
-        if let Some(memory_task) = background_memory_task {
+                background_memory_jobs,
+            );
             match tokio::time::timeout(std::time::Duration::from_secs(30), memory_task).await {
                 Ok(Ok(result)) => {
                     accumulated_memory_input_tokens = accumulated_memory_input_tokens
