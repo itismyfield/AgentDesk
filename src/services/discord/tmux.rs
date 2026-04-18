@@ -72,6 +72,40 @@ fn watcher_ready_for_input_turn_completed(
     tracker.observe_idle(current_offset > data_start_offset, ready_for_input, now)
 }
 
+fn watcher_should_yield_to_active_bridge_turn(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    let state = super::inflight::load_inflight_state(provider, channel_id.get());
+    watcher_should_yield_to_inflight_state(
+        state.as_ref(),
+        tmux_session_name,
+        data_start_offset,
+        current_offset,
+    )
+}
+
+fn watcher_should_yield_to_inflight_state(
+    state: Option<&super::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+
+    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return false;
+    }
+
+    let turn_start_offset = state.turn_start_offset.unwrap_or(state.last_offset);
+    data_start_offset <= turn_start_offset && turn_start_offset < current_offset
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DeadSessionCleanupPlan {
     preserve_tmux_session: bool,
@@ -425,11 +459,17 @@ pub(super) async fn tmux_output_watcher(
         // the watcher from using a stale current_offset after unpausing.
         if let Some(new_offset) = resume_offset.lock().ok().and_then(|mut g| g.take()) {
             current_offset = new_offset;
-            // Clear turn_delivered: the watcher is now starting from a fresh offset
-            // set by the turn bridge, so future data at this offset is safe to relay.
+            // If the bridge already delivered the previous turn, treat this resume
+            // point as already consumed once so the watcher doesn't re-relay the
+            // same batch after unpausing.
+            last_relayed_offset = if turn_delivered.load(Ordering::Relaxed) {
+                Some(new_offset)
+            } else {
+                None
+            };
+            // Clear turn_delivered after preserving the duplicate-relay guard so
+            // future turns beyond this resume point can be relayed normally.
             turn_delivered.store(false, Ordering::Relaxed);
-            // Reset duplicate-relay guard: new offset means new data range.
-            last_relayed_offset = None;
         }
 
         // Check cancel or global shutdown (both exit quietly, no "session ended" message)
@@ -1165,6 +1205,26 @@ pub(super) async fn tmux_output_watcher(
             tracing::warn!(
                 "  [{ts}] 👁 Late epoch/delivered guard: suppressed duplicate relay for {}",
                 tmux_session_name
+            );
+            continue;
+        }
+
+        if watcher_should_yield_to_active_bridge_turn(
+            &watcher_provider,
+            channel_id,
+            &tmux_session_name,
+            data_start_offset,
+            current_offset,
+        ) {
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 Active bridge turn guard: suppressed duplicate relay for {} (range {}..{})",
+                tmux_session_name,
+                data_start_offset,
+                current_offset
             );
             continue;
         }
@@ -2711,7 +2771,9 @@ mod tests {
         DeadSessionCleanupPlan, WatcherToolState, dead_session_cleanup_plan,
         load_restored_provider_session_id, process_watcher_lines,
         refresh_session_heartbeat_from_tmux_output, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state,
     };
+    use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
 
@@ -2798,6 +2860,69 @@ mod tests {
             )
             .unwrap();
         assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
+    }
+
+    #[test]
+    fn watcher_yields_to_active_bridge_turn_when_batch_overlaps_turn_start() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("deadlock-manager".to_string()),
+            7,
+            9,
+            11,
+            "ping".to_string(),
+            Some("session-1".to_string()),
+            Some("#AgentDesk-codex-deadlock-manager".to_string()),
+            Some("/tmp/output.jsonl".to_string()),
+            Some("/tmp/input.fifo".to_string()),
+            0,
+        );
+        state.turn_start_offset = Some(120);
+        state.last_offset = 180;
+        let should_yield = watcher_should_yield_to_inflight_state(
+            Some(&state),
+            "#AgentDesk-codex-deadlock-manager",
+            100,
+            180,
+        );
+
+        assert!(should_yield);
+    }
+
+    #[test]
+    fn watcher_does_not_yield_for_non_overlapping_or_other_session_turns() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("deadlock-manager".to_string()),
+            7,
+            9,
+            11,
+            "ping".to_string(),
+            Some("session-1".to_string()),
+            Some("#AgentDesk-codex-deadlock-manager".to_string()),
+            Some("/tmp/output.jsonl".to_string()),
+            Some("/tmp/input.fifo".to_string()),
+            0,
+        );
+        state.turn_start_offset = Some(220);
+        state.last_offset = 260;
+        let different_range = watcher_should_yield_to_inflight_state(
+            Some(&state),
+            "#AgentDesk-codex-deadlock-manager",
+            100,
+            180,
+        );
+        let different_session = watcher_should_yield_to_inflight_state(
+            Some(&state),
+            "#AgentDesk-codex-somewhere-else",
+            200,
+            280,
+        );
+
+        assert!(!different_range);
+        assert!(!different_session);
     }
 
     #[test]
