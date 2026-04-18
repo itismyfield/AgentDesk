@@ -42,6 +42,53 @@ function warnInvalidStorageValue(key: string, raw: string, error?: unknown): voi
   });
 }
 
+function readLocalStorageRawValue(key: string): string | null {
+  const storage = getBrowserStorage();
+  if (!storage) {
+    return null;
+  }
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function parseLocalStorageValue<T>(
+  key: string,
+  raw: string | null,
+  defaultValue: LocalStorageDefaultValue<T>,
+  options: LocalStorageReadOptions<T> = {},
+): T {
+  if (raw === null) {
+    return resolveDefaultValue(defaultValue);
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (options.validate && !options.validate(parsed)) {
+      if (options.warnOnInvalid !== false) {
+        warnInvalidStorageValue(key, raw);
+      }
+      return resolveDefaultValue(defaultValue);
+    }
+    invalidStorageWarnings.delete(key);
+    return parsed as T;
+  } catch (error) {
+    if (options.legacy) {
+      const legacyValue = options.legacy(raw);
+      if (legacyValue !== null) {
+        invalidStorageWarnings.delete(key);
+        return legacyValue;
+      }
+    }
+    if (options.warnOnInvalid !== false) {
+      warnInvalidStorageValue(key, raw, error);
+    }
+    return resolveDefaultValue(defaultValue);
+  }
+}
+
 function notifyStorageSubscribers(key: string): void {
   const listeners = storageSubscribers.get(key);
   if (!listeners) {
@@ -89,45 +136,7 @@ export function readLocalStorageValue<T>(
   defaultValue: LocalStorageDefaultValue<T>,
   options: LocalStorageReadOptions<T> = {},
 ): T {
-  const storage = getBrowserStorage();
-  if (!storage) {
-    return resolveDefaultValue(defaultValue);
-  }
-
-  let raw: string | null = null;
-  try {
-    raw = storage.getItem(key);
-  } catch {
-    return resolveDefaultValue(defaultValue);
-  }
-
-  if (raw === null) {
-    return resolveDefaultValue(defaultValue);
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (options.validate && !options.validate(parsed)) {
-      if (options.warnOnInvalid !== false) {
-        warnInvalidStorageValue(key, raw);
-      }
-      return resolveDefaultValue(defaultValue);
-    }
-    invalidStorageWarnings.delete(key);
-    return parsed as T;
-  } catch (error) {
-    if (options.legacy) {
-      const legacyValue = options.legacy(raw);
-      if (legacyValue !== null) {
-        invalidStorageWarnings.delete(key);
-        return legacyValue;
-      }
-    }
-    if (options.warnOnInvalid !== false) {
-      warnInvalidStorageValue(key, raw, error);
-    }
-    return resolveDefaultValue(defaultValue);
-  }
+  return parseLocalStorageValue(key, readLocalStorageRawValue(key), defaultValue, options);
 }
 
 export function writeLocalStorageValue<T>(key: string, value: T): void {
@@ -166,13 +175,27 @@ export function useLocalStorage<T>(
   key: string,
   defaultValue: LocalStorageDefaultValue<T>,
 ): readonly [T, Dispatch<SetStateAction<T>>] {
-  const defaultValueRef = useRef<{ value: T } | null>(null);
-  if (defaultValueRef.current === null) {
-    defaultValueRef.current = { value: resolveDefaultValue(defaultValue) };
+  const defaultValueRef = useRef<{ key: string; value: T } | null>(null);
+  if (defaultValueRef.current === null || defaultValueRef.current.key !== key) {
+    defaultValueRef.current = { key, value: resolveDefaultValue(defaultValue) };
   }
+  const snapshotRef = useRef<{ key: string; raw: string | null; value: T } | null>(null);
 
   const getSnapshot = useCallback(
-    () => readLocalStorageValue(key, () => defaultValueRef.current?.value as T),
+    () => {
+      const raw = readLocalStorageRawValue(key);
+      const cachedSnapshot = snapshotRef.current;
+      if (cachedSnapshot && cachedSnapshot.key === key && cachedSnapshot.raw === raw) {
+        return cachedSnapshot.value;
+      }
+      const nextValue = parseLocalStorageValue(
+        key,
+        raw,
+        () => defaultValueRef.current?.value as T,
+      );
+      snapshotRef.current = { key, raw, value: nextValue };
+      return nextValue;
+    },
     [key],
   );
 
@@ -184,14 +207,14 @@ export function useLocalStorage<T>(
 
   const setValue = useCallback(
     (nextValue: SetStateAction<T>) => {
-      const currentValue = readLocalStorageValue(key, () => defaultValueRef.current?.value as T);
+      const currentValue = getSnapshot();
       const resolvedValue =
         typeof nextValue === "function"
           ? (nextValue as (previousValue: T) => T)(currentValue)
           : nextValue;
       writeLocalStorageValue(key, resolvedValue);
     },
-    [key],
+    [getSnapshot, key],
   );
 
   return [value, setValue] as const;

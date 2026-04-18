@@ -1,6 +1,11 @@
 import { useEffect, useState, useMemo } from "react";
 import type { Agent } from "../../types";
 import * as api from "../../api/client";
+import { STORAGE_KEYS } from "../../lib/storageKeys";
+import {
+  readLocalStorageValue,
+  writeLocalStorageValue,
+} from "../../lib/useLocalStorage";
 import type { TFunction } from "./model";
 import AgentAvatar from "../AgentAvatar";
 import { cx, dashboardBadge, dashboardCard } from "./ui";
@@ -15,7 +20,7 @@ import {
 } from "./dashboardInsights";
 
 const DEFAULT_CRON_TIMELINE_WINDOW_MS = 60 * 60_000;
-const BOTTLE_NECK_THRESHOLDS_STORAGE_KEY = "agentdesk:dashboard:bottleneck-thresholds";
+const BOTTLE_NECK_THRESHOLDS_STORAGE_KEY = STORAGE_KEYS.dashboardBottleneckThresholds;
 const AUTO_QUEUE_HISTORY_LIMIT = 24;
 const AUTO_QUEUE_HISTORY_PREVIEW_COUNT = 8;
 
@@ -135,28 +140,22 @@ function sanitizeThreshold(value: number, fallback: number, min = 1, max = 30): 
 }
 
 function readStoredBottleneckThresholds(): BottleneckThresholds {
-  if (typeof window === "undefined") return DEFAULT_BOTTLENECK_THRESHOLDS;
-  try {
-    const raw = window.localStorage.getItem(BOTTLE_NECK_THRESHOLDS_STORAGE_KEY);
-    if (!raw) return DEFAULT_BOTTLENECK_THRESHOLDS;
-    const parsed = JSON.parse(raw) as Partial<BottleneckThresholds>;
-    return {
-      review_delay_days: sanitizeThreshold(parsed.review_delay_days ?? NaN, REVIEW_DELAY_DAYS),
-      long_blocked_days: sanitizeThreshold(parsed.long_blocked_days ?? NaN, LONG_BLOCKED_DAYS),
-      rework_alert_threshold: sanitizeThreshold(parsed.rework_alert_threshold ?? NaN, REWORK_ALERT_THRESHOLD, 1, 20),
-    };
-  } catch {
+  const parsed = readLocalStorageValue<Partial<BottleneckThresholds> | null>(
+    BOTTLE_NECK_THRESHOLDS_STORAGE_KEY,
+    null,
+  );
+  if (!parsed || typeof parsed !== "object") {
     return DEFAULT_BOTTLENECK_THRESHOLDS;
   }
+  return {
+    review_delay_days: sanitizeThreshold(parsed.review_delay_days ?? NaN, REVIEW_DELAY_DAYS),
+    long_blocked_days: sanitizeThreshold(parsed.long_blocked_days ?? NaN, LONG_BLOCKED_DAYS),
+    rework_alert_threshold: sanitizeThreshold(parsed.rework_alert_threshold ?? NaN, REWORK_ALERT_THRESHOLD, 1, 20),
+  };
 }
 
 function persistBottleneckThresholds(thresholds: BottleneckThresholds) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(BOTTLE_NECK_THRESHOLDS_STORAGE_KEY, JSON.stringify(thresholds));
-  } catch {
-    // Ignore localStorage failures and keep the current in-memory values.
-  }
+  writeLocalStorageValue(BOTTLE_NECK_THRESHOLDS_STORAGE_KEY, thresholds);
 }
 
 function buildWeightedSuccessRate(runs: api.AutoQueueHistoryRun[]): number {

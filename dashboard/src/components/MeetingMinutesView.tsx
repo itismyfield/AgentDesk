@@ -1,5 +1,11 @@
 import { useState, useEffect } from "react";
 import { useI18n } from "../i18n";
+import { STORAGE_KEYS } from "../lib/storageKeys";
+import {
+  readLocalStorageValue,
+  removeLocalStorageValue,
+  writeLocalStorageValue,
+} from "../lib/useLocalStorage";
 import type {
   IssueCreationResult,
   ProposedIssue,
@@ -45,8 +51,8 @@ import {
   SurfaceSection,
 } from "./common/SurfacePrimitives";
 
-const STORAGE_KEY = "pcd_meeting_channel_id";
-const FIXED_PARTICIPANTS_STORAGE_KEY = "pcd_meeting_fixed_participants";
+const STORAGE_KEY = STORAGE_KEYS.meetingChannelId;
+const FIXED_PARTICIPANTS_STORAGE_KEY = STORAGE_KEYS.meetingFixedParticipants;
 const MEETING_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
@@ -155,20 +161,25 @@ function normalizeSelectionReason(reason: string | null | undefined): string {
   return trimmed.replace(/^선정 사유:\s*/u, "").trim();
 }
 
+function readStoredMeetingChannelId(): string {
+  return (
+    readLocalStorageValue<string | null>(STORAGE_KEY, null, {
+      validate: (value): value is string => typeof value === "string",
+      legacy: (raw) => raw,
+      warnOnInvalid: false,
+    }) ?? ""
+  );
+}
+
 function parseStoredFixedParticipants(): string[] {
-  try {
-    const parsed = JSON.parse(
-      localStorage.getItem(FIXED_PARTICIPANTS_STORAGE_KEY) || "[]",
-    );
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (roleId): roleId is string =>
-            typeof roleId === "string" && roleId.trim().length > 0,
-        )
-      : [];
-  } catch {
+  const parsed = readLocalStorageValue<unknown>(FIXED_PARTICIPANTS_STORAGE_KEY, []);
+  if (!Array.isArray(parsed)) {
     return [];
   }
+  return parsed.filter(
+    (roleId): roleId is string =>
+      typeof roleId === "string" && roleId.trim().length > 0,
+  );
 }
 
 function getDefaultReviewerProvider(
@@ -350,22 +361,12 @@ export default function MeetingMinutesView({
   const [showStartForm, setShowStartForm] = useState(initialShowStartForm);
   const [agenda, setAgenda] = useState("");
   const [channelId, setChannelId] = useState(
-    () =>
-      initialChannelId ??
-      (typeof localStorage !== "undefined"
-        ? localStorage.getItem(STORAGE_KEY)
-        : null) ??
-      "",
+    () => initialChannelId ?? readStoredMeetingChannelId(),
   );
   const [showChannelEdit, setShowChannelEdit] = useState(false);
   const [primaryProvider, setPrimaryProvider] = useState<string>("claude");
   const [reviewerProvider, setReviewerProvider] = useState<string>(() => {
-    const storedChannelId =
-      initialChannelId ??
-      (typeof localStorage !== "undefined"
-        ? localStorage.getItem(STORAGE_KEY)
-        : null) ??
-      "";
+    const storedChannelId = initialChannelId ?? readStoredMeetingChannelId();
     const seededChannel =
       initialMeetingChannels.find(
         (channel) => channel.channel_id === storedChannelId,
@@ -399,7 +400,9 @@ export default function MeetingMinutesView({
   const [repoError, setRepoError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (channelId) localStorage.setItem(STORAGE_KEY, channelId);
+    if (channelId) {
+      writeLocalStorageValue(STORAGE_KEY, channelId);
+    }
   }, [channelId]);
 
   useEffect(() => {
@@ -528,13 +531,10 @@ export default function MeetingMinutesView({
 
   useEffect(() => {
     if (fixedParticipants.length === 0) {
-      localStorage.removeItem(FIXED_PARTICIPANTS_STORAGE_KEY);
+      removeLocalStorageValue(FIXED_PARTICIPANTS_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(
-      FIXED_PARTICIPANTS_STORAGE_KEY,
-      JSON.stringify(fixedParticipants),
-    );
+    writeLocalStorageValue(FIXED_PARTICIPANTS_STORAGE_KEY, fixedParticipants);
   }, [fixedParticipants]);
 
   useEffect(() => {
