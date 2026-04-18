@@ -10,6 +10,7 @@ use axum::routing::get;
 use rusqlite::Connection;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tower_http::services::ServeDir;
 
 use crate::config::Config;
@@ -21,8 +22,57 @@ const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
 const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
 const ESCALATION_PENDING_TTL_SEC: i64 = 600;
+const POLICY_TICK_WARN_MS: u128 = 500;
+const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 static DEPLOY_GATE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct PolicyTickHookGuard {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl PolicyTickHookGuard {
+    fn acquire(engine: &PolicyEngine) -> Option<Self> {
+        let in_flight = engine.tick_hook_in_flight();
+        in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { in_flight })
+    }
+}
+
+impl Drop for PolicyTickHookGuard {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyTickHookOutcome {
+    Ok,
+    Error,
+    Timeout,
+    SkippedInFlight,
+    JoinError,
+}
+
+impl PolicyTickHookOutcome {
+    fn status(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::SkippedInFlight => "skipped_inflight",
+            Self::JoinError => "join_error",
+        }
+    }
+}
+
+struct PolicyTickHookExecution {
+    outcome: PolicyTickHookOutcome,
+    elapsed: Duration,
+    error: Option<String>,
+}
 
 fn deploy_gate_title(phase: i64) -> String {
     format!("[Deploy Gate] Phase {phase} 빌드+배포")
@@ -381,8 +431,6 @@ fn seed_github_repos_from_config(db: &Db, config: &Config) -> std::result::Resul
 /// - OnTick5min (5m): non-critical reconciliation [R][B][F][G][H][M][O], idle session cleanup
 /// - OnTick (legacy, 5m): backward compat for policies that only register onTick
 async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
-    use std::time::Duration;
-
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
     let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
@@ -398,19 +446,16 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         poll_deploy_gates(&db);
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
-        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s");
-        drain_transitions(&engine, &db);
+        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s").await;
 
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
-            fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min");
-            drain_transitions(&engine, &db);
+            fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min").await;
         }
 
         // ── 5min tier: every 10th tick (300s) ──
         if is_five_min_policy_tick(count) {
-            fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
-            drain_transitions(&engine, &db);
+            fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
             if let Err(error) =
                 crate::services::api_friction::process_api_friction_patterns(&db, None, None).await
@@ -418,68 +463,176 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
                 tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
             }
             // Also fire legacy OnTick for backward compat
-            fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
-            drain_transitions(&engine, &db);
+            fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy").await;
         }
     }
 }
 
 /// Fire a single tick hook by name, log timing, record telemetry, and notify any dispatches created by JS.
 /// Uses try_fire_hook_by_name for dynamic hook binding (#134).
-fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label: &str) {
-    let start = std::time::Instant::now();
-    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
-
-    let key_ms = format!("last_tick_{}_ms", label);
-    let key_status = format!("last_tick_{}_status", label);
-
-    if let Err(e) = engine.try_fire_hook_by_name(hook_name, serde_json::json!({})) {
-        tracing::warn!("[policy-tick] {} hook error: {e}", label);
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'error')",
-                [&key_status],
-            )
-            .ok();
-        }
-    } else {
-        let elapsed = start.elapsed();
-        if elapsed.as_millis() > 500 {
-            tracing::warn!("[policy-tick] {} took {}ms", label, elapsed.as_millis());
-        } else {
-            tracing::debug!("[policy-tick] {} took {}ms", label, elapsed.as_millis());
-        }
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key_ms, now_ms],
-            )
-            .ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'ok')",
-                [&key_status],
-            )
-            .ok();
-            // Also update legacy key for backward compat
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
-                [&now_ms],
-            )
-            .ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', 'ok')",
-                [],
-            )
-            .ok();
-        }
-    }
-
-    crate::kanban::drain_hook_side_effects(db, engine);
+async fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label: &str) {
+    let execution =
+        fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
+            .await;
+    record_tick_hook_execution(db, label, &execution);
 }
 
-/// Drain pending transitions after each tier execution.
-fn drain_transitions(engine: &PolicyEngine, db: &Db) {
-    crate::kanban::drain_hook_side_effects(db, engine);
+async fn fire_tick_hook_by_name_with_timeout(
+    engine: &PolicyEngine,
+    hook_name: &str,
+    label: &str,
+    hook_timeout: Duration,
+) -> PolicyTickHookExecution {
+    let Some(in_flight_guard) = PolicyTickHookGuard::acquire(engine) else {
+        tracing::warn!(
+            "[policy-tick] {} skipped: previous tick hook is still running",
+            label
+        );
+        return PolicyTickHookExecution {
+            outcome: PolicyTickHookOutcome::SkippedInFlight,
+            elapsed: Duration::ZERO,
+            error: None,
+        };
+    };
+
+    let start = std::time::Instant::now();
+    let engine = engine.clone();
+    let hook_name = hook_name.to_string();
+    let label = label.to_string();
+    let timed_out = std::sync::Arc::new(AtomicBool::new(false));
+    let timed_out_for_task = timed_out.clone();
+    let mut handle = tokio::task::spawn_blocking(move || {
+        let _guard = in_flight_guard;
+        let result = engine.try_fire_hook_by_name(&hook_name, serde_json::json!({}));
+        let elapsed = start.elapsed();
+        if timed_out_for_task.load(Ordering::Acquire) {
+            tracing::warn!(
+                "[policy-tick] {} finished after timeout in {}ms",
+                label,
+                elapsed.as_millis()
+            );
+        }
+        match result {
+            Ok(()) => PolicyTickHookExecution {
+                outcome: PolicyTickHookOutcome::Ok,
+                elapsed,
+                error: None,
+            },
+            Err(error) => PolicyTickHookExecution {
+                outcome: PolicyTickHookOutcome::Error,
+                elapsed,
+                error: Some(error.to_string()),
+            },
+        }
+    });
+
+    tokio::select! {
+        joined = &mut handle => match joined {
+            Ok(execution) => execution,
+            Err(error) => PolicyTickHookExecution {
+                outcome: PolicyTickHookOutcome::JoinError,
+                elapsed: start.elapsed(),
+                error: Some(error.to_string()),
+            },
+        },
+        _ = tokio::time::sleep(hook_timeout) => {
+            timed_out.store(true, Ordering::Release);
+            PolicyTickHookExecution {
+                outcome: PolicyTickHookOutcome::Timeout,
+                elapsed: start.elapsed(),
+                error: None,
+            }
+        }
+    }
+}
+
+fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookExecution) {
+    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+    let key_ms = format!("last_tick_{}_ms", label);
+    let key_status = format!("last_tick_{}_status", label);
+    let key_duration = format!("last_tick_{}_duration_ms", label);
+    let status = execution.outcome.status();
+
+    match execution.outcome {
+        PolicyTickHookOutcome::Ok => {
+            if execution.elapsed.as_millis() > POLICY_TICK_WARN_MS {
+                tracing::warn!(
+                    "[policy-tick] {} took {}ms",
+                    label,
+                    execution.elapsed.as_millis()
+                );
+            } else {
+                tracing::debug!(
+                    "[policy-tick] {} took {}ms",
+                    label,
+                    execution.elapsed.as_millis()
+                );
+            }
+        }
+        PolicyTickHookOutcome::Error | PolicyTickHookOutcome::JoinError => {
+            tracing::warn!(
+                "[policy-tick] {} hook {}: {}",
+                label,
+                status,
+                execution.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        PolicyTickHookOutcome::Timeout => {
+            tracing::warn!(
+                "[policy-tick] {} hook timed out after {}ms",
+                label,
+                execution.elapsed.as_millis()
+            );
+        }
+        PolicyTickHookOutcome::SkippedInFlight => {}
+    }
+
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key_ms, now_ms],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key_status, status],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
+            [&now_ms],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_duration_ms', ?1)",
+            [execution.elapsed.as_millis().to_string()],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', ?1)",
+            [status],
+        )
+        .ok();
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn fire_tick_hook_by_name_for_test(
+    engine: &PolicyEngine,
+    db: &Db,
+    hook_name: &str,
+    label: &str,
+    hook_timeout: Duration,
+) -> PolicyTickHookOutcome {
+    let execution =
+        fire_tick_hook_by_name_with_timeout(engine, hook_name, label, hook_timeout).await;
+    record_tick_hook_execution(db, label, &execution);
+    execution.outcome
 }
 
 /// Background task that periodically fetches rate-limit data from external providers
@@ -583,6 +736,16 @@ mod tests {
 
     fn test_db() -> Db {
         crate::db::test_db()
+    }
+
+    fn server_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn repo_policies_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies")
     }
 
     fn test_engine_with_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
@@ -708,6 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_memory_health_refresh_uses_startup_reason() {
+        let _guard = server_test_lock();
         crate::services::memory::reset_backend_health_for_tests();
         refresh_memory_health_for_startup().await;
         assert_eq!(
@@ -726,6 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn five_min_memory_health_refresh_uses_tick_reason() {
+        let _guard = server_test_lock();
         crate::services::memory::reset_backend_health_for_tests();
         refresh_memory_health_for_five_min_tick().await;
         assert_eq!(
@@ -889,8 +1054,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tiered_tick_hooks_record_expected_markers_per_label() {
+    #[tokio::test]
+    async fn tiered_tick_hooks_record_expected_markers_per_label() {
         crate::services::memory::reset_backend_health_for_tests();
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
@@ -927,31 +1092,35 @@ mod tests {
         let db = test_db();
         let engine = test_engine_with_dir(&db, dir.path());
 
-        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s");
+        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s").await;
         assert_eq!(kv_value(&db, "probe_30s").as_deref(), Some("hit"));
         assert_eq!(kv_value(&db, "last_tick_30s_status").as_deref(), Some("ok"));
         assert!(kv_value(&db, "last_tick_30s_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
+        assert!(kv_value(&db, "last_tick_ms").is_some());
         assert_eq!(kv_value(&db, "probe_1min"), None);
         assert_eq!(kv_value(&db, "probe_5min"), None);
         assert_eq!(kv_value(&db, "probe_legacy"), None);
 
-        fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min");
+        fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min").await;
         assert_eq!(kv_value(&db, "probe_1min").as_deref(), Some("hit"));
         assert_eq!(
             kv_value(&db, "last_tick_1min_status").as_deref(),
             Some("ok")
         );
         assert!(kv_value(&db, "last_tick_1min_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
 
-        fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
+        fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min").await;
         assert_eq!(kv_value(&db, "probe_5min").as_deref(), Some("hit"));
         assert_eq!(
             kv_value(&db, "last_tick_5min_status").as_deref(),
             Some("ok")
         );
         assert!(kv_value(&db, "last_tick_5min_ms").is_some());
+        assert_eq!(kv_value(&db, "last_tick_status").as_deref(), Some("ok"));
 
-        fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
+        fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy").await;
         assert_eq!(kv_value(&db, "probe_legacy").as_deref(), Some("hit"));
         assert_eq!(
             kv_value(&db, "last_tick_legacy_status").as_deref(),
@@ -959,6 +1128,182 @@ mod tests {
         );
         assert!(kv_value(&db, "last_tick_legacy_ms").is_some());
         assert!(kv_value(&db, "last_tick_ms").is_some());
+        assert!(kv_value(&db, "last_tick_duration_ms").is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_tick_marks_status_and_skips_overlapping_runs() {
+        let db = test_db();
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = test_engine_with_dir(&db, dir.path());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        let timeout_outcome = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(timeout_outcome, PolicyTickHookOutcome::Timeout);
+        assert_eq!(
+            kv_value(&db, "last_tick_1min_status").as_deref(),
+            Some("timeout")
+        );
+
+        let skipped_outcome = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(skipped_outcome, PolicyTickHookOutcome::SkippedInFlight);
+        assert_eq!(
+            kv_value(&db, "last_tick_1min_status").as_deref(),
+            Some("skipped_inflight")
+        );
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        let ok_outcome = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let outcome = fire_tick_hook_by_name_for_test(
+                    &engine,
+                    &db,
+                    "OnTick1min",
+                    "1min",
+                    Duration::from_millis(50),
+                )
+                .await;
+                if outcome != PolicyTickHookOutcome::SkippedInFlight {
+                    break outcome;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed-out tick should release the in-flight guard once background work finishes");
+        assert_eq!(ok_outcome, PolicyTickHookOutcome::Ok);
+        assert_eq!(
+            kv_value(&db, "last_tick_1min_status").as_deref(),
+            Some("ok")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tick_in_flight_guard_is_scoped_per_engine_instance() {
+        let blocked_db = test_db();
+        let blocked_dir = tempfile::TempDir::new().unwrap();
+        let blocked_engine = test_engine_with_dir(&blocked_db, blocked_dir.path());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = blocked_engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        let timed_out = fire_tick_hook_by_name_for_test(
+            &blocked_engine,
+            &blocked_db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(timed_out, PolicyTickHookOutcome::Timeout);
+
+        let free_db = test_db();
+        let free_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            free_dir.path().join("tick-probe.js"),
+            r#"
+            agentdesk.registerPolicy({
+                name: "tick-probe",
+                priority: 1,
+                onTick30s: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_engine_local', 'hit')"
+                    );
+                }
+            });
+            "#,
+        )
+        .unwrap();
+        let free_engine = test_engine_with_dir(&free_db, free_dir.path());
+        let free_outcome = fire_tick_hook_by_name_for_test(
+            &free_engine,
+            &free_db,
+            "OnTick30s",
+            "30s",
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(free_outcome, PolicyTickHookOutcome::Ok);
+        assert_eq!(
+            kv_value(&free_db, "probe_engine_local").as_deref(),
+            Some("hit")
+        );
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "manual profiling baseline for #735 docs"]
+    async fn profile_real_policy_tick_hooks_empty_db_baseline() {
+        let db = test_db();
+        let config = crate::config::Config::default();
+        seed_startup_runtime_state(&db, &config);
+        let engine = test_engine_with_dir(&db, &repo_policies_dir());
+
+        let started_1min = std::time::Instant::now();
+        let on_tick_1min = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_secs(30),
+        )
+        .await;
+        let elapsed_1min = started_1min.elapsed();
+
+        let started_5min = std::time::Instant::now();
+        let on_tick_5min = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick5min",
+            "5min",
+            Duration::from_secs(30),
+        )
+        .await;
+        let elapsed_5min = started_5min.elapsed();
+
+        println!(
+            "profile_real_policy_tick_hooks_empty_db_baseline onTick1min outcome={on_tick_1min:?} elapsed_ms={}",
+            elapsed_1min.as_millis()
+        );
+        println!(
+            "profile_real_policy_tick_hooks_empty_db_baseline onTick5min outcome={on_tick_5min:?} elapsed_ms={}",
+            elapsed_5min.as_millis()
+        );
+
+        assert_eq!(on_tick_1min, PolicyTickHookOutcome::Ok);
+        assert_eq!(on_tick_5min, PolicyTickHookOutcome::Ok);
     }
 
     #[tokio::test]

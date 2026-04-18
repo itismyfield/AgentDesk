@@ -12,8 +12,10 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use serenity::model::channel::{MessageType, ReactionType};
 use serenity::model::id::UserId;
+use serenity::model::prelude::MessageId;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 // Re-import the private helper for testing
 fn should_skip_human_slash_message(
@@ -175,6 +177,87 @@ fn text_stop_lookup_detects_inflight_cancellation() {
         lookup_text_stop_token(&cancel_tokens, channel_id),
         TextStopLookup::AlreadyStopping
     ));
+}
+
+#[test]
+fn intake_gate_enqueue_stays_responsive_while_policy_tick_times_out() {
+    let db = crate::db::test_db();
+    let config = crate::config::Config {
+        policies: crate::config::PoliciesConfig {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            hot_reload: false,
+        },
+        ..Default::default()
+    };
+    let engine = crate::engine::PolicyEngine::new(&config, db.clone()).unwrap();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker_engine = engine.clone();
+    let blocker = std::thread::spawn(move || {
+        blocker_engine
+            .block_actor_for_test(entered_tx, release_rx)
+            .unwrap();
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("policy engine actor should enter the blocker");
+
+    let shared = super::super::make_shared_data_for_tests();
+    let shared_for_runtime = shared.clone();
+    let engine_for_runtime = engine.clone();
+    let db_for_runtime = db.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async move {
+            let channel_id = ChannelId::new(4242);
+            let tick_engine = engine_for_runtime.clone();
+            let tick_db = db_for_runtime.clone();
+            let tick_task = tokio::spawn(async move {
+                crate::server::fire_tick_hook_by_name_for_test(
+                    &tick_engine,
+                    &tick_db,
+                    "OnTick1min",
+                    "1min",
+                    Duration::from_millis(75),
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+
+            let enqueued = super::intake_gate::enqueue_soft_intervention_for_test(
+                &shared_for_runtime,
+                channel_id,
+                UserId::new(99),
+                MessageId::new(1001),
+                "gateway payload",
+            )
+            .await;
+            let snapshot = shared_for_runtime.mailbox(channel_id).snapshot().await;
+            let tick_outcome = tick_task.await.expect("tick task should join cleanly");
+            (enqueued, snapshot.intervention_queue.len(), tick_outcome)
+        });
+        result_tx.send(result).unwrap();
+    });
+
+    let (enqueued, queued_count, tick_outcome) = result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("current-thread runtime should stay responsive while tick hook waits");
+
+    assert!(enqueued, "intake_gate should still enqueue the message");
+    assert_eq!(
+        queued_count, 1,
+        "queued intervention should be visible immediately"
+    );
+    assert_eq!(tick_outcome, crate::server::PolicyTickHookOutcome::Timeout);
+
+    release_tx.send(()).unwrap();
+    runtime_thread.join().unwrap();
+    blocker.join().unwrap();
 }
 
 #[test]

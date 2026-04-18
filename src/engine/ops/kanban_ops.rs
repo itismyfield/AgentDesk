@@ -522,13 +522,11 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var raw = agentdesk.kanban.__setStatusRaw;
-            var reopenRaw = agentdesk.kanban.__reopenRaw;
-            var getRaw = agentdesk.kanban.__getCardRaw;
-            var clearLatestRaw = agentdesk.kanban.__clearLatestDispatchRaw;
             agentdesk.kanban.__pendingTransitions = [];
             agentdesk.kanban.setStatus = function(cardId, newStatus, force) {
-                var result = JSON.parse(raw(cardId, newStatus, !!force));
+                var result = JSON.parse(
+                    agentdesk.kanban.__setStatusRaw(cardId, newStatus, !!force)
+                );
                 if (result.error) throw new Error(result.error);
                 if (result.changed) {
                     agentdesk.kanban.__pendingTransitions.push({
@@ -546,7 +544,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return result;
             };
             agentdesk.kanban.reopen = function(cardId, newStatus) {
-                var result = JSON.parse(reopenRaw(cardId, newStatus));
+                var result = JSON.parse(agentdesk.kanban.__reopenRaw(cardId, newStatus));
                 if (result.error) throw new Error(result.error);
                 if (result.changed) {
                     agentdesk.kanban.__pendingTransitions.push({
@@ -561,20 +559,23 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return result;
             };
             agentdesk.kanban.getCard = function(cardId) {
-                var result = JSON.parse(getRaw(cardId));
+                var result = JSON.parse(agentdesk.kanban.__getCardRaw(cardId));
                 if (result.error) return null;
                 return result;
             };
             agentdesk.kanban.clearLatestDispatch = function(cardId, expectedDispatchId) {
-                var result = JSON.parse(clearLatestRaw(cardId, expectedDispatchId || null));
+                var result = JSON.parse(
+                    agentdesk.kanban.__clearLatestDispatchRaw(cardId, expectedDispatchId || null)
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            var reviewRaw = agentdesk.kanban.__setReviewStatusRaw;
             agentdesk.kanban.setReviewStatus = function(cardId, reviewStatus, opts) {
                 var o = opts || {};
                 o.review_status = reviewStatus;
-                var result = JSON.parse(reviewRaw(cardId, JSON.stringify(o)));
+                var result = JSON.parse(
+                    agentdesk.kanban.__setReviewStatusRaw(cardId, JSON.stringify(o))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };

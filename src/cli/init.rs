@@ -275,6 +275,12 @@ fn default_shared_prompt() -> &'static str {
 - Fix bugs autonomously without asking "how should I fix this?"
 - Check `GET /api/docs` or `GET /api/docs/{category}` before guessing ADK API calls.
 - When ADK API usage causes repeated trial-and-error, record it as `api-friction` instead of bypassing with direct DB access.
+
+## Search Safety
+- Prefer `rg` or the Grep tool over `grep -r` / `grep -rn`; they honor ignore files and avoid crawling build outputs.
+- Scope searches to the smallest relevant subdirectory instead of the workspace root.
+- If recursive `grep` is unavoidable, always pass `--exclude-dir={target,node_modules,.git,dist,build,.next}`.
+- Do not recursively scan build artifacts or dependency trees in ways that can stall a turn without output.
 "#
 }
 

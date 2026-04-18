@@ -92,6 +92,23 @@ async fn enqueue_soft_intervention(
     .await
 }
 
+#[cfg(test)]
+pub(super) async fn enqueue_soft_intervention_for_test(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    author_id: serenity::UserId,
+    message_id: serenity::MessageId,
+    text: &str,
+) -> bool {
+    mailbox_enqueue_intervention(
+        shared,
+        &ProviderKind::Codex,
+        channel_id,
+        build_soft_intervention(author_id, message_id, text, None, false, false),
+    )
+    .await
+}
+
 fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
     !is_allowed_bot
         && !text.starts_with('!')
@@ -582,11 +599,14 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             let text = new_message.content.trim();
+            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
 
-            let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get());
+            let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get())
+                || announce_bot_id.is_some_and(|id| id == user_id.get());
             if is_allowed_bot_sender
                 && !super::super::is_allowed_turn_sender(
                     &settings_snapshot.allowed_bot_ids,
+                    announce_bot_id,
                     user_id.get(),
                     new_message.author.bot,
                     text,

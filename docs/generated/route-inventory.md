@@ -186,4 +186,4 @@
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:102` | `src/server/routes/domains/admin.rs:72` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:152` | `src/server/routes/domains/ops.rs:156` |
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:181` | `src/server/routes/domains/ops.rs:157` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:65` | `src/server/mod.rs:311` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:65` | `src/server/mod.rs:361` |

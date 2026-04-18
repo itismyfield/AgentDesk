@@ -149,48 +149,51 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var sync = agentdesk.dispatch.__create_sync;
             agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title, context) {
                 var dt = dispatchType || "implementation";
                 var t = title || "Dispatch";
                 var ctxJson = JSON.stringify(context || {});
                 // #248: Synchronous DB INSERT — no deferred intent.
                 // Validation + INSERT happen atomically in Rust.
-                var result = JSON.parse(sync(cardId, agentId, dt, t, ctxJson));
+                var result = JSON.parse(
+                    agentdesk.dispatch.__create_sync(cardId, agentId, dt, t, ctxJson)
+                );
                 if (result.error) throw new Error(result.error);
                 var dispatchId = result.dispatch_id;
                 return dispatchId;
             };
-            var rawFail = agentdesk.dispatch.__mark_failed_raw;
             agentdesk.dispatch.markFailed = function(dispatchId, reason) {
-                var result = JSON.parse(rawFail(dispatchId, reason || ""));
+                var result = JSON.parse(
+                    agentdesk.dispatch.__mark_failed_raw(dispatchId, reason || "")
+                );
                 if (result.error) throw new Error(result.error);
                 if (result.rows_affected === 0) {
                     agentdesk.log.warn("[dispatch.markFailed] no rows affected for " + dispatchId + " — already terminal or missing");
                 }
                 return result;
             };
-            var rawComplete = agentdesk.dispatch.__mark_completed_raw;
             agentdesk.dispatch.markCompleted = function(dispatchId, resultJson) {
-                var result = JSON.parse(rawComplete(dispatchId, resultJson || "{}"));
+                var result = JSON.parse(
+                    agentdesk.dispatch.__mark_completed_raw(dispatchId, resultJson || "{}")
+                );
                 if (result.error) throw new Error(result.error);
                 if (result.rows_affected === 0) {
                     agentdesk.log.warn("[dispatch.markCompleted] no rows affected for " + dispatchId + " — already terminal or missing");
                 }
                 return result;
             };
-            var rawRetry = agentdesk.dispatch.__set_retry_count_raw;
             agentdesk.dispatch.setRetryCount = function(dispatchId, count) {
-                var result = JSON.parse(rawRetry(dispatchId, count));
+                var result = JSON.parse(
+                    agentdesk.dispatch.__set_retry_count_raw(dispatchId, count)
+                );
                 if (result.error) throw new Error(result.error);
                 if (result.rows_affected === 0) {
                     agentdesk.log.warn("[dispatch.setRetryCount] no rows affected for " + dispatchId + " — missing");
                 }
                 return result;
             };
-            var rawActiveWork = agentdesk.dispatch.__has_active_work_raw;
             agentdesk.dispatch.hasActiveWork = function(cardId) {
-                var result = JSON.parse(rawActiveWork(cardId));
+                var result = JSON.parse(agentdesk.dispatch.__has_active_work_raw(cardId));
                 if (result.error) throw new Error(result.error);
                 return result.count > 0;
             };

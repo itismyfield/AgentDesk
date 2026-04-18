@@ -135,28 +135,27 @@ pub(super) fn register_agent_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ctx.eval::<(), _>(
         r#"
 (function() {
-    var a = agentdesk.agents;
-    a.get = function(agentId) {
-        var result = JSON.parse(a.__getRaw(agentId || ""));
+    agentdesk.agents.get = function(agentId) {
+        var result = JSON.parse(agentdesk.agents.__getRaw(agentId || ""));
         if (result.error) throw new Error(result.error);
         return result.agent || null;
     };
-    a.primaryChannel = function(agentId) {
-        return a.resolvePrimaryChannel(agentId);
+    agentdesk.agents.primaryChannel = function(agentId) {
+        return agentdesk.agents.resolvePrimaryChannel(agentId);
     };
-    a.counterModelChannel = function(agentId) {
-        return a.resolveCounterModelChannel(agentId);
+    agentdesk.agents.counterModelChannel = function(agentId) {
+        return agentdesk.agents.resolveCounterModelChannel(agentId);
     };
-    a.resolvePrimaryChannel = function(agentId) {
-        var ch = a.__resolvePrimaryChannel(agentId);
+    agentdesk.agents.resolvePrimaryChannel = function(agentId) {
+        var ch = agentdesk.agents.__resolvePrimaryChannel(agentId);
         return ch || null;
     };
-    a.resolveCounterModelChannel = function(agentId) {
-        var ch = a.__resolveCounterModelChannel(agentId);
+    agentdesk.agents.resolveCounterModelChannel = function(agentId) {
+        var ch = agentdesk.agents.__resolveCounterModelChannel(agentId);
         return ch || null;
     };
-    a.resolveDispatchChannel = function(agentId, dispatchType) {
-        var ch = a.__resolveDispatchChannel(agentId, dispatchType || "");
+    agentdesk.agents.resolveDispatchChannel = function(agentId, dispatchType) {
+        var ch = agentdesk.agents.__resolveDispatchChannel(agentId, dispatchType || "");
         return ch || null;
     };
 })();

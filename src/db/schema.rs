@@ -65,6 +65,20 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         WHERE repo_id IS NOT NULL AND pr_number IS NOT NULL;",
     )?;
 
+    // #743: pr_tracking lifecycle identity columns.
+    // dispatch_generation is the authoritative stale key (UUID per handoff).
+    // review_round is observability/debugging.
+    // retry_count caps auto-retry at 3 before escalation.
+    let _ = conn.execute_batch(
+        "ALTER TABLE pr_tracking ADD COLUMN dispatch_generation TEXT NOT NULL DEFAULT '';",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE pr_tracking ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE pr_tracking ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
+    );
+
     // Additive columns — ALTER TABLE errors are ignored if column already exists
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN deferred_dod_json TEXT;");
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN default_agent_id TEXT;");
@@ -444,6 +458,33 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review_decision \
          ON task_dispatches (kanban_card_id) \
          WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched');",
+    );
+
+    // #743: Partial unique index — at most 1 active create-pr per card.
+    // Pre-check: if duplicates already exist, migration must panic loudly so an
+    // operator resolves them before the index creation silently fails.
+    let create_pr_dupes: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ( \
+                SELECT kanban_card_id FROM task_dispatches \
+                WHERE dispatch_type='create-pr' AND status IN ('pending','dispatched') \
+                GROUP BY kanban_card_id HAVING COUNT(*) > 1 \
+             )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if create_pr_dupes > 0 {
+        panic!(
+            "Migration blocked (#743): {create_pr_dupes} card(s) have duplicate active create-pr \
+             dispatches. Inspect via `GET /api/dispatches?status=pending|dispatched` and filter \
+             dispatch_type=='create-pr', cancel duplicates, then restart."
+        );
+    }
+    let _ = conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_create_pr \
+         ON task_dispatches (kanban_card_id) \
+         WHERE dispatch_type = 'create-pr' AND status IN ('pending', 'dispatched');",
     );
 
     // #117: Canonical card-level review state — single source of truth for review lifecycle.

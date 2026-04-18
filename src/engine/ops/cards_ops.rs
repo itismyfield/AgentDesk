@@ -72,24 +72,29 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var raw = agentdesk.cards;
-            raw.get = function(cardId) {
-                var result = JSON.parse(raw.__getRaw(cardId || ""));
+            agentdesk.cards.get = function(cardId) {
+                var result = JSON.parse(agentdesk.cards.__getRaw(cardId || ""));
                 if (result.error) throw new Error(result.error);
                 return result.card || null;
             };
-            raw.list = function(filter) {
-                var result = JSON.parse(raw.__listRaw(JSON.stringify(filter || {})));
+            agentdesk.cards.list = function(filter) {
+                var result = JSON.parse(
+                    agentdesk.cards.__listRaw(JSON.stringify(filter || {}))
+                );
                 if (result.error) throw new Error(result.error);
                 return result.cards || [];
             };
-            raw.assign = function(cardId, agentId) {
-                var result = JSON.parse(raw.__assignRaw(cardId || "", agentId || ""));
+            agentdesk.cards.assign = function(cardId, agentId) {
+                var result = JSON.parse(
+                    agentdesk.cards.__assignRaw(cardId || "", agentId || "")
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            raw.setPriority = function(cardId, priority) {
-                var result = JSON.parse(raw.__setPriorityRaw(cardId || "", priority || ""));
+            agentdesk.cards.setPriority = function(cardId, priority) {
+                var result = JSON.parse(
+                    agentdesk.cards.__setPriorityRaw(cardId || "", priority || "")
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };

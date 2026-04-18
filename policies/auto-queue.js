@@ -223,7 +223,8 @@ var autoQueue = {
   // ── Authoritative auto-queue continuation (#110, #140) ──────────────
   // This is the SINGLE path for done → next queued item.
   // Rust transition_status() already marks auto_queue_entries as 'done'
-  // before firing OnCardTerminal, so we don't re-mark here.
+  // before firing OnCardTerminal and now defers final run completion here so
+  // single-phase runs can still create a phase gate before they finish.
   // kanban-rules.js does NOT touch auto_queue_entries (removed in #110).
   // #140: Group-aware continuation — dispatches next entry in same group,
   //       and starts new groups when slots become available.
@@ -777,15 +778,6 @@ function loadPhaseGateDispatches(dispatchIds) {
   );
 }
 
-function countDistinctBatchPhases(runId) {
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(DISTINCT COALESCE(batch_phase, 0)) as cnt " +
-    "FROM auto_queue_entries WHERE run_id = ?",
-    [runId]
-  );
-  return (rows.length > 0) ? (rows[0].cnt || 0) : 0;
-}
-
 function _isDeployPhase(runId, phase) {
   var rows = agentdesk.db.query(
     "SELECT deploy_phases FROM auto_queue_runs WHERE id = ?",
@@ -801,8 +793,9 @@ function _isDeployPhase(runId, phase) {
 }
 
 function _phaseGateRequired(runId, phase) {
-  if (_isDeployPhase(runId, phase)) return true;
-  return countDistinctBatchPhases(runId) > 1;
+  // General phase gates are always required after a phase completes.
+  // `deploy_phases` only selects the deploy/build gate implementation.
+  return true;
 }
 
 function completeRunAndNotify(runId) {

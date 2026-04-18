@@ -91,9 +91,13 @@ pub struct HealthRegistry {
     /// Dedicated HTTP client for the announce bot (agent-to-agent routing).
     /// This bot's messages are accepted by all agents' allowed_bot_ids.
     announce_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+    /// Cached Discord user id for the announce bot.
+    announce_user_id: tokio::sync::Mutex<Option<u64>>,
     /// Dedicated HTTP client for the notify bot (info-only notifications).
     /// Agents do NOT process notify bot messages — use for non-actionable alerts.
     notify_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+    /// Cached Discord user id for the notify bot.
+    notify_user_id: tokio::sync::Mutex<Option<u64>>,
 }
 
 impl HealthRegistry {
@@ -103,7 +107,9 @@ impl HealthRegistry {
             started_at: Instant::now(),
             discord_http: tokio::sync::Mutex::new(Vec::new()),
             announce_http: tokio::sync::Mutex::new(None),
+            announce_user_id: tokio::sync::Mutex::new(None),
             notify_http: tokio::sync::Mutex::new(None),
+            notify_user_id: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -138,6 +144,32 @@ impl HealthRegistry {
                     tracing::info!("  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing");
                 }
             }
+        }
+    }
+
+    pub async fn utility_bot_user_id(&self, bot_name: &str) -> Option<u64> {
+        match bot_name {
+            "announce" => {
+                if let Some(id) = *self.announce_user_id.lock().await {
+                    return Some(id);
+                }
+                let http = { self.announce_http.lock().await.clone()? };
+                let user = http.get_current_user().await.ok()?;
+                let id = user.id.get();
+                *self.announce_user_id.lock().await = Some(id);
+                Some(id)
+            }
+            "notify" => {
+                if let Some(id) = *self.notify_user_id.lock().await {
+                    return Some(id);
+                }
+                let http = { self.notify_http.lock().await.clone()? };
+                let user = http.get_current_user().await.ok()?;
+                let id = user.id.get();
+                *self.notify_user_id.lock().await = Some(id);
+                Some(id)
+            }
+            _ => None,
         }
     }
 }

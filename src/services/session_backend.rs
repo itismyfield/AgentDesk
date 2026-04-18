@@ -282,17 +282,29 @@ pub fn extract_turn_analytics_from_output(
     output_path: &str,
     start_offset: u64,
 ) -> (Option<String>, Option<TurnTokenUsage>) {
+    extract_turn_analytics_from_output_range(output_path, start_offset, None)
+}
+
+pub fn extract_turn_analytics_from_output_range(
+    output_path: &str,
+    start_offset: u64,
+    end_offset: Option<u64>,
+) -> (Option<String>, Option<TurnTokenUsage>) {
     let Ok(bytes) = std::fs::read(output_path) else {
         return (None, None);
     };
-    let start = usize::try_from(start_offset)
-        .ok()
+    let end = end_offset
+        .and_then(|offset| usize::try_from(offset).ok())
         .map(|offset| offset.min(bytes.len()))
         .unwrap_or(bytes.len());
+    let start = usize::try_from(start_offset)
+        .ok()
+        .map(|offset| offset.min(end))
+        .unwrap_or(end);
 
     let (sender, _receiver) = std::sync::mpsc::channel::<StreamMessage>();
     let mut state = StreamLineState::new();
-    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
+    for line in String::from_utf8_lossy(&bytes[start..end]).lines() {
         let _ = process_stream_line(line, &sender, &mut state);
     }
 

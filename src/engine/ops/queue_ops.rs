@@ -19,9 +19,8 @@ pub(super) fn register_queue_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var q = agentdesk.queue;
-            q.status = function() {
-                var result = JSON.parse(q.__statusRaw());
+            agentdesk.queue.status = function() {
+                var result = JSON.parse(agentdesk.queue.__statusRaw());
                 if (result.error) throw new Error(result.error);
                 return result;
             };

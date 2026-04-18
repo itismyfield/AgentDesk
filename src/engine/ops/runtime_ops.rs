@@ -53,13 +53,10 @@ pub(super) fn register_runtime_ops<'js>(
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var raw = agentdesk.runtime.__emitSignalRaw;
-            var shouldDeferSignal = agentdesk.runtime.__shouldDeferSignalRaw;
-            var recordRetrospectiveRaw = agentdesk.runtime.__recordCardRetrospectiveRaw;
             agentdesk.runtime.emitSignal = function(signalName, evidence) {
                 var normalizedSignal = signalName || "";
                 var normalizedEvidence = evidence || {};
-                if (shouldDeferSignal()) {
+                if (agentdesk.runtime.__shouldDeferSignalRaw()) {
                     agentdesk.__pendingIntents = agentdesk.__pendingIntents || [];
                     agentdesk.__pendingIntents.push({
                         type: "emit_supervisor_signal",
@@ -74,12 +71,22 @@ pub(super) fn register_runtime_ops<'js>(
                         note: "deferred until hook completion"
                     };
                 }
-                var result = JSON.parse(raw(normalizedSignal, JSON.stringify(normalizedEvidence)));
+                var result = JSON.parse(
+                    agentdesk.runtime.__emitSignalRaw(
+                        normalizedSignal,
+                        JSON.stringify(normalizedEvidence)
+                    )
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
             agentdesk.runtime.recordCardRetrospective = function(cardId, terminalStatus) {
-                return JSON.parse(recordRetrospectiveRaw(cardId || "", terminalStatus || ""));
+                return JSON.parse(
+                    agentdesk.runtime.__recordCardRetrospectiveRaw(
+                        cardId || "",
+                        terminalStatus || ""
+                    )
+                );
             };
         })();
         "#,

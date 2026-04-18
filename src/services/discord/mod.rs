@@ -140,12 +140,23 @@ pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
     text.trim_start().starts_with("DISPATCH:")
 }
 
+pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
+    shared: &SharedData,
+) -> Option<u64> {
+    let registry = shared.health_registry()?;
+    registry.utility_bot_user_id("announce").await
+}
+
 pub(in crate::services::discord) fn is_allowed_turn_sender(
     allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
     author_id: u64,
     author_is_bot: bool,
     text: &str,
 ) -> bool {
+    if announce_bot_id.is_some_and(|id| id == author_id) {
+        return true;
+    }
     if allowed_bot_ids.contains(&author_id) {
         return should_process_allowed_bot_turn_text(text);
     }
@@ -490,6 +501,52 @@ impl SharedData {
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
         self.health_registry.upgrade()
     }
+}
+
+#[cfg(test)]
+pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
+    Arc::new(SharedData {
+        core: tokio::sync::Mutex::new(CoreState {
+            sessions: std::collections::HashMap::new(),
+            active_meetings: std::collections::HashMap::new(),
+        }),
+        mailboxes: ChannelMailboxRegistry::default(),
+        settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
+        api_timestamps: dashmap::DashMap::new(),
+        skills_cache: tokio::sync::RwLock::new(Vec::new()),
+        tmux_watchers: dashmap::DashMap::new(),
+        recovering_channels: dashmap::DashMap::new(),
+        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        current_generation: 0,
+        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+        global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+        intake_dedup: dashmap::DashMap::new(),
+        dispatch_thread_parents: dashmap::DashMap::new(),
+        bot_connected: std::sync::atomic::AtomicBool::new(false),
+        last_turn_at: std::sync::Mutex::new(None),
+        model_overrides: dashmap::DashMap::new(),
+        model_session_reset_pending: dashmap::DashSet::new(),
+        model_picker_pending: dashmap::DashMap::new(),
+        dispatch_role_overrides: dashmap::DashMap::new(),
+        last_message_ids: dashmap::DashMap::new(),
+        turn_start_times: dashmap::DashMap::new(),
+        cached_serenity_ctx: tokio::sync::OnceCell::new(),
+        cached_bot_token: tokio::sync::OnceCell::new(),
+        token_hash: "test-token-hash".to_string(),
+        api_port: 9,
+        db: None,
+        engine: None,
+        health_registry: std::sync::Weak::new(),
+        known_slash_commands: tokio::sync::OnceCell::new(),
+    })
 }
 
 fn queue_persistence_context(
@@ -958,6 +1015,7 @@ async fn catch_up_missed_messages(
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
+        let announce_bot_id = resolve_announce_bot_user_id(shared).await;
 
         let mut channel_recovered = 0usize;
         let mut max_recovered_id: Option<u64> = None;
@@ -985,8 +1043,13 @@ async fn catch_up_missed_messages(
             if text.is_empty() {
                 continue;
             }
-            if !is_allowed_turn_sender(&allowed_bot_ids, msg.author.id.get(), msg.author.bot, text)
-            {
+            if !is_allowed_turn_sender(
+                &allowed_bot_ids,
+                announce_bot_id,
+                msg.author.id.get(),
+                msg.author.bot,
+                text,
+            ) {
                 continue;
             }
 
@@ -1055,6 +1118,7 @@ async fn catch_up_missed_messages(
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
+    let announce_bot_id_phase2 = resolve_announce_bot_user_id(shared).await;
 
     for entry in entries2.flatten() {
         let path = entry.path();
@@ -1135,14 +1199,16 @@ async fn catch_up_missed_messages(
             let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
+                announce_bot_id_phase2,
                 msg.author.id.get(),
                 msg.author.bot,
                 text,
             ) {
                 continue;
             }
-            let is_allowed_bot =
-                msg.author.bot && allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            let is_allowed_bot = msg.author.bot
+                && (allowed_bot_ids_phase2.contains(&msg.author.id.get())
+                    || announce_bot_id_phase2.is_some_and(|id| id == msg.author.id.get()));
             if !is_allowed_bot {
                 let settings = shared.settings.read().await;
                 if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
@@ -1878,6 +1944,7 @@ mod tests {
     #[test]
     fn allowed_bot_turns_require_dispatch_prefix() {
         let allowed_bot_ids = vec![123];
+        let announce_bot_id = Some(456);
         let dispatch = "DISPATCH: abc123\n작업 시작";
         let agent_msg = "completion_guard 수정해줘";
 
@@ -1888,20 +1955,30 @@ mod tests {
         assert!(!should_process_allowed_bot_turn_text(agent_msg));
         assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
+            announce_bot_id,
             123,
             false,
             "⚠️ 검토 전용 — 작업 착수 금지"
         ));
         assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
+            announce_bot_id,
             123,
             false,
             dispatch
         ));
         assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
+            announce_bot_id,
             123,
             false,
+            agent_msg
+        ));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
             agent_msg
         ));
     }

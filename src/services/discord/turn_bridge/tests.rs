@@ -251,6 +251,138 @@ fn persist_turn_analytics_row_prefers_output_jsonl_usage_from_turn_start_offset(
     assert_eq!(row.7, 40);
 }
 
+fn fetch_persisted_turn_usage(db: &crate::db::Db) -> Option<(Option<String>, i64, i64, i64, i64)> {
+    let conn = db.read_conn().unwrap();
+    match conn.query_row(
+        "SELECT session_id, input_tokens, cache_create_tokens, cache_read_tokens, output_tokens
+         FROM turns
+         WHERE turn_id = 'discord:1486333430516945008:1487795113240559788'",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        },
+    ) {
+        Ok(row) => Some(row),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => panic!("failed to fetch persisted turn usage: {error}"),
+    }
+}
+
+#[test]
+fn persist_turn_analytics_row_snapshots_output_before_background_persist() {
+    let db = crate::db::test_db();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(
+        file,
+        "{}",
+        r#"{"type":"result","subtype":"success","session_id":"old-session","usage":{"input_tokens":999,"cache_creation_input_tokens":99,"cache_read_input_tokens":88,"output_tokens":77},"result":"old turn"}"#
+    )
+    .unwrap();
+    let turn_start_offset = file.as_file().metadata().unwrap().len();
+    writeln!(
+        file,
+        "{}",
+        r#"{"type":"system","subtype":"init","session_id":"session-init"}"#
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        r#"{"type":"result","subtype":"success","session_id":"session-final","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"result":"done"}"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+    let current_turn_end_offset = file.as_file().metadata().unwrap().len();
+
+    let mut inflight_state = InflightTurnState::new(
+        ProviderKind::Claude,
+        1486333430516945008,
+        Some("adk-cc-t1486333430516945008".to_string()),
+        343742347365974026,
+        1487795113240559788,
+        1487799916758827138,
+        "turn analytics".to_string(),
+        Some("stale-session".to_string()),
+        Some("AgentDesk-claude-adk-cc-t1486333430516945008".to_string()),
+        Some(file.path().to_str().unwrap().to_string()),
+        Some("/tmp/agentdesk-test.input".to_string()),
+        turn_start_offset,
+    );
+    inflight_state.last_offset = current_turn_end_offset;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = release_rx.recv();
+        });
+
+        super::persist_turn_analytics_row(
+            &db,
+            &ProviderKind::Claude,
+            ChannelId::new(1486333430516945008),
+            MessageId::new(1487795113240559788),
+            None,
+            Some("dispatch-593"),
+            Some("claude/token/host:adk-cdx"),
+            Some("stream-session"),
+            &inflight_state,
+            TurnTokenUsage {
+                input_tokens: 1,
+                cache_create_tokens: 1,
+                cache_read_tokens: 1,
+                output_tokens: 1,
+            },
+            12_000,
+        );
+
+        writeln!(
+            file,
+            "{}",
+            r#"{"type":"system","subtype":"init","session_id":"session-next-init"}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            r#"{"type":"result","subtype":"success","session_id":"session-next","usage":{"input_tokens":500,"cache_creation_input_tokens":50,"cache_read_input_tokens":60,"output_tokens":70},"result":"next turn"}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while fetch_persisted_turn_usage(&db).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for background persistence"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let row = fetch_persisted_turn_usage(&db).unwrap();
+    assert_eq!(row.0.as_deref(), Some("session-final"));
+    assert_eq!(row.1, 100);
+    assert_eq!(row.2, 20);
+    assert_eq!(row.3, 30);
+    assert_eq!(row.4, 40);
+}
+
 fn sample_session() -> DiscordSession {
     DiscordSession {
         session_id: Some("session-1".to_string()),

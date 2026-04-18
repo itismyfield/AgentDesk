@@ -45,9 +45,8 @@ pub(super) fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var raw = agentdesk.http.__post_raw;
             agentdesk.http.post = function(url, body) {
-                return JSON.parse(raw(url, JSON.stringify(body)));
+                return JSON.parse(agentdesk.http.__post_raw(url, JSON.stringify(body)));
             };
         })();
     "#,

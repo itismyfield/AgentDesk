@@ -123,6 +123,13 @@ React 19 + TypeScript + Vite + Tailwind. Uses Pixi.js for the office visualizati
 - **NEVER checkout `wt/*` branches on the main workspace repo.** These branches belong to git worktrees only. Checking them out on the main repo breaks all sessions when the worktree directory is cleaned up. If you need to inspect a worktree branch, use `git log wt/branch-name` or `git diff wt/branch-name` without switching branches.
 - **NEVER run `git checkout` to switch away from `main`** on the workspace root unless explicitly instructed by the user. Feature work should use git worktrees (`git worktree add`), not branch switching on the main repo.
 
+## Search Safety
+
+- Prefer `rg` or the harness Grep tool over `grep -r` / `grep -rn`. They respect ignore files and avoid crawling `target/` and other generated trees by default.
+- Scope searches to the smallest relevant directory (`src/`, `config/`, `docs/`, specific module paths) instead of the workspace root whenever possible.
+- If recursive `grep` is unavoidable, always pass `--exclude-dir={target,node_modules,.git,dist,build,.next}`.
+- Do not recursively scan build artifacts or dependency directories in ways that can stall a turn without output.
+
 ## Environment Variables
 
 - `AGENTDESK_TOKEN` — Auth token for the HTTP server

@@ -1837,7 +1837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_completion_enqueues_notify_to_main_channel() {
+    async fn run_completion_waits_for_phase_gate_then_enqueues_notify_to_main_channel() {
         let db = test_db();
         ensure_auto_queue_tables(&db);
         let engine = test_engine(&db);
@@ -1878,31 +1878,51 @@ mod tests {
             transition_status_with_opts(&db, &engine, "card-notify", "done", "review", true);
         assert!(result.is_ok(), "transition to done should succeed");
 
-        // onCardTerminal completes the run by calling the authoritative activate API.
-        // In this unit harness no localhost Axum server is listening, so invoke the
-        // route directly before asserting the persisted run status.
-        let state = crate::server::routes::AppState {
-            db: db.clone(),
-            engine: engine.clone(),
-            config: std::sync::Arc::new(crate::config::Config::default()),
-            broadcast_tx: crate::server::ws::new_broadcast(),
-            batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
-            health_registry: None,
+        let phase_gate_dispatch_id = {
+            let conn = db.lock().unwrap();
+            let run_status: String = conn
+                .query_row(
+                    "SELECT status FROM auto_queue_runs WHERE id = 'run-notify'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                run_status, "paused",
+                "single-phase terminal completion must pause for a phase gate"
+            );
+
+            let phase_gate_dispatch_id: String = conn
+                .query_row(
+                    "SELECT id FROM task_dispatches
+                     WHERE kanban_card_id = 'card-notify' AND dispatch_type = 'phase-gate'
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let queued_notifications: i64 = conn
+                .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                queued_notifications, 0,
+                "completion notify must wait for the phase gate to pass"
+            );
+            phase_gate_dispatch_id
         };
-        let (status, body) = crate::server::routes::auto_queue::activate(
-            axum::extract::State(state),
-            axum::Json(crate::server::routes::auto_queue::ActivateBody {
-                run_id: Some("run-notify".to_string()),
-                repo: None,
-                agent_id: None,
-                thread_group: None,
-                unified_thread: None,
-                active_only: Some(true),
+
+        let completed = crate::dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &phase_gate_dispatch_id,
+            &json!({
+                "verdict": "phase_gate_passed",
+                "summary": "phase gate approved"
             }),
         )
-        .await;
-        assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(body.0["count"].as_u64(), Some(0));
+        .expect("phase gate completion should succeed");
+        assert_eq!(completed["status"], "completed");
 
         let conn = db.lock().unwrap();
         let run_status: String = conn

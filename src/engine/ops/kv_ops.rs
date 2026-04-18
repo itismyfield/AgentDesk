@@ -86,12 +86,11 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ctx.eval::<(), _>(
         r#"
         (function() {
-            var raw = agentdesk.kv;
             agentdesk.kv.set = function(key, value, ttlSeconds) {
-                return JSON.parse(raw.__setRaw(key, value, ttlSeconds || 0));
+                return JSON.parse(agentdesk.kv.__setRaw(key, value, ttlSeconds || 0));
             };
             agentdesk.kv.get = function(key) {
-                var r = JSON.parse(raw.__getRaw(key));
+                var r = JSON.parse(agentdesk.kv.__getRaw(key));
                 return r.found ? r.value : null;
             };
         })();

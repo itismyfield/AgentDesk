@@ -2,11 +2,14 @@ use crate::db::Db;
 use crate::engine::sql_guard::detect_core_table_write;
 use crate::error::{AppError, ErrorCode};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use std::time::Duration;
 
 // ── DB ops ───────────────────────────────────────────────────────
 //
 // We use a JSON-string bridge: Rust receives (sql, params_json_string)
 // and returns a json_string. A thin JS wrapper does JSON.parse/stringify.
+
+const POLICY_DB_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
 pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -43,17 +46,15 @@ pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var rawQuery = agentdesk.db.__query_raw;
-            var rawExec = agentdesk.db.__execute_raw;
-            var rawGuard = agentdesk.db.__guard_raw;
-
             agentdesk.db.query = function(sql, params) {
-                var result = JSON.parse(rawQuery(sql, JSON.stringify(params || [])));
+                var result = JSON.parse(
+                    agentdesk.db.__query_raw(sql, JSON.stringify(params || []))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
             agentdesk.db.execute = function(sql, params) {
-                var guard = JSON.parse(rawGuard(sql));
+                var guard = JSON.parse(agentdesk.db.__guard_raw(sql));
                 if (guard.blocked) {
                     agentdesk.log.warn(guard.warning);
                     throw new Error(guard.error);
@@ -62,7 +63,9 @@ pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 // dispatch.create and kanban.setStatus use intent/transition model;
                 // converting db.execute to intents requires typed intents for each
                 // mutation pattern (card_review_state, kv_meta, agents, etc.).
-                var result = JSON.parse(rawExec(sql, JSON.stringify(params || [])));
+                var result = JSON.parse(
+                    agentdesk.db.__execute_raw(sql, JSON.stringify(params || []))
+                );
                 if (result.error) throw new Error(result.error);
                 return result;
             };
@@ -87,6 +90,7 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
 }
 
 fn db_query_raw(db: &Db, sql: &str, params_json: &str) -> String {
+    let started = std::time::Instant::now();
     let params: Vec<serde_json::Value> =
         match parse_params_json(params_json, "agentdesk.db.query.parse_params", sql) {
             Ok(params) => params,
@@ -158,6 +162,15 @@ fn db_query_raw(db: &Db, sql: &str, params_json: &str) -> String {
                 .into_policy_json_string();
         }
     };
+    let elapsed = started.elapsed();
+    if elapsed >= POLICY_DB_WARN_THRESHOLD {
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis(),
+            row_count = result.len(),
+            sql = %compact_sql(sql),
+            "policy db query slow"
+        );
+    }
     serde_json::to_string(&result).unwrap_or_else(|error| {
         AppError::internal(format!("serialize query result: {error}"))
             .with_code(ErrorCode::Policy)
@@ -168,6 +181,7 @@ fn db_query_raw(db: &Db, sql: &str, params_json: &str) -> String {
 }
 
 fn db_execute_raw(db: &Db, sql: &str, params_json: &str) -> String {
+    let started = std::time::Instant::now();
     if let Some(violation) = detect_core_table_write(sql) {
         return serde_json::json!({ "__error": violation.error_message() }).to_string();
     }
@@ -208,6 +222,15 @@ fn db_execute_raw(db: &Db, sql: &str, params_json: &str) -> String {
                 .into_policy_json_string();
         }
     };
+    let elapsed = started.elapsed();
+    if elapsed >= POLICY_DB_WARN_THRESHOLD {
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis(),
+            changes,
+            sql = %compact_sql(sql),
+            "policy db execute slow"
+        );
+    }
 
     format!(r#"{{"changes":{changes}}}"#)
 }

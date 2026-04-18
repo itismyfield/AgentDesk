@@ -34,9 +34,8 @@ pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var rawGet = agentdesk.config.__get_raw;
             agentdesk.config.get = function(key) {
-                return JSON.parse(rawGet(key));
+                return JSON.parse(agentdesk.config.__get_raw(key));
             };
         })();
         undefined;
