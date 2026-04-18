@@ -43,6 +43,39 @@ cargo build --release
 ./target/release/agentdesk --init
 ```
 
+### Dawn LaunchDaemon Operations (macOS)
+
+If you also install observability skills such as `memory-dream`, `service-monitoring`, `version-watch`, and `hardware-audit`, use `scripts/manage_dawn_launchdaemons.py` to manage their dawn `LaunchDaemon` jobs from a single entrypoint.
+
+The script automatically searches common skill install roots in this order:
+- `$AGENTDESK_SKILLS_ROOT`
+- `$CODEX_HOME/skills`
+- `~/.codex/skills`
+- `~/.adk/release/skills`
+- `<repo>/skills`
+
+First-time bootstrap:
+
+```bash
+sudo /opt/homebrew/bin/python3 ./scripts/manage_dawn_launchdaemons.py bootstrap
+```
+
+What that one command does:
+- installs the `agentdesk-dawn-manager` sudoers drop-in
+- installs or refreshes the selected dawn `LaunchDaemon` plists
+- keeps later `status` checks on the non-root path by default
+
+Useful follow-ups:
+
+```bash
+python3 ./scripts/manage_dawn_launchdaemons.py preflight
+python3 ./scripts/manage_dawn_launchdaemons.py status
+python3 ./scripts/manage_dawn_launchdaemons.py install
+python3 ./scripts/manage_dawn_launchdaemons.py uninstall
+```
+
+If your skills live outside the default roots, pass one or more `--skills-root <path>` flags.
+
 ## Onboarding
 
 After installation, the web dashboard opens automatically at `http://127.0.0.1:8791`. The onboarding wizard walks you through:
