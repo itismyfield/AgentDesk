@@ -5,7 +5,11 @@ pub mod ops;
 pub mod sql_guard;
 pub mod transition;
 
-use std::sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicBool, mpsc};
+use std::sync::{
+    Arc, Mutex, OnceLock, Weak,
+    atomic::{AtomicBool, AtomicUsize},
+    mpsc,
+};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::Duration;
 
@@ -44,6 +48,11 @@ struct PolicyEngineActor {
     tx: mpsc::Sender<EngineCommand>,
     thread_id: Arc<OnceLock<ThreadId>>,
     join: Mutex<Option<JoinHandle<()>>>,
+    /// Approximate queue depth: incremented when a command is sent, decremented
+    /// when the actor pops one off the channel. Exposed for observability (#747).
+    queue_depth: Arc<AtomicUsize>,
+    /// Short name used in log messages (e.g. "main", "tick").
+    label: &'static str,
 }
 
 enum EngineCommand {
@@ -83,19 +92,32 @@ impl PolicyEngineActor {
         inner: Arc<Mutex<PolicyEngineInner>>,
         db: Db,
         tick_hook_in_flight: Arc<AtomicBool>,
+        label: &'static str,
     ) -> Result<Arc<Self>> {
         let (tx, rx) = mpsc::channel();
         let thread_id = Arc::new(OnceLock::new());
+        let queue_depth = Arc::new(AtomicUsize::new(0));
         let actor = Arc::new(Self {
             tx,
             thread_id: thread_id.clone(),
             join: Mutex::new(None),
+            queue_depth: queue_depth.clone(),
+            label,
         });
         let actor_weak = Arc::downgrade(&actor);
+        let thread_name = format!("policy-engine-actor-{label}");
         let handle = thread::Builder::new()
-            .name("policy-engine-actor".to_string())
+            .name(thread_name)
             .spawn(move || {
-                Self::run_loop(actor_weak, inner, db, tick_hook_in_flight, thread_id, rx)
+                Self::run_loop(
+                    actor_weak,
+                    inner,
+                    db,
+                    tick_hook_in_flight,
+                    thread_id,
+                    queue_depth,
+                    rx,
+                )
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn policy engine actor: {e}"))?;
         *actor
@@ -111,6 +133,7 @@ impl PolicyEngineActor {
         db: Db,
         tick_hook_in_flight: Arc<AtomicBool>,
         thread_id: Arc<OnceLock<ThreadId>>,
+        queue_depth: Arc<AtomicUsize>,
         rx: mpsc::Receiver<EngineCommand>,
     ) {
         let _ = thread_id.set(thread::current().id());
@@ -122,6 +145,16 @@ impl PolicyEngineActor {
         let _runtime_guard = runtime.as_ref().map(|rt| rt.enter());
 
         while let Ok(command) = rx.recv() {
+            // We popped a command off the channel, so approximate queue depth
+            // should drop. saturating_sub guards against any accidental skew.
+            queue_depth
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |d| Some(d.saturating_sub(1)),
+                )
+                .ok();
+
             if matches!(command, EngineCommand::Shutdown) {
                 break;
             }
@@ -230,6 +263,23 @@ pub struct PolicyInfo {
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
     pub fn new(config: &Config, db: Db) -> Result<Self> {
+        Self::new_with_label(config, db, "main")
+    }
+
+    /// Create a dedicated policy engine for the tick loop (#747).
+    ///
+    /// The tick engine has its own QuickJS runtime, policy actor thread,
+    /// and hot-reload watcher — fully isolated from the main engine so that
+    /// a long-running or stuck tick hook cannot back up the main engine's
+    /// actor queue and starve HTTP/Discord hook paths.
+    ///
+    /// Both engines load the same policies directory (so any policy that
+    /// registers `onTick*` hooks is executed by this engine).
+    pub fn new_for_tick(config: &Config, db: Db) -> Result<Self> {
+        Self::new_with_label(config, db, "tick")
+    }
+
+    fn new_with_label(config: &Config, db: Db, label: &'static str) -> Result<Self> {
         let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
@@ -265,11 +315,18 @@ impl PolicyEngine {
 
             match loader::start_hot_reload(policies_dir.clone(), reload_ctx, store.clone()) {
                 Ok(w) => {
-                    tracing::info!("Policy hot-reload enabled for {}", policies_dir.display());
+                    tracing::info!(
+                        engine_label = label,
+                        "Policy hot-reload enabled for {}",
+                        policies_dir.display()
+                    );
                     Some(w)
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to start policy hot-reload: {e}");
+                    tracing::warn!(
+                        engine_label = label,
+                        "Failed to start policy hot-reload: {e}"
+                    );
                     None
                 }
             }
@@ -278,6 +335,7 @@ impl PolicyEngine {
         };
 
         tracing::info!(
+            engine_label = label,
             "Policy engine initialized (policies_dir={}, loaded={policy_count})",
             policies_dir.display()
         );
@@ -289,8 +347,12 @@ impl PolicyEngine {
             _watcher: watcher,
         }));
         let tick_hook_in_flight = Arc::new(AtomicBool::new(false));
-        let actor =
-            PolicyEngineActor::spawn(inner.clone(), db.clone(), tick_hook_in_flight.clone())?;
+        let actor = PolicyEngineActor::spawn(
+            inner.clone(),
+            db.clone(),
+            tick_hook_in_flight.clone(),
+            label,
+        )?;
         let engine = Self {
             inner,
             actor,
@@ -300,6 +362,21 @@ impl PolicyEngine {
         supervisor_bridge.attach_engine(&engine);
 
         Ok(engine)
+    }
+
+    /// Approximate number of commands waiting in the actor queue (#747).
+    /// Zero when idle. Reported for observability when a tick hook times out
+    /// so operators can tell whether the stuck worker is also holding up
+    /// queued callers.
+    pub fn actor_queue_depth(&self) -> usize {
+        self.actor
+            .queue_depth
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Short label identifying this engine instance (e.g. "main", "tick").
+    pub fn actor_label(&self) -> &'static str {
+        self.actor.label
     }
 
     pub fn downgrade(&self) -> PolicyEngineHandle {
@@ -321,10 +398,24 @@ impl PolicyEngine {
 
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
         let (reply_tx, reply_rx) = mpsc::channel();
+        // Approximate queue depth is bumped before the send. The actor drops it
+        // back down when it pops the command off the channel (#747).
         self.actor
-            .tx
-            .send(command(reply_tx))
-            .map_err(|_| anyhow::anyhow!("policy engine actor is unavailable"))?;
+            .queue_depth
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Err(e) = self.actor.tx.send(command(reply_tx)) {
+            // Send failed — the actor is gone, undo our increment so the gauge
+            // does not drift upward forever.
+            self.actor
+                .queue_depth
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |d| Some(d.saturating_sub(1)),
+                )
+                .ok();
+            return Err(anyhow::anyhow!("policy engine actor is unavailable: {e}"));
+        }
         reply_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("policy engine actor response channel dropped"))
