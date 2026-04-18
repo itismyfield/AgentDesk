@@ -71,11 +71,38 @@ fn context_reset_slot_thread_before_reuse(dispatch_context: Option<&serde_json::
         .unwrap_or(false)
 }
 
-// #750: removed — announce bot no longer writes dispatch-lifecycle emoji
-// reactions (see sync_dispatch_status_reaction for rationale). The
-// DispatchMessageTarget / DispatchStatusReactionState helpers that supported
-// the feature have no external callers; keeping them would just preserve
-// dead code paths that drift over time.
+/// #750: announce bot no longer writes ⏳ or ✅ (command bot handles those).
+/// The ❌ failure marker is still written because command bot unconditionally
+/// adds ✅ when a response is delivered — a failed dispatch that returned any
+/// text would otherwise show a false green check. `DispatchMessageTarget`
+/// locates the dispatch message for this narrow write path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DispatchMessageTarget {
+    channel_id: String,
+    message_id: String,
+}
+
+fn dispatch_failure_emoji_path() -> &'static str {
+    "%E2%9D%8C" // ❌
+}
+
+fn parse_dispatch_message_target(dispatch_context: Option<&str>) -> Option<DispatchMessageTarget> {
+    let context = dispatch_context_value(dispatch_context)?;
+    let channel_id = context
+        .get("discord_message_channel_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let message_id = context
+        .get("discord_message_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(DispatchMessageTarget {
+        channel_id: channel_id.to_string(),
+        message_id: message_id.to_string(),
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewFollowupKind {
@@ -405,17 +432,80 @@ pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
     Ok(())
 }
 
-/// #750: announce bot lifecycle emoji reactions removed. The command bot
-/// (claudebot / codexbot) writes the authoritative turn-lifecycle emojis
-/// (`📬` / `⏳` / `✅`) onto the dispatch message; duplicating them from
-/// announce bot added no information and caused visual churn. This function
-/// is retained as a no-op so callers (outbox worker, direct callers in
-/// tests) keep compiling without an audit of every entry-point.
+/// #750: narrow-path status sync for announce bot.
+///
+/// Command bot (claudebot / codexbot) writes the ⏳ and ✅ reactions on the
+/// dispatch message — those two are no-ops here. The only status the
+/// announce-bot path still writes is ❌ for failed/cancelled dispatches,
+/// because `turn_bridge` unconditionally adds ✅ when a response is delivered
+/// (`services/discord/turn_bridge/mod.rs:1537`). Without this ❌ correction,
+/// a failed dispatch that returned any text would show a false green check.
+///
+/// This is also the only repair signal for status transitions that bypass
+/// turn_bridge entirely (queue/API cancellation, orphan recovery).
 pub(crate) async fn sync_dispatch_status_reaction(
-    _db: &crate::db::Db,
-    _dispatch_id: &str,
+    db: &crate::db::Db,
+    dispatch_id: &str,
 ) -> Result<(), String> {
-    Ok(())
+    let (status, target) = {
+        let conn = db
+            .lock()
+            .map_err(|_| format!("db lock failed for {dispatch_id} status reaction"))?;
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT status, context FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("lookup dispatch {dispatch_id}: {error}"))?;
+        let Some((status, context)) = row else {
+            return Ok(());
+        };
+        (status, parse_dispatch_message_target(context.as_deref()))
+    };
+
+    if !matches!(status.as_str(), "failed" | "cancelled") {
+        return Ok(());
+    }
+
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    let Some(token) = crate::credential::read_bot_token("announce") else {
+        return Err("no announce bot token".to_string());
+    };
+    let base_url = discord_api_base_url();
+    let url = discord_api_url(
+        &base_url,
+        &format!(
+            "/channels/{}/messages/{}/reactions/{}/@me",
+            target.channel_id,
+            target.message_id,
+            dispatch_failure_emoji_path()
+        ),
+    );
+    let response = shared_discord_http_client()
+        .put(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to add ❌ to dispatch message {}: {error}",
+                target.message_id
+            )
+        })?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let http_status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(format!(
+        "failed to add ❌ for dispatch message {} (status={status}): {http_status} {body}",
+        target.message_id
+    ))
 }
 
 fn thread_id_from_slot_map(thread_id_map: Option<&str>, channel_id: u64) -> Option<String> {
@@ -3288,10 +3378,10 @@ mod tests {
         );
     }
 
-    /// #750: announce bot no longer writes dispatch-lifecycle emoji
-    /// reactions (command bot `📬`/`⏳`/`✅` is the single source of
-    /// truth). Verify that calling sync_dispatch_status_reaction for a
-    /// completed dispatch produces ZERO reaction HTTP calls.
+    /// #750: announce bot no longer writes ⏳ or ✅ (command bot `📬`/`⏳`/`✅`
+    /// is the single source of truth for normal lifecycle). Verify that
+    /// calling sync_dispatch_status_reaction for a **completed** dispatch
+    /// produces ZERO reaction HTTP calls.
     #[tokio::test]
     async fn sync_dispatch_status_reaction_does_not_write_reactions_for_completed_dispatch() {
         let _env_lock = env_lock();
@@ -3350,10 +3440,12 @@ mod tests {
         );
     }
 
-    /// #750: same as above but for failed dispatch — still zero reaction
-    /// HTTP calls.
+    /// #750: failed dispatches DO get ❌ from the announce bot because
+    /// command bot's turn_bridge unconditionally adds ✅ on response delivery
+    /// — without this correction a failed dispatch would show a false green
+    /// check. Only ❌ is written; no ⏳ remove / ✅ remove operations.
     #[tokio::test]
-    async fn sync_dispatch_status_reaction_does_not_write_reactions_for_failed_dispatch() {
+    async fn sync_dispatch_status_reaction_writes_failure_cross_for_failed_dispatch() {
         let _env_lock = env_lock();
         let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
         let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
@@ -3404,9 +3496,10 @@ mod tests {
             .filter(|call| call.contains("/reactions/"))
             .cloned()
             .collect();
-        assert!(
-            reaction_calls.is_empty(),
-            "#750: failed dispatch must not trigger any reaction HTTP calls, got {reaction_calls:?}"
+        assert_eq!(
+            reaction_calls,
+            vec!["PUT /channels/123/messages/message-123/reactions/%E2%9D%8C/@me".to_string()],
+            "#750: failed dispatch must add exactly ❌ (no ⏳ or ✅ operations)"
         );
     }
 

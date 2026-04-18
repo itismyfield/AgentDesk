@@ -2077,35 +2077,34 @@ mod tests {
         );
     }
 
-    /// #750: announce bot no longer writes dispatch-lifecycle emoji
-    /// reactions. set_dispatch_status_on_conn previously enqueued a
-    /// status_reaction outbox row on every pending→dispatched / terminal
-    /// transition; that enqueue was removed because the only consumer
-    /// (announce-bot reaction writer) is disabled. Verify the transitions
-    /// still succeed but NO status_reaction row is created.
+    /// #750: announce bot no longer writes ⏳ or ✅ (command bot owns those),
+    /// so pending→dispatched and dispatched→completed transitions skip the
+    /// status_reaction enqueue. Failed/cancelled transitions STILL enqueue —
+    /// command bot unconditionally adds ✅ on response delivery, so announce
+    /// bot is the only path that can correct the visual state to ❌.
     #[test]
-    fn dispatch_status_transitions_do_not_enqueue_status_reaction_outbox_entries() {
+    fn dispatch_status_transitions_enqueue_only_for_failed_or_cancelled() {
         let db = test_db();
         let engine = test_engine(&db);
-        seed_card(&db, "card-reaction-outbox", "ready");
+        seed_card(&db, "card-reaction-outbox-success", "ready");
 
-        let dispatch = create_dispatch(
+        let success = create_dispatch(
             &db,
             &engine,
-            "card-reaction-outbox",
+            "card-reaction-outbox-success",
             "agent-1",
             "implementation",
-            "Reaction trail",
+            "Success trail",
             &json!({}),
         )
         .unwrap();
-        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+        let success_id = success["id"].as_str().unwrap().to_string();
 
         {
             let conn = db.separate_conn().unwrap();
             set_dispatch_status_on_conn(
                 &conn,
-                &dispatch_id,
+                &success_id,
                 "dispatched",
                 None,
                 "test_dispatch_outbox",
@@ -2114,13 +2113,16 @@ mod tests {
             )
             .unwrap();
         }
-
         let conn = db.separate_conn().unwrap();
-        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 0);
+        assert_eq!(
+            count_status_reaction_outbox(&conn, &success_id),
+            0,
+            "#750: pending→dispatched must not enqueue (command bot owns ⏳)"
+        );
 
         set_dispatch_status_on_conn(
             &conn,
-            &dispatch_id,
+            &success_id,
             "completed",
             Some(&json!({"completion_source":"test_complete"})),
             "test_complete",
@@ -2128,11 +2130,76 @@ mod tests {
             true,
         )
         .unwrap();
-
         assert_eq!(
-            count_status_reaction_outbox(&conn, &dispatch_id),
+            count_status_reaction_outbox(&conn, &success_id),
             0,
-            "#750: terminal transitions must not enqueue status_reaction rows"
+            "#750: dispatched→completed must not enqueue (command bot owns ✅)"
+        );
+
+        seed_card(&db, "card-reaction-outbox-failed", "ready");
+        let failed = create_dispatch(
+            &db,
+            &engine,
+            "card-reaction-outbox-failed",
+            "agent-1",
+            "implementation",
+            "Fail trail",
+            &json!({}),
+        )
+        .unwrap();
+        let failed_id = failed["id"].as_str().unwrap().to_string();
+        set_dispatch_status_on_conn(
+            &conn,
+            &failed_id,
+            "dispatched",
+            None,
+            "test_dispatch_outbox",
+            Some(&["pending"]),
+            false,
+        )
+        .unwrap();
+        set_dispatch_status_on_conn(
+            &conn,
+            &failed_id,
+            "failed",
+            Some(&json!({"completion_source":"test_failed"})),
+            "test_failed",
+            Some(&["dispatched"]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            count_status_reaction_outbox(&conn, &failed_id),
+            1,
+            "#750: dispatched→failed must enqueue (announce bot writes ❌ to overwrite command bot's ✅)"
+        );
+
+        seed_card(&db, "card-reaction-outbox-cancelled", "ready");
+        let cancelled = create_dispatch(
+            &db,
+            &engine,
+            "card-reaction-outbox-cancelled",
+            "agent-1",
+            "implementation",
+            "Cancel trail",
+            &json!({}),
+        )
+        .unwrap();
+        let cancelled_id = cancelled["id"].as_str().unwrap().to_string();
+        set_dispatch_status_on_conn(
+            &conn,
+            &cancelled_id,
+            "cancelled",
+            Some(&json!({"completion_source":"test_cancelled"})),
+            "test_cancelled",
+            Some(&["pending"]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            count_status_reaction_outbox(&conn, &cancelled_id),
+            1,
+            "#750: pending→cancelled must enqueue (covers queue/API cancel bypass paths)"
         );
     }
 

@@ -63,18 +63,35 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
 /// Once an older row is already `done` or `failed`, a later transition should
 /// enqueue a fresh row.
 ///
-/// #750: announce bot no longer writes lifecycle emoji reactions — the
-/// command bot's turn-lifecycle emojis are the single source of truth. The
-/// enqueue is preserved as a no-op sink so schema/test harness assumptions
-/// about outbox row counts continue to hold, but no new status_reaction rows
-/// are created. Existing rows in the wild are drained by the outbox worker's
-/// no-op handler.
-#[allow(dead_code)]
+/// #750: announce bot no longer writes ✅ on completed dispatches (command
+/// bot's turn-lifecycle ✅ is the single source of truth for success). The
+/// announce-bot path is preserved ONLY to write ❌ on failed/cancelled
+/// dispatches, because command bot's turn_bridge unconditionally adds ✅ when
+/// a response was delivered (see turn_bridge/mod.rs:1537) — a failed dispatch
+/// that returned any text would otherwise show a false green check. This
+/// enqueue is also the only repair path for status transitions that bypass
+/// turn_bridge entirely (queue/API cancellation, orphan recovery).
 pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
-    _conn: &rusqlite::Connection,
-    _dispatch_id: &str,
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
 ) -> rusqlite::Result<bool> {
-    Ok(false)
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT status FROM dispatch_outbox \
+             WHERE dispatch_id = ?1 AND action = 'status_reaction' \
+             ORDER BY id DESC LIMIT 1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(existing.as_deref(), Some("pending")) {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, status) VALUES (?1, 'status_reaction', 'pending')",
+        [dispatch_id],
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn record_dispatch_status_event_on_conn(
@@ -199,10 +216,17 @@ pub(crate) fn set_dispatch_status_on_conn(
                 result,
             )?;
 
-            // #750: status_reaction outbox enqueue removed — announce bot no
-            // longer writes dispatch-lifecycle emoji reactions. The outbox
-            // handler itself is a no-op for pre-existing rows (see
-            // src/server/routes/dispatches/outbox.rs).
+            // #750: only enqueue for failure/cancel transitions.
+            // - 'completed' → skip: command bot's turn_bridge already adds ✅.
+            // - 'failed' / 'cancelled' → enqueue: command bot unconditionally
+            //   adds ✅ if a response was delivered, so failed dispatches that
+            //   returned any text would otherwise show a false green check.
+            //   The announce-bot sync path writes ❌ to correct this, and is
+            //   also the only repair signal for status transitions that bypass
+            //   turn_bridge entirely (queue/API cancellation, orphan recovery).
+            if matches!(to_status, "failed" | "cancelled") {
+                ensure_dispatch_status_reaction_outbox_on_conn(conn, dispatch_id)?;
+            }
         }
         Ok(changed)
     })();

@@ -76,6 +76,12 @@ pub(crate) trait OutboxNotifier: Send + Sync {
         db: crate::db::Db,
         dispatch_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    fn sync_status_reaction(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// Production notifier that calls the real Discord functions.
@@ -102,6 +108,14 @@ impl OutboxNotifier for RealOutboxNotifier {
 
     async fn handle_followup(&self, db: crate::db::Db, dispatch_id: String) -> Result<(), String> {
         handle_completed_dispatch_followups(&db, &dispatch_id).await
+    }
+
+    async fn sync_status_reaction(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) -> Result<(), String> {
+        super::discord_delivery::sync_dispatch_status_reaction(&db, &dispatch_id).await
     }
 }
 
@@ -228,17 +242,13 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                     .await
             }
             "status_reaction" => {
-                // #750: announce bot no longer writes lifecycle emoji reactions.
-                // Command bot (turn_bridge) removes ⏳ on turn end and adds ✅
-                // on success, so the legacy announce-bot sync path is redundant.
-                // Any pre-existing status_reaction rows in the wild (from before
-                // this deploy) are drained as no-op — the command bot has
-                // already handled the ⏳→✅ transition on those turns, so no
-                // reaction state is actually lost.
-                tracing::debug!(
-                    "[dispatch-outbox] drop legacy status_reaction row (dispatch={dispatch_id}) — command bot handles reactions"
-                );
-                Ok(())
+                // #750: narrow-path sync — sync_dispatch_status_reaction only
+                // writes ❌ on failed/cancelled dispatches (command bot owns
+                // ⏳/✅). Drains legacy rows correctly and covers repair paths
+                // that bypass turn_bridge (queue/API cancel, orphan recovery).
+                notifier
+                    .sync_status_reaction(db.clone(), dispatch_id.clone())
+                    .await
             }
             other => {
                 tracing::warn!("[dispatch-outbox] Unknown action: {other}");
@@ -1323,14 +1333,26 @@ mod tests {
                 .push(format!("followup:{dispatch_id}"));
             Ok(())
         }
+
+        async fn sync_status_reaction(
+            &self,
+            _db: crate::db::Db,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("status_reaction:{dispatch_id}"));
+            Ok(())
+        }
     }
 
-    /// #750: status_reaction action is now a no-op inside the outbox worker
-    /// (announce bot lifecycle emoji path retired). The notifier is NOT
-    /// invoked for this action; the outbox row is still marked done so any
-    /// pre-existing status_reaction rows drain cleanly.
+    /// #750: status_reaction outbox rows route through notifier.sync_status_reaction.
+    /// The real notifier's sync is narrowed to write ❌ only for failed/cancelled
+    /// dispatches (command bot's ⏳/✅ covers normal lifecycle); mock captures
+    /// every invocation so we can assert the action is wired through.
     #[tokio::test]
-    async fn process_outbox_batch_drains_status_reaction_as_noop() {
+    async fn process_outbox_batch_routes_status_reaction_through_notifier() {
         let db = test_db();
         {
             let conn = db.lock().unwrap();
@@ -1344,9 +1366,10 @@ mod tests {
         let notifier = MockOutboxNotifier::default();
         let processed = process_outbox_batch(&db, &notifier).await;
         assert_eq!(processed, 1);
-        assert!(
-            notifier.calls.lock().unwrap().is_empty(),
-            "#750: notifier.sync_status_reaction must not be called; outbox handler is no-op"
+        assert_eq!(
+            *notifier.calls.lock().unwrap(),
+            vec!["status_reaction:dispatch-status".to_string()],
+            "#750: status_reaction action must flow through notifier.sync_status_reaction"
         );
 
         let conn = db.lock().unwrap();
