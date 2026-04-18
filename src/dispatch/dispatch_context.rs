@@ -1039,49 +1039,72 @@ fn resolve_repo_head_fallback_target(
 ///
 /// #761: These fields must be treated as untrusted when they arrive via the
 /// public dispatch-create API. A caller could craft a context that pins the
-/// review to any commit/path. `build_review_context` strips them before
-/// running the validation/refresh chain unless the caller set the
-/// `REVIEW_TARGET_TRUSTED_FLAG` sentinel.
+/// review to any commit/path. `build_review_context` with
+/// `ReviewTargetTrust::Untrusted` strips them before running the
+/// validation/refresh chain. The trust signal is passed **out-of-band** as a
+/// function parameter — never read from the JSON context — so no
+/// client-controlled field can opt out of stripping.
 pub(super) const UNTRUSTED_REVIEW_TARGET_FIELDS: &[&str] =
     &["reviewed_commit", "worktree_path", "branch", "target_repo"];
 
-/// Sentinel context flag signalling that review-target fields on the incoming
-/// context were populated by a trusted internal code path (e.g. a re-review
-/// follow-up that carries a validated `reviewed_commit` from
-/// `latest_completed_work_dispatch_target`). When absent or not `true`,
-/// `build_review_context` strips review-target fields and re-runs the full
-/// validation/refresh chain.
-pub(super) const REVIEW_TARGET_TRUSTED_FLAG: &str = "_trusted_review_target";
+/// Trust boundary for review-target fields on the incoming context.
+///
+/// #761 (Codex round-2): The round-1 design used a `_trusted_review_target`
+/// sentinel inside the context JSON. That made trust client-controlled — a
+/// crafted POST /api/dispatches body could set it and bypass stripping. This
+/// enum is the replacement: it is an out-of-band Rust-type parameter, not a
+/// JSON field. API-sourced code paths (`POST /api/dispatches` → dispatch
+/// service → `create_dispatch_core_internal` → `build_review_context`) always
+/// pass `Untrusted`. Only internal callers that legitimately pre-populate
+/// review-target fields (e.g. tests simulating a specific target_repo
+/// recovery path) may opt in via `Trusted`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ReviewTargetTrust {
+    /// Review-target fields in the incoming context are UNTRUSTED and will be
+    /// stripped. The validation/refresh chain then resolves them fresh from
+    /// the card's history (latest completed work dispatch → worktree lookup →
+    /// issue commit recovery → repo HEAD fallback). This is the default for
+    /// anything reachable via the public HTTP API.
+    Untrusted,
+    /// Review-target fields in the incoming context are TRUSTED and will be
+    /// passed through to the downstream validation/refresh chain. Only use
+    /// this from internal call sites where the fields came from a
+    /// first-party source (not user-controlled JSON).
+    Trusted,
+}
 
 /// Build the context JSON string for a review dispatch.
 ///
 /// Injects `reviewed_commit`, `branch`, `worktree_path`, and provider info.
 /// Prefers worktree branch (if found for this card's issue) over main HEAD.
 ///
-/// #761: Review-target fields on `context` are treated as untrusted by
-/// default — they are stripped unless the caller set
-/// `REVIEW_TARGET_TRUSTED_FLAG` to `true`. Untrusted callers (anyone reaching
-/// `POST /api/dispatches`) cannot preseed `reviewed_commit` / `worktree_path`
-/// / `branch` / `target_repo` to bypass the card-issue commit validation,
-/// stale-worktree refresh, or target-repo recovery paths.
+/// #761 (Codex round-2): `trust` is an out-of-band parameter. `Untrusted`
+/// unconditionally strips `reviewed_commit` / `worktree_path` / `branch` /
+/// `target_repo` from the incoming context before the validation/refresh
+/// chain runs. No JSON field on `context` can toggle this behavior — the
+/// previous `_trusted_review_target` sentinel has been removed. API-sourced
+/// callers (anyone reaching `POST /api/dispatches`) MUST pass `Untrusted`;
+/// internal callers that already have first-party review-target values may
+/// opt into `Trusted`.
 pub(super) fn build_review_context(
     db: &Db,
     kanban_card_id: &str,
     to_agent_id: &str,
     context: &serde_json::Value,
+    trust: ReviewTargetTrust,
 ) -> Result<String> {
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
 
     // #761: Strip untrusted review-target fields before any downstream code
-    // consumes them. The trusted-internal flag opts out but is consumed here
-    // so it never propagates into the persisted dispatch context.
-    let trusted_target = ctx_val
-        .get(REVIEW_TARGET_TRUSTED_FLAG)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // consumes them. The trust decision is out-of-band (the `trust` parameter
+    // on this function's signature, not a JSON field), so a malicious or buggy
+    // POST /api/dispatches body cannot opt out of stripping. Any legacy
+    // `_trusted_review_target` key in the payload is also removed so it
+    // cannot leak into the persisted dispatch context and mislead future
+    // readers into thinking it carries meaning.
     if let Some(obj) = ctx_val.as_object_mut() {
-        obj.remove(REVIEW_TARGET_TRUSTED_FLAG);
-        if !trusted_target {
+        obj.remove("_trusted_review_target");
+        if matches!(trust, ReviewTargetTrust::Untrusted) {
             let mut stripped: Vec<&str> = Vec::new();
             for field in UNTRUSTED_REVIEW_TARGET_FIELDS {
                 if obj.remove(*field).is_some() {
@@ -1570,6 +1593,7 @@ mod tests {
                 "branch": "wt/692-review",
                 "reviewed_commit": reviewed_commit,
             }),
+            ReviewTargetTrust::Untrusted,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();

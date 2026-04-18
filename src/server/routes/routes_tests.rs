@@ -2662,6 +2662,11 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
     // Simulate a malicious / buggy caller preseeding review-target fields.
     // The injected commit SHA is syntactically valid but points at nothing
     // in this repo; the injected worktree path doesn't exist either.
+    //
+    // #761 (Codex round-2): also set `_trusted_review_target: true` in the
+    // context to prove the flag is inert. The API-sourced code path MUST
+    // ignore any JSON-supplied trust signal and always treat review-target
+    // fields as untrusted.
     let injected_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     let injected_worktree = "/tmp/agentdesk-761-attacker-controlled-worktree";
     let injected_target_repo = "/tmp/agentdesk-761-attacker-controlled-repo";
@@ -2675,6 +2680,7 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
             "worktree_path": injected_worktree,
             "branch": "attacker/controlled-branch",
             "target_repo": injected_target_repo,
+            "_trusted_review_target": true,
         }
     })
     .to_string();
@@ -2741,6 +2747,132 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
         canonical(&real_worktree_path),
         "worktree_path must resolve to the card's real repo dir"
     );
+
+    // #761 (Codex round-2): The `_trusted_review_target` flag must be
+    // scrubbed from the persisted dispatch context — it has no meaning on
+    // the API-sourced path and must not become an audit artifact that
+    // implies the client steered the review target.
+    assert!(
+        context.get("_trusted_review_target").is_none(),
+        "client-supplied _trusted_review_target flag must not persist into the dispatch context"
+    );
+}
+
+/// #761 (Codex round-2): Focused negative test for the trust-boundary
+/// redesign. The previous round's `_trusted_review_target` context flag was
+/// client-controlled, so an attacker could set it alongside injected
+/// review-target fields and bypass stripping entirely. The fix replaces the
+/// flag with an out-of-band Rust enum parameter on `build_review_context`,
+/// and the API-sourced path
+/// (`POST /api/dispatches` → `create_dispatch_core_internal`) always uses
+/// `ReviewTargetTrust::Untrusted`. This test asserts the flag cannot bypass
+/// stripping on its own, even without any "real" review target existing for
+/// the card — the injected values must be dropped and never resurrected
+/// from the context payload.
+#[tokio::test]
+async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
+    let db = test_db();
+    seed_test_agents(&db);
+    let engine = test_engine(&db);
+
+    // Deliberately do NOT seed any work dispatch or pr_tracking row for this
+    // card — the validation/refresh chain has nothing to resolve. If the
+    // flag were honored, the injected fields would slip straight into the
+    // persisted context. The fix means they get stripped and remain absent.
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES (
+                'card-761-flag', 'Ignore trust flag', 'in_progress', 'medium', 'ch-td', 999999,
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let injected_commit = "cafef00dcafef00dcafef00dcafef00dcafef00d";
+    let injected_worktree = "/tmp/agentdesk-761-flag-attacker-worktree";
+    let injected_target_repo = "/tmp/agentdesk-761-flag-attacker-repo";
+    let body = serde_json::json!({
+        "kanban_card_id": "card-761-flag",
+        "to_agent_id": "ch-td",
+        "dispatch_type": "review",
+        "title": "[Review R1] trust-flag bypass attempt",
+        "context": {
+            "reviewed_commit": injected_commit,
+            "worktree_path": injected_worktree,
+            "branch": "attacker/trust-flag-bypass",
+            "target_repo": injected_target_repo,
+            // The crux: client explicitly asserts trust. The server must ignore it.
+            "_trusted_review_target": true,
+        }
+    })
+    .to_string();
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatches")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Dispatch creation may succeed (validation chain has nothing to inject
+    // but that's not fatal for review dispatches — noop-style contexts are
+    // valid). What matters is that the INJECTED fields did not propagate.
+    // Some routes return CREATED on success or CONFLICT if the worktree
+    // recovery chain finds nothing usable; accept either, only assert on
+    // the persisted context if the row was created.
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    if status == StatusCode::CREATED {
+        let context = &json["dispatch"]["context"];
+        assert_ne!(
+            context["reviewed_commit"].as_str(),
+            Some(injected_commit),
+            "client-supplied trust flag must NOT bypass reviewed_commit stripping"
+        );
+        assert_ne!(
+            context["worktree_path"].as_str(),
+            Some(injected_worktree),
+            "client-supplied trust flag must NOT bypass worktree_path stripping"
+        );
+        assert_ne!(
+            context["branch"].as_str(),
+            Some("attacker/trust-flag-bypass"),
+            "client-supplied trust flag must NOT bypass branch stripping"
+        );
+        assert_ne!(
+            context["target_repo"].as_str(),
+            Some(injected_target_repo),
+            "client-supplied trust flag must NOT bypass target_repo stripping"
+        );
+        assert!(
+            context.get("_trusted_review_target").is_none(),
+            "client-supplied _trusted_review_target flag must not persist into the dispatch context"
+        );
+    } else {
+        // If creation failed, the injected values clearly didn't end up
+        // anywhere — test passes vacuously. But the response JSON must NOT
+        // echo them back (and the dispatch service doesn't echo request
+        // bodies on error, so this is a sanity guard only).
+        assert!(
+            !json.to_string().contains(injected_commit),
+            "error response must not echo the injected reviewed_commit: {json}"
+        );
+    }
 }
 
 #[tokio::test]

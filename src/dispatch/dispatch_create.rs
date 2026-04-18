@@ -7,9 +7,9 @@ use crate::engine::PolicyEngine;
 
 use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
 use super::dispatch_context::{
-    build_review_context, dispatch_context_with_session_strategy, dispatch_context_worktree_target,
-    inject_review_dispatch_identifiers, resolve_card_target_repo_ref, resolve_card_worktree,
-    resolve_parent_dispatch_context,
+    ReviewTargetTrust, build_review_context, dispatch_context_with_session_strategy,
+    dispatch_context_worktree_target, inject_review_dispatch_identifiers,
+    resolve_card_target_repo_ref, resolve_card_worktree, resolve_parent_dispatch_context,
 };
 use super::dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, record_dispatch_status_event_on_conn,
@@ -237,11 +237,22 @@ fn create_dispatch_core_internal(
         }
     }
     let context_str = if dispatch_type == "review" {
+        // #761 (Codex round-2): `create_dispatch_core_internal` is the single
+        // funnel for every review dispatch that originates from the public
+        // HTTP API (POST /api/dispatches → dispatch_service::create_dispatch
+        // → here) as well as from JS policies
+        // (`agentdesk.dispatch.create(..., "review", ...)`). Neither of those
+        // call sites is entitled to pre-seed review-target fields, so this
+        // path is ALWAYS untrusted. Internal tests or future Rust callers that
+        // need to pre-populate review-target fields must NOT go through
+        // `create_dispatch*` — they must call `build_review_context` directly
+        // with `ReviewTargetTrust::Trusted`.
         build_review_context(
             db,
             kanban_card_id,
             to_agent_id,
             &context_with_session_strategy,
+            ReviewTargetTrust::Untrusted,
         )?
     } else {
         let mut base = serde_json::to_string(&context_with_session_strategy)?;

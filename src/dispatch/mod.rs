@@ -23,7 +23,7 @@ pub(crate) use dispatch_context::{
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]
-use dispatch_context::{build_review_context, inject_review_merge_base_context};
+use dispatch_context::{ReviewTargetTrust, build_review_context, inject_review_merge_base_context};
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_conn;
 #[allow(unused_imports)]
@@ -2757,8 +2757,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-target", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-target",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], completed_commit);
@@ -2813,8 +2819,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-stale-worktree", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-stale-worktree",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let actual_worktree = std::fs::canonicalize(parsed["worktree_path"].as_str().unwrap())
             .unwrap()
@@ -2862,8 +2874,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-stale-repo", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-stale-repo",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -2913,8 +2931,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-no-issue", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-no-issue",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -2981,8 +3005,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-no-issue-tr", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-no-issue-tr",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3053,8 +3083,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-recycled-wt", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-recycled-wt",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3136,8 +3172,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-external-tr", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-external-tr",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3219,8 +3261,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-descendant", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-descendant",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3293,8 +3341,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-merge-base", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-merge-base",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3351,8 +3405,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-match", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-match",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], matching_commit);
@@ -3396,8 +3456,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-mismatch", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-mismatch",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], expected_commit);
@@ -3449,9 +3515,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-worktree-fallback", "agent-1", &json!({}))
-                .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-worktree-fallback",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["worktree_path"], repo_dir);
@@ -3472,8 +3543,14 @@ mod tests {
         run_git(repo_dir, &["commit", "-m", "feat: add tracked file"]);
         std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
 
-        let err = build_review_context(&db, "card-review-dirty-root", "agent-1", &json!({}))
-            .expect_err("dirty repo root must block repo HEAD fallback");
+        let err = build_review_context(
+            &db,
+            "card-review-dirty-root",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .expect_err("dirty repo root must block repo HEAD fallback");
 
         assert!(
             err.to_string()
@@ -3510,8 +3587,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let err = build_review_context(&db, "card-review-dirty-completion", "agent-1", &json!({}))
-            .expect_err("dirty repo root must block fallback after commitless completion");
+        let err = build_review_context(
+            &db,
+            "card-review-dirty-completion",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .expect_err("dirty repo root must block fallback after commitless completion");
 
         assert!(
             err.to_string()
@@ -3566,9 +3649,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-external-reject", "agent-1", &json!({}))
-                .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-external-reject",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert!(
@@ -3641,16 +3729,22 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        // #761: Trusted internal callers may pre-seed `target_repo` to steer
-        // review at an external repo. Public API callers cannot — the field
-        // is stripped before the validation chain runs (see
-        // review_context_strips_untrusted_input_target_repo for the negative
-        // case).
+        // #761 (Codex round-2): Trusted internal callers may pre-seed
+        // `target_repo` to steer review at an external repo. Public API
+        // callers cannot — the trust signal is an out-of-band enum on
+        // `build_review_context`, NOT a JSON field on the context payload.
+        // The API-sourced path (`POST /api/dispatches` →
+        // `create_dispatch_core_internal` → `build_review_context` with
+        // `ReviewTargetTrust::Untrusted`) always strips review-target fields
+        // regardless of what the client sent. See
+        // `dispatch_create_review_strips_untrusted_review_target_fields_from_context`
+        // in `server/routes/routes_tests.rs` for the API-level negative case.
         let context = build_review_context(
             &db,
             "card-review-external-accept",
             "agent-1",
-            &json!({ "target_repo": external_dir, "_trusted_review_target": true }),
+            &json!({ "target_repo": external_dir }),
+            ReviewTargetTrust::Trusted,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3671,9 +3765,12 @@ mod tests {
         assert_eq!(parsed["branch"], "codex/627-target-repo");
         assert_eq!(actual_worktree, expected_external_dir);
         assert_eq!(actual_target_repo, expected_external_dir);
+        // #761 (Codex round-2): Even though trust is now an out-of-band Rust
+        // parameter, defensively confirm no legacy `_trusted_review_target`
+        // JSON key slips through if some upstream caller ever attached one.
         assert!(
             parsed.get("_trusted_review_target").is_none(),
-            "trusted sentinel must be consumed and not persisted into the dispatch context"
+            "legacy trusted sentinel must not appear in the persisted dispatch context"
         );
     }
 
@@ -3712,6 +3809,7 @@ mod tests {
                 "review_mode": "noop_verification",
                 "noop_reason": "spec already satisfied"
             }),
+            ReviewTargetTrust::Untrusted,
         )
         .expect("explicit noop work should still create a noop_verification review dispatch");
         let parsed: serde_json::Value =
@@ -3736,9 +3834,14 @@ mod tests {
             .to_string();
         run_git(repo_dir, &["checkout", "main"]);
 
-        let context =
-            build_review_context(&db, "card-review-contains-branch", "agent-1", &json!({}))
-                .unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-contains-branch",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
@@ -3777,8 +3880,14 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-quality", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-quality",
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         let checklist = parsed["review_quality_checklist"]
             .as_array()
