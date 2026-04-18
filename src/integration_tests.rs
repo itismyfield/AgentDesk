@@ -8696,6 +8696,139 @@ mod tests {
         );
     }
 
+    /// #751 (Codex follow-up on PR #749): reviewLoopFingerprintInfo must
+    /// source head_sha from the latest completed work dispatch first, not
+    /// pr_tracking. pr_tracking.head_sha is refreshed only by the CI
+    /// recovery polling path (onTick1min) and lags fast rework/review
+    /// cycles — if the guard used the stale pr_tracking value, three
+    /// *distinct* rework completions (each with a different head_sha)
+    /// would still share a fingerprint and incorrectly trip the
+    /// same-head loop guard.
+    ///
+    /// This test seeds a stale pr_tracking.head_sha and three rework
+    /// completions with distinct head_shas; the loop guard must NOT
+    /// escalate — each fingerprint is unique.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_751_review_loop_fingerprint_uses_latest_work_head_not_stale_pr_tracking() {
+        let _gh = install_mock_gh(&[]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-751-fresh-head",
+            "in_progress",
+            "test/repo",
+            751,
+            None,
+        );
+        // Stale pr_tracking — NEVER advances in this test. If the guard
+        // fingerprints off this value, all 3 cycles share a fingerprint.
+        seed_pr_tracking(
+            &db,
+            "card-751-fresh-head",
+            "test/repo",
+            None,
+            "wt/card-751-fresh-head",
+            Some(751),
+            Some("sha-stale-tracking-never-refreshes"),
+            "wait-ci",
+        );
+
+        for idx in 1..=3 {
+            let dispatch_id = format!("rw-751-fresh-{idx}");
+            // Distinct head_sha per iteration — simulates fast rework
+            // cycles producing new commits before CI recovery polls.
+            let fresh_head = format!("sha-fresh-rework-{idx}");
+
+            seed_dispatch(
+                &db,
+                &dispatch_id,
+                "card-751-fresh-head",
+                "rework",
+                "pending",
+            );
+            seed_assistant_response_for_dispatch(&db, &dispatch_id, "fresh rework head");
+
+            // Pass completed_commit via the completion result so
+            // loadLatestCompletedWorkTarget surfaces the fresh head when
+            // reviewLoopFingerprintInfo runs inside OnDispatchCompleted.
+            let result = dispatch::complete_dispatch(
+                &db,
+                &engine,
+                &dispatch_id,
+                &serde_json::json!({
+                    "completion_source": "test_harness",
+                    "completed_commit": fresh_head,
+                    "completed_branch": "wt/card-751-fresh-head",
+                }),
+            );
+            assert!(
+                result.is_ok(),
+                "rework completion should succeed on fresh-head attempt {idx}: {:?}",
+                result.err()
+            );
+            kanban::drain_hook_side_effects(&db, &engine);
+
+            if idx < 3 {
+                let conn = db.lock().unwrap();
+                conn.execute(
+                    "UPDATE task_dispatches \
+                     SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') \
+                     WHERE kanban_card_id = 'card-751-fresh-head' AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE kanban_cards \
+                     SET status = 'in_progress', review_status = NULL, blocked_reason = NULL, updated_at = datetime('now') \
+                     WHERE id = 'card-751-fresh-head'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+
+        let (review_status, metadata_json): (Option<String>, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT review_status, metadata FROM kanban_cards WHERE id = 'card-751-fresh-head'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        // NOT escalated — each rework had a distinct head_sha so the guard
+        // must treat them as separate fingerprints.
+        assert_ne!(
+            review_status.as_deref(),
+            Some("dilemma_pending"),
+            "distinct-head rework cycles must NOT be escalated as same-head churn"
+        );
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        // enter_count should be 1 (latest fingerprint, not accumulated).
+        let enter_count = metadata["loop_guard"]["review_churn"]["enter_count"]
+            .as_i64()
+            .unwrap_or(0);
+        assert!(
+            enter_count < 3,
+            "distinct-head fingerprints must not accumulate into same-head churn (enter_count={})",
+            enter_count
+        );
+        let guard_head = metadata["loop_guard"]["review_churn"]["head_sha"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            guard_head.starts_with("sha-fresh-rework-"),
+            "loop guard must source head_sha from the latest completed work, not stale pr_tracking (got '{}')",
+            guard_head
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_690_high_risk_recovery_job_failure_becomes_code_rework() {
