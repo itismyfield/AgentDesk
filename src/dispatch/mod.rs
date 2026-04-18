@@ -23,6 +23,8 @@ pub(crate) use dispatch_context::{
 #[cfg(test)]
 use dispatch_context::{build_review_context, inject_review_merge_base_context};
 #[allow(unused_imports)]
+pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_conn;
+#[allow(unused_imports)]
 pub use dispatch_create::{
     create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
     create_dispatch_core_with_id_and_options, create_dispatch_core_with_options,
