@@ -1840,7 +1840,9 @@ mod tests {
     fn test_append_claude_mcp_config_arg_skips_when_no_runtime_config() {
         let _guard = crate::services::discord::runtime_store::lock_test_env();
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_memento_access_key = std::env::var_os("MEMENTO_ACCESS_KEY");
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") };
 
         let mut args = vec!["-p".to_string()];
         append_claude_mcp_config_arg(&mut args);
@@ -1850,6 +1852,10 @@ mod tests {
         match previous_root {
             Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_memento_access_key {
+            Some(value) => unsafe { std::env::set_var("MEMENTO_ACCESS_KEY", value) },
+            None => unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") },
         }
     }
 

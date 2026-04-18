@@ -1688,7 +1688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discord_gateway_lease_allows_only_one_live_runtime_per_token_hash() {
+    async fn postgres_discord_gateway_lease_allows_only_one_live_runtime_per_token_hash() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
         let pool = crate::db::postgres::connect_and_migrate(&config)
@@ -1727,7 +1727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discord_gateway_lease_allows_parallel_runtimes_for_different_token_hashes() {
+    async fn postgres_discord_gateway_lease_allows_parallel_runtimes_for_different_token_hashes() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
         let pool = crate::db::postgres::connect_and_migrate(&config)
@@ -1766,7 +1766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discord_gateway_lease_fails_over_across_separate_runtime_pools() {
+    async fn postgres_discord_gateway_lease_fails_over_across_separate_runtime_pools() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
         let pool_a = crate::db::postgres::connect_and_migrate(&config)

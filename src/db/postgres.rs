@@ -89,6 +89,10 @@ pub fn database_summary(config: &Config) -> String {
     if database_url_override().is_some() {
         return "env:DATABASE_URL".to_string();
     }
+    config_database_summary(config)
+}
+
+fn config_database_summary(config: &Config) -> String {
     format!(
         "{}:{}/{} user={} pool_max={}",
         config.database.host,
@@ -356,8 +360,8 @@ fn database_url_override() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvisoryLockLease, connect_and_migrate, connect_options, database_enabled,
-        database_summary, startup_reseed,
+        AdvisoryLockLease, config_database_summary, connect_and_migrate, connect_options,
+        database_enabled, database_summary, startup_reseed,
     };
     use sqlx::Row;
 
@@ -514,7 +518,7 @@ mod tests {
         config.database.pool_max = 16;
 
         assert_eq!(
-            database_summary(&config),
+            config_database_summary(&config),
             "db.internal:5433/agentdesk_dev user=agentdesk_app pool_max=16"
         );
         assert!(connect_options(&config).unwrap().is_some());
@@ -589,7 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_lock_lease_allows_only_one_live_holder() {
+    async fn postgres_advisory_lock_lease_allows_only_one_live_holder() {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);
 
@@ -625,7 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_lock_lease_releases_on_drop_across_separate_pools() {
+    async fn postgres_advisory_lock_lease_releases_on_drop_across_separate_pools() {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);
 

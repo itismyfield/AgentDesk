@@ -22,6 +22,7 @@ src/
 │   ├── migrate/
 │   │   ├── apply.rs
 │   │   ├── plan.rs
+│   │   ├── postgres_cutover.rs
 │   │   ├── source.rs
 │   │   └── tests.rs
 │   ├── args.rs
@@ -38,10 +39,12 @@ src/
 ├── db/
 │   ├── agents.rs
 │   ├── auto_queue.rs
+│   ├── builtin_pipeline.rs
 │   ├── cron_history.rs
 │   ├── kanban.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
+│   ├── postgres.rs
 │   ├── schema.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_transcripts.rs
@@ -289,6 +292,7 @@ src/
 │   ├── ai_screen.rs
 │   └── mod.rs
 ├── utils/
+│   ├── async_bridge.rs
 │   ├── format.rs
 │   └── mod.rs
 ├── bootstrap.rs

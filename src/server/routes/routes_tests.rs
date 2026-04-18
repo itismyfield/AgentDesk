@@ -7832,7 +7832,7 @@ async fn transition_to_done_records_true_negative_in_postgres_review_tuning() {
 }
 
 #[tokio::test]
-async fn reopen_updates_review_tuning_outcome_in_postgres() {
+async fn postgres_reopen_updates_review_tuning_outcome_in_postgres() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -16978,7 +16978,7 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn activate_run_id_blocks_phase_gate_paused_runs_pg() {
+async fn activate_run_id_blocks_phase_gate_paused_runs_pg_path() {
     crate::pipeline::ensure_loaded();
 
     let db = test_db();
@@ -17283,7 +17283,7 @@ async fn auto_queue_activate_dispatches_pg_only_run_without_sqlite_mirror() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resume_run_skips_phase_gate_blocked_runs_pg() {
+async fn resume_run_skips_phase_gate_blocked_runs_pg_path() {
     crate::pipeline::ensure_loaded();
 
     let db = test_db();
