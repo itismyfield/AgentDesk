@@ -121,9 +121,9 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3178 | giant-file |
+| `server` | `src/server/mod.rs` | 3181 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
-| `server::boot` | `src/server/boot.rs` | 148 |  |
+| `server::boot` | `src/server/boot.rs` | 152 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 71 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 200 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1389 | giant-file |
