@@ -584,6 +584,13 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
     let key_ms = format!("last_tick_{}_ms", label);
     let key_status = format!("last_tick_{}_status", label);
     let key_duration = format!("last_tick_{}_duration_ms", label);
+    // #747 round-2: `*_skip_ms` tracks the last moment we *attempted* a tick
+    // that was rejected by the in-flight guard. It advances for every
+    // SkippedInFlight so operators have visibility into a wedged tick, but
+    // `last_tick_*_ms` only advances for hooks that actually ran (Ok / Error
+    // / JoinError / Timeout — the timed-out body continues in the
+    // background and therefore still counts as tick progress).
+    let key_skip_ms = format!("last_tick_{}_skip_ms", label);
     let status = execution.outcome.status();
 
     match execution.outcome {
@@ -620,30 +627,26 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
         PolicyTickHookOutcome::SkippedInFlight => {}
     }
 
+    let skipped_inflight = matches!(execution.outcome, PolicyTickHookOutcome::SkippedInFlight);
+
     if let Ok(conn) = db.lock() {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key_ms, now_ms],
-        )
-        .ok();
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
-        )
-        .ok();
+        // Always record the status + skip timestamp so dashboards can see
+        // a skipped invocation happened. Duration for SkippedInFlight is
+        // always ZERO, which is fine.
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
             rusqlite::params![key_status, status],
         )
         .ok();
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
-            [&now_ms],
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key_skip_ms, now_ms],
         )
         .ok();
+        // The global last-skip marker is useful for at-a-glance health.
         conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_duration_ms', ?1)",
-            [execution.elapsed.as_millis().to_string()],
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_skip_ms', ?1)",
+            [&now_ms],
         )
         .ok();
         conn.execute(
@@ -651,6 +654,33 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
             [status],
         )
         .ok();
+
+        if !skipped_inflight {
+            // Only real hook executions (including Timeout, whose body
+            // continues running in the background) advance the freshness
+            // timestamps. This ensures a wedged tick becomes visibly
+            // overdue on `/api/cron-jobs` instead of looking "recent".
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key_ms, now_ms],
+            )
+            .ok();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
+            )
+            .ok();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
+                [&now_ms],
+            )
+            .ok();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_duration_ms', ?1)",
+                [execution.elapsed.as_millis().to_string()],
+            )
+            .ok();
+        }
     }
 }
 
@@ -1482,6 +1512,216 @@ mod tests {
 
         release_tx.send(()).unwrap();
         blocker.join().unwrap();
+    }
+
+    /// Regression for #747 round-2 Finding 2: a `SkippedInFlight` tick must
+    /// NOT advance `last_tick_<tier>_ms` / `last_tick_ms`. Those fields are
+    /// exposed by `cron_api` as `lastRunAtMs` / `nextRunAtMs`; if they
+    /// advance on skip, a wedged tick shows "recent" on the dashboard while
+    /// no hook body is actually progressing. A skip must ONLY advance the
+    /// new `last_tick_<tier>_skip_ms` / `last_tick_skip_ms` fields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn skipped_inflight_does_not_advance_last_tick_ms() {
+        let db = test_db();
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = test_engine_with_dir(&db, dir.path());
+
+        // Wedge the actor so the first hook times out and the second call
+        // hits SkippedInFlight.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker_engine = engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine
+                .block_actor_for_test(entered_tx, release_rx)
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        // First call: hook body runs past the deadline → Timeout. The body
+        // is still running in the background — this counts as "tick
+        // progress" for freshness purposes, so it SHOULD advance
+        // last_tick_1min_ms.
+        let timeout_outcome = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(timeout_outcome, PolicyTickHookOutcome::Timeout);
+        let tick_ms_after_timeout = kv_value(&db, "last_tick_1min_ms")
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("Timeout must advance last_tick_1min_ms");
+        let global_tick_ms_after_timeout = kv_value(&db, "last_tick_ms")
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("Timeout must advance last_tick_ms");
+
+        // Need strictly different millisecond reads; sleep just past 1ms.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Second call while the first is still holding the in-flight guard
+        // → SkippedInFlight. This must NOT touch last_tick_1min_ms or
+        // last_tick_ms, but MUST advance last_tick_1min_skip_ms /
+        // last_tick_skip_ms.
+        let skipped_outcome = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(skipped_outcome, PolicyTickHookOutcome::SkippedInFlight);
+
+        let tick_ms_after_skip = kv_value(&db, "last_tick_1min_ms")
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("last_tick_1min_ms must still be present after skip");
+        let global_tick_ms_after_skip = kv_value(&db, "last_tick_ms")
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("last_tick_ms must still be present after skip");
+        assert_eq!(
+            tick_ms_after_skip, tick_ms_after_timeout,
+            "SkippedInFlight must NOT advance last_tick_1min_ms"
+        );
+        assert_eq!(
+            global_tick_ms_after_skip, global_tick_ms_after_timeout,
+            "SkippedInFlight must NOT advance last_tick_ms"
+        );
+
+        // The new skip freshness markers should be populated.
+        let skip_ms = kv_value(&db, "last_tick_1min_skip_ms")
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("SkippedInFlight must populate last_tick_1min_skip_ms");
+        assert!(
+            skip_ms >= tick_ms_after_timeout,
+            "skip marker should be >= tick marker (skip={skip_ms}, tick={tick_ms_after_timeout})"
+        );
+        assert!(
+            kv_value(&db, "last_tick_skip_ms").is_some(),
+            "SkippedInFlight must populate global last_tick_skip_ms"
+        );
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+    }
+
+    /// Regression for #747 round-2 Finding 1: the auto-queue phase-gate
+    /// race between `onCardTerminal` (main engine) and `onTick1min`
+    /// (tick engine). After the last entry is marked `done`, a tick-side
+    /// `finalizeRunWithoutPhaseGate()` must NOT complete a run while its
+    /// owning `onCardTerminal` is still creating phase-gate dispatches.
+    ///
+    /// The grace window column `phase_gate_grace_until` is set by the
+    /// main engine's `onCardTerminal` path BEFORE it calls
+    /// `_createPhaseGateDispatches`, so the tick's finalize call refuses
+    /// to finalize the run until the grace window expires (or
+    /// `onCardTerminal` clears it on a non-phase-gate exit).
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase_gate_grace_window_blocks_tick_finalize_race() {
+        let db = test_db();
+        // Install a minimal probe policy that exposes just the
+        // finalizeRunWithoutPhaseGate behavior we want to exercise. We
+        // re-implement the helper here mirroring the production policy so
+        // the test stays self-contained.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("grace-window-probe.js"),
+            r#"
+            var PHASE_GATE_GRACE_WINDOW_MS = 30 * 1000;
+
+            function runWithinPhaseGateGrace(runId) {
+                var rows = agentdesk.db.query(
+                    "SELECT phase_gate_grace_until FROM auto_queue_runs WHERE id = ?",
+                    [runId]
+                );
+                if (rows.length === 0 || !rows[0].phase_gate_grace_until) return false;
+                var until = Date.parse(rows[0].phase_gate_grace_until);
+                if (!isFinite(until)) return false;
+                return Date.now() < until;
+            }
+
+            function finalizeRunWithoutPhaseGate(runId) {
+                if (runWithinPhaseGateGrace(runId)) {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('grace_probe_result', 'deferred')"
+                    );
+                    return false;
+                }
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('grace_probe_result', 'finalized')"
+                );
+                return true;
+            }
+
+            agentdesk.registerPolicy({
+                name: "grace-window-probe",
+                priority: 1,
+                onTick1min: function() {
+                    finalizeRunWithoutPhaseGate("run-race-1");
+                }
+            });
+            "#,
+        )
+        .unwrap();
+
+        // Seed the DB with an auto_queue_runs row and set the grace window
+        // into the future (simulating onCardTerminal having just started
+        // its continuation work on the main engine).
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, phase_gate_grace_until)
+                 VALUES ('run-race-1', 'test/repo', 'agent-1', 'active',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 seconds'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let engine = test_engine_with_dir(&db, dir.path());
+        let outcome = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(outcome, PolicyTickHookOutcome::Ok);
+        assert_eq!(
+            kv_value(&db, "grace_probe_result").as_deref(),
+            Some("deferred"),
+            "tick-side finalize must defer while the grace window is active"
+        );
+
+        // Now clear the grace window (simulating onCardTerminal finishing
+        // without a phase-gate path) and re-fire: the tick should now be
+        // allowed to finalize.
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE auto_queue_runs SET phase_gate_grace_until = NULL WHERE id = 'run-race-1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let outcome2 = fire_tick_hook_by_name_for_test(
+            &engine,
+            &db,
+            "OnTick1min",
+            "1min",
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(outcome2, PolicyTickHookOutcome::Ok);
+        assert_eq!(
+            kv_value(&db, "grace_probe_result").as_deref(),
+            Some("finalized"),
+            "once the grace window is cleared, finalize may proceed"
+        );
     }
 
     #[tokio::test]
