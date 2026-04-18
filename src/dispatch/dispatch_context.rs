@@ -925,11 +925,15 @@ pub(super) fn build_review_context(
                     );
                 }
                 if valid {
-                    if card_issue_number.is_none() {
-                        Some(target.clone())
-                    } else {
-                        refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
-                    }
+                    // #682: Always refresh to catch stale worktree_path even for
+                    // issue-less cards. refresh_review_target_worktree tries
+                    // resolve_card_worktree first (needs issue_number — returns
+                    // None here) and falls back to the card's repo_dir when the
+                    // reviewed_commit still lives there. Prior code returned the
+                    // recorded target unchanged when issue_number was None, which
+                    // meant a stale worktree_path propagated into the dispatch
+                    // context and failed `Path::exists()` at review execution.
+                    refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
                 } else {
                     None
                 }

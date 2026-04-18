@@ -2738,6 +2738,63 @@ mod tests {
         assert_eq!(parsed["branch"], "main");
     }
 
+    /// #682: An issue-less card (no github_issue_number) whose completed-work
+    /// dispatch points at a worktree that has since been cleaned up must NOT
+    /// leak the stale path into the review dispatch context. The refresh path
+    /// should fall back to the card's repo_dir when the reviewed commit still
+    /// lives there — matching the behavior already covered for issue-bearing
+    /// cards (see review_context_falls_back_to_repo_dir_when_completed_worktree_was_deleted).
+    ///
+    /// Regression guard for the kunkunGames port (commit bad35a191) which
+    /// bypassed refresh_review_target_worktree for issue-less cards and
+    /// returned the recorded (stale) target unchanged.
+    #[test]
+    fn review_context_refreshes_stale_worktree_for_issueless_card() {
+        let db = test_db();
+        seed_card(&db, "card-review-no-issue", "review");
+        // Deliberately do NOT set_card_issue_number — this is the edge case.
+
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let reviewed_commit = git_commit(repo_dir, "fix: issueless repo fallback (#682)");
+        let stale_wt_path = repo.path().join("wt-682-deleted-no-issue");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-no-issue', 'card-review-no-issue', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_wt_path,
+                    "completed_branch": "wt/682-deleted-no-issue",
+                    "completed_commit": reviewed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-no-issue", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        // Must NOT be the stale path — refresh should have dropped it in favor
+        // of the repo_dir fallback (where the reviewed_commit lives).
+        assert_ne!(
+            parsed["worktree_path"].as_str(),
+            Some(stale_wt_path.to_str().unwrap()),
+            "issue-less card must not propagate stale worktree_path into review context"
+        );
+        assert_eq!(parsed["worktree_path"], repo_dir);
+    }
+
     #[test]
     fn review_context_includes_merge_base_for_branch_review() {
         let db = test_db();
