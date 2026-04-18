@@ -7,6 +7,7 @@ use crate::services::platform::binary_resolver::{
     apply_runtime_path, resolve_binary_with_login_shell,
 };
 use regex::Regex;
+use sqlx::{PgPool, Row};
 use std::fs::File;
 use std::future::Future;
 use std::io::Write;
@@ -520,6 +521,37 @@ pub fn list_repos(db: &Db) -> Result<Vec<RepoRow>, String> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+pub async fn list_repos_pg(pool: &PgPool) -> Result<Vec<RepoRow>, String> {
+    let rows = sqlx::query(
+        "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at
+         FROM github_repos
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("list github_repos pg: {error}"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RepoRow {
+            id: row.try_get::<String, _>("id").unwrap_or_default(),
+            display_name: row
+                .try_get::<Option<String>, _>("display_name")
+                .ok()
+                .flatten(),
+            sync_enabled: row
+                .try_get::<Option<bool>, _>("sync_enabled")
+                .ok()
+                .flatten()
+                .unwrap_or(true),
+            last_synced_at: row
+                .try_get::<Option<String>, _>("last_synced_at")
+                .ok()
+                .flatten(),
+        })
+        .collect())
+}
+
 /// Register a new repo (or update display_name if already exists).
 pub fn register_repo(db: &Db, repo_id: &str) -> Result<RepoRow, String> {
     let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
@@ -528,6 +560,8 @@ pub fn register_repo(db: &Db, repo_id: &str) -> Result<RepoRow, String> {
         [repo_id],
     )
     .map_err(|e| format!("insert: {e}"))?;
+    crate::db::schema::seed_builtin_pipeline_stages(&conn)
+        .map_err(|e| format!("seed builtin pipeline stages: {e}"))?;
 
     let row = conn
         .query_row(
@@ -632,7 +666,7 @@ mod tests {
     use super::*;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

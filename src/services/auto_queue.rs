@@ -2,6 +2,7 @@ pub mod runtime;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::{BTreeMap, HashMap};
 use tracing::field::{Empty, display};
 
@@ -282,6 +283,32 @@ impl AutoQueueService {
         Self { db, engine }
     }
 
+    pub async fn status_with_pg(
+        &self,
+        pool: &PgPool,
+        input: StatusInput,
+    ) -> ServiceResult<AutoQueueStatusResponse> {
+        let run_id = auto_queue::find_latest_run_id_pg(
+            pool,
+            &StatusFilter {
+                repo: input.repo.clone(),
+                agent_id: input.agent_id.clone(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            ServiceError::internal(format!("load latest run: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("status.find_latest_run_id_pg")
+        })?;
+
+        let Some(run_id) = run_id else {
+            return Ok(AutoQueueStatusResponse::default());
+        };
+
+        self.status_for_run_pg(pool, &run_id, input).await
+    }
+
     pub fn prepare_generate_cards(
         &self,
         input: &PrepareGenerateInput,
@@ -464,6 +491,28 @@ impl AutoQueueService {
             .unwrap_or(Value::Null))
     }
 
+    pub async fn entry_json_with_pg(
+        &self,
+        pool: &PgPool,
+        entry_id: &str,
+        guild_id: Option<&str>,
+    ) -> ServiceResult<Value> {
+        let Some(record) = auto_queue::get_status_entry_pg(pool, entry_id)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("load status entry: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("entry_json_with_pg.get_status_entry_pg")
+                    .with_context("entry_id", entry_id)
+            })?
+        else {
+            return Ok(Value::Null);
+        };
+        let mut agent_bindings_cache = HashMap::new();
+        let entry = build_entry_view_pg(pool, record, guild_id, &mut agent_bindings_cache).await?;
+        Ok(json!(entry))
+    }
+
     pub fn status_for_run(
         &self,
         run_id: &str,
@@ -530,6 +579,43 @@ impl AutoQueueService {
             return Ok(AutoQueueStatusResponse::default());
         };
         self.status_for_run(&run_id, input)
+    }
+
+    async fn status_for_run_pg(
+        &self,
+        pool: &PgPool,
+        run_id: &str,
+        input: StatusInput,
+    ) -> ServiceResult<AutoQueueStatusResponse> {
+        let Some(run) = auto_queue::get_run_pg(pool, run_id)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("load run: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("status_for_run.get_run_pg")
+                    .with_context("run_id", run_id)
+            })?
+        else {
+            return Ok(AutoQueueStatusResponse::default());
+        };
+
+        let records = auto_queue::list_status_entries_pg(
+            pool,
+            run_id,
+            &StatusFilter {
+                repo: input.repo.clone(),
+                agent_id: input.agent_id.clone(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            ServiceError::internal(format!("load status entries: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("status_for_run.list_status_entries_pg")
+                .with_context("run_id", run_id)
+        })?;
+
+        build_status_response_pg(pool, run, records, input.guild_id.as_deref()).await
     }
 }
 
@@ -604,7 +690,7 @@ impl AutoQueueStatusEntryView {
 }
 
 fn build_status_response(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run: AutoQueueRunRecord,
     records: Vec<StatusEntryRecord>,
     guild_id: Option<&str>,
@@ -621,6 +707,173 @@ fn build_status_response(
         )?);
     }
 
+    let phase_gates = query_phase_gates(conn, &run.id);
+    Ok(assemble_status_response(run, entries, phase_gates))
+}
+
+fn query_phase_gates(conn: &libsql_rusqlite::Connection, run_id: &str) -> Vec<PhaseGateView> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, phase, status, dispatch_id, failure_reason, created_at, updated_at
+         FROM auto_queue_phase_gates
+         WHERE run_id = ?1
+         ORDER BY phase ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([run_id], |row| {
+        Ok(PhaseGateView {
+            id: row.get(0)?,
+            phase: row.get(1)?,
+            status: row.get(2)?,
+            dispatch_id: row.get(3)?,
+            failure_reason: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+async fn build_status_response_pg(
+    pool: &PgPool,
+    run: AutoQueueRunRecord,
+    records: Vec<StatusEntryRecord>,
+    guild_id: Option<&str>,
+) -> ServiceResult<AutoQueueStatusResponse> {
+    let mut agent_bindings_cache: HashMap<String, Option<crate::db::agents::AgentChannelBindings>> =
+        HashMap::new();
+    let mut entries = Vec::with_capacity(records.len());
+    for record in records {
+        entries.push(build_entry_view_pg(pool, record, guild_id, &mut agent_bindings_cache).await?);
+    }
+
+    let phase_gates = query_phase_gates_pg(pool, &run.id).await?;
+    Ok(assemble_status_response(run, entries, phase_gates))
+}
+
+async fn query_phase_gates_pg(pool: &PgPool, run_id: &str) -> ServiceResult<Vec<PhaseGateView>> {
+    let rows = sqlx::query(
+        "SELECT id::BIGINT AS id,
+                phase::BIGINT AS phase,
+                status,
+                dispatch_id,
+                failure_reason,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1
+         ORDER BY phase ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::internal(format!("load phase gates: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("query_phase_gates_pg")
+            .with_context("run_id", run_id)
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PhaseGateView {
+                id: row.try_get("id").map_err(map_phase_gate_row_error)?,
+                phase: row.try_get("phase").map_err(map_phase_gate_row_error)?,
+                status: row.try_get("status").map_err(map_phase_gate_row_error)?,
+                dispatch_id: row
+                    .try_get("dispatch_id")
+                    .map_err(map_phase_gate_row_error)?,
+                failure_reason: row
+                    .try_get("failure_reason")
+                    .map_err(map_phase_gate_row_error)?,
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(map_phase_gate_row_error)?,
+                updated_at: row
+                    .try_get("updated_at")
+                    .map_err(map_phase_gate_row_error)?,
+            })
+        })
+        .collect()
+}
+
+fn build_entry_view(
+    conn: &libsql_rusqlite::Connection,
+    record: StatusEntryRecord,
+    guild_id: Option<&str>,
+    agent_bindings_cache: &mut HashMap<String, Option<crate::db::agents::AgentChannelBindings>>,
+) -> ServiceResult<AutoQueueStatusEntryView> {
+    let bindings = if let Some(cached) = agent_bindings_cache.get(&record.agent_id) {
+        cached.clone()
+    } else {
+        let loaded = crate::db::agents::load_agent_channel_bindings(conn, &record.agent_id)
+            .map_err(|error| {
+                ServiceError::internal(format!("load agent channel bindings: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("build_entry_view.load_agent_channel_bindings")
+                    .with_context("agent_id", &record.agent_id)
+            })?;
+        agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
+        loaded
+    };
+    let dispatch_history =
+        auto_queue::list_entry_dispatch_history(conn, &record.id).map_err(|error| {
+            ServiceError::internal(format!("load entry dispatch history: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("build_entry_view.list_entry_dispatch_history")
+                .with_context("entry_id", &record.id)
+        })?;
+    let thread_links = build_entry_thread_links(&record, bindings.as_ref(), guild_id);
+    Ok(AutoQueueStatusEntryView::from_record(
+        record,
+        dispatch_history,
+        thread_links,
+    ))
+}
+
+async fn build_entry_view_pg(
+    pool: &PgPool,
+    record: StatusEntryRecord,
+    guild_id: Option<&str>,
+    agent_bindings_cache: &mut HashMap<String, Option<crate::db::agents::AgentChannelBindings>>,
+) -> ServiceResult<AutoQueueStatusEntryView> {
+    let bindings = if let Some(cached) = agent_bindings_cache.get(&record.agent_id) {
+        cached.clone()
+    } else {
+        let loaded = crate::db::agents::load_agent_channel_bindings_pg(pool, &record.agent_id)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("load agent channel bindings: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("build_entry_view.load_agent_channel_bindings_pg")
+                    .with_context("agent_id", &record.agent_id)
+            })?;
+        agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
+        loaded
+    };
+    let dispatch_history = auto_queue::list_entry_dispatch_history_pg(pool, &record.id)
+        .await
+        .map_err(|error| {
+            ServiceError::internal(format!("load entry dispatch history: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("build_entry_view.list_entry_dispatch_history_pg")
+                .with_context("entry_id", &record.id)
+        })?;
+    let thread_links = build_entry_thread_links(&record, bindings.as_ref(), guild_id);
+    Ok(AutoQueueStatusEntryView::from_record(
+        record,
+        dispatch_history,
+        thread_links,
+    ))
+}
+
+fn assemble_status_response(
+    run: AutoQueueRunRecord,
+    entries: Vec<AutoQueueStatusEntryView>,
+    phase_gates: Vec<PhaseGateView>,
+) -> AutoQueueStatusResponse {
     let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
     let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
     for entry in &entries {
@@ -662,74 +915,19 @@ fn build_status_response(
         };
     }
 
-    let phase_gates = query_phase_gates(conn, &run.id);
-
-    Ok(AutoQueueStatusResponse {
+    AutoQueueStatusResponse {
         run: Some(AutoQueueRunView::from(run)),
         entries,
         agents,
         thread_groups,
         phase_gates,
-    })
+    }
 }
 
-fn query_phase_gates(conn: &rusqlite::Connection, run_id: &str) -> Vec<PhaseGateView> {
-    let mut stmt = match conn.prepare(
-        "SELECT id, phase, status, dispatch_id, failure_reason, created_at, updated_at
-         FROM auto_queue_phase_gates
-         WHERE run_id = ?1
-         ORDER BY phase ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map([run_id], |row| {
-        Ok(PhaseGateView {
-            id: row.get(0)?,
-            phase: row.get(1)?,
-            status: row.get(2)?,
-            dispatch_id: row.get(3)?,
-            failure_reason: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-        })
-    })
-    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-    .unwrap_or_default()
-}
-
-fn build_entry_view(
-    conn: &rusqlite::Connection,
-    record: StatusEntryRecord,
-    guild_id: Option<&str>,
-    agent_bindings_cache: &mut HashMap<String, Option<crate::db::agents::AgentChannelBindings>>,
-) -> ServiceResult<AutoQueueStatusEntryView> {
-    let bindings = if let Some(cached) = agent_bindings_cache.get(&record.agent_id) {
-        cached.clone()
-    } else {
-        let loaded = crate::db::agents::load_agent_channel_bindings(conn, &record.agent_id)
-            .map_err(|error| {
-                ServiceError::internal(format!("load agent channel bindings: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("build_entry_view.load_agent_channel_bindings")
-                    .with_context("agent_id", &record.agent_id)
-            })?;
-        agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
-        loaded
-    };
-    let dispatch_history =
-        auto_queue::list_entry_dispatch_history(conn, &record.id).map_err(|error| {
-            ServiceError::internal(format!("load entry dispatch history: {error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("build_entry_view.list_entry_dispatch_history")
-                .with_context("entry_id", &record.id)
-        })?;
-    let thread_links = build_entry_thread_links(&record, bindings.as_ref(), guild_id);
-    Ok(AutoQueueStatusEntryView::from_record(
-        record,
-        dispatch_history,
-        thread_links,
-    ))
+fn map_phase_gate_row_error(error: sqlx::Error) -> ServiceError {
+    ServiceError::internal(format!("decode phase gate row: {error}"))
+        .with_code(ErrorCode::Database)
+        .with_operation("query_phase_gates_pg.decode_row")
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {

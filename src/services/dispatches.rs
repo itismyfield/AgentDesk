@@ -72,9 +72,9 @@ impl DispatchService {
                 .with_operation("list_dispatches.prepare")
         })?;
 
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
+        let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
             .iter()
-            .map(|value| value as &dyn rusqlite::types::ToSql)
+            .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
             .collect();
 
         let rows = stmt
@@ -102,7 +102,7 @@ impl DispatchService {
             dispatch_row_to_json,
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => ServiceError::not_found("dispatch not found")
+            libsql_rusqlite::Error::QueryReturnedNoRows => ServiceError::not_found("dispatch not found")
                 .with_code(ErrorCode::Dispatch)
                 .with_context("dispatch_id", id),
             other => ServiceError::internal(format!("{other}"))
@@ -230,13 +230,13 @@ impl DispatchService {
                     .with_context("dispatch_id", id));
             }
         } else if let Some(result) = input.result {
-            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
             let result_str = serde_json::to_string(&result).unwrap_or_default();
             let mut sets = vec!["result = ?1".to_string()];
             values.push(Box::new(result_str));
             sets.push("updated_at = datetime('now')".to_string());
             values.push(Box::new(id.to_string()));
-            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
                 values.iter().map(|value| value.as_ref()).collect();
             match conn.execute(
                 &format!(
@@ -278,7 +278,7 @@ impl DispatchService {
     }
 }
 
-fn dispatch_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
+fn dispatch_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<Value> {
     let status = row.get::<_, String>(5)?;
     let dispatch_type = row.get::<_, Option<String>>(4)?;
     let context_raw = row.get::<_, Option<String>>(7)?;

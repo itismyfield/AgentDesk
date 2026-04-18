@@ -234,7 +234,7 @@ fn runtime_scalar_to_string(value: &Value) -> Option<String> {
 }
 
 fn write_runtime_config(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     values: &Map<String, Value>,
 ) -> ServiceResult<()> {
     let value_str =
@@ -262,7 +262,7 @@ fn write_runtime_config(
         if let Some(text) = runtime_scalar_to_string(value) {
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key, text],
+                libsql_rusqlite::params![key, text],
             )
             .map_err(|error| {
                 ServiceError::internal(format!("{error}"))
@@ -276,7 +276,10 @@ fn write_runtime_config(
     Ok(())
 }
 
-pub fn seed_runtime_config_defaults(conn: &rusqlite::Connection, config: &crate::config::Config) {
+pub fn seed_runtime_config_defaults(
+    conn: &libsql_rusqlite::Connection,
+    config: &crate::config::Config,
+) {
     let defaults = runtime_config_defaults_map(config);
     let yaml_overrides = runtime_config_yaml_overrides(config);
     let saved_obj = conn

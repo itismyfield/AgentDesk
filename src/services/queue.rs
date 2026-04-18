@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
 use crate::db::Db;
@@ -89,7 +89,7 @@ impl QueueService {
         })?;
 
         let mut conditions = vec!["status IN ('pending', 'dispatched')".to_string()];
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(card_id) = kanban_card_id {
             params.push(Box::new(card_id.to_string()));
@@ -104,7 +104,7 @@ impl QueueService {
             "SELECT id FROM task_dispatches WHERE {}",
             conditions.join(" AND ")
         );
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
             params.iter().map(|param| param.as_ref()).collect();
         let dispatch_ids: Vec<String> = {
             let mut stmt = conn.prepare(&sql).map_err(|error| {

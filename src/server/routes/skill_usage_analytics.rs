@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
+use libsql_rusqlite::Connection;
 use regex::Regex;
-use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
@@ -86,7 +86,7 @@ fn infer_skills_from_transcript(
     used
 }
 
-fn collect_known_skills(conn: &Connection) -> rusqlite::Result<HashSet<String>> {
+fn collect_known_skills(conn: &Connection) -> libsql_rusqlite::Result<HashSet<String>> {
     let mut stmt = conn.prepare("SELECT id FROM skills")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut skills = HashSet::new();
@@ -102,7 +102,7 @@ fn load_transcript_skill_usage(
     conn: &Connection,
     days: Option<i64>,
     known_skills: &HashSet<String>,
-) -> rusqlite::Result<Vec<SkillUsageRecord>> {
+) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
     let sql_all = "SELECT st.session_key,
                           st.agent_id,
                           COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
@@ -132,9 +132,9 @@ fn load_transcript_skill_usage(
                         )";
 
     let mut records = Vec::new();
-    let mut push_rows = |stmt: &mut rusqlite::Statement<'_>,
-                         params: &[&dyn rusqlite::ToSql]|
-     -> rusqlite::Result<()> {
+    let mut push_rows = |stmt: &mut libsql_rusqlite::Statement<'_>,
+                         params: &[&dyn libsql_rusqlite::ToSql]|
+     -> libsql_rusqlite::Result<()> {
         let rows = stmt.query_map(params, |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -194,7 +194,7 @@ fn load_transcript_skill_usage(
 fn load_direct_skill_usage(
     conn: &Connection,
     days: Option<i64>,
-) -> rusqlite::Result<Vec<SkillUsageRecord>> {
+) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
     let sql_all = "SELECT su.skill_id,
                           su.agent_id,
                           COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
@@ -214,9 +214,9 @@ fn load_direct_skill_usage(
                       WHERE su.used_at >= datetime('now', '-' || ?1 || ' days')";
 
     let mut records = Vec::new();
-    let mut push_rows = |stmt: &mut rusqlite::Statement<'_>,
-                         params: &[&dyn rusqlite::ToSql]|
-     -> rusqlite::Result<()> {
+    let mut push_rows = |stmt: &mut libsql_rusqlite::Statement<'_>,
+                         params: &[&dyn libsql_rusqlite::ToSql]|
+     -> libsql_rusqlite::Result<()> {
         let rows = stmt.query_map(params, |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -340,7 +340,7 @@ impl TranscriptUsageMatcher {
 pub(super) fn collect_skill_usage(
     conn: &Connection,
     days: Option<i64>,
-) -> rusqlite::Result<Vec<SkillUsageRecord>> {
+) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
     let known_skills = collect_known_skills(conn)?;
     let mut transcript_records = load_transcript_skill_usage(conn, days, &known_skills)?;
     let direct_records = load_direct_skill_usage(conn, days)?;
@@ -360,8 +360,8 @@ mod tests {
     use super::collect_skill_usage;
     use std::collections::HashMap;
 
-    fn setup_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+    fn setup_conn() -> libsql_rusqlite::Connection {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE skills (
                 id TEXT PRIMARY KEY,
@@ -407,17 +407,17 @@ mod tests {
         let conn = setup_conn();
         conn.execute(
             "INSERT INTO skills (id, name, description) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["create-issue", "create-issue", "issue"],
+            libsql_rusqlite::params!["create-issue", "create-issue", "issue"],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO skills (id, name, description) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["memory-write", "memory-write", "memory"],
+            libsql_rusqlite::params!["memory-write", "memory-write", "memory"],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO agents (id, name, name_ko) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["project-agentdesk", "AgentDesk", "AgentDesk 에이전트"],
+            libsql_rusqlite::params!["project-agentdesk", "AgentDesk", "AgentDesk 에이전트"],
         )
         .unwrap();
 
@@ -448,7 +448,7 @@ mod tests {
                 events_json,
                 created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "turn-1",
                 "sess-1",
                 "project-agentdesk",
@@ -467,7 +467,7 @@ mod tests {
                 events_json,
                 created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "turn-2",
                 "sess-2",
                 "project-agentdesk",
@@ -480,7 +480,7 @@ mod tests {
         conn.execute(
             "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "create-issue",
                 "project-agentdesk",
                 "sess-1",
@@ -491,7 +491,7 @@ mod tests {
         conn.execute(
             "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "create-issue",
                 "project-agentdesk",
                 "sess-other",

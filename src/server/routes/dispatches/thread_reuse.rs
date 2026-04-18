@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::agents::{
     resolve_agent_counter_model_channel_on_conn, resolve_agent_primary_channel_on_conn,
@@ -24,10 +25,26 @@ pub struct LinkDispatchThreadBody {
 
 // ── Channel-thread map helpers ────────────────────────────────
 
+fn parse_channel_thread_map(
+    raw: Option<&str>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    raw.and_then(|value| {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(value).ok()
+    })
+}
+
+fn lookup_thread_for_channel_from_map(map_json: Option<&str>, channel_id: u64) -> Option<String> {
+    parse_channel_thread_map(map_json).and_then(|map| {
+        map.get(&channel_id.to_string())
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+    })
+}
+
 /// Look up the thread_id for a specific channel from channel_thread_map.
 /// Falls back to active_thread_id for backward compatibility.
 pub(super) fn get_thread_for_channel(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     channel_id: u64,
 ) -> Option<String> {
@@ -40,15 +57,8 @@ pub(super) fn get_thread_for_channel(
         .ok()
         .flatten();
 
-    if let Some(ref json_str) = map_json {
-        if let Ok(map) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json_str)
-        {
-            let key = channel_id.to_string();
-            if let Some(tid) = map.get(&key).and_then(|v| v.as_str()) {
-                return Some(tid.to_string());
-            }
-        }
+    if let Some(thread_id) = lookup_thread_for_channel_from_map(map_json.as_deref(), channel_id) {
+        return Some(thread_id);
     }
 
     // Fallback: legacy active_thread_id — only if channel_thread_map is empty/absent.
@@ -70,10 +80,50 @@ pub(super) fn get_thread_for_channel(
     None
 }
 
+pub(super) async fn get_thread_for_channel_pg(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        "SELECT channel_thread_map::text AS channel_thread_map, active_thread_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres thread map for {card_id}: {error}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let map_json: Option<String> = row
+        .try_get("channel_thread_map")
+        .map_err(|error| format!("read postgres channel_thread_map for {card_id}: {error}"))?;
+    let active_thread_id: Option<String> = row
+        .try_get("active_thread_id")
+        .map_err(|error| format!("read postgres active_thread_id for {card_id}: {error}"))?;
+
+    if let Some(thread_id) = lookup_thread_for_channel_from_map(map_json.as_deref(), channel_id) {
+        return Ok(Some(thread_id));
+    }
+
+    if map_json
+        .as_deref()
+        .map_or(true, |value| value.is_empty() || value == "{}")
+    {
+        return Ok(active_thread_id.filter(|value| !value.trim().is_empty()));
+    }
+
+    Ok(None)
+}
+
 /// Set the thread_id for a specific channel in channel_thread_map.
 /// Also updates active_thread_id for backward compatibility.
 pub(super) fn set_thread_for_channel(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     channel_id: u64,
     thread_id: &str,
@@ -99,14 +149,57 @@ pub(super) fn set_thread_for_channel(
     let json_str = serde_json::to_string(&map).unwrap_or_default();
     conn.execute(
         "UPDATE kanban_cards SET channel_thread_map = ?1, active_thread_id = ?2 WHERE id = ?3",
-        rusqlite::params![json_str, thread_id, card_id],
+        libsql_rusqlite::params![json_str, thread_id, card_id],
     )
     .ok();
 }
 
+pub(super) async fn set_thread_for_channel_pg(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+    thread_id: &str,
+) -> Result<(), String> {
+    let existing: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT channel_thread_map::text
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres thread map for {card_id}: {error}"))?
+    .flatten();
+
+    let mut map: serde_json::Map<String, serde_json::Value> = existing
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default();
+    map.insert(
+        channel_id.to_string(),
+        serde_json::Value::String(thread_id.to_string()),
+    );
+    let json_str = serde_json::to_string(&map)
+        .map_err(|error| format!("serialize postgres thread map for {card_id}: {error}"))?;
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET channel_thread_map = $1::jsonb,
+             active_thread_id = $2,
+             updated_at = NOW()
+         WHERE id = $3",
+    )
+    .bind(json_str)
+    .bind(thread_id)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("save postgres thread map for {card_id}: {error}"))?;
+    Ok(())
+}
+
 /// Clear thread mapping for a specific channel.
 pub(super) fn clear_thread_for_channel(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     channel_id: u64,
 ) {
@@ -127,15 +220,60 @@ pub(super) fn clear_thread_for_channel(
             let new_json = serde_json::to_string(&map).unwrap_or_default();
             conn.execute(
                 "UPDATE kanban_cards SET channel_thread_map = ?1 WHERE id = ?2",
-                rusqlite::params![new_json, card_id],
+                libsql_rusqlite::params![new_json, card_id],
             )
             .ok();
         }
     }
 }
 
+pub(super) async fn clear_thread_for_channel_pg(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let existing: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT channel_thread_map::text
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres thread map for {card_id}: {error}"))?
+    .flatten();
+
+    let Some(existing) = existing else {
+        return Ok(());
+    };
+
+    let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&existing)
+    else {
+        return Ok(());
+    };
+
+    map.remove(&channel_id.to_string());
+    let new_json =
+        serde_json::to_string(&map).map_err(|error| format!("serialize thread map: {error}"))?;
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET channel_thread_map = $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(new_json)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("clear postgres thread map for {card_id}: {error}"))?;
+    Ok(())
+}
+
 /// Clear ALL thread mappings (card done).
-pub(in crate::server::routes) fn clear_all_threads(conn: &rusqlite::Connection, card_id: &str) {
+pub(in crate::server::routes) fn clear_all_threads(
+    conn: &libsql_rusqlite::Connection,
+    card_id: &str,
+) {
     conn.execute(
         "UPDATE kanban_cards SET channel_thread_map = NULL, active_thread_id = NULL WHERE id = ?1",
         [card_id],
@@ -348,7 +486,7 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
                  SET channel_thread_map = ?1,
                      active_thread_id = ?2
                  WHERE id = ?3",
-                rusqlite::params![new_map, new_active_thread_id, card_id],
+                libsql_rusqlite::params![new_map, new_active_thread_id, card_id],
             )
             .ok();
         }
@@ -372,6 +510,7 @@ pub(super) async fn try_reuse_thread(
     dispatch_id: &str,
     card_id: &str,
     db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
 ) -> Result<Option<bool>, super::discord_delivery::DispatchMessagePostError> {
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
     let thread_info_url = format!(
@@ -394,7 +533,11 @@ pub(super) async fn try_reuse_thread(
     if !resp.status().is_success() {
         tracing::info!("[dispatch] Thread {thread_id} no longer accessible, will create new");
         // Clear stale thread for this channel
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            clear_thread_for_channel_pg(pool, card_id, expected_parent)
+                .await
+                .ok();
+        } else if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, expected_parent);
         }
         return Ok(None);
@@ -420,14 +563,29 @@ pub(super) async fn try_reuse_thread(
         );
         // Clear stale cross-channel thread references so retries don't keep
         // probing the wrong thread via active_thread_id fallback
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            clear_thread_for_channel_pg(pool, card_id, expected_parent)
+                .await
+                .ok();
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET active_thread_id = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1 AND active_thread_id = $2",
+            )
+            .bind(card_id)
+            .bind(thread_id)
+            .execute(pool)
+            .await
+            .ok();
+        } else if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, expected_parent);
             // Also clear active_thread_id if it points to the mismatched thread,
             // preventing get_thread_for_channel() fallback from re-selecting it
             conn.execute(
                 "UPDATE kanban_cards SET active_thread_id = NULL \
                  WHERE id = ?1 AND active_thread_id = ?2",
-                rusqlite::params![card_id, thread_id],
+                libsql_rusqlite::params![card_id, thread_id],
             )
             .ok();
         }
@@ -443,7 +601,11 @@ pub(super) async fn try_reuse_thread(
     if is_locked {
         tracing::info!("[dispatch] Thread {thread_id} is locked, will create new");
         // Clear stale thread for this channel
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            clear_thread_for_channel_pg(pool, card_id, expected_parent)
+                .await
+                .ok();
+        } else if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, expected_parent);
         }
         return Ok(Some(false));
@@ -497,20 +659,45 @@ pub(super) async fn try_reuse_thread(
     {
         Ok(message_id) => {
             // Update dispatch thread_id and mark as notified
-            if let Ok(conn) = db.lock() {
+            if let Some(pool) = pg_pool {
+                sqlx::query(
+                    "UPDATE task_dispatches
+                     SET thread_id = $1,
+                         updated_at = NOW()
+                     WHERE id = $2",
+                )
+                .bind(thread_id)
+                .bind(dispatch_id)
+                .execute(pool)
+                .await
+                .ok();
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value)
+                     VALUES ($1, $2)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                )
+                .bind(format!("dispatch_notified:{dispatch_id}"))
+                .bind(dispatch_id)
+                .execute(pool)
+                .await
+                .ok();
+            } else if let Ok(conn) = db.lock() {
                 conn.execute(
                     "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                    rusqlite::params![thread_id, dispatch_id],
+                    libsql_rusqlite::params![thread_id, dispatch_id],
                 )
                 .ok();
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
+                    libsql_rusqlite::params![
+                        format!("dispatch_notified:{}", dispatch_id),
+                        dispatch_id
+                    ],
                 )
                 .ok();
             }
             if let Err(error) =
-                super::discord_delivery::persist_dispatch_message_target_and_add_pending_reaction(
+                super::discord_delivery::persist_dispatch_message_target_and_add_pending_reaction_with_pg(
                     db,
                     client,
                     token,
@@ -518,6 +705,7 @@ pub(super) async fn try_reuse_thread(
                     dispatch_id,
                     thread_id,
                     &message_id,
+                    pg_pool,
                 )
                 .await
             {
@@ -552,7 +740,7 @@ mod tests {
     use serde_json::json;
 
     fn test_db() -> crate::db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -670,7 +858,7 @@ pub async fn link_dispatch_thread(
         Some(cid) => {
             conn.execute(
                 "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                rusqlite::params![body.thread_id, body.dispatch_id],
+                libsql_rusqlite::params![body.thread_id, body.dispatch_id],
             )
             .ok();
             if let Some(ref ch_id) = body.channel_id {
@@ -680,7 +868,7 @@ pub async fn link_dispatch_thread(
                     // Fallback: legacy active_thread_id
                     conn.execute(
                         "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                        rusqlite::params![body.thread_id, cid],
+                        libsql_rusqlite::params![body.thread_id, cid],
                     )
                     .ok();
                 }
@@ -688,7 +876,7 @@ pub async fn link_dispatch_thread(
                 // No channel_id provided — legacy path
                 conn.execute(
                     "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                    rusqlite::params![body.thread_id, cid],
+                    libsql_rusqlite::params![body.thread_id, cid],
                 )
                 .ok();
             }

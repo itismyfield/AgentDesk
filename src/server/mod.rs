@@ -7,9 +7,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use rusqlite::Connection;
+use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use sqlx::pool::PoolConnection;
+use sqlx::{PgPool, Postgres, Row};
 use std::time::Duration;
 use tower_http::services::ServeDir;
 
@@ -22,6 +24,9 @@ const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
 const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
 const ESCALATION_PENDING_TTL_SEC: i64 = 600;
+const MESSAGE_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
+const POLICY_TICK_ADVISORY_LOCK_ID: i64 = 7_801_001;
+const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
 const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -100,6 +105,37 @@ fn deploy_gate_title(phase: i64) -> String {
     format!("[Deploy Gate] Phase {phase} 빌드+배포")
 }
 
+async fn try_acquire_pg_singleton_lock(
+    pool: &PgPool,
+    lock_id: i64,
+    job_name: &str,
+) -> std::result::Result<Option<PoolConnection<Postgres>>, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|error| format!("{job_name} acquire advisory lock connection: {error}"))?;
+    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(lock_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|error| format!("{job_name} try advisory lock: {error}"))?;
+    if acquired { Ok(Some(conn)) } else { Ok(None) }
+}
+
+async fn release_pg_singleton_lock(
+    mut conn: PoolConnection<Postgres>,
+    lock_id: i64,
+    job_name: &str,
+) {
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(lock_id)
+        .execute(&mut *conn)
+        .await
+    {
+        tracing::warn!("[{job_name}] failed to release advisory lock {lock_id}: {error}");
+    }
+}
+
 fn deploy_gate_failure_reason(phase: i64, detail: &str) -> String {
     format!("{} 실패: {}", deploy_gate_title(phase), detail.trim())
 }
@@ -111,7 +147,7 @@ fn phase_live_entry_count(conn: &Connection, run_id: &str, phase: i64) -> i64 {
          WHERE run_id = ?1
            AND status IN ('pending', 'dispatched')
            AND COALESCE(batch_phase, 0) = ?2",
-        rusqlite::params![run_id, phase],
+        libsql_rusqlite::params![run_id, phase],
         |row| row.get(0),
     )
     .unwrap_or(0)
@@ -172,7 +208,7 @@ fn enqueue_deploy_gate_escalation(conn: &Connection, card_id: &str, reason: &str
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value, expires_at)
              VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'))",
-            rusqlite::params![pending_key, payload, ESCALATION_PENDING_TTL_SEC.to_string()],
+            libsql_rusqlite::params![pending_key, payload, ESCALATION_PENDING_TTL_SEC.to_string()],
         )
         .ok();
     }
@@ -217,12 +253,12 @@ fn poll_deploy_gates(db: &Db) {
             );
             conn.execute(
                 "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                rusqlite::params![run_id, phase],
+                libsql_rusqlite::params![run_id, phase],
             )
             .ok();
             conn.execute(
                 "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
-                rusqlite::params![run_id],
+                libsql_rusqlite::params![run_id],
             )
             .ok();
             return;
@@ -262,12 +298,12 @@ fn poll_deploy_gates(db: &Db) {
                     );
                     conn.execute(
                         "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                        rusqlite::params![run_id, phase],
+                        libsql_rusqlite::params![run_id, phase],
                     )
                     .ok();
                     conn.execute(
                         "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
-                        rusqlite::params![run_id],
+                        libsql_rusqlite::params![run_id],
                     )
                     .ok();
                 } else {
@@ -285,7 +321,7 @@ fn poll_deploy_gates(db: &Db) {
                         "UPDATE auto_queue_phase_gates
                          SET status = 'failed', failure_reason = ?3
                          WHERE run_id = ?1 AND phase = ?2",
-                        rusqlite::params![run_id, phase, error],
+                        libsql_rusqlite::params![run_id, phase, error],
                     )
                     .ok();
                     if let Some(anchor_card_id) = anchor_card_id.as_deref() {
@@ -330,13 +366,22 @@ pub async fn run(
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
+    let pg_pool = crate::db::postgres::connect_and_migrate(&config)
+        .await
+        .map_err(anyhow::Error::msg)?;
     seed_startup_runtime_state(&db, &config);
+    if let Some(pool) = pg_pool.as_ref() {
+        crate::db::postgres::startup_reseed(pool, &config)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
 
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(
         config.clone(),
         db.clone(),
         engine.clone(),
         health_registry.clone(),
+        pg_pool.clone(),
     );
     worker_registry.run_boot_only_steps().await?;
     worker_registry.start_after_boot_reconcile()?;
@@ -383,13 +428,14 @@ pub async fn run(
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
             "/api",
-            routes::api_router(
+            routes::api_router_with_pg(
                 db.clone(),
                 engine.clone(),
                 config.clone(),
                 broadcast_tx.clone(),
                 batch_buffer,
                 health_registry,
+                pg_pool,
             ),
         )
         .fallback_service(ServeDir::new(&dashboard_dir).append_index_html_on_directories(true));
@@ -416,6 +462,9 @@ fn seed_startup_runtime_state(db: &Db, config: &Config) {
 
     if let Err(error) = seed_github_repos_from_config(db, config) {
         tracing::warn!("[startup] failed to seed github repos from config: {error}");
+    }
+    if let Err(error) = crate::db::agents::sync_agents_from_config(db, &config.agents) {
+        tracing::warn!("[startup] failed to sync agents from config: {error}");
     }
 }
 
@@ -465,6 +514,24 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         interval_30s.tick().await;
         count += 1;
 
+        let advisory_lock = if let Some(pool) = engine.pg_pool() {
+            match try_acquire_pg_singleton_lock(pool, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick")
+                .await
+            {
+                Ok(Some(conn)) => Some(conn),
+                Ok(None) => {
+                    tracing::debug!("[policy-tick] skipped: advisory lock held elsewhere");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("[policy-tick] advisory lock failed: {error}");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         poll_deploy_gates(&db);
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
@@ -486,6 +553,10 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             }
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy").await;
+        }
+
+        if let Some(conn) = advisory_lock {
+            release_pg_singleton_lock(conn, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick").await;
         }
     }
 }
@@ -635,12 +706,12 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
         // always ZERO, which is fine.
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key_status, status],
+            libsql_rusqlite::params![key_status, status],
         )
         .ok();
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key_skip_ms, now_ms],
+            libsql_rusqlite::params![key_skip_ms, now_ms],
         )
         .ok();
         // The global last-skip marker is useful for at-a-glance health.
@@ -662,12 +733,12 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
             // overdue on `/api/cron-jobs` instead of looking "recent".
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key_ms, now_ms],
+                libsql_rusqlite::params![key_ms, now_ms],
             )
             .ok();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
+                libsql_rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
             )
             .ok();
             conn.execute(
@@ -700,7 +771,43 @@ pub(crate) async fn fire_tick_hook_by_name_for_test(
 
 /// Background task that periodically fetches rate-limit data from external providers
 /// and caches it in the `rate_limit_cache` table for the dashboard API.
-async fn rate_limit_sync_loop(db: Db) {
+async fn upsert_rate_limit_cache_entry(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    provider: &str,
+    data: &str,
+    fetched_at: i64,
+) {
+    if let Some(pool) = pg_pool {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO rate_limit_cache (provider, data, fetched_at)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (provider)
+             DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
+        )
+        .bind(provider)
+        .bind(data)
+        .bind(fetched_at)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
+            );
+        }
+        return;
+    }
+
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
+            libsql_rusqlite::params![provider, data, fetched_at],
+        )
+        .ok();
+    }
+}
+
+async fn rate_limit_sync_loop(db: Db, pg_pool: Option<PgPool>) {
     use std::time::Duration;
 
     let interval = Duration::from_secs(120);
@@ -726,13 +833,7 @@ async fn rate_limit_sync_loop(db: Db) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["claude", data, now],
-                    )
-                    .ok();
-                }
+                upsert_rate_limit_cache_entry(&db, pg_pool.as_ref(), "claude", &data, now).await;
                 tracing::info!("[rate-limit-sync] Claude: {} buckets cached", buckets.len());
             }
             Err(e) => {
@@ -753,13 +854,7 @@ async fn rate_limit_sync_loop(db: Db) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["codex", data, now],
-                    )
-                    .ok();
-                }
+                upsert_rate_limit_cache_entry(&db, pg_pool.as_ref(), "codex", &data, now).await;
                 tracing::info!("[rate-limit-sync] Codex: {} buckets cached", buckets.len());
             }
             Err(e) => {
@@ -775,13 +870,7 @@ async fn rate_limit_sync_loop(db: Db) {
                 let n = buckets.len();
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["gemini", data, now],
-                    )
-                    .ok();
-                }
+                upsert_rate_limit_cache_entry(&db, pg_pool.as_ref(), "gemini", &data, now).await;
                 tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
             }
             Err(e) => {
@@ -822,7 +911,7 @@ mod tests {
         conn.execute(
             "INSERT INTO agents (id, name, provider, created_at, updated_at)
              VALUES (?1, ?2, 'codex', datetime('now'), datetime('now'))",
-            rusqlite::params![agent_id, format!("Agent {agent_id}")],
+            libsql_rusqlite::params![agent_id, format!("Agent {agent_id}")],
         )
         .unwrap();
     }
@@ -843,11 +932,35 @@ mod tests {
             .collect()
     }
 
+    fn agent_ids(db: &Db) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM agents ORDER BY id ASC")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    fn pipeline_stage_names(db: &Db, repo_id: &str) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT stage_name FROM pipeline_stages WHERE repo_id = ?1 ORDER BY stage_order ASC",
+            )
+            .unwrap();
+        stmt.query_map([repo_id], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
     fn insert_pending_message(db: &Db, target: &str, content: &str) -> i64 {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-            rusqlite::params![target, content],
+            libsql_rusqlite::params![target, content],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -862,6 +975,103 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_server_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url).await.unwrap();
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .unwrap();
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url).await.unwrap();
+            crate::db::postgres::migrate(&pool).await.unwrap();
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url).await.unwrap();
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     #[test]
@@ -1086,6 +1296,16 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.server.port = 43121;
         config.github.repos = vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()];
+        config.agents = vec![crate::config::AgentDef {
+            id: "project-agentdesk".to_string(),
+            name: "AgentDesk".to_string(),
+            name_ko: None,
+            provider: "claude".to_string(),
+            channels: crate::config::AgentChannels::default(),
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }];
 
         seed_startup_runtime_state(&db, &config);
 
@@ -1093,6 +1313,22 @@ mod tests {
         assert_eq!(
             repo_ids(&db),
             vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()]
+        );
+        assert_eq!(agent_ids(&db), vec!["project-agentdesk".to_string()]);
+    }
+
+    #[test]
+    fn seed_startup_runtime_state_seeds_builtin_pipeline_stages_for_agentdesk_repo() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.github.repos = vec!["itismyfield/AgentDesk".to_string()];
+
+        seed_startup_runtime_state(&db, &config);
+        seed_startup_runtime_state(&db, &config);
+
+        assert_eq!(
+            pipeline_stage_names(&db, "itismyfield/AgentDesk"),
+            vec!["dev-deploy".to_string(), "e2e-test".to_string()]
         );
     }
 
@@ -1773,7 +2009,7 @@ mod tests {
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "hello");
         let delivered = Arc::new(Mutex::new(Vec::new()));
 
-        let processed = drain_message_outbox_batch_once(&db, {
+        let processed = drain_message_outbox_batch_once(&db, None, None, {
             let delivered = delivered.clone();
             move |target, content, source, bot| {
                 let delivered = delivered.clone();
@@ -1809,14 +2045,18 @@ mod tests {
         let db = test_db();
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
 
-        let processed =
-            drain_message_outbox_batch_once(&db, |_target, _content, _source, _bot| async {
+        let processed = drain_message_outbox_batch_once(
+            &db,
+            None,
+            None,
+            |_target, _content, _source, _bot| async {
                 (
                     "500 Internal Server Error".to_string(),
                     json!({"error": "mock failure"}).to_string(),
                 )
-            })
-            .await;
+            },
+        )
+        .await;
 
         let (status, error, sent_at) = message_row_status(&db, message_id);
 
@@ -1829,6 +2069,115 @@ mod tests {
         let error = error.expect("failed rows must persist error details");
         assert!(error.contains("500 Internal Server Error"));
         assert!(error.contains("mock failure"));
+    }
+
+    #[tokio::test]
+    async fn claim_pending_message_outbox_batch_pg_reclaims_stale_processing_rows() {
+        let _guard = server_test_lock();
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO message_outbox (
+                target, content, bot, source, status, claimed_at, claim_owner
+             ) VALUES ($1, $2, 'notify', 'system', 'processing', NOW() - INTERVAL '10 minutes', 'old-owner')",
+        )
+        .bind("channel:1492506767085801535")
+        .bind("stale")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+        let claimed = claim_pending_message_outbox_batch_pg(&pg_pool, "test-owner").await;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].2, "stale");
+
+        let row = sqlx::query(
+            "SELECT status, claim_owner
+             FROM message_outbox
+             WHERE id = $1",
+        )
+        .bind(claimed[0].0)
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        let status: String = row.get("status");
+        let claim_owner: Option<String> = row.get("claim_owner");
+        assert_eq!(status, "processing");
+        assert_eq!(claim_owner.as_deref(), Some("test-owner"));
+
+        pg_pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn drain_message_outbox_batch_pg_marks_successful_rows_sent() {
+        let _guard = server_test_lock();
+        let db = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+
+        let message_id: i64 = sqlx::query_scalar(
+            "INSERT INTO message_outbox (target, content, bot, source)
+             VALUES ($1, $2, 'notify', 'system')
+             RETURNING id",
+        )
+        .bind("channel:1492506767085801535")
+        .bind("hello-pg")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+
+        let processed = drain_message_outbox_batch_once(&db, Some(&pg_pool), Some("test-owner"), {
+            let delivered = delivered.clone();
+            move |target, content, source, bot| {
+                let delivered = delivered.clone();
+                async move {
+                    delivered.lock().unwrap().push(json!({
+                        "target": target,
+                        "content": content,
+                        "source": source,
+                        "bot": bot,
+                    }));
+                    ("200 OK".to_string(), json!({"ok": true}).to_string())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(processed, 1);
+        let captured = delivered.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["content"], "hello-pg");
+
+        let row = sqlx::query(
+            "SELECT status,
+                    error,
+                    sent_at IS NOT NULL AS has_sent_at,
+                    claimed_at IS NULL AS claim_cleared,
+                    claim_owner IS NULL AS owner_cleared
+             FROM message_outbox
+             WHERE id = $1",
+        )
+        .bind(message_id)
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        let status: String = row.get("status");
+        let error: Option<String> = row.get("error");
+        let has_sent_at: bool = row.get("has_sent_at");
+        let claim_cleared: bool = row.get("claim_cleared");
+        let owner_cleared: bool = row.get("owner_cleared");
+
+        assert_eq!(status, "sent");
+        assert_eq!(error, None);
+        assert!(has_sent_at);
+        assert!(claim_cleared);
+        assert!(owner_cleared);
+
+        pg_pool.close().await;
+        pg_db.drop().await;
     }
 }
 
@@ -2437,15 +2786,60 @@ async fn github_sync_loop(db: Db, engine: crate::engine::PolicyEngine, interval_
     loop {
         tokio::time::sleep(interval).await;
 
+        let mut advisory_lock = if let Some(pool) = engine.pg_pool() {
+            match try_acquire_pg_singleton_lock(pool, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
+                .await
+            {
+                Ok(Some(conn)) => Some(conn),
+                Ok(None) => {
+                    tracing::debug!("[github-sync] skipped: advisory lock held elsewhere");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("[github-sync] advisory lock failed: {error}");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         tracing::debug!("[github-sync] Running periodic sync...");
 
+        let pg_pool = engine.pg_pool().cloned();
+
         // Fetch repos
-        let repos = match crate::github::list_repos(&db) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("[github-sync] Failed to list repos: {e}");
-                continue;
-            }
+        let repos = match pg_pool.as_ref() {
+            Some(pool) => match crate::github::list_repos_pg(pool).await {
+                Ok(repos) => repos,
+                Err(error) => {
+                    tracing::error!("[github-sync] Failed to list repos from PG: {error}");
+                    if let Some(conn) = advisory_lock.take() {
+                        release_pg_singleton_lock(
+                            conn,
+                            GITHUB_SYNC_ADVISORY_LOCK_ID,
+                            "github-sync",
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+            },
+            None => match crate::github::list_repos(&db) {
+                Ok(repos) => repos,
+                Err(error) => {
+                    tracing::error!("[github-sync] Failed to list repos: {error}");
+                    if let Some(conn) = advisory_lock.take() {
+                        release_pg_singleton_lock(
+                            conn,
+                            GITHUB_SYNC_ADVISORY_LOCK_ID,
+                            "github-sync",
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+            },
         };
 
         for repo in &repos {
@@ -2461,34 +2855,67 @@ async fn github_sync_loop(db: Db, engine: crate::engine::PolicyEngine, interval_
                 }
             };
 
-            // Triage new issues
-            match crate::github::triage::triage_new_issues(&db, &repo.id, &issues) {
-                Ok(n) if n > 0 => {
-                    tracing::info!("[github-sync] Triaged {n} new issues for {}", repo.id);
+            if let Some(pool) = pg_pool.as_ref() {
+                match crate::github::triage::triage_new_issues_pg(pool, &repo.id, &issues).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
+                    }
+                    Err(error) => {
+                        tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    tracing::warn!("[github-sync] Triage failed for {}: {e}", repo.id);
-                }
-                _ => {}
-            }
 
-            // Sync state
-            match crate::github::sync::sync_github_issues_for_repo(&db, &engine, &repo.id, &issues)
-            {
-                Ok(r) => {
-                    if r.closed_count > 0 || r.inconsistency_count > 0 {
-                        tracing::info!(
-                            "[github-sync] {}: closed={}, inconsistencies={}",
-                            repo.id,
-                            r.closed_count,
-                            r.inconsistency_count
-                        );
+                match crate::github::sync::sync_github_issues_for_repo_pg(pool, &repo.id, &issues)
+                    .await
+                {
+                    Ok(result) => {
+                        if result.closed_count > 0 || result.inconsistency_count > 0 {
+                            tracing::info!(
+                                "[github-sync] {}: closed={}, inconsistencies={}",
+                                repo.id,
+                                result.closed_count,
+                                result.inconsistency_count
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
                     }
                 }
-                Err(e) => {
-                    tracing::error!("[github-sync] Sync failed for {}: {e}", repo.id);
+            } else {
+                match crate::github::triage::triage_new_issues(&db, &repo.id, &issues) {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
+                    }
+                    Err(error) => {
+                        tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
+                    }
+                    _ => {}
+                }
+
+                match crate::github::sync::sync_github_issues_for_repo(
+                    &db, &engine, &repo.id, &issues,
+                ) {
+                    Ok(result) => {
+                        if result.closed_count > 0 || result.inconsistency_count > 0 {
+                            tracing::info!(
+                                "[github-sync] {}: closed={}, inconsistencies={}",
+                                repo.id,
+                                result.closed_count,
+                                result.inconsistency_count
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
+                    }
                 }
             }
+        }
+
+        if let Some(conn) = advisory_lock.take() {
+            release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync").await;
         }
     }
 }
@@ -2513,7 +2940,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 
 /// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
 /// Runs every 2 seconds, processes up to 10 messages per tick.
-fn load_pending_message_outbox_batch(db: &Db) -> Vec<(i64, String, String, String, String)> {
+fn load_pending_message_outbox_batch_sqlite(db: &Db) -> Vec<(i64, String, String, String, String)> {
     let conn = match db.lock() {
         Ok(conn) => conn,
         Err(_) => return Vec::new(),
@@ -2539,12 +2966,78 @@ fn load_pending_message_outbox_batch(db: &Db) -> Vec<(i64, String, String, Strin
     .unwrap_or_default()
 }
 
-async fn drain_message_outbox_batch_once<F, Fut>(db: &Db, mut deliver: F) -> usize
+async fn claim_pending_message_outbox_batch_pg(
+    pool: &PgPool,
+    claim_owner: &str,
+) -> Vec<(i64, String, String, String, String)> {
+    let rows = match sqlx::query(
+        "WITH claimed AS (
+            SELECT id
+              FROM message_outbox
+             WHERE status = 'pending'
+                OR (
+                    status = 'processing'
+                    AND (
+                        claimed_at IS NULL
+                        OR claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
+                    )
+                )
+             ORDER BY id ASC
+             FOR UPDATE SKIP LOCKED
+             LIMIT 10
+        )
+        UPDATE message_outbox mo
+           SET status = 'processing',
+               claimed_at = NOW(),
+               claim_owner = $2,
+               error = NULL
+          FROM claimed
+         WHERE mo.id = claimed.id
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source",
+    )
+    .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
+    .bind(claim_owner)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("[outbox-pg] failed to claim message_outbox rows: {error}");
+            return Vec::new();
+        }
+    };
+
+    let mut claimed = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row.try_get::<i64, _>("id").ok()?,
+                row.try_get::<String, _>("target").ok()?,
+                row.try_get::<String, _>("content").ok()?,
+                row.try_get::<String, _>("bot").ok()?,
+                row.try_get::<String, _>("source").ok()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    claimed.sort_by_key(|row| row.0);
+    claimed
+}
+
+async fn drain_message_outbox_batch_once<F, Fut>(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    claim_owner: Option<&str>,
+    mut deliver: F,
+) -> usize
 where
     F: FnMut(String, String, String, String) -> Fut,
     Fut: std::future::Future<Output = (String, String)>,
 {
-    let pending = load_pending_message_outbox_batch(db);
+    let pending = if let Some(pool) = pg_pool {
+        claim_pending_message_outbox_batch_pg(pool, claim_owner.unwrap_or("message-outbox")).await
+    } else {
+        load_pending_message_outbox_batch_sqlite(db)
+    };
     if pending.is_empty() {
         return 0;
     }
@@ -2553,9 +3046,29 @@ where
         let (status, err_text) =
             deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
         if status == "200 OK" {
-            if let Ok(conn) = db.lock() {
+            if let Some(pool) = pg_pool {
+                sqlx::query(
+                    "UPDATE message_outbox
+                        SET status = 'sent',
+                            sent_at = NOW(),
+                            error = NULL,
+                            claimed_at = NULL,
+                            claim_owner = NULL
+                      WHERE id = $1",
+                )
+                .bind(*id)
+                .execute(pool)
+                .await
+                .ok();
+            } else if let Ok(conn) = db.lock() {
                 conn.execute(
-                    "UPDATE message_outbox SET status = 'sent', sent_at = datetime('now') WHERE id = ?1",
+                    "UPDATE message_outbox
+                        SET status = 'sent',
+                            sent_at = datetime('now'),
+                            error = NULL,
+                            claimed_at = NULL,
+                            claim_owner = NULL
+                      WHERE id = ?1",
                     [id],
                 )
                 .ok();
@@ -2563,10 +3076,30 @@ where
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
         } else {
-            if let Ok(conn) = db.lock() {
+            let error_text = format!("{status}: {err_text}");
+            if let Some(pool) = pg_pool {
+                sqlx::query(
+                    "UPDATE message_outbox
+                        SET status = 'failed',
+                            error = $1,
+                            claimed_at = NULL,
+                            claim_owner = NULL
+                      WHERE id = $2",
+                )
+                .bind(error_text)
+                .bind(*id)
+                .execute(pool)
+                .await
+                .ok();
+            } else if let Ok(conn) = db.lock() {
                 conn.execute(
-                    "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                    rusqlite::params![format!("{status}: {err_text}"), id],
+                    "UPDATE message_outbox
+                        SET status = 'failed',
+                            error = ?1,
+                            claimed_at = NULL,
+                            claim_owner = NULL
+                      WHERE id = ?2",
+                    libsql_rusqlite::params![error_text, id],
                 )
                 .ok();
             }
@@ -2577,7 +3110,11 @@ where
     pending.len()
 }
 
-async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>>) {
+async fn message_outbox_loop(
+    db: Db,
+    pg_pool: Option<PgPool>,
+    health_registry: Option<Arc<HealthRegistry>>,
+) {
     use std::time::Duration;
 
     let Some(health_registry) = health_registry else {
@@ -2588,13 +3125,18 @@ async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>
     // Give Discord runtime bootstrap a brief head start before polling.
     tokio::time::sleep(Duration::from_secs(3)).await;
     tracing::info!("[outbox] Message outbox worker started (adaptive backoff 500ms-5s)");
+    let claim_owner = format!(
+        "message-outbox:{}:{}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string()),
+        std::process::id()
+    );
 
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
 
     loop {
         tokio::time::sleep(poll_interval).await;
-        if drain_message_outbox_batch_once(&db, {
+        if drain_message_outbox_batch_once(&db, pg_pool.as_ref(), Some(&claim_owner), {
             let health_registry = health_registry.clone();
             let db = db.clone();
             move |target, content, source, bot| {
@@ -2626,11 +3168,11 @@ async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>
     }
 }
 
-async fn dm_reply_retry_loop(db: Db) {
+async fn dm_reply_retry_loop(db: Db, pg_pool: Option<PgPool>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     interval.tick().await; // skip immediate first tick
     loop {
         interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(&db).await;
+        crate::services::discord::retry_failed_dm_notifications(&db, pg_pool.as_ref()).await;
     }
 }

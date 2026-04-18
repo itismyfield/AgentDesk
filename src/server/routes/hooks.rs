@@ -75,7 +75,7 @@ pub async fn skill_usage(
 
     match conn.execute(
         "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        rusqlite::params![body.skill_id, agent_id, body.session_key],
+        libsql_rusqlite::params![body.skill_id, agent_id, body.session_key],
     ) {
         Ok(_) => {
             let id = conn.last_insert_rowid();

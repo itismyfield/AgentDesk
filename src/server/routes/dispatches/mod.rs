@@ -11,7 +11,7 @@ pub use crud::{
 };
 
 // ── Re-exports: Discord delivery ─────────────────────────────
-pub(crate) use discord_delivery::send_dispatch_to_discord;
+pub(crate) use discord_delivery::{send_dispatch_to_discord, send_dispatch_to_discord_with_pg};
 
 // ── Re-exports: Outbox ───────────────────────────────────────
 pub use outbox::resolve_channel_alias_pub;

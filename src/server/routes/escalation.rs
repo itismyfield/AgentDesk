@@ -139,7 +139,7 @@ fn escalation_defaults(config: &Config) -> EscalationSettings {
     }
 }
 
-fn load_override(conn: &rusqlite::Connection) -> Option<EscalationSettings> {
+fn load_override(conn: &libsql_rusqlite::Connection) -> Option<EscalationSettings> {
     let raw: Option<String> = conn
         .query_row(
             "SELECT value FROM kv_meta WHERE key = ?1",
@@ -150,31 +150,31 @@ fn load_override(conn: &rusqlite::Connection) -> Option<EscalationSettings> {
     raw.and_then(|raw| serde_json::from_str::<EscalationSettings>(&raw).ok())
 }
 
-fn merged_settings(conn: &rusqlite::Connection, config: &Config) -> EscalationSettings {
+fn merged_settings(conn: &libsql_rusqlite::Connection, config: &Config) -> EscalationSettings {
     load_override(conn).unwrap_or_else(|| escalation_defaults(config))
 }
 
 pub(in crate::server::routes) fn effective_owner_user_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     config: &Config,
 ) -> Option<u64> {
     merged_settings(conn, config).owner_user_id
 }
 
 fn store_override(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     settings: &EscalationSettings,
 ) -> Result<(), String> {
     let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![ESCALATION_SETTINGS_OVERRIDE_KEY, raw],
+        libsql_rusqlite::params![ESCALATION_SETTINGS_OVERRIDE_KEY, raw],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
 }
 
-fn clear_override(conn: &rusqlite::Connection) -> Result<(), String> {
+fn clear_override(conn: &libsql_rusqlite::Connection) -> Result<(), String> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key = ?1",
         [ESCALATION_SETTINGS_OVERRIDE_KEY],
@@ -225,7 +225,7 @@ fn resolve_mode_at(settings: &EscalationSettings, now: DateTime<Utc>) -> Escalat
 }
 
 fn load_card_summary(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> Result<CardEscalationSummary, String> {
     conn.query_row(
@@ -271,7 +271,7 @@ fn load_card_summary(
     .map_err(|_| format!("card not found: {card_id}"))
 }
 
-fn latest_dispatch_agent_id(conn: &rusqlite::Connection, card_id: &str) -> Option<String> {
+fn latest_dispatch_agent_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT to_agent_id
          FROM task_dispatches
@@ -287,7 +287,7 @@ fn latest_dispatch_agent_id(conn: &rusqlite::Connection, card_id: &str) -> Optio
 }
 
 fn candidate_parent_channels(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     assigned_agent_id: Option<&str>,
 ) -> Vec<u64> {
@@ -361,7 +361,7 @@ fn escalation_thread_key(card_id: &str) -> String {
     format!("{ESCALATION_THREAD_KEY_PREFIX}{card_id}")
 }
 
-fn load_cached_thread_id(conn: &rusqlite::Connection, card_id: &str) -> Option<String> {
+fn load_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM kv_meta WHERE key = ?1",
         [escalation_thread_key(card_id)],
@@ -371,19 +371,19 @@ fn load_cached_thread_id(conn: &rusqlite::Connection, card_id: &str) -> Option<S
 }
 
 fn save_cached_thread_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     thread_id: &str,
 ) -> Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![escalation_thread_key(card_id), thread_id],
+        libsql_rusqlite::params![escalation_thread_key(card_id), thread_id],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
 }
 
-fn clear_cached_thread_id(conn: &rusqlite::Connection, card_id: &str) -> Result<(), String> {
+fn clear_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Result<(), String> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key = ?1",
         [escalation_thread_key(card_id)],
@@ -546,7 +546,7 @@ fn summarize_dispatch_result_text(raw: &str) -> Option<String> {
 }
 
 fn load_recent_dispatch_results(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> Result<Vec<String>, String> {
     let mut stmt = conn
@@ -561,7 +561,7 @@ fn load_recent_dispatch_results(
         .map_err(|err| err.to_string())?;
     let rows = stmt
         .query_map(
-            rusqlite::params![card_id, ESCALATION_RECENT_RESULT_LIMIT as i64],
+            libsql_rusqlite::params![card_id, ESCALATION_RECENT_RESULT_LIMIT as i64],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -592,7 +592,7 @@ fn load_recent_dispatch_results(
 }
 
 fn load_card_context(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     summary: &CardEscalationSummary,
 ) -> Result<Option<CardContext>, String> {
@@ -1165,7 +1165,7 @@ async fn deliver_pm_fallback(
     }
 }
 
-pub fn seed_escalation_defaults(conn: &rusqlite::Connection, config: &Config) {
+pub fn seed_escalation_defaults(conn: &libsql_rusqlite::Connection, config: &Config) {
     if config.runtime.reset_overrides_on_restart {
         let _ = clear_override(conn);
     }
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     fn test_db() -> crate::db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -1535,7 +1535,7 @@ mod tests {
                  SET description = ?1,
                      blocked_reason = ?2
                  WHERE id = 'card-1'",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "리뷰 루프가 반복되고 있습니다.\n브랜치 상태를 직접 확인해야 합니다.\n이전 결과를 요약합니다.",
                     "rework 디스패치가 terminal card 에서 취소됨",
                 ],
@@ -1548,7 +1548,7 @@ mod tests {
                     'dispatch-escalation-1', 'card-1', 'project-agentdesk', 'review', 'completed', 'Review finished', ?1,
                     datetime('now', '-10 minutes'), datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
                  )",
-                rusqlite::params![serde_json::json!({
+                libsql_rusqlite::params![serde_json::json!({
                     "summary": "Codex review에서 P1 1건과 P2 2건이 남았습니다."
                 })
                 .to_string()],
@@ -1647,7 +1647,7 @@ mod tests {
                  SET description = ?1,
                      blocked_reason = ?2
                  WHERE id = 'card-2'",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "오너 라우팅이 불가한 카드입니다.\nPM 채널 폴백이 필요합니다.",
                     "owner routing unavailable",
                 ],
@@ -1660,7 +1660,7 @@ mod tests {
                     'dispatch-escalation-2', 'card-2', 'agent-2', 'implementation', 'failed', 'Implement failed', ?1,
                     datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
                  )",
-                rusqlite::params![serde_json::json!({
+                libsql_rusqlite::params![serde_json::json!({
                     "notes": "CI failure after implementation dispatch"
                 })
                 .to_string()],

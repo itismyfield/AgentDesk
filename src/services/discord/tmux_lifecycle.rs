@@ -50,7 +50,7 @@ pub(super) fn resolve_dispatch_tmux_protection(
 }
 
 fn resolve_dispatch_tmux_protection_from_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     token_hash: &str,
     provider: &ProviderKind,
     tmux_session_name: &str,
@@ -98,7 +98,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
            datetime(COALESCE(s.last_heartbeat, s.created_at)) DESC,
            s.rowid DESC
          LIMIT 1",
-        rusqlite::params![
+        libsql_rusqlite::params![
             session_keys[0].as_str(),
             session_keys[1].as_str(),
             thread_channel_id.as_deref(),
@@ -137,7 +137,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
            datetime(td.created_at) DESC,
            td.rowid DESC
          LIMIT 1",
-        rusqlite::params![
+        libsql_rusqlite::params![
             thread_channel_id.as_str(),
             provider.as_str(),
             namespaced_session_key_prefix.as_str(),
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn protects_session_rows_with_active_dispatch_even_when_idle() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -200,7 +200,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-495', datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![session_key.as_str(), provider.as_str()],
+            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
         )
         .unwrap();
 
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn ignores_thread_dispatches_when_current_namespace_session_row_is_missing() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn ignores_completed_dispatches_without_active_session_rows() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn protects_session_rows_with_completed_dispatch_ids_until_ttl() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -328,7 +328,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-stale', datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![session_key.as_str(), provider.as_str()],
+            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
         )
         .unwrap();
 
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn ignores_session_rows_with_missing_dispatch_ids() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -382,7 +382,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-missing', datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![session_key.as_str(), provider.as_str()],
+            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
         )
         .unwrap();
 
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn ignores_thread_channel_session_rows_from_other_provider() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn ignores_thread_channel_session_rows_from_other_token_namespace() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -482,7 +482,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-other-token', datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![foreign_session_key, provider.as_str()],
+            libsql_rusqlite::params![foreign_session_key, provider.as_str()],
         )
         .unwrap();
 
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn ignores_thread_dispatches_from_other_token_namespace() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -535,7 +535,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', NULL, datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![foreign_session_key, provider.as_str()],
+            libsql_rusqlite::params![foreign_session_key, provider.as_str()],
         )
         .unwrap();
 
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn protects_thread_dispatches_when_current_namespace_owns_thread() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -590,7 +590,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', NULL, datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![sidecar_session_key, provider.as_str()],
+            libsql_rusqlite::params![sidecar_session_key, provider.as_str()],
         )
         .unwrap();
 
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn protects_thread_channel_session_rows_with_same_token_namespace() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
             CREATE TABLE sessions (
@@ -649,7 +649,7 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-same-token', datetime('now'), datetime('now'), '1485506232256168011')",
-            rusqlite::params![namespaced_sidecar_key, provider.as_str()],
+            libsql_rusqlite::params![namespaced_sidecar_key, provider.as_str()],
         )
         .unwrap();
 
@@ -684,7 +684,7 @@ mod tests {
             .execute(
                 "INSERT INTO task_dispatches (id, status, thread_id, created_at, updated_at, dispatch_type, title)
                  VALUES (?1, 'dispatched', ?2, datetime('now'), datetime('now'), 'implementation', 'active dispatch')",
-                rusqlite::params!["dispatch-db-wrapper", "1485506232256168011"],
+                libsql_rusqlite::params!["dispatch-db-wrapper", "1485506232256168011"],
             )
             .unwrap();
         db.lock()
@@ -693,7 +693,7 @@ mod tests {
                 "INSERT INTO sessions
                  (session_key, provider, status, active_dispatch_id, thread_channel_id, created_at, last_heartbeat)
                  VALUES (?1, ?2, 'idle', 'dispatch-db-wrapper', '1485506232256168011', datetime('now'), datetime('now'))",
-                rusqlite::params![session_key, provider.as_str()],
+                libsql_rusqlite::params![session_key, provider.as_str()],
             )
             .unwrap();
 

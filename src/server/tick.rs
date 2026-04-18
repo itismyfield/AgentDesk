@@ -59,12 +59,12 @@ fn poll_deploy_gates(db: &Db) {
                 tracing::info!("[deploy-gate] deploy succeeded for run {} phase {}: {}", &run_id[..8.min(run_id.len())], phase, summary);
                 conn.execute(
                     "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                    rusqlite::params![run_id, phase],
+                    libsql_rusqlite::params![run_id, phase],
                 )
                 .ok();
                 conn.execute(
                     "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status = 'paused'",
-                    rusqlite::params![run_id],
+                    libsql_rusqlite::params![run_id],
                 )
                 .ok();
             } else {
@@ -75,7 +75,7 @@ fn poll_deploy_gates(db: &Db) {
                 tracing::warn!("[deploy-gate] deploy failed for run {} phase {}: {}", &run_id[..8.min(run_id.len())], phase, error);
                 conn.execute(
                     "UPDATE auto_queue_phase_gates SET status = 'failed', failure_reason = ?3 WHERE run_id = ?1 AND phase = ?2",
-                    rusqlite::params![run_id, phase, error],
+                    libsql_rusqlite::params![run_id, phase, error],
                 )
                 .ok();
             }
@@ -168,7 +168,7 @@ fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label
         if let Ok(conn) = db.lock() {
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key_ms, now_ms],
+                libsql_rusqlite::params![key_ms, now_ms],
             )
             .ok();
             conn.execute(

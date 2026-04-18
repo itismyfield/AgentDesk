@@ -1,7 +1,7 @@
 use crate::db::Db;
 use anyhow::anyhow;
+use libsql_rusqlite::{OptionalExtension, Row};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use rusqlite::{OptionalExtension, Row};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -126,7 +126,7 @@ fn card_list_raw(db: &Db, filter_json: &str) -> String {
 
         let conn = db.read_conn()?;
         let mut sql = format!("{} WHERE 1 = 1", card_select_sql());
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(status) = filter.status {
             params.push(Box::new(status));
@@ -182,11 +182,11 @@ fn card_list_raw(db: &Db, filter_json: &str) -> String {
             sql.push_str(&format!(" LIMIT {}", limit.min(200)));
         }
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
             params.iter().map(|value| value.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), card_row_to_json)?;
-        let cards: Vec<Value> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let cards: Vec<Value> = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
         Ok(json!({ "cards": cards }))
     })();
 
@@ -214,7 +214,7 @@ fn card_assign_raw(db: &Db, card_id: &str, agent_id: &str) -> String {
 
         let changed = conn.execute(
             "UPDATE kanban_cards SET assigned_agent_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![agent_id, card_id],
+            libsql_rusqlite::params![agent_id, card_id],
         )?;
         if changed == 0 {
             return Err(anyhow!("unknown card: {card_id}"));
@@ -246,7 +246,7 @@ fn card_set_priority_raw(db: &Db, card_id: &str, priority: &str) -> String {
         let conn = db.separate_conn()?;
         let changed = conn.execute(
             "UPDATE kanban_cards SET priority = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![normalized, card_id],
+            libsql_rusqlite::params![normalized, card_id],
         )?;
         if changed == 0 {
             return Err(anyhow!("unknown card: {card_id}"));
@@ -276,7 +276,7 @@ fn card_select_sql() -> &'static str {
 }
 
 fn load_card_json_by_id_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<Option<Value>> {
     let sql = format!("{} WHERE kc.id = ?1", card_select_sql());
@@ -288,7 +288,7 @@ fn load_card_json_by_id_on_conn(
     Ok(card)
 }
 
-fn card_row_to_json(row: &Row<'_>) -> rusqlite::Result<Value> {
+fn card_row_to_json(row: &Row<'_>) -> libsql_rusqlite::Result<Value> {
     Ok(json!({
         "id": row.get::<_, String>(0)?,
         "repo_id": row.get::<_, Option<String>>(1)?,

@@ -55,8 +55,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
-use rusqlite::OptionalExtension;
 use serenity::{ChannelId, EditMessage, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
@@ -482,6 +482,8 @@ pub(super) struct SharedData {
     pub(super) api_port: u16,
     /// Shared DB handle for direct dispatch finalization (avoids HTTP round-trip).
     pub(super) db: Option<crate::db::Db>,
+    /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
+    pub(super) pg_pool: Option<sqlx::PgPool>,
     /// Shared policy engine for direct dispatch finalization.
     pub(super) engine: Option<crate::engine::PolicyEngine>,
     /// Weak reference to the process-wide health registry so turn handlers can
@@ -543,6 +545,7 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
         token_hash: "test-token-hash".to_string(),
         api_port: 9,
         db: None,
+        pg_pool: None,
         engine: None,
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
@@ -1733,8 +1736,9 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             }
 
             if let Some(db) = shared.db.as_ref() {
-                crate::services::termination_audit::record_termination_with_db(
+                crate::services::termination_audit::record_termination_with_handles(
                     db,
+                    shared.pg_pool.as_ref(),
                     session_key,
                     None,
                     "cleanup",

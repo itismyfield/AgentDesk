@@ -47,7 +47,7 @@ fn message_queue_raw(db: &Db, target: &str, content: &str, bot: &str, source: &s
     };
     match conn.execute(
         "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![target, content, bot, source],
+        libsql_rusqlite::params![target, content, bot, source],
     ) {
         Ok(_) => {
             let id = conn.last_insert_rowid();

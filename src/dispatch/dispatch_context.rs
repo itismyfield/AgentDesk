@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 
 use crate::db::Db;
@@ -180,7 +180,7 @@ pub(super) fn dispatch_context_worktree_target(
 }
 
 pub(super) fn resolve_parent_dispatch_context(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     context: &serde_json::Value,
 ) -> Result<(Option<String>, i64)> {
@@ -779,20 +779,10 @@ fn result_has_work_completion_evidence(result: &serde_json::Value) -> bool {
         || json_string_field(result, "work_outcome").is_some()
 }
 
-fn dispatch_has_assistant_response(conn: &rusqlite::Connection, dispatch_id: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM session_transcripts
-         WHERE dispatch_id = ?1
-           AND TRIM(assistant_message) <> ''",
-        [dispatch_id],
-        |row| row.get(0),
-    )
-    .map_err(|e| anyhow::anyhow!("session transcript lookup failed: {e}"))
-}
-
 pub(super) fn validate_dispatch_completion_evidence_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
+    db: &Db,
+    pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<()> {
@@ -811,7 +801,11 @@ pub(super) fn validate_dispatch_completion_evidence_on_conn(
     }
 
     if result_has_work_completion_evidence(result)
-        || dispatch_has_assistant_response(conn, dispatch_id)?
+        || crate::db::session_transcripts::dispatch_has_assistant_response_db(
+            db,
+            pg_pool,
+            dispatch_id,
+        )?
     {
         return Ok(());
     }
@@ -837,7 +831,7 @@ pub(crate) fn validate_dispatch_completion_evidence(
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-    validate_dispatch_completion_evidence_on_conn(&conn, dispatch_id, result)
+    validate_dispatch_completion_evidence_on_conn(&conn, db, None, dispatch_id, result)
 }
 
 fn apply_review_target_context(
@@ -1535,7 +1529,7 @@ mod tests {
              ) VALUES (
                 ?1, 'Test Card', ?2, ?3, datetime('now'), datetime('now')
              )",
-            rusqlite::params![card_id, status, issue_number],
+            libsql_rusqlite::params![card_id, status, issue_number],
         )
         .unwrap();
     }
@@ -1544,7 +1538,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
-            rusqlite::params![repo_id, card_id],
+            libsql_rusqlite::params![repo_id, card_id],
         )
         .unwrap();
     }
@@ -1730,7 +1724,7 @@ mod tests {
                 'card-review-identifiers', ?1, ?2, 'wt/692-review', 901, ?3, 'review',
                 datetime('now'), datetime('now')
              )",
-            rusqlite::params![repo_dir, repo_dir, reviewed_commit],
+            libsql_rusqlite::params![repo_dir, repo_dir, reviewed_commit],
         )
         .unwrap();
         drop(conn);

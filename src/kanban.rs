@@ -16,6 +16,7 @@ use crate::db::Db;
 use crate::engine::PolicyEngine;
 use anyhow::Result;
 use serde_json::json;
+use sqlx::Row as SqlxRow;
 
 /// Transition a kanban card to a new status.
 ///
@@ -41,12 +42,12 @@ pub fn transition_status(
 }
 
 fn clear_escalation_alert_state_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key IN (?1, ?2)",
-        rusqlite::params![
+        libsql_rusqlite::params![
             format!("pm_pending:{card_id}"),
             format!("pm_decision_sent:{card_id}")
         ],
@@ -55,7 +56,7 @@ fn clear_escalation_alert_state_on_conn(
 }
 
 pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
@@ -109,7 +110,7 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
 }
 
 pub(crate) fn log_audit_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     from: &str,
     to: &str,
@@ -129,7 +130,7 @@ fn transition_status_with_opts_inner<F>(
     on_conn_after_intents: F,
 ) -> Result<TransitionResult>
 where
-    F: FnOnce(&rusqlite::Connection) -> Result<()>,
+    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
 {
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
@@ -204,7 +205,7 @@ where
              WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
                AND (?2 IS NULL OR datetime(COALESCE(completed_at, updated_at)) >= datetime(?2)) \
              ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC LIMIT 1",
-            rusqlite::params![card_id, review_entered_at.as_deref()],
+            libsql_rusqlite::params![card_id, review_entered_at.as_deref()],
             |row| row.get(0),
         )
         .ok()
@@ -318,8 +319,13 @@ where
         Some(source),
     );
 
-    if effective.is_terminal(new_status) && record_true_negative_if_pass(db, card_id) {
-        crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
+    if effective.is_terminal(new_status)
+        && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
+    {
+        crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+            db,
+            engine.pg_pool().cloned(),
+        );
     }
 
     Ok(TransitionResult {
@@ -361,7 +367,7 @@ pub fn transition_status_with_opts_and_on_conn<F>(
     on_conn_after_intents: F,
 ) -> Result<TransitionResult>
 where
-    F: FnOnce(&rusqlite::Connection) -> Result<()>,
+    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
 {
     transition_status_with_opts_inner(
         db,
@@ -372,6 +378,237 @@ where
         force,
         on_conn_after_intents,
     )
+}
+
+pub async fn transition_status_with_opts_pg(
+    db: &Db,
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force: bool,
+) -> Result<TransitionResult> {
+    use crate::engine::transition::{
+        self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
+    };
+
+    let row = sqlx::query(
+        "SELECT
+            status,
+            review_status,
+            latest_dispatch_id,
+            repo_id,
+            assigned_agent_id,
+            review_entered_at::text AS review_entered_at,
+            blocked_reason
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres card {card_id}: {error}"))?
+    .ok_or_else(|| anyhow::anyhow!("card not found: {card_id}"))?;
+
+    let old_status: String = row
+        .try_get("status")
+        .map_err(|error| anyhow::anyhow!("decode status for {card_id}: {error}"))?;
+    let review_status: Option<String> = row
+        .try_get("review_status")
+        .map_err(|error| anyhow::anyhow!("decode review_status for {card_id}: {error}"))?;
+    let latest_dispatch_id: Option<String> = row
+        .try_get("latest_dispatch_id")
+        .map_err(|error| anyhow::anyhow!("decode latest_dispatch_id for {card_id}: {error}"))?;
+    let card_repo_id: Option<String> = row
+        .try_get("repo_id")
+        .map_err(|error| anyhow::anyhow!("decode repo_id for {card_id}: {error}"))?;
+    let card_agent_id: Option<String> = row
+        .try_get("assigned_agent_id")
+        .map_err(|error| anyhow::anyhow!("decode assigned_agent_id for {card_id}: {error}"))?;
+    let review_entered_at: Option<String> = row
+        .try_get("review_entered_at")
+        .map_err(|error| anyhow::anyhow!("decode review_entered_at for {card_id}: {error}"))?;
+    let blocked_reason: Option<String> = row
+        .try_get("blocked_reason")
+        .map_err(|error| anyhow::anyhow!("decode blocked_reason for {card_id}: {error}"))?;
+
+    if old_status == new_status {
+        return Ok(TransitionResult {
+            changed: false,
+            from: old_status,
+            to: new_status.to_string(),
+        });
+    }
+
+    crate::pipeline::ensure_loaded();
+    let effective =
+        resolve_pipeline_with_pg(pg_pool, card_repo_id.as_deref(), card_agent_id.as_deref())
+            .await?;
+
+    let has_active_dispatch = sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_one(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load active dispatch gate for {card_id}: {error}"))?;
+
+    let latest_review_verdict = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT result::jsonb ->> 'verdict'
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = 'review'
+           AND status = 'completed'
+           AND ($2::timestamptz IS NULL OR COALESCE(completed_at, updated_at) >= $2::timestamptz)
+         ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .bind(review_entered_at.as_deref())
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load latest review verdict for {card_id}: {error}"))?
+    .flatten();
+
+    let ctx = TransitionContext {
+        card: CardState {
+            id: card_id.to_string(),
+            status: old_status.clone(),
+            review_status: review_status.clone(),
+            latest_dispatch_id: latest_dispatch_id.clone(),
+        },
+        pipeline: effective.clone(),
+        gates: GateSnapshot {
+            has_active_dispatch,
+            review_verdict_pass: matches!(
+                latest_review_verdict.as_deref(),
+                Some("pass") | Some("approved")
+            ),
+            review_verdict_rework: matches!(
+                latest_review_verdict.as_deref(),
+                Some("rework") | Some("improve") | Some("reject")
+            ),
+        },
+    };
+
+    let decision = transition::decide_status_transition(&ctx, new_status, source, force);
+
+    if let TransitionOutcome::Blocked(ref reason) = decision.outcome {
+        let mut tx = pg_pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!("begin blocked postgres transition tx: {error}"))?;
+        for intent in &decision.intents {
+            crate::github::sync::execute_pg_transition_intent(&mut tx, intent)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| anyhow::anyhow!("commit blocked postgres transition tx: {error}"))?;
+        tracing::warn!(
+            "[kanban] Blocked postgres transition {} → {} for card {} (source: {}): {}",
+            old_status,
+            new_status,
+            card_id,
+            source,
+            reason
+        );
+        return Err(anyhow::anyhow!("{}", reason));
+    }
+
+    if decision.outcome == TransitionOutcome::NoOp {
+        return Ok(TransitionResult {
+            changed: false,
+            from: old_status,
+            to: new_status.to_string(),
+        });
+    }
+
+    let old_manual_intervention = crate::manual_intervention::requires_manual_intervention(
+        review_status.as_deref(),
+        blocked_reason.as_deref(),
+    );
+
+    let mut tx = pg_pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin postgres transition tx: {error}"))?;
+
+    for intent in &decision.intents {
+        crate::github::sync::execute_pg_transition_intent(&mut tx, intent)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
+    if effective.is_terminal(new_status) {
+        crate::github::sync::cancel_live_dispatches_for_terminal_card_pg(&mut tx, card_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
+    let new_state_row = sqlx::query(
+        "SELECT review_status, blocked_reason
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("reload postgres card state for {card_id}: {error}"))?;
+    let new_review_status: Option<String> = new_state_row
+        .try_get("review_status")
+        .map_err(|error| anyhow::anyhow!("decode new review_status for {card_id}: {error}"))?;
+    let new_blocked_reason: Option<String> = new_state_row
+        .try_get("blocked_reason")
+        .map_err(|error| anyhow::anyhow!("decode new blocked_reason for {card_id}: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit postgres transition tx: {error}"))?;
+
+    let new_manual_intervention = crate::manual_intervention::requires_manual_intervention(
+        new_review_status.as_deref(),
+        new_blocked_reason.as_deref(),
+    );
+    if old_manual_intervention
+        && !new_manual_intervention
+        && let Ok(conn) = db.lock()
+        && let Err(error) = clear_escalation_alert_state_on_conn(&conn, card_id)
+    {
+        tracing::warn!(
+            "[kanban] failed to clear manual-intervention alert state for {card_id}: {error}"
+        );
+    }
+
+    github_sync_on_transition_pg(pg_pool, &effective, card_id, new_status).await;
+    fire_dynamic_hooks(
+        engine,
+        &effective,
+        card_id,
+        &old_status,
+        new_status,
+        Some(source),
+    );
+
+    if effective.is_terminal(new_status)
+        && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
+    {
+        crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+            db,
+            engine.pg_pool().cloned(),
+        );
+    }
+
+    Ok(TransitionResult {
+        changed: true,
+        from: old_status,
+        to: new_status.to_string(),
+    })
 }
 
 #[derive(Debug)]
@@ -417,6 +654,144 @@ fn fire_dynamic_hooks(
         }
     }
     // No fallback — YAML is the sole source of truth for hook bindings.
+}
+
+async fn resolve_pipeline_with_pg(
+    pg_pool: &sqlx::PgPool,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<crate::pipeline::PipelineConfig> {
+    let repo_override = if let Some(repo_id) = repo_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config
+             FROM github_repos
+             WHERE id = $1",
+        )
+        .bind(repo_id)
+        .fetch_optional(pg_pool)
+        .await
+        .map_err(|error| anyhow::anyhow!("load repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+        .map(|json| crate::pipeline::parse_override(&json))
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("parse repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+    } else {
+        None
+    };
+
+    let agent_override = if let Some(agent_id) = agent_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config
+             FROM agents
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(pg_pool)
+        .await
+        .map_err(|error| anyhow::anyhow!("load agent pipeline override for {agent_id}: {error}"))?
+        .flatten()
+        .map(|json| crate::pipeline::parse_override(&json))
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("parse agent pipeline override for {agent_id}: {error}"))?
+        .flatten()
+    } else {
+        None
+    };
+
+    Ok(crate::pipeline::resolve(
+        repo_override.as_ref(),
+        agent_override.as_ref(),
+    ))
+}
+
+async fn github_sync_on_transition_pg(
+    pg_pool: &sqlx::PgPool,
+    pipeline: &crate::pipeline::PipelineConfig,
+    card_id: &str,
+    new_status: &str,
+) {
+    let is_terminal = pipeline.is_terminal(new_status);
+    let is_review_enter = pipeline
+        .hooks_for_state(new_status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
+
+    if !is_terminal && !is_review_enter {
+        return;
+    }
+
+    let Some((repo_id, issue_number)) = github_sync_target_for_card_pg(pg_pool, card_id).await
+    else {
+        return;
+    };
+
+    if is_terminal {
+        if let Err(error) = crate::github::close_issue(&repo_id, issue_number) {
+            tracing::warn!(
+                "[kanban] failed to close issue {repo_id}#{issue_number} for terminal card {card_id}: {error}"
+            );
+        }
+    } else if is_review_enter {
+        let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
+        let _ = crate::github::comment_issue(&repo_id, issue_number, comment);
+    }
+}
+
+async fn github_sync_target_for_card_pg(
+    pg_pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Option<(String, i64)> {
+    let row = sqlx::query(
+        "SELECT
+            COALESCE(repo_id, '') AS repo_id,
+            COALESCE(github_issue_url, '') AS github_issue_url,
+            github_issue_number::BIGINT AS github_issue_number
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pg_pool)
+    .await
+    .ok()??;
+
+    let repo_id: String = row.try_get("repo_id").ok()?;
+    let issue_url: String = row.try_get("github_issue_url").ok()?;
+    let issue_number: Option<i64> = row.try_get("github_issue_number").ok()?;
+    if repo_id.is_empty() || issue_url.is_empty() {
+        return None;
+    }
+
+    let issue_repo = issue_url
+        .strip_prefix("https://github.com/")
+        .and_then(|value| value.find("/issues/").map(|index| &value[..index]))?;
+    if issue_repo != repo_id {
+        tracing::warn!(
+            "[kanban] skip GitHub sync for card {card_id}: issue URL repo {issue_repo} does not match card repo_id {repo_id}"
+        );
+        return None;
+    }
+
+    let repo_registered = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM github_repos
+            WHERE id = $1
+              AND COALESCE(sync_enabled, TRUE) = TRUE
+         )",
+    )
+    .bind(&repo_id)
+    .fetch_one(pg_pool)
+    .await
+    .ok()
+    .unwrap_or(false);
+    if !repo_registered {
+        tracing::warn!(
+            "[kanban] skip GitHub sync for card {card_id}: repo_id {repo_id} is not a registered sync-enabled repo"
+        );
+        return None;
+    }
+
+    issue_number.map(|number| (repo_id, number))
 }
 
 const TERMINAL_DISPATCH_CLEANUP_REASON: &str = "auto_cancelled_on_terminal_card";
@@ -641,8 +1016,11 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
         fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
 
         // #119: Record true_negative for cards that passed review and reached terminal state
-        if pipeline.is_terminal(to) && record_true_negative_if_pass(db, card_id) {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
+        if pipeline.is_terminal(to) && record_true_negative_if_pass(db, engine.pg_pool(), card_id) {
+            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+                db,
+                engine.pg_pool().cloned(),
+            );
         }
     }
 
@@ -740,7 +1118,7 @@ fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(String, i64)> 
 
 /// Log a kanban state transition to audit_logs table.
 fn log_audit(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     from: &str,
     to: &str,
@@ -761,7 +1139,7 @@ fn log_audit(
     .ok();
     conn.execute(
         "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![card_id, from, to, source, result],
+        libsql_rusqlite::params![card_id, from, to, source, result],
     )
     .ok();
     conn.execute_batch(
@@ -778,7 +1156,7 @@ fn log_audit(
     conn.execute(
         "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
          VALUES ('kanban_card', ?1, ?2, ?3)",
-        rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
+        libsql_rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
     )
     .ok();
 }
@@ -786,7 +1164,103 @@ fn log_audit(
 /// #119: When a card reaches done after a review pass verdict, record a true_negative
 /// tuning outcome. This confirms the review was correct in not finding issues.
 /// Returns true if a TN was actually inserted.
-fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
+fn record_true_negative_if_pass(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) -> bool {
+    if let Some(pool) = pg_pool {
+        let card_id = card_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |pool| async move {
+                let last_verdict = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT last_verdict
+                     FROM card_review_state
+                     WHERE card_id = $1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load postgres review verdict for {card_id}: {error}"))?
+                .flatten();
+
+                let Some(last_verdict) = last_verdict else {
+                    return Ok(false);
+                };
+                if !matches!(last_verdict.as_str(), "pass" | "approved") {
+                    return Ok(false);
+                }
+
+                let review_round = sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT review_round
+                     FROM card_review_state
+                     WHERE card_id = $1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load postgres review round for {card_id}: {error}"))?
+                .flatten();
+
+                let review_results = sqlx::query(
+                    "SELECT result
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type = 'review'
+                       AND status = 'completed'
+                     ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, id DESC",
+                )
+                .bind(&card_id)
+                .fetch_all(&pool)
+                .await
+                .map_err(|error| format!("load postgres review dispatches for {card_id}: {error}"))?;
+
+                let finding_cats = review_results.into_iter().find_map(|row| {
+                    row.try_get::<Option<String>, _>("result")
+                        .ok()
+                        .flatten()
+                        .and_then(|result_str| serde_json::from_str::<serde_json::Value>(&result_str).ok())
+                        .and_then(|value| {
+                            value["items"].as_array().and_then(|items| {
+                                let cats: Vec<String> = items
+                                    .iter()
+                                    .filter_map(|item| item["category"].as_str().map(str::to_string))
+                                    .collect();
+                                if cats.is_empty() {
+                                    None
+                                } else {
+                                    serde_json::to_string(&cats).ok()
+                                }
+                            })
+                        })
+                });
+
+                let inserted = sqlx::query(
+                    "INSERT INTO review_tuning_outcomes (
+                        card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories
+                     )
+                     VALUES ($1, NULL, $2, $3, 'done', 'true_negative', $4)",
+                )
+                .bind(&card_id)
+                .bind(review_round)
+                .bind(&last_verdict)
+                .bind(finding_cats)
+                .execute(&pool)
+                .await
+                .map(|result| result.rows_affected() > 0)
+                .map_err(|error| {
+                    format!("insert postgres true_negative review tuning for {card_id}: {error}")
+                })?;
+
+                if inserted {
+                    tracing::info!(
+                        "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
+                    );
+                }
+                Ok(inserted)
+            },
+            |error| error,
+        )
+        .unwrap_or(false);
+    }
+
     if let Ok(conn) = db.lock() {
         // Check if the card's last review verdict was "pass" or "approved"
         let last_verdict: Option<String> = conn
@@ -850,7 +1324,7 @@ fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
                     "INSERT INTO review_tuning_outcomes \
                      (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
                      VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', ?4)",
-                    rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass"), finding_cats],
+                    libsql_rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass"), finding_cats],
                 )
                 .map(|n| n > 0)
                 .unwrap_or(false);
@@ -875,7 +1349,127 @@ fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
 /// which is the pass/approved dispatch with empty items. On reopen we look for the
 /// most recent review dispatch that actually reported findings (non-empty items array)
 /// to carry those categories forward into the FN record.
-pub fn correct_tn_to_fn_on_reopen(db: &Db, card_id: &str) {
+pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
+    if let Some(pool) = pg_pool {
+        let card_id = card_id.to_string();
+        let log_card_id = card_id.clone();
+        let updated = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |pool| async move {
+                let updated = sqlx::query(
+                    "UPDATE review_tuning_outcomes
+                     SET outcome = 'false_negative'
+                     WHERE card_id = $1
+                       AND outcome = 'true_negative'
+                       AND review_round = (
+                           SELECT MAX(review_round)
+                           FROM review_tuning_outcomes
+                           WHERE card_id = $1
+                             AND outcome = 'true_negative'
+                       )",
+                )
+                .bind(&card_id)
+                .execute(&pool)
+                .await
+                .map_err(|error| format!("correct postgres TN->FN for {card_id}: {error}"))?
+                .rows_affected();
+                if updated == 0 {
+                    return Ok(0_u64);
+                }
+
+                let needs_backfill = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(
+                         finding_categories IS NULL
+                         OR finding_categories = ''
+                         OR finding_categories = '[]',
+                         false
+                     )
+                     FROM review_tuning_outcomes
+                     WHERE card_id = $1
+                       AND outcome = 'false_negative'
+                     ORDER BY id DESC
+                     LIMIT 1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load postgres FN backfill flag for {card_id}: {error}"))?
+                .unwrap_or(false);
+
+                if needs_backfill {
+                    let review_results = sqlx::query(
+                        "SELECT result
+                         FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type = 'review'
+                           AND status = 'completed'
+                         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, id DESC",
+                    )
+                    .bind(&card_id)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|error| format!("load postgres review dispatches for {card_id}: {error}"))?;
+
+                    let finding_cats = review_results.into_iter().find_map(|row| {
+                        row.try_get::<Option<String>, _>("result")
+                            .ok()
+                            .flatten()
+                            .and_then(|result_str| serde_json::from_str::<serde_json::Value>(&result_str).ok())
+                            .and_then(|value| {
+                                value["items"].as_array().and_then(|items| {
+                                    if items.is_empty() {
+                                        return None;
+                                    }
+                                    let cats: Vec<String> = items
+                                        .iter()
+                                        .filter_map(|item| item["category"].as_str().map(str::to_string))
+                                        .collect();
+                                    if cats.is_empty() {
+                                        None
+                                    } else {
+                                        serde_json::to_string(&cats).ok()
+                                    }
+                                })
+                            })
+                    });
+
+                    if let Some(cats) = finding_cats {
+                        let backfilled = sqlx::query(
+                            "UPDATE review_tuning_outcomes
+                             SET finding_categories = $1
+                             WHERE card_id = $2
+                               AND outcome = 'false_negative'
+                               AND (finding_categories IS NULL OR finding_categories = '' OR finding_categories = '[]')",
+                        )
+                        .bind(&cats)
+                        .bind(&card_id)
+                        .execute(&pool)
+                        .await
+                        .map_err(|error| {
+                            format!("backfill postgres FN finding_categories for {card_id}: {error}")
+                        })?
+                        .rows_affected();
+                        if backfilled > 0 {
+                            tracing::info!(
+                                "[review-tuning] #119 backfilled {backfilled} FN finding_categories: card={card_id} categories={cats}"
+                            );
+                        }
+                    }
+                }
+
+                Ok(updated)
+            },
+            |error| error,
+        )
+        .unwrap_or(0);
+        if updated > 0 {
+            tracing::info!(
+                "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={log_card_id} (reopen, latest round only)"
+            );
+        }
+        return;
+    }
+
     if let Ok(conn) = db.lock() {
         // Only correct the most recent TN (latest review_round) to avoid
         // corrupting historical TN records from earlier rounds
@@ -951,7 +1545,7 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, card_id: &str) {
                             "UPDATE review_tuning_outcomes SET finding_categories = ?1 \
                              WHERE card_id = ?2 AND outcome = 'false_negative' \
                              AND (finding_categories IS NULL OR finding_categories = '' OR finding_categories = '[]')",
-                            rusqlite::params![cats, card_id],
+                            libsql_rusqlite::params![cats, card_id],
                         )
                         .unwrap_or(0);
                     if backfilled > 0 {
@@ -974,7 +1568,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -1035,7 +1629,7 @@ mod tests {
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
              VALUES (?1, 'Test Card', ?2, 'agent-1', datetime('now'), datetime('now'))",
-            rusqlite::params![card_id, status],
+            libsql_rusqlite::params![card_id, status],
         ).unwrap();
     }
 
@@ -1044,7 +1638,7 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
              VALUES (?1, ?2, 'agent-1', 'implementation', ?3, 'Test Dispatch', datetime('now'), datetime('now'))",
-            rusqlite::params![format!("dispatch-{}-{}", card_id, dispatch_status), card_id, dispatch_status],
+            libsql_rusqlite::params![format!("dispatch-{}-{}", card_id, dispatch_status), card_id, dispatch_status],
         ).unwrap();
     }
 
@@ -1059,7 +1653,7 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
              VALUES (?1, ?2, 'agent-1', ?3, ?4, 'Typed Dispatch', datetime('now'), datetime('now'))",
-            rusqlite::params![dispatch_id, card_id, dispatch_type, dispatch_status],
+            libsql_rusqlite::params![dispatch_id, card_id, dispatch_type, dispatch_status],
         )
         .unwrap();
     }
@@ -1198,7 +1792,7 @@ mod tests {
                     'stale pass', ?1,
                     datetime('now', '-30 minutes'), datetime('now', '-30 minutes'), datetime('now', '-30 minutes')
                  )",
-                rusqlite::params![json!({"verdict": "pass"}).to_string()],
+                libsql_rusqlite::params![json!({"verdict": "pass"}).to_string()],
             )
             .unwrap();
         }
@@ -1241,7 +1835,7 @@ mod tests {
                     'legacy pass', ?1,
                     datetime('now', '-10 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
                  )",
-                rusqlite::params![json!({"verdict": "pass"}).to_string()],
+                libsql_rusqlite::params![json!({"verdict": "pass"}).to_string()],
             )
             .unwrap();
         }
@@ -1572,7 +2166,7 @@ mod tests {
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at)
              VALUES (?1, 'Test Card', ?2, 'agent-1', ?3, datetime('now'), datetime('now'))",
-            rusqlite::params![card_id, status, repo_id],
+            libsql_rusqlite::params![card_id, status, repo_id],
         ).unwrap();
     }
 
@@ -1604,17 +2198,17 @@ mod tests {
         let entry_b = "entry-b";
         conn.execute(
             "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES (?1, 'active', ?2, datetime('now'))",
-            rusqlite::params![run_id, agent_id],
+            libsql_rusqlite::params![run_id, agent_id],
         ).unwrap();
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
              VALUES (?1, ?2, 'card-q1', ?3, 'dispatched', 1)",
-            rusqlite::params![entry_a, run_id, agent_id],
+            libsql_rusqlite::params![entry_a, run_id, agent_id],
         ).unwrap();
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
              VALUES (?1, ?2, 'card-q2', ?3, 'pending', 2)",
-            rusqlite::params![entry_b, run_id, agent_id],
+            libsql_rusqlite::params![entry_b, run_id, agent_id],
         ).unwrap();
         (run_id.to_string(), entry_a.to_string(), entry_b.to_string())
     }
@@ -1744,7 +2338,7 @@ mod tests {
                 "UPDATE kanban_cards
                  SET pipeline_stage_id = ?1, blocked_reason = 'deploy:waiting', updated_at = datetime('now')
                  WHERE id = ?2",
-                rusqlite::params![stage_id, card_id],
+                libsql_rusqlite::params![stage_id, card_id],
             )
             .unwrap();
             conn.execute(
@@ -1754,7 +2348,7 @@ mod tests {
                     'dispatch-card-deploy-301', ?1, 'agent-1', 'implementation', 'completed',
                     'Implementation Done', ?2, '{}', datetime('now'), datetime('now')
                  )",
-                rusqlite::params![card_id, serde_json::json!({
+                libsql_rusqlite::params![card_id, serde_json::json!({
                     "worktree_path": correct_worktree.display().to_string(),
                     "worktree_branch": "feat/301-correct-worktree"
                 })
@@ -1851,7 +2445,7 @@ mod tests {
                 "INSERT INTO auto_queue_runs (
                     id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count, created_at
                  ) VALUES (?1, ?2, ?3, 'active', 1, ?4, 1, datetime('now'))",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "run-notify",
                     "repo-1",
                     "agent-1",
@@ -1863,7 +2457,7 @@ mod tests {
                 "INSERT INTO auto_queue_entries (
                     id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank
                  ) VALUES (?1, ?2, ?3, ?4, 'dispatched', ?5, 1)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "entry-notify",
                     "run-notify",
                     "card-notify",

@@ -31,7 +31,7 @@ fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
 }
 
 fn load_existing_thread_for_channel(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     channel_id: u64,
 ) -> Result<Option<String>> {
@@ -79,7 +79,7 @@ fn load_existing_thread_for_channel(
 }
 
 fn lookup_active_dispatch_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     dispatch_type: &str,
 ) -> Option<String> {
@@ -88,23 +88,23 @@ fn lookup_active_dispatch_id(
          WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
          AND status IN ('pending', 'dispatched') \
          ORDER BY rowid DESC LIMIT 1",
-        rusqlite::params![card_id, dispatch_type],
+        libsql_rusqlite::params![card_id, dispatch_type],
         |row| row.get(0),
     )
     .ok()
 }
 
-fn is_single_active_dispatch_violation(error: &rusqlite::Error) -> bool {
+fn is_single_active_dispatch_violation(error: &libsql_rusqlite::Error) -> bool {
     matches!(
         error,
-        rusqlite::Error::SqliteFailure(_, Some(message))
+        libsql_rusqlite::Error::SqliteFailure(_, Some(message))
             if message.contains("UNIQUE constraint failed")
                 && message.contains("task_dispatches.kanban_card_id")
     )
 }
 
 fn validate_dispatch_target_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_type: &str,
@@ -561,7 +561,7 @@ pub fn create_dispatch_with_options(
 /// `handoffCreatePr` in #743) should call
 /// [`apply_dispatch_attached_intents_on_conn`] directly instead.
 fn apply_dispatch_attached_intents(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_id: &str,
@@ -609,7 +609,7 @@ fn apply_dispatch_attached_intents(
 /// dispatch creation with surrounding pr_tracking/kanban_cards updates in a
 /// single atomic transaction.
 pub(crate) fn apply_dispatch_attached_intents_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_id: &str,
@@ -675,7 +675,7 @@ pub(crate) fn apply_dispatch_attached_intents_on_conn(
             parent_dispatch_id, chain_depth, created_at, updated_at
         )
          VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-        rusqlite::params![
+        libsql_rusqlite::params![
             dispatch_id,
             card_id,
             to_agent_id,

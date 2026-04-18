@@ -96,9 +96,9 @@ pub async fn list_messages(
         }
     };
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
         .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
         .collect();
 
     let rows = stmt
@@ -134,7 +134,7 @@ pub async fn create_message(
     if let Err(e) = conn.execute(
         "INSERT INTO messages (sender_type, sender_id, receiver_type, receiver_id, content, message_type, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
-        rusqlite::params![
+        libsql_rusqlite::params![
             sender_type,
             body.sender_id,
             body.receiver_type,
@@ -173,7 +173,7 @@ pub async fn create_message(
 
 // ── Helpers ────────────────────────────────────────────────────
 
-fn message_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+fn message_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<serde_json::Value> {
     Ok(json!({
         "id": row.get::<_, i64>(0)?,
         "sender_type": row.get::<_, Option<String>>(1)?,

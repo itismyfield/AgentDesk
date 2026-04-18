@@ -345,6 +345,9 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         }
         Commands::Migrate { action } => exit_for_cli(match action {
             MigrateAction::Openclaw(args) => super::migrate::cmd_migrate_openclaw(args),
+            MigrateAction::PostgresCutover(args) => {
+                super::direct::run_async(super::migrate::cmd_migrate_postgres_cutover(args))
+            }
         }),
     }
 }

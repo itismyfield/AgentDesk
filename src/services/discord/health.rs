@@ -844,6 +844,7 @@ impl TestHealthHarness {
             token_hash: super::settings::discord_token_hash("test-token"),
             api_port: 8791,
             db: None,
+            pg_pool: None,
             engine: None,
             health_registry: Arc::downgrade(&registry),
             known_slash_commands: tokio::sync::OnceCell::new(),
@@ -1709,7 +1710,7 @@ mod tests {
     use super::*;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

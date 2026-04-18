@@ -7,12 +7,14 @@ use crate::utils::format::expand_tilde_path;
 
 mod apply;
 mod plan;
+mod postgres_cutover;
 mod source;
 #[cfg(test)]
 mod tests;
 
 use apply::apply_import_plan;
 use plan::build_import_plan;
+pub use postgres_cutover::{PostgresCutoverArgs, cmd_migrate_postgres_cutover};
 use source::resolve_source_root;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

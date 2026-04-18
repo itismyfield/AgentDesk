@@ -666,13 +666,16 @@ pub fn execute_decision(db: &crate::db::Db, decision: &TransitionDecision) -> an
 ///
 /// Public for use by callers that manage their own DB lock (e.g., `kanban.rs`).
 pub fn execute_intent_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     intent: &TransitionIntent,
 ) -> anyhow::Result<()> {
     execute_intent(conn, intent)
 }
 
-fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> anyhow::Result<()> {
+fn execute_intent(
+    conn: &libsql_rusqlite::Connection,
+    intent: &TransitionIntent,
+) -> anyhow::Result<()> {
     match intent {
         TransitionIntent::UpdateStatus {
             card_id,
@@ -681,7 +684,7 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
         } => {
             conn.execute(
                 "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![to, card_id],
+                libsql_rusqlite::params![to, card_id],
             )?;
         }
         TransitionIntent::SetLatestDispatchId {
@@ -690,7 +693,7 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
         } => {
             conn.execute(
                 "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![dispatch_id, card_id],
+                libsql_rusqlite::params![dispatch_id, card_id],
             )?;
         }
         TransitionIntent::SetReviewStatus {
@@ -699,7 +702,7 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
         } => {
             conn.execute(
                 "UPDATE kanban_cards SET review_status = ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![review_status, card_id],
+                libsql_rusqlite::params![review_status, card_id],
             )?;
         }
         TransitionIntent::ApplyClock { card_id, clock, .. } => {
@@ -762,7 +765,7 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
 }
 
 fn execute_audit_log(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     from: &str,
     to: &str,
@@ -774,7 +777,7 @@ fn execute_audit_log(
     if let Err(e) = conn.execute(
         "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![card_id, from, to, source, message],
+        libsql_rusqlite::params![card_id, from, to, source, message],
     ) {
         tracing::warn!("[transition] audit_logs insert failed: {e}");
     }
@@ -782,7 +785,7 @@ fn execute_audit_log(
     conn.execute(
         "INSERT INTO audit_logs (entity_type, entity_id, action, actor) \
          VALUES ('kanban_card', ?1, ?2, ?3)",
-        rusqlite::params![card_id, format!("{from}->{to} ({message})"), source],
+        libsql_rusqlite::params![card_id, format!("{from}->{to} ({message})"), source],
     )
     .ok();
 }
@@ -1189,13 +1192,13 @@ mod tests {
     // ── #158: SyncReviewState executor routes through unified entrypoint ──
 
     fn test_db() -> crate::db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
     }
 
-    fn insert_test_card(conn: &rusqlite::Connection, card_id: &str) {
+    fn insert_test_card(conn: &libsql_rusqlite::Connection, card_id: &str) {
         conn.execute(
             "INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Test', '111')",
             [],
@@ -1207,7 +1210,7 @@ mod tests {
         ).unwrap();
     }
 
-    fn ensure_auto_queue_tables(conn: &rusqlite::Connection) {
+    fn ensure_auto_queue_tables(conn: &libsql_rusqlite::Connection) {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS auto_queue_runs (
                 id          TEXT PRIMARY KEY,
@@ -1403,7 +1406,7 @@ mod tests {
         ] {
             conn.execute(
                 "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES (?1, 'test-repo', 'agent-1', ?2)",
-                rusqlite::params![run_id, status],
+                libsql_rusqlite::params![run_id, status],
             )
             .unwrap();
         }
@@ -1417,7 +1420,7 @@ mod tests {
         ] {
             conn.execute(
                 "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) VALUES (?1, ?2, 'card-exec-aq', 'agent-1', ?3)",
-                rusqlite::params![entry_id, run_id, status],
+                libsql_rusqlite::params![entry_id, run_id, status],
             )
             .unwrap();
         }

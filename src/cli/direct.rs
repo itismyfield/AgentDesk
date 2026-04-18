@@ -166,7 +166,6 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     };
 
     let db = crate::db::init(&loaded.config).map_err(|e| format!("init db: {e}"))?;
-    crate::services::termination_audit::init_audit_db(db.clone());
 
     let config = if let Some(root) = runtime_root.as_ref() {
         crate::services::discord::config_audit::audit_and_reconcile(
@@ -200,7 +199,9 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
         crate::pipeline::ensure_loaded();
     }
 
-    let engine = crate::engine::PolicyEngine::new(&config, db.clone())
+    let pg_pool = crate::db::postgres::connect_and_migrate(&config).await?;
+    crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, db.clone(), pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
     let batch_buffer = crate::server::ws::spawn_batch_flusher(broadcast_tx.clone());
@@ -215,6 +216,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
 
     Ok(AppState {
         db,
+        pg_pool,
         engine,
         config: Arc::new(config),
         broadcast_tx,
@@ -567,7 +569,7 @@ fn upsert_backlog_card_from_issue(
 
     if let Ok(existing_id) = conn.query_row(
         "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-        rusqlite::params![issue.number, repo],
+        libsql_rusqlite::params![issue.number, repo],
         |row| row.get::<_, String>(0),
     ) {
         conn.execute(
@@ -578,7 +580,7 @@ fn upsert_backlog_card_from_issue(
                  metadata = COALESCE(?4, metadata),
                  updated_at = datetime('now')
              WHERE id = ?5",
-            rusqlite::params![issue.title, issue.url, issue.body, metadata, existing_id],
+            libsql_rusqlite::params![issue.title, issue.url, issue.body, metadata, existing_id],
         )
         .map_err(|e| format!("update existing card: {e}"))?;
         return Ok(existing_id);
@@ -591,7 +593,7 @@ fn upsert_backlog_card_from_issue(
              description, metadata, created_at, updated_at
          )
          VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-        rusqlite::params![
+        libsql_rusqlite::params![
             card_id,
             repo,
             issue.title,
@@ -630,7 +632,7 @@ fn resolve_card_id(
             .prepare("SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2")
             .map_err(|e| format!("prepare card lookup: {e}"))?;
         let rows = stmt
-            .query_map(rusqlite::params![issue_number, repo], |row| {
+            .query_map(libsql_rusqlite::params![issue_number, repo], |row| {
                 row.get::<_, String>(0)
             })
             .map_err(|e| format!("query card lookup: {e}"))?;
@@ -868,7 +870,7 @@ pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Resul
 }
 
 fn resolve_auto_queue_run(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_id: Option<&str>,
     repo: Option<&str>,
     agent_id: Option<&str>,
@@ -905,9 +907,9 @@ fn resolve_auto_queue_run(
     }
     sql.push_str(" ORDER BY created_at DESC LIMIT 1");
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = values
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = values
         .iter()
-        .map(|value| value as &dyn rusqlite::types::ToSql)
+        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
         .collect();
     conn.query_row(&sql, params_ref.as_slice(), |row| row.get::<_, String>(0))
         .map_err(|_| "no matching live auto-queue run found".to_string())
@@ -1012,7 +1014,7 @@ pub(crate) async fn cmd_auto_queue_add(
                      id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, thread_group_count
                  )
                  VALUES (?1, ?2, ?3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
-                rusqlite::params![created_run_id, repo_id, effective_agent],
+                libsql_rusqlite::params![created_run_id, repo_id, effective_agent],
             )
             .map_err(|e| format!("create auto-queue run: {e}"))?;
             created_run_id
@@ -1022,7 +1024,7 @@ pub(crate) async fn cmd_auto_queue_add(
             .query_row(
                 "SELECT COUNT(*) > 0 FROM auto_queue_entries
                  WHERE run_id = ?1 AND kanban_card_id = ?2 AND status IN ('pending', 'dispatched')",
-                rusqlite::params![run_id, card_id],
+                libsql_rusqlite::params![run_id, card_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -1056,7 +1058,7 @@ pub(crate) async fn cmd_auto_queue_add(
                  FROM auto_queue_entries
                  WHERE run_id = ?1
                    AND COALESCE(thread_group, 0) = ?2",
-                rusqlite::params![&run_id, effective_thread_group],
+                libsql_rusqlite::params![&run_id, effective_thread_group],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0)
@@ -1067,7 +1069,7 @@ pub(crate) async fn cmd_auto_queue_add(
                  id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, reason
              )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 entry_id,
                 run_id,
                 card_id,
@@ -1112,7 +1114,7 @@ pub(crate) async fn cmd_auto_queue_config(
         let changed = conn
             .execute(
                 "UPDATE auto_queue_runs SET max_concurrent_threads = ?1 WHERE id = ?2",
-                rusqlite::params![max_concurrent_threads, run_id],
+                libsql_rusqlite::params![max_concurrent_threads, run_id],
             )
             .map_err(|e| format!("update auto-queue run: {e}"))?;
         if changed == 0 {

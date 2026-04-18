@@ -1078,7 +1078,7 @@ fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
 
 // ── Rate limit window ──────────────────────────────────────────
 
-pub fn ratelimit_window_start(conn: &rusqlite::Connection) -> Option<DateTime<Utc>> {
+pub fn ratelimit_window_start(conn: &libsql_rusqlite::Connection) -> Option<DateTime<Utc>> {
     let data: String = conn
         .query_row(
             "SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1",

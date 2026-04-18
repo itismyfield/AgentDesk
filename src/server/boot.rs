@@ -31,6 +31,10 @@ pub(super) async fn serve_http(
     let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
 
     seed_server_runtime_config(&db, &config);
+    let pg_pool = crate::db::postgres::connect(&config)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
 
     let app = build_app(
         &dashboard_dir,
@@ -40,6 +44,7 @@ pub(super) async fn serve_http(
         broadcast_tx,
         batch_buffer,
         health_registry,
+        pg_pool,
     );
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -106,18 +111,20 @@ fn build_app(
     broadcast_tx: ws::BroadcastTx,
     batch_buffer: ws::BatchBuffer,
     health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
             "/api",
-            routes::api_router(
+            routes::api_router_with_pg(
                 db,
                 engine,
                 config,
                 broadcast_tx,
                 batch_buffer,
                 health_registry,
+                pg_pool,
             ),
         )
         .fallback_service(ServeDir::new(dashboard_dir).append_index_html_on_directories(true))

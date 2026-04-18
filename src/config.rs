@@ -23,6 +23,8 @@ pub struct Config {
     pub policies: PoliciesConfig,
     #[serde(default)]
     pub data: DataConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
     #[serde(default, skip_serializing_if = "KanbanConfig::is_empty")]
     pub kanban: KanbanConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
@@ -495,6 +497,25 @@ pub struct DataConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct DatabaseConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_database_host")]
+    pub host: String,
+    #[serde(default = "default_database_port")]
+    pub port: u16,
+    #[serde(default = "default_database_name")]
+    pub dbname: String,
+    #[serde(default = "default_database_user")]
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default = "default_database_pool_max")]
+    pub pool_max: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct KanbanConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_channel_id: Option<String>,
@@ -775,6 +796,21 @@ fn default_data_dir() -> PathBuf {
 fn default_db_name() -> String {
     "agentdesk.sqlite".into()
 }
+fn default_database_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_database_port() -> u16 {
+    5432
+}
+fn default_database_name() -> String {
+    "agentdesk".into()
+}
+fn default_database_user() -> String {
+    "agentdesk".into()
+}
+fn default_database_pool_max() -> u32 {
+    12
+}
 fn default_memory_backend() -> String {
     "auto".into()
 }
@@ -905,6 +941,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
+            database: DatabaseConfig::default(),
             kanban: KanbanConfig::default(),
             review: ReviewConfig::default(),
             runtime: RuntimeSettingsConfig::default(),

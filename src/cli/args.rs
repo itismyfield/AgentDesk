@@ -483,6 +483,8 @@ pub(crate) struct DispatchArgs {
 pub(crate) enum MigrateAction {
     /// Import OpenClaw durable state into AgentDesk
     Openclaw(super::migrate::OpenClawMigrateArgs),
+    /// Cut over SQLite history into PostgreSQL and verify live state is drained
+    PostgresCutover(super::migrate::PostgresCutoverArgs),
 }
 
 #[derive(Subcommand)]
@@ -522,8 +524,20 @@ pub(crate) enum ParseOutcome {
     Command(Commands),
 }
 
+fn rewrite_legacy_args(mut args: Vec<String>) -> Vec<String> {
+    if args.get(1).map(String::as_str) == Some("--cutover-pg") {
+        let mut rewritten = Vec::with_capacity(args.len() + 1);
+        rewritten.push(args.remove(0));
+        rewritten.push("migrate".to_string());
+        rewritten.push("postgres-cutover".to_string());
+        rewritten.extend(args.into_iter().skip(1));
+        return rewritten;
+    }
+    args
+}
+
 pub(crate) fn parse() -> ParseOutcome {
-    match Cli::try_parse() {
+    match Cli::try_parse_from(rewrite_legacy_args(std::env::args().collect())) {
         Ok(cli) => match cli.command {
             Some(command) => ParseOutcome::Command(command),
             None => ParseOutcome::RunServer,
@@ -576,6 +590,59 @@ mod tests {
                 assert_eq!(card_id, "610");
                 assert_eq!(phase, Some(1));
                 assert_eq!(thread_group, Some(2));
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn migrate_postgres_cutover_parses_archive_dir() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "migrate",
+            "postgres-cutover",
+            "--dry-run",
+            "--archive-dir",
+            "/tmp/agentdesk-cutover",
+        ])
+        .expect("cli args should parse");
+
+        match cli.command {
+            Some(Commands::Migrate {
+                action: MigrateAction::PostgresCutover(args),
+            }) => {
+                assert!(args.dry_run);
+                assert_eq!(args.archive_dir.as_deref(), Some("/tmp/agentdesk-cutover"));
+                assert!(!args.skip_pg_import);
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn legacy_cutover_pg_flag_rewrites_to_migrate_command() {
+        let cli = Cli::try_parse_from(rewrite_legacy_args(vec![
+            "agentdesk".to_string(),
+            "--cutover-pg".to_string(),
+            "--dry-run".to_string(),
+            "--archive-dir".to_string(),
+            "/tmp/agentdesk-cutover".to_string(),
+        ]))
+        .expect("legacy cutover args should parse");
+
+        match cli.command {
+            Some(Commands::Migrate {
+                action: MigrateAction::PostgresCutover(args),
+            }) => {
+                assert!(args.dry_run);
+                assert_eq!(args.archive_dir.as_deref(), Some("/tmp/agentdesk-cutover"));
+                assert!(!args.skip_pg_import);
             }
             other => panic!(
                 "unexpected parse result: {:?}",

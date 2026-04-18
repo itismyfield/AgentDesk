@@ -51,6 +51,7 @@ use crate::services::discord::health::HealthRegistry;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    pub pg_pool: Option<sqlx::PgPool>,
     pub engine: PolicyEngine,
     pub config: Arc<crate::config::Config>,
     pub broadcast_tx: crate::server::ws::BroadcastTx,
@@ -97,6 +98,7 @@ impl AppState {
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         Self {
             db,
+            pg_pool: None,
             engine,
             config: Arc::new(config),
             broadcast_tx: tx,
@@ -114,8 +116,29 @@ pub fn api_router(
     batch_buffer: crate::server::ws::BatchBuffer,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Router {
+    api_router_with_pg(
+        db,
+        engine,
+        config,
+        broadcast_tx,
+        batch_buffer,
+        health_registry,
+        None,
+    )
+}
+
+pub fn api_router_with_pg(
+    db: Db,
+    engine: PolicyEngine,
+    config: crate::config::Config,
+    broadcast_tx: crate::server::ws::BroadcastTx,
+    batch_buffer: crate::server::ws::BatchBuffer,
+    health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<sqlx::PgPool>,
+) -> Router {
     let state = AppState {
         db,
+        pg_pool,
         engine,
         config: Arc::new(config),
         broadcast_tx,

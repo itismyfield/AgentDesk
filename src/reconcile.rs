@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use rusqlite::Connection;
+use libsql_rusqlite::Connection;
 use serde_json::json;
 
 use crate::db::agents::load_agent_channel_bindings;
@@ -270,7 +270,7 @@ where
                 "UPDATE kanban_cards
                  SET channel_thread_map = ?1, active_thread_id = ?2
                  WHERE id = ?3",
-                rusqlite::params![new_map_json, new_active_thread_id, card_id],
+                libsql_rusqlite::params![new_map_json, new_active_thread_id, card_id],
             )?;
         }
         cleared += removed_for_card;
@@ -421,8 +421,8 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
 mod tests {
     use super::*;
 
-    fn test_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+    fn test_conn() -> libsql_rusqlite::Connection {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         conn

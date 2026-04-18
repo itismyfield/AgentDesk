@@ -1,5 +1,6 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use libsql_rusqlite::{Connection, OptionalExtension};
+use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::config::{AgentChannel, AgentDef};
 use crate::db::Db;
@@ -116,7 +117,7 @@ fn normalized_channel(value: Option<String>) -> Option<String> {
 pub fn load_agent_channel_bindings(
     conn: &Connection,
     agent_id: &str,
-) -> rusqlite::Result<Option<AgentChannelBindings>> {
+) -> libsql_rusqlite::Result<Option<AgentChannelBindings>> {
     conn.query_row(
         "SELECT provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
          FROM agents WHERE id = ?1",
@@ -137,14 +138,14 @@ pub fn load_agent_channel_bindings(
 pub fn resolve_agent_primary_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.primary_channel()))
 }
 
 pub fn resolve_agent_counter_model_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.counter_model_channel()))
 }
 
@@ -152,7 +153,7 @@ pub fn resolve_agent_channel_for_provider_on_conn(
     conn: &Connection,
     agent_id: &str,
     provider: Option<&str>,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.channel_for_provider(provider)))
 }
 
@@ -160,7 +161,7 @@ pub fn resolve_agent_dispatch_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
     dispatch_type: Option<&str>,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     Ok(
         load_agent_channel_bindings(conn, agent_id)?.and_then(|bindings| {
             if matches!(dispatch_type, Some("review" | "e2e-test" | "consultation")) {
@@ -170,6 +171,75 @@ pub fn resolve_agent_dispatch_channel_on_conn(
             }
         }),
     )
+}
+
+pub async fn load_agent_channel_bindings_pg(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Option<AgentChannelBindings>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         FROM agents
+         WHERE id = $1",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(AgentChannelBindings {
+            provider: row.try_get("provider")?,
+            discord_channel_id: row.try_get("discord_channel_id")?,
+            discord_channel_alt: row.try_get("discord_channel_alt")?,
+            discord_channel_cc: row.try_get("discord_channel_cc")?,
+            discord_channel_cdx: row.try_get("discord_channel_cdx")?,
+        })
+    })
+    .transpose()
+}
+
+pub async fn resolve_agent_primary_channel_pg(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(load_agent_channel_bindings_pg(pool, agent_id)
+        .await?
+        .and_then(|bindings| bindings.primary_channel()))
+}
+
+pub async fn resolve_agent_counter_model_channel_pg(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(load_agent_channel_bindings_pg(pool, agent_id)
+        .await?
+        .and_then(|bindings| bindings.counter_model_channel()))
+}
+
+pub async fn resolve_agent_channel_for_provider_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    provider: Option<&str>,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(load_agent_channel_bindings_pg(pool, agent_id)
+        .await?
+        .and_then(|bindings| bindings.channel_for_provider(provider)))
+}
+
+pub async fn resolve_agent_dispatch_channel_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    dispatch_type: Option<&str>,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(load_agent_channel_bindings_pg(pool, agent_id)
+        .await?
+        .and_then(|bindings| {
+            if matches!(dispatch_type, Some("review" | "e2e-test" | "consultation")) {
+                bindings.counter_model_channel()
+            } else {
+                bindings.primary_channel()
+            }
+        }))
 }
 
 /// Upsert agents from config into the agents table.
@@ -223,7 +293,7 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
                 discord_channel_cc = excluded.discord_channel_cc,
                 discord_channel_cdx = excluded.discord_channel_cdx,
                 updated_at = CURRENT_TIMESTAMP",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 agent.id,
                 agent.name,
                 agent.name_ko,
@@ -248,7 +318,7 @@ mod tests {
     use crate::config::AgentChannels;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

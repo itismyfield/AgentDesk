@@ -1,5 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode};
 use serde_json::json;
+use sqlx::Row;
 
 use super::AppState;
 
@@ -22,8 +23,36 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "narrate_progress",
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KvSeedAction {
+    Put { key: String, value: String },
+    PutIfAbsent { key: String, value: String },
+    Delete { key: String },
+}
+
 /// GET /api/settings
 pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let value =
+            match sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("settings")
+                .fetch_optional(pool)
+                .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => "{}".to_string(),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            };
+
+        let parsed: serde_json::Value = serde_json::from_str(&value).unwrap_or(json!({}));
+        return (StatusCode::OK, Json(parsed));
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -63,6 +92,28 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let normalized = prune_retired_settings_keys(body);
+    let value_str = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string());
+
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind("settings")
+        .bind(&value_str)
+        .execute(pool)
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+        return (StatusCode::OK, Json(json!({"ok": true})));
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -72,9 +123,6 @@ pub async fn put_settings(
             );
         }
     };
-
-    let normalized = prune_retired_settings_keys(body);
-    let value_str = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string());
 
     if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('settings', ?1)",
@@ -320,24 +368,46 @@ fn config_entry_restart_behavior(
 pub async fn get_config_entries(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
+    let pg_values = if let Some(pool) = state.pg_pool.as_ref() {
+        match load_pg_kv_values(pool).await {
+            Ok(values) => Some(values),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
         }
+    } else {
+        None
     };
+    let sqlite_conn = if pg_values.is_none() {
+        match state.db.lock() {
+            Ok(conn) => Some(conn),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     let mut entries = Vec::new();
     for (key, category, label_ko, label_en, default_val) in CONFIG_KEYS {
         let stored_value: Option<String> = if is_read_only_config_key(key) {
             None
+        } else if let Some(values) = pg_values.as_ref() {
+            values.get(*key).cloned()
         } else {
-            conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-                row.get(0)
+            sqlite_conn.as_ref().and_then(|conn| {
+                conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .ok()
             })
-            .ok()
         };
         let baseline = config_entry_default(state.config.as_ref(), key, *default_val);
         let effective = config_entry_effective_value(key, stored_value, baseline.clone());
@@ -371,15 +441,6 @@ pub async fn patch_config_entries(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
     let entries = match body.as_object() {
         Some(obj) => obj,
         None => {
@@ -393,6 +454,57 @@ pub async fn patch_config_entries(
         CONFIG_KEYS.iter().map(|(k, _, _, _, _)| *k).collect();
     let mut updated = 0;
     let mut rejected = Vec::new();
+
+    if let Some(pool) = state.pg_pool.as_ref() {
+        for (key, value) in entries {
+            if !allowed.contains(key.as_str()) || is_read_only_config_key(key) {
+                rejected.push(key.clone());
+                continue;
+            }
+            let v = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if let Err(error) = sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(key)
+            .bind(v)
+            .execute(pool)
+            .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+            updated += 1;
+        }
+
+        if !rejected.is_empty() {
+            tracing::warn!(
+                "patch_config_entries: rejected unknown keys: {:?}",
+                rejected
+            );
+        }
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": true, "updated": updated, "rejected": rejected})),
+        );
+    }
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
     for (key, value) in entries {
         if !allowed.contains(key.as_str()) {
             rejected.push(key.clone());
@@ -408,7 +520,7 @@ pub async fn patch_config_entries(
         };
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key, v],
+            libsql_rusqlite::params![key, v],
         )
         .ok();
         updated += 1;
@@ -429,7 +541,16 @@ pub async fn patch_config_entries(
 /// YAML values are treated as startup baseline and overwrite runtime overrides on reboot.
 /// When `runtime.reset_overrides_on_restart` is enabled, the entire managed surface resets
 /// back to YAML-or-hardcoded defaults.
-pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config::Config) {
+pub fn seed_config_defaults(conn: &libsql_rusqlite::Connection, config: &crate::config::Config) {
+    apply_kv_seed_actions(conn, &config_default_seed_actions(config));
+
+    crate::services::settings::seed_runtime_config_defaults(conn, config);
+    crate::server::routes::escalation::seed_escalation_defaults(conn, config);
+}
+
+pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec<KvSeedAction> {
+    let mut actions = Vec::new();
+
     for (key, _, _, _, default_val) in CONFIG_KEYS {
         if *key == "server_port" {
             continue;
@@ -440,55 +561,84 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config:
 
         if config.runtime.reset_overrides_on_restart {
             match baseline {
-                Some(val) => {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        rusqlite::params![key, val],
-                    )
-                    .ok();
-                }
-                None => {
-                    conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-                        .ok();
-                }
+                Some(value) => actions.push(KvSeedAction::Put {
+                    key: (*key).to_string(),
+                    value,
+                }),
+                None => actions.push(KvSeedAction::Delete {
+                    key: (*key).to_string(),
+                }),
             }
             continue;
         }
 
         match (yaml_value, baseline) {
-            (Some(val), _) => {
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![key, val],
-                )
-                .ok();
-            }
-            (None, Some(val)) => {
-                conn.execute(
-                    "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![key, val],
-                )
-                .ok();
-            }
+            (Some(value), _) => actions.push(KvSeedAction::Put {
+                key: (*key).to_string(),
+                value,
+            }),
+            (None, Some(value)) => actions.push(KvSeedAction::PutIfAbsent {
+                key: (*key).to_string(),
+                value,
+            }),
             (None, None) => {}
         }
     }
 
-    // Seed workspace_root from CARGO_MANIFEST_DIR (compile-time) for auto-merge.
-    // This is the source repo path, not a runtime override — always INSERT OR IGNORE.
-    conn.execute(
-        "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('workspace_root', ?1)",
-        [env!("CARGO_MANIFEST_DIR")],
-    )
-    .ok();
-
-    crate::services::settings::seed_runtime_config_defaults(conn, config);
-    crate::server::routes::escalation::seed_escalation_defaults(conn, config);
+    actions.push(KvSeedAction::PutIfAbsent {
+        key: "workspace_root".to_string(),
+        value: env!("CARGO_MANIFEST_DIR").to_string(),
+    });
 
     for key in RETIRED_CONFIG_KEYS {
-        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-            .ok();
+        actions.push(KvSeedAction::Delete {
+            key: (*key).to_string(),
+        });
     }
+
+    actions
+}
+
+fn apply_kv_seed_actions(conn: &libsql_rusqlite::Connection, actions: &[KvSeedAction]) {
+    for action in actions {
+        match action {
+            KvSeedAction::Put { key, value } => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    libsql_rusqlite::params![key, value],
+                )
+                .ok();
+            }
+            KvSeedAction::PutIfAbsent { key, value } => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    libsql_rusqlite::params![key, value],
+                )
+                .ok();
+            }
+            KvSeedAction::Delete { key } => {
+                conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+                    .ok();
+            }
+        }
+    }
+}
+
+async fn load_pg_kv_values(
+    pool: &sqlx::PgPool,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let rows = sqlx::query("SELECT key, value FROM kv_meta")
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres kv_meta: {error}"))?;
+    let mut values = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        values.insert(
+            row.get::<String, _>("key"),
+            row.get::<Option<String>, _>("value").unwrap_or_default(),
+        );
+    }
+    Ok(values)
 }
 
 /// GET /api/settings/runtime-config
@@ -522,7 +672,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_db() -> db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
         db::wrap_conn(conn)
@@ -717,7 +867,7 @@ mod tests {
 
     #[test]
     fn seed_config_defaults_removes_retired_config_keys() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
 
@@ -756,7 +906,7 @@ mod tests {
 
     #[test]
     fn seed_config_defaults_prefers_yaml_values_and_preserves_other_runtime_overrides() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
 
@@ -832,7 +982,7 @@ mod tests {
 
     #[test]
     fn seed_config_defaults_can_reset_runtime_overrides_on_restart() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
 

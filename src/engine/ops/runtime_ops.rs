@@ -5,6 +5,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 pub(super) fn register_runtime_ops<'js>(
     ctx: &Ctx<'js>,
     db: Db,
+    pg_pool: Option<sqlx::PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -34,6 +35,7 @@ pub(super) fn register_runtime_ops<'js>(
         })?,
     )?;
     let db_for_retrospective = db.clone();
+    let pg_for_retrospective = pg_pool.clone();
     runtime_obj.set(
         "__recordCardRetrospectiveRaw",
         Function::new(
@@ -41,6 +43,7 @@ pub(super) fn register_runtime_ops<'js>(
             move |card_id: String, terminal_status: String| -> String {
                 crate::services::retrospectives::record_card_retrospective_json(
                     &db_for_retrospective,
+                    pg_for_retrospective.as_ref(),
                     &card_id,
                     &terminal_status,
                 )

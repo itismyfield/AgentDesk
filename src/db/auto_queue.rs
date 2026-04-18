@@ -1,4 +1,5 @@
-use rusqlite::{Connection, OptionalExtension, types::ToSql};
+use libsql_rusqlite::{Connection, OptionalExtension, types::ToSql};
+use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -34,7 +35,7 @@ pub enum EntryStatusUpdateError {
         to_status: String,
     },
     #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +53,7 @@ pub enum EntryDispatchFailureError {
     #[error(transparent)]
     EntryStatus(#[from] EntryStatusUpdateError),
     #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +73,7 @@ pub enum ConsultationDispatchRecordError {
     #[error(transparent)]
     EntryStatus(#[from] EntryStatusUpdateError),
     #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error),
 }
 
 const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
@@ -89,7 +90,7 @@ pub enum SlotAllocationError {
         attempts: usize,
     },
     #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +151,7 @@ pub fn reactivate_done_entry_on_conn(
     let effective_slot_index = options.slot_index.or(current.slot_index);
 
     conn.execute_batch("SAVEPOINT auto_queue_entry_done_reactivate")?;
-    let restore_result = (|| -> rusqlite::Result<usize> {
+    let restore_result = (|| -> libsql_rusqlite::Result<usize> {
         let rows_affected = conn.execute(
             "UPDATE auto_queue_entries
                  SET status = 'dispatched',
@@ -160,7 +161,7 @@ pub fn reactivate_done_entry_on_conn(
                      completed_at = NULL
                  WHERE id = ?3
                    AND status = 'done'",
-            rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,],
+            libsql_rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,],
         )?;
 
         if rows_affected == 0 {
@@ -283,7 +284,7 @@ pub fn record_entry_dispatch_failure_on_conn(
                  WHERE id = ?2
                    AND status = 'dispatched'
                    AND retry_count = ?3",
-                    rusqlite::params![retry_limit, entry_id, current.retry_count],
+                    libsql_rusqlite::params![retry_limit, entry_id, current.retry_count],
                 )?;
 
                 if rows_affected == 0 {
@@ -339,6 +340,264 @@ pub fn record_entry_dispatch_failure_on_conn(
                 return Err(error);
             }
         }
+    }
+}
+
+pub async fn update_entry_status_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    options: &EntryStatusUpdateOptions,
+) -> Result<EntryStatusUpdateResult, String> {
+    let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
+    let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+
+    loop {
+        let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+            .run(&current.run_id)
+            .entry(entry_id)
+            .card(&current.card_id)
+            .maybe_dispatch(current.dispatch_id.as_deref())
+            .agent(&current.agent_id)
+            .thread_group(current.thread_group)
+            .batch_phase(current.batch_phase)
+            .maybe_slot_index(current.slot_index);
+
+        if !is_allowed_entry_transition(&current.status, normalized, trigger_source) {
+            crate::auto_queue_log!(
+                warn,
+                "entry_status_transition_blocked_pg",
+                log_ctx.clone(),
+                "[auto-queue] blocked invalid PG entry transition {} {} -> {} (source: {})",
+                entry_id,
+                current.status,
+                normalized,
+                trigger_source
+            );
+            return Err(format!(
+                "invalid auto-queue entry transition for {entry_id}: {} -> {normalized}",
+                current.status
+            ));
+        }
+
+        let effective_dispatch_id = options
+            .dispatch_id
+            .clone()
+            .or_else(|| current.dispatch_id.clone());
+        let effective_slot_index = options.slot_index.or(current.slot_index);
+        let metadata_change = match normalized {
+            ENTRY_STATUS_PENDING => {
+                current.dispatch_id.is_some()
+                    || current.slot_index.is_some()
+                    || current.completed_at.is_some()
+            }
+            ENTRY_STATUS_DISPATCHED => {
+                effective_dispatch_id != current.dispatch_id
+                    || effective_slot_index != current.slot_index
+                    || current.completed_at.is_some()
+            }
+            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED => false,
+            _ => false,
+        };
+        let changed = current.status != normalized || metadata_change;
+
+        if !changed {
+            return Ok(EntryStatusUpdateResult {
+                run_id: current.run_id,
+                from_status: current.status,
+                to_status: normalized.to_string(),
+                changed: false,
+            });
+        }
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("open postgres entry transition transaction: {error}"))?;
+
+        let rows_affected = match normalized {
+            ENTRY_STATUS_PENDING => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'pending',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NULL,
+                     retry_count = CASE
+                         WHEN $3 = 'failed' THEN 0
+                         ELSE retry_count
+                     END
+                 WHERE id = $1
+                   AND status = $2",
+            )
+            .bind(entry_id)
+            .bind(&current.status)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update auto-queue entry {entry_id} -> pending: {error}"))?
+            .rows_affected(),
+            ENTRY_STATUS_DISPATCHED => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'dispatched',
+                     dispatch_id = $1,
+                     slot_index = $2,
+                     dispatched_at = NOW(),
+                     completed_at = NULL
+                 WHERE id = $3
+                   AND status = $4",
+            )
+            .bind(effective_dispatch_id.as_deref())
+            .bind(effective_slot_index)
+            .bind(entry_id)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
+            .rows_affected(),
+            ENTRY_STATUS_DONE => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'done',
+                     completed_at = NOW()
+                 WHERE id = $1
+                   AND status = $2",
+            )
+            .bind(entry_id)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update auto-queue entry {entry_id} -> done: {error}"))?
+            .rows_affected(),
+            ENTRY_STATUS_SKIPPED => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'skipped',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NOW()
+                 WHERE id = $1
+                   AND status = $2",
+            )
+            .bind(entry_id)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update auto-queue entry {entry_id} -> skipped: {error}"))?
+            .rows_affected(),
+            ENTRY_STATUS_FAILED => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'failed',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NOW()
+                 WHERE id = $1
+                   AND status = $2",
+            )
+            .bind(entry_id)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update auto-queue entry {entry_id} -> failed: {error}"))?
+            .rows_affected(),
+            _ => unreachable!(),
+        };
+
+        if rows_affected == 0 {
+            drop(tx);
+            let latest = load_entry_status_row_pg(pool, entry_id).await?;
+            if entry_status_row_matches_target(
+                &latest,
+                normalized,
+                effective_dispatch_id.as_deref(),
+                effective_slot_index,
+            ) {
+                return Ok(EntryStatusUpdateResult {
+                    run_id: latest.run_id,
+                    from_status: latest.status,
+                    to_status: normalized.to_string(),
+                    changed: false,
+                });
+            }
+
+            if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
+                let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+                    .run(&latest.run_id)
+                    .entry(entry_id)
+                    .card(&latest.card_id)
+                    .maybe_dispatch(latest.dispatch_id.as_deref())
+                    .agent(&latest.agent_id)
+                    .thread_group(latest.thread_group)
+                    .batch_phase(latest.batch_phase)
+                    .maybe_slot_index(latest.slot_index);
+                crate::auto_queue_log!(
+                    warn,
+                    "entry_status_stale_transition_blocked_pg",
+                    stale_log_ctx,
+                    "[auto-queue] stale PG entry transition blocked {} {} -> {} (source: {})",
+                    entry_id,
+                    latest.status,
+                    normalized,
+                    trigger_source
+                );
+                return Err(format!(
+                    "invalid auto-queue entry transition for {entry_id}: {} -> {normalized}",
+                    latest.status
+                ));
+            }
+
+            current = latest;
+            continue;
+        }
+
+        if normalized == ENTRY_STATUS_DISPATCHED {
+            if let Some(previous_dispatch_id) = current
+                .dispatch_id
+                .as_deref()
+                .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
+            {
+                record_entry_dispatch_history_on_pg(
+                    &mut tx,
+                    entry_id,
+                    previous_dispatch_id,
+                    trigger_source,
+                )
+                .await?;
+            }
+            if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+                record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source)
+                    .await?;
+            }
+        }
+
+        record_entry_transition_on_pg(
+            &mut tx,
+            entry_id,
+            &current.status,
+            normalized,
+            trigger_source,
+        )
+        .await?;
+
+        if matches!(
+            normalized,
+            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
+        ) {
+            maybe_finalize_run_after_terminal_entry_pg(&mut tx, &current.run_id, normalized)
+                .await?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit postgres entry transition for {entry_id}: {error}"))?;
+
+        return Ok(EntryStatusUpdateResult {
+            run_id: current.run_id,
+            from_status: current.status,
+            to_status: normalized.to_string(),
+            changed: true,
+        });
     }
 }
 
@@ -410,7 +669,7 @@ fn update_entry_status_with_current_on_conn(
         }
 
         conn.execute_batch("SAVEPOINT auto_queue_entry_status_transition")?;
-        let transition_result = (|| -> rusqlite::Result<usize> {
+        let transition_result = (|| -> libsql_rusqlite::Result<usize> {
             let rows_affected = match normalized {
                 ENTRY_STATUS_PENDING => conn.execute(
                     "UPDATE auto_queue_entries
@@ -425,7 +684,7 @@ fn update_entry_status_with_current_on_conn(
                              END
                          WHERE id = ?1
                            AND status = ?2",
-                    rusqlite::params![entry_id, current.status, current.status],
+                    libsql_rusqlite::params![entry_id, current.status, current.status],
                 )?,
                 ENTRY_STATUS_DISPATCHED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -436,7 +695,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = NULL
                          WHERE id = ?3
                            AND status = ?4",
-                    rusqlite::params![
+                    libsql_rusqlite::params![
                         effective_dispatch_id,
                         effective_slot_index,
                         entry_id,
@@ -449,7 +708,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status],
                 )?,
                 ENTRY_STATUS_SKIPPED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -460,7 +719,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status],
                 )?,
                 ENTRY_STATUS_FAILED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -471,7 +730,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status],
                 )?,
                 _ => unreachable!(),
             };
@@ -595,20 +854,44 @@ fn record_entry_dispatch_history_on_conn(
     entry_id: &str,
     dispatch_id: &str,
     trigger_source: &str,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
             entry_id, dispatch_id, trigger_source
         ) VALUES (?1, ?2, ?3)",
-        rusqlite::params![entry_id, dispatch_id, trigger_source],
+        libsql_rusqlite::params![entry_id, dispatch_id, trigger_source],
     )?;
+    Ok(())
+}
+
+async fn record_entry_dispatch_history_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO auto_queue_entry_dispatch_history (
+             entry_id, dispatch_id, trigger_source
+         )
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(entry_id)
+    .bind(dispatch_id)
+    .bind(trigger_source)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("record dispatch history for auto-queue entry {entry_id} ({dispatch_id}): {error}")
+    })?;
     Ok(())
 }
 
 pub fn list_entry_dispatch_history(
     conn: &Connection,
     entry_id: &str,
-) -> rusqlite::Result<Vec<String>> {
+) -> libsql_rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT dispatch_id
          FROM auto_queue_entry_dispatch_history
@@ -619,13 +902,32 @@ pub fn list_entry_dispatch_history(
     rows.collect()
 }
 
+pub async fn list_entry_dispatch_history_pg(
+    pool: &PgPool,
+    entry_id: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT dispatch_id
+         FROM auto_queue_entry_dispatch_history
+         WHERE entry_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(entry_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get("dispatch_id"))
+        .collect()
+}
+
 pub fn rebind_slot_for_group_agent(
     conn: &Connection,
     run_id: &str,
     thread_group: i64,
     agent_id: &str,
     slot_index: i64,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     ensure_agent_slot_rows(conn, run_id, agent_id)?;
 
     let slot_updated = conn.execute(
@@ -636,7 +938,7 @@ pub fn rebind_slot_for_group_agent(
          WHERE agent_id = ?3
            AND slot_index = ?4
            AND (assigned_run_id IS NULL OR assigned_run_id = ?1)",
-        rusqlite::params![run_id, thread_group, agent_id, slot_index],
+        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
     )?;
     if slot_updated == 0 {
         return Ok(0);
@@ -651,7 +953,7 @@ fn bind_slot_index_for_group_entries(
     agent_id: &str,
     thread_group: i64,
     slot_index: i64,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     conn.execute(
         "UPDATE auto_queue_entries
          SET slot_index = ?1
@@ -660,7 +962,7 @@ fn bind_slot_index_for_group_entries(
            AND COALESCE(thread_group, 0) = ?4
            AND status IN ('pending', 'dispatched')
            AND (slot_index IS NULL OR slot_index != ?1)",
-        rusqlite::params![slot_index, run_id, agent_id, thread_group],
+        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group],
     )
 }
 
@@ -670,7 +972,7 @@ pub fn release_slot_for_group_agent(
     thread_group: i64,
     agent_id: &str,
     slot_index: i64,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     conn.execute(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -680,7 +982,7 @@ pub fn release_slot_for_group_agent(
            AND slot_index = ?2
            AND assigned_run_id = ?3
            AND COALESCE(assigned_thread_group, 0) = ?4",
-        rusqlite::params![agent_id, slot_index, run_id, thread_group],
+        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group],
     )
 }
 
@@ -738,7 +1040,6 @@ pub struct StatusEntryRecord {
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
-    pub retry_count: i64,
     pub created_at: i64,
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -772,7 +1073,7 @@ pub struct AutoQueueRunHistoryRecord {
 pub fn find_latest_run_id(
     conn: &Connection,
     filter: &StatusFilter,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     let mut run_filter = "1=1".to_string();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -802,7 +1103,31 @@ pub fn find_latest_run_id(
     .optional()
 }
 
-pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQueueRunRecord>> {
+pub async fn find_latest_run_id_pg(
+    pool: &PgPool,
+    filter: &StatusFilter,
+) -> Result<Option<String>, sqlx::Error> {
+    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+
+    sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_runs
+         WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
+           AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(repo)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub fn get_run(
+    conn: &Connection,
+    run_id: &str,
+) -> libsql_rusqlite::Result<Option<AutoQueueRunRecord>> {
     conn.query_row(
         "SELECT id, repo, agent_id, status, timeout_minutes,
                 ai_model, ai_rationale,
@@ -834,13 +1159,42 @@ pub fn get_run(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<AutoQ
     .optional()
 }
 
+pub async fn get_run_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<Option<AutoQueueRunRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id,
+                repo,
+                agent_id,
+                status,
+                timeout_minutes::BIGINT AS timeout_minutes,
+                ai_model,
+                ai_rationale,
+                EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS created_at,
+                CASE WHEN completed_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM completed_at)::BIGINT * 1000
+                END AS completed_at,
+                COALESCE(max_concurrent_threads, 1)::BIGINT AS max_concurrent_threads,
+                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count,
+                deploy_phases
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| auto_queue_run_record_from_pg_row(&row))
+        .transpose()
+}
+
 pub fn get_status_entry(
     conn: &Connection,
     entry_id: &str,
-) -> rusqlite::Result<Option<StatusEntryRecord>> {
+) -> libsql_rusqlite::Result<Option<StatusEntryRecord>> {
     conn.query_row(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
-                COALESCE(e.retry_count, 0),
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
                 CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
@@ -858,14 +1212,54 @@ pub fn get_status_entry(
     .optional()
 }
 
+pub async fn get_status_entry_pg(
+    pool: &PgPool,
+    entry_id: &str,
+) -> Result<Option<StatusEntryRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT e.id,
+                e.agent_id,
+                e.kanban_card_id,
+                e.priority_rank::BIGINT AS priority_rank,
+                e.reason,
+                e.status,
+                EXTRACT(EPOCH FROM e.created_at)::BIGINT * 1000 AS created_at,
+                CASE WHEN e.dispatched_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM e.dispatched_at)::BIGINT * 1000
+                END AS dispatched_at,
+                CASE WHEN e.completed_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM e.completed_at)::BIGINT * 1000
+                END AS completed_at,
+                kc.title,
+                kc.github_issue_number::BIGINT AS github_issue_number,
+                kc.github_issue_url AS github_repo,
+                COALESCE(e.thread_group, 0)::BIGINT AS thread_group,
+                e.slot_index::BIGINT AS slot_index,
+                COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
+                kc.channel_thread_map::text AS channel_thread_map,
+                kc.active_thread_id,
+                kc.status AS card_status,
+                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round
+         FROM auto_queue_entries e
+         LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
+         LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
+         WHERE e.id = $1",
+    )
+    .bind(entry_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| status_entry_record_from_pg_row(&row))
+        .transpose()
+}
+
 pub fn list_status_entries(
     conn: &Connection,
     run_id: &str,
     filter: &StatusFilter,
-) -> rusqlite::Result<Vec<StatusEntryRecord>> {
+) -> libsql_rusqlite::Result<Vec<StatusEntryRecord>> {
     let mut sql = String::from(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
-                COALESCE(e.retry_count, 0),
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
                 CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
@@ -897,11 +1291,62 @@ pub fn list_status_entries(
     rows.collect()
 }
 
+pub async fn list_status_entries_pg(
+    pool: &PgPool,
+    run_id: &str,
+    filter: &StatusFilter,
+) -> Result<Vec<StatusEntryRecord>, sqlx::Error> {
+    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+
+    let rows = sqlx::query(
+        "SELECT e.id,
+                e.agent_id,
+                e.kanban_card_id,
+                e.priority_rank::BIGINT AS priority_rank,
+                e.reason,
+                e.status,
+                EXTRACT(EPOCH FROM e.created_at)::BIGINT * 1000 AS created_at,
+                CASE WHEN e.dispatched_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM e.dispatched_at)::BIGINT * 1000
+                END AS dispatched_at,
+                CASE WHEN e.completed_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM e.completed_at)::BIGINT * 1000
+                END AS completed_at,
+                kc.title,
+                kc.github_issue_number::BIGINT AS github_issue_number,
+                kc.github_issue_url AS github_repo,
+                COALESCE(e.thread_group, 0)::BIGINT AS thread_group,
+                e.slot_index::BIGINT AS slot_index,
+                COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
+                kc.channel_thread_map::text AS channel_thread_map,
+                kc.active_thread_id,
+                kc.status AS card_status,
+                GREATEST(COALESCE(crs.review_round, 0), COALESCE(kc.review_round, 0))::BIGINT AS review_round
+         FROM auto_queue_entries e
+         LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
+         LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
+         WHERE e.run_id = $1
+           AND ($2::TEXT IS NULL OR e.agent_id = $2)
+           AND ($3::TEXT IS NULL OR kc.repo_id = $3)
+         ORDER BY e.priority_rank ASC",
+    )
+    .bind(run_id)
+    .bind(agent_id)
+    .bind(repo)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| status_entry_record_from_pg_row(&row))
+        .collect()
+}
+
 pub fn list_run_history(
     conn: &Connection,
     filter: &StatusFilter,
     limit: usize,
-) -> rusqlite::Result<Vec<AutoQueueRunHistoryRecord>> {
+) -> libsql_rusqlite::Result<Vec<AutoQueueRunHistoryRecord>> {
     let mut sql = String::from(
         "SELECT r.id, r.repo, r.agent_id, r.status,
                 CAST(strftime('%s', r.created_at) AS INTEGER) * 1000,
@@ -960,10 +1405,53 @@ pub fn list_run_history(
     rows.collect()
 }
 
+pub async fn list_run_history_pg(
+    pool: &PgPool,
+    filter: &StatusFilter,
+    limit: usize,
+) -> Result<Vec<AutoQueueRunHistoryRecord>, sqlx::Error> {
+    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let limit = limit.clamp(1, 20) as i64;
+
+    let rows = sqlx::query(
+        "SELECT r.id,
+                r.repo,
+                r.agent_id,
+                r.status,
+                EXTRACT(EPOCH FROM r.created_at)::BIGINT * 1000 AS created_at,
+                CASE WHEN r.completed_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM r.completed_at)::BIGINT * 1000
+                END AS completed_at,
+                COUNT(e.id)::BIGINT AS entry_count,
+                COALESCE(SUM(CASE WHEN e.status = 'done' THEN 1 ELSE 0 END), 0)::BIGINT AS done_count,
+                COALESCE(SUM(CASE WHEN e.status = 'skipped' THEN 1 ELSE 0 END), 0)::BIGINT AS skipped_count,
+                COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0)::BIGINT AS pending_count,
+                COALESCE(SUM(CASE WHEN e.status = 'dispatched' THEN 1 ELSE 0 END), 0)::BIGINT AS dispatched_count
+         FROM auto_queue_runs r
+         LEFT JOIN auto_queue_entries e ON e.run_id = r.id
+         LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+         WHERE ($1::TEXT IS NULL OR COALESCE(kc.repo_id, r.repo, '') = $1)
+           AND ($2::TEXT IS NULL OR COALESCE(e.agent_id, r.agent_id, '') = $2)
+         GROUP BY r.id, r.repo, r.agent_id, r.status, r.created_at, r.completed_at
+         ORDER BY r.created_at DESC
+         LIMIT $3",
+    )
+    .bind(repo)
+    .bind(agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| auto_queue_run_history_record_from_pg_row(&row))
+        .collect()
+}
+
 pub fn list_backlog_cards(
     conn: &Connection,
     filter: &GenerateCardFilter,
-) -> rusqlite::Result<Vec<BacklogCardRecord>> {
+) -> libsql_rusqlite::Result<Vec<BacklogCardRecord>> {
     let mut conditions = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
     append_card_filters("kc", filter, &mut conditions, &mut params);
@@ -991,7 +1479,7 @@ pub fn list_generate_candidates(
     conn: &Connection,
     filter: &GenerateCardFilter,
     enqueueable_states: &[String],
-) -> rusqlite::Result<Vec<GenerateCandidateRecord>> {
+) -> libsql_rusqlite::Result<Vec<GenerateCandidateRecord>> {
     let mut conditions = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -1045,7 +1533,7 @@ pub fn count_cards_by_status(
     repo: Option<&str>,
     agent_id: Option<&str>,
     status: &str,
-) -> rusqlite::Result<i64> {
+) -> libsql_rusqlite::Result<i64> {
     let mut sql = "SELECT COUNT(*) FROM kanban_cards WHERE status = ?1".to_string();
     let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(status.to_string())];
 
@@ -1062,6 +1550,26 @@ pub fn count_cards_by_status(
     conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
 }
 
+pub async fn count_cards_by_status_pg(
+    pool: &PgPool,
+    repo: Option<&str>,
+    agent_id: Option<&str>,
+    status: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM kanban_cards
+         WHERE status = $1
+           AND ($2::TEXT IS NULL OR repo_id = $2)
+           AND ($3::TEXT IS NULL OR assigned_agent_id = $3)",
+    )
+    .bind(status)
+    .bind(repo.filter(|value| !value.is_empty()))
+    .bind(agent_id.filter(|value| !value.is_empty()))
+    .fetch_one(pool)
+    .await
+}
+
 pub fn run_slot_pool_size(conn: &Connection, run_id: &str) -> i64 {
     conn.query_row(
         "SELECT COALESCE(max_concurrent_threads, 1)
@@ -1074,17 +1582,50 @@ pub fn run_slot_pool_size(conn: &Connection, run_id: &str) -> i64 {
     .clamp(1, 10)
 }
 
+pub async fn run_slot_pool_size_pg(pool: &PgPool, run_id: &str) -> Result<i64, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT COALESCE(max_concurrent_threads, 1)::BIGINT
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .unwrap_or(1)
+    .clamp(1, 10))
+}
+
 pub fn ensure_agent_slot_pool_rows(
     conn: &Connection,
     agent_id: &str,
     slot_pool_size: i64,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     for slot_index in 0..slot_pool_size.clamp(1, 32) {
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
              VALUES (?1, ?2, '{}')",
-            rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index],
         )?;
+    }
+    Ok(())
+}
+
+pub async fn ensure_agent_slot_pool_rows_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_pool_size: i64,
+) -> Result<(), sqlx::Error> {
+    for slot_index in 0..slot_pool_size.clamp(1, 32) {
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ($1, $2, '{}'::jsonb)
+             ON CONFLICT (agent_id, slot_index) DO NOTHING",
+        )
+        .bind(agent_id)
+        .bind(slot_index)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -1104,7 +1645,23 @@ pub fn clear_inactive_slot_assignments(conn: &Connection) {
     .ok();
 }
 
-pub fn release_run_slots(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
+pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = NULL,
+             assigned_thread_group = NULL,
+             updated_at = NOW()
+         WHERE assigned_run_id IS NOT NULL
+           AND assigned_run_id NOT IN (
+               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+           )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub fn release_run_slots(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
     conn.execute(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -1114,6 +1671,20 @@ pub fn release_run_slots(conn: &Connection, run_id: &str) -> rusqlite::Result<()
         [run_id],
     )?;
     Ok(())
+}
+
+pub async fn release_run_slots_pg(pool: &PgPool, run_id: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = NULL,
+             assigned_thread_group = NULL,
+             updated_at = NOW()
+         WHERE assigned_run_id = $1",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub fn current_batch_phase(conn: &Connection, run_id: &str) -> Option<i64> {
@@ -1127,6 +1698,21 @@ pub fn current_batch_phase(conn: &Connection, run_id: &str) -> Option<i64> {
     )
     .ok()
     .flatten()
+}
+
+pub async fn current_batch_phase_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MIN(COALESCE(batch_phase, 0))::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
 }
 
 pub fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool {
@@ -1196,7 +1782,7 @@ pub fn record_consultation_dispatch_on_conn(
          SET metadata = ?1,
              updated_at = datetime('now')
          WHERE id = ?2",
-        rusqlite::params![&metadata_json, card_id],
+        libsql_rusqlite::params![&metadata_json, card_id],
     )?;
     if updated == 0 {
         return Err(ConsultationDispatchRecordError::CardNotFound {
@@ -1216,6 +1802,82 @@ pub fn record_consultation_dispatch_on_conn(
     )?;
 
     tx.commit()?;
+    Ok(ConsultationDispatchRecordResult {
+        metadata_json,
+        entry_status_changed: entry_result.changed,
+    })
+}
+
+pub async fn record_consultation_dispatch_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+    base_metadata_json: &str,
+) -> Result<ConsultationDispatchRecordResult, String> {
+    let dispatch_id = dispatch_id.trim();
+    if dispatch_id.is_empty() {
+        return Err(ConsultationDispatchRecordError::MissingDispatchId.to_string());
+    }
+    let trigger_source = trigger_source.trim();
+    if trigger_source.is_empty() {
+        return Err(ConsultationDispatchRecordError::MissingSource.to_string());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres consultation dispatch transaction: {error}"))?;
+    let mut metadata = consultation_metadata_object(base_metadata_json);
+    metadata.insert(
+        "consultation_status".to_string(),
+        serde_json::json!("pending"),
+    );
+    metadata.insert(
+        "consultation_dispatch_id".to_string(),
+        serde_json::json!(dispatch_id),
+    );
+    let metadata_json = serde_json::Value::Object(metadata).to_string();
+
+    let updated = sqlx::query(
+        "UPDATE kanban_cards
+         SET metadata = $1,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(&metadata_json)
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("update postgres consultation metadata for {card_id}: {error}"))?
+    .rows_affected();
+    if updated == 0 {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback missing postgres consultation card {card_id}: {error}")
+        })?;
+        return Err(ConsultationDispatchRecordError::CardNotFound {
+            card_id: card_id.to_string(),
+        }
+        .to_string());
+    }
+
+    let entry_result = update_entry_status_on_pg(
+        pool,
+        entry_id,
+        ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+        &EntryStatusUpdateOptions {
+            dispatch_id: Some(dispatch_id.to_string()),
+            slot_index: None,
+        },
+    )
+    .await?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres consultation dispatch transaction: {error}"))?;
+
     Ok(ConsultationDispatchRecordResult {
         metadata_json,
         entry_status_changed: entry_result.changed,
@@ -1288,7 +1950,7 @@ fn dedupe_phase_gate_dispatch_ids(dispatch_ids: &[String]) -> Vec<String> {
 fn valid_phase_gate_dispatch_ids(
     conn: &Connection,
     dispatch_ids: &[String],
-) -> rusqlite::Result<Vec<String>> {
+) -> libsql_rusqlite::Result<Vec<String>> {
     if dispatch_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1301,7 +1963,7 @@ fn valid_phase_gate_dispatch_ids(
         placeholders
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params = rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str));
+    let params = libsql_rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str));
     let mut rows = stmt.query(params)?;
     let mut valid = std::collections::HashSet::new();
     while let Some(row) = rows.next()? {
@@ -1321,11 +1983,11 @@ fn delete_stale_phase_gate_rows(
     run_id: &str,
     phase: i64,
     dispatch_ids: &[String],
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     if dispatch_ids.is_empty() {
         return conn.execute(
             "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-            rusqlite::params![run_id, phase],
+            libsql_rusqlite::params![run_id, phase],
         );
     }
 
@@ -1339,15 +2001,15 @@ fn delete_stale_phase_gate_rows(
            AND (dispatch_id IS NULL OR dispatch_id NOT IN ({}))",
         placeholders
     );
-    let mut values = vec![rusqlite::types::Value::from(run_id.to_string())];
-    values.push(rusqlite::types::Value::from(phase));
+    let mut values = vec![libsql_rusqlite::types::Value::from(run_id.to_string())];
+    values.push(libsql_rusqlite::types::Value::from(phase));
     values.extend(
         dispatch_ids
             .iter()
             .cloned()
-            .map(rusqlite::types::Value::from),
+            .map(libsql_rusqlite::types::Value::from),
     );
-    conn.execute(&sql, rusqlite::params_from_iter(values))
+    conn.execute(&sql, libsql_rusqlite::params_from_iter(values))
 }
 
 pub fn save_phase_gate_state_on_conn(
@@ -1355,7 +2017,7 @@ pub fn save_phase_gate_state_on_conn(
     run_id: &str,
     phase: i64,
     state: &PhaseGateStateWrite,
-) -> rusqlite::Result<PhaseGateSaveResult> {
+) -> libsql_rusqlite::Result<PhaseGateSaveResult> {
     let dispatch_ids =
         valid_phase_gate_dispatch_ids(conn, &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids))?;
     let removed_stale_rows = delete_stale_phase_gate_rows(conn, run_id, phase, &dispatch_ids)?;
@@ -1375,7 +2037,7 @@ pub fn save_phase_gate_state_on_conn(
                 ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9,
                 COALESCE(?10, CURRENT_TIMESTAMP), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 run_id,
                 phase,
                 status,
@@ -1409,7 +2071,7 @@ pub fn save_phase_gate_state_on_conn(
                     anchor_card_id = excluded.anchor_card_id,
                     failure_reason = excluded.failure_reason,
                     updated_at = datetime('now')",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     run_id,
                     phase,
                     status,
@@ -1436,10 +2098,10 @@ pub fn clear_phase_gate_state_on_conn(
     conn: &Connection,
     run_id: &str,
     phase: i64,
-) -> rusqlite::Result<bool> {
+) -> libsql_rusqlite::Result<bool> {
     let deleted = conn.execute(
         "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-        rusqlite::params![run_id, phase],
+        libsql_rusqlite::params![run_id, phase],
     )?;
     Ok(deleted > 0)
 }
@@ -1461,7 +2123,7 @@ pub fn group_has_pending_entries(
         Ok(stmt) => stmt,
         Err(_) => return false,
     };
-    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+    stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
         row.get::<_, i64>(0)
     })
     .ok()
@@ -1470,6 +2132,29 @@ pub fn group_has_pending_entries(
             .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase))
     })
     .unwrap_or(false)
+}
+
+pub async fn group_has_pending_entries_pg(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(batch_phase, 0)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND COALESCE(thread_group, 0) = $2
+           AND status = 'pending'
+         ORDER BY priority_rank ASC",
+    )
+    .bind(run_id)
+    .bind(thread_group)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase)))
 }
 
 pub fn first_pending_entry_for_group(
@@ -1488,7 +2173,7 @@ pub fn first_pending_entry_for_group(
              ORDER BY e.priority_rank ASC",
         )
         .ok()?;
-    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+    stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -1508,6 +2193,40 @@ pub fn first_pending_entry_for_group(
                 ))
             })
     })
+}
+
+pub async fn first_pending_entry_for_group_pg(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> Result<Option<(String, String, String, i64)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
+         FROM auto_queue_entries e
+         WHERE e.run_id = $1
+           AND COALESCE(e.thread_group, 0) = $2
+           AND e.status = 'pending'
+         ORDER BY e.priority_rank ASC",
+    )
+    .bind(run_id)
+    .bind(thread_group)
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let batch_phase = row.try_get::<i64, _>("batch_phase")?;
+        if batch_phase_is_eligible(batch_phase, current_phase) {
+            return Ok(Some((
+                row.try_get("id")?,
+                row.try_get("kanban_card_id")?,
+                row.try_get("agent_id")?,
+                batch_phase,
+            )));
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn assigned_groups_with_pending_entries(
@@ -1561,6 +2280,54 @@ pub fn assigned_groups_with_pending_entries(
     .unwrap_or_default()
 }
 
+pub async fn assigned_groups_with_pending_entries_pg(
+    pool: &PgPool,
+    run_id: &str,
+    current_phase: Option<i64>,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.assigned_thread_group, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
+         FROM auto_queue_slots s
+         JOIN auto_queue_entries e
+           ON e.run_id = $1
+          AND e.agent_id = s.agent_id
+          AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+         WHERE s.assigned_run_id = $1
+           AND s.assigned_thread_group IS NOT NULL
+           AND EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = s.agent_id
+                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                 AND e.status = 'pending'
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = s.agent_id
+                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                 AND e.status = 'dispatched'
+           )
+         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC, COALESCE(e.batch_phase, 0) ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    for row in rows {
+        let thread_group = row.try_get::<i64, _>("assigned_thread_group")?;
+        let batch_phase = row.try_get::<i64, _>("batch_phase")?;
+        if batch_phase_is_eligible(batch_phase, current_phase) && seen.insert(thread_group) {
+            groups.push(thread_group);
+        }
+    }
+    Ok(groups)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotAllocation {
     pub slot_index: i64,
@@ -1597,7 +2364,7 @@ pub fn allocate_slot_for_group_agent(
                    AND assigned_run_id = ?2
                    AND COALESCE(assigned_thread_group, 0) = ?3
                  LIMIT 1",
-                rusqlite::params![agent_id, run_id, thread_group],
+                libsql_rusqlite::params![agent_id, run_id, thread_group],
                 |row| row.get(0),
             )
             .optional()
@@ -1645,7 +2412,7 @@ pub fn allocate_slot_for_group_agent(
                    )
                  ORDER BY s.slot_index ASC
                  LIMIT 1",
-                rusqlite::params![agent_id, run_id, thread_group],
+                libsql_rusqlite::params![agent_id, run_id, thread_group],
                 |row| row.get(0),
             )
             .optional()
@@ -1676,7 +2443,7 @@ pub fn allocate_slot_for_group_agent(
                              AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
                              AND e.status IN ('pending', 'dispatched')
                        )",
-                    rusqlite::params![thread_group, agent_id, slot_index, run_id],
+                    libsql_rusqlite::params![thread_group, agent_id, slot_index, run_id],
                 )
                 .map_err(|error| {
                     crate::auto_queue_log!(
@@ -1756,7 +2523,7 @@ pub fn allocate_slot_for_group_agent(
                  WHERE agent_id = ?3
                    AND slot_index = ?4
                    AND assigned_run_id IS NULL",
-                rusqlite::params![run_id, thread_group, agent_id, slot_index],
+                libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
             )
             .map_err(|error| {
                 crate::auto_queue_log!(
@@ -1805,6 +2572,253 @@ pub fn allocate_slot_for_group_agent(
     unreachable!("slot allocation loop must return within bounded retries");
 }
 
+async fn bind_slot_index_for_group_entries_pg(
+    pool: &PgPool,
+    run_id: &str,
+    agent_id: &str,
+    thread_group: i64,
+    slot_index: i64,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE auto_queue_entries
+         SET slot_index = $1
+         WHERE run_id = $2
+           AND agent_id = $3
+           AND COALESCE(thread_group, 0) = $4
+           AND status IN ('pending', 'dispatched')
+           AND (slot_index IS NULL OR slot_index != $1)",
+    )
+    .bind(slot_index)
+    .bind(run_id)
+    .bind(agent_id)
+    .bind(thread_group)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn allocate_slot_for_group_agent_pg(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+) -> Result<Option<SlotAllocation>, String> {
+    let slot_pool_size = run_slot_pool_size_pg(pool, run_id)
+        .await
+        .map_err(|error| format!("load postgres slot pool size for {run_id}: {error}"))?;
+    ensure_agent_slot_pool_rows_pg(pool, agent_id, slot_pool_size)
+        .await
+        .map_err(|error| {
+            format!("prepare postgres slot rows for run {run_id} agent {agent_id}: {error}")
+        })?;
+
+    for attempt in 1..=SLOT_ALLOCATION_MAX_RETRIES {
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT slot_index::BIGINT
+             FROM auto_queue_slots
+             WHERE agent_id = $1
+               AND assigned_run_id = $2
+               AND COALESCE(assigned_thread_group, 0) = $3
+             LIMIT 1",
+        )
+        .bind(agent_id)
+        .bind(run_id)
+        .bind(thread_group)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "inspect existing postgres slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            )
+        })?;
+        if let Some(slot_index) = existing {
+            bind_slot_index_for_group_entries_pg(pool, run_id, agent_id, thread_group, slot_index)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "bind existing postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                    )
+                })?;
+            return Ok(Some(SlotAllocation {
+                slot_index,
+                newly_assigned: false,
+                reassigned_from_other_group: false,
+            }));
+        }
+
+        let reusable_slot = sqlx::query_scalar::<_, i64>(
+            "SELECT s.slot_index::BIGINT
+             FROM auto_queue_slots s
+             WHERE s.agent_id = $1
+               AND s.assigned_run_id = $2
+               AND COALESCE(s.assigned_thread_group, -1) != $3
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = $2
+                     AND e.agent_id = s.agent_id
+                     AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                     AND e.status IN ('pending', 'dispatched')
+               )
+             ORDER BY s.slot_index ASC
+             LIMIT 1",
+        )
+        .bind(agent_id)
+        .bind(run_id)
+        .bind(thread_group)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "inspect reusable postgres slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            )
+        })?;
+        if let Some(slot_index) = reusable_slot {
+            let rebound = sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_thread_group = $1,
+                     updated_at = NOW()
+                 WHERE agent_id = $2
+                   AND slot_index = $3
+                   AND assigned_run_id = $4
+                   AND COALESCE(assigned_thread_group, -1) != $1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM auto_queue_entries e
+                       WHERE e.run_id = $4
+                         AND e.agent_id = auto_queue_slots.agent_id
+                         AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
+                         AND e.status IN ('pending', 'dispatched')
+                   )",
+            )
+            .bind(thread_group)
+            .bind(agent_id)
+            .bind(slot_index)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "rebind postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                )
+            })?
+            .rows_affected();
+            if rebound == 0 {
+                if attempt == SLOT_ALLOCATION_MAX_RETRIES {
+                    return Err(format!(
+                        "slot allocation retry limit exceeded for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
+                    ));
+                }
+                continue;
+            }
+
+            bind_slot_index_for_group_entries_pg(pool, run_id, agent_id, thread_group, slot_index)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "bind rebound postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                    )
+                })?;
+            return Ok(Some(SlotAllocation {
+                slot_index,
+                newly_assigned: false,
+                reassigned_from_other_group: true,
+            }));
+        }
+
+        let free_slot = sqlx::query_scalar::<_, i64>(
+            "SELECT slot_index::BIGINT
+             FROM auto_queue_slots
+             WHERE agent_id = $1
+               AND assigned_run_id IS NULL
+             ORDER BY slot_index ASC
+             LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "inspect free postgres slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            )
+        })?;
+        let Some(slot_index) = free_slot else {
+            return Ok(None);
+        };
+
+        let claimed = sqlx::query(
+            "UPDATE auto_queue_slots
+             SET assigned_run_id = $1,
+                 assigned_thread_group = $2,
+                 updated_at = NOW()
+             WHERE agent_id = $3
+               AND slot_index = $4
+               AND assigned_run_id IS NULL",
+        )
+        .bind(run_id)
+        .bind(thread_group)
+        .bind(agent_id)
+        .bind(slot_index)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "claim postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            )
+        })?
+        .rows_affected();
+        if claimed == 0 {
+            if attempt == SLOT_ALLOCATION_MAX_RETRIES {
+                return Err(format!(
+                    "slot allocation retry limit exceeded for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
+                ));
+            }
+            continue;
+        }
+
+        bind_slot_index_for_group_entries_pg(pool, run_id, agent_id, thread_group, slot_index)
+            .await
+            .map_err(|error| {
+                format!(
+                    "bind claimed postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                )
+            })?;
+        return Ok(Some(SlotAllocation {
+            slot_index,
+            newly_assigned: true,
+            reassigned_from_other_group: false,
+        }));
+    }
+
+    unreachable!("slot allocation loop must return within bounded retries");
+}
+
+pub async fn release_slot_for_group_agent_pg(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = NULL,
+             assigned_thread_group = NULL,
+             updated_at = NOW()
+         WHERE agent_id = $1
+           AND slot_index = $2
+           AND assigned_run_id = $3
+           AND COALESCE(assigned_thread_group, 0) = $4",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .bind(run_id)
+    .bind(thread_group)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub fn slot_has_active_dispatch(conn: &Connection, agent_id: &str, slot_index: i64) -> bool {
     slot_has_active_dispatch_excluding(conn, agent_id, slot_index, None)
 }
@@ -1824,7 +2838,7 @@ pub fn slot_has_active_dispatch_excluding(
                AND slot_index = ?2
                AND status = 'dispatched'
                AND COALESCE(dispatch_id, '') != ?3",
-            rusqlite::params![agent_id, slot_index, exclude_id],
+            libsql_rusqlite::params![agent_id, slot_index, exclude_id],
             |row| row.get(0),
         )
         .unwrap_or(false);
@@ -1840,13 +2854,13 @@ pub fn slot_has_active_dispatch_excluding(
            AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
            AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL
            AND id != ?3",
-        rusqlite::params![agent_id, slot_index, exclude_id],
+        libsql_rusqlite::params![agent_id, slot_index, exclude_id],
         |row| row.get(0),
     )
     .unwrap_or(false)
 }
 
-pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
+pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
     let thread_group_count: i64 = conn
         .query_row(
             "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
@@ -1863,7 +2877,7 @@ pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> rusqlite::Res
          SET thread_group_count = ?1,
              max_concurrent_threads = ?1
          WHERE id = ?2",
-        rusqlite::params![thread_group_count, run_id],
+        libsql_rusqlite::params![thread_group_count, run_id],
     )?;
     Ok(())
 }
@@ -1904,6 +2918,61 @@ fn load_entry_status_row(
     .optional()?
     .ok_or_else(|| EntryStatusUpdateError::NotFound {
         entry_id: entry_id.to_string(),
+    })
+}
+
+async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
+    let row = sqlx::query(
+        "SELECT run_id,
+                kanban_card_id,
+                agent_id,
+                status,
+                dispatch_id,
+                COALESCE(retry_count, 0)::BIGINT AS retry_count,
+                slot_index::BIGINT AS slot_index,
+                COALESCE(thread_group, 0)::BIGINT AS thread_group,
+                COALESCE(batch_phase, 0)::BIGINT AS batch_phase,
+                completed_at
+         FROM auto_queue_entries
+         WHERE id = $1",
+    )
+    .bind(entry_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres auto-queue entry {entry_id}: {error}"))?
+    .ok_or_else(|| format!("auto-queue entry not found: {entry_id}"))?;
+
+    Ok(EntryStatusRow {
+        run_id: row
+            .try_get("run_id")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} run_id: {error}"))?,
+        card_id: row.try_get("kanban_card_id").map_err(|error| {
+            format!("decode auto-queue entry {entry_id} kanban_card_id: {error}")
+        })?,
+        agent_id: row
+            .try_get("agent_id")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} agent_id: {error}"))?,
+        status: row
+            .try_get("status")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} status: {error}"))?,
+        dispatch_id: row
+            .try_get("dispatch_id")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch_id: {error}"))?,
+        retry_count: row
+            .try_get("retry_count")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} retry_count: {error}"))?,
+        slot_index: row
+            .try_get("slot_index")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} slot_index: {error}"))?,
+        thread_group: row
+            .try_get("thread_group")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} thread_group: {error}"))?,
+        batch_phase: row
+            .try_get("batch_phase")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} batch_phase: {error}"))?,
+        completed_at: row
+            .try_get("completed_at")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} completed_at: {error}"))?,
     })
 }
 
@@ -1980,7 +3049,7 @@ fn maybe_finalize_run_after_terminal_entry(
     conn: &Connection,
     run_id: &str,
     new_status: &str,
-) -> rusqlite::Result<bool> {
+) -> libsql_rusqlite::Result<bool> {
     // `done` completion is finalized by the policy-side OnCardTerminal flow so it
     // can always create or pass through a phase gate, even for single-phase runs.
     if new_status == ENTRY_STATUS_DONE {
@@ -2004,7 +3073,76 @@ fn maybe_finalize_run_after_terminal_entry(
     complete_run_on_conn(conn, run_id)
 }
 
-pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+async fn maybe_finalize_run_after_terminal_entry_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    new_status: &str,
+) -> Result<bool, String> {
+    if new_status == ENTRY_STATUS_DONE {
+        return Ok(false);
+    }
+
+    let blocking_phase_gate_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1
+           AND status IN ('pending', 'failed')",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("count blocking phase gates for run {run_id}: {error}"))?;
+    if blocking_phase_gate_count > 0 {
+        return Ok(false);
+    }
+
+    let remaining = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))?;
+    if remaining > 0 {
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = NULL,
+             assigned_thread_group = NULL,
+             updated_at = NOW()
+         WHERE assigned_run_id = $1",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("release auto-queue slots for run {run_id}: {error}"))?;
+
+    let updated = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = NOW()
+         WHERE id = $1
+           AND status IN ('active', 'paused', 'generated', 'pending')",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?
+    .rows_affected();
+    if updated == 0 {
+        return Ok(false);
+    }
+
+    queue_run_completion_notify_on_pg(tx, run_id).await?;
+    Ok(true)
+}
+
+pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'paused',
@@ -2018,7 +3156,7 @@ pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bo
     Ok(updated > 0)
 }
 
-pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'active',
@@ -2029,7 +3167,7 @@ pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<b
     Ok(updated > 0)
 }
 
-pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<bool> {
+pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'completed',
@@ -2055,7 +3193,10 @@ pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result
     Ok(true)
 }
 
-fn queue_run_completion_notify_on_conn(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
+fn queue_run_completion_notify_on_conn(
+    conn: &Connection,
+    run_id: &str,
+) -> libsql_rusqlite::Result<()> {
     let (repo, agent_id): (Option<String>, Option<String>) = conn.query_row(
         "SELECT repo, agent_id FROM auto_queue_runs WHERE id = ?1",
         [run_id],
@@ -2084,8 +3225,61 @@ fn queue_run_completion_notify_on_conn(conn: &Connection, run_id: &str) -> rusql
     for channel_id in targets {
         conn.execute(
             "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-            rusqlite::params![format!("channel:{channel_id}"), &content],
+            libsql_rusqlite::params![format!("channel:{channel_id}"), &content],
         )?;
+    }
+
+    Ok(())
+}
+
+async fn queue_run_completion_notify_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<(), String> {
+    let row = sqlx::query("SELECT repo, agent_id FROM auto_queue_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| format!("load completion notify targets for run {run_id}: {error}"))?;
+    let repo: Option<String> = row
+        .try_get("repo")
+        .map_err(|error| format!("decode completion notify repo for run {run_id}: {error}"))?;
+    let agent_id: Option<String> = row
+        .try_get("agent_id")
+        .map_err(|error| format!("decode completion notify agent_id for run {run_id}: {error}"))?;
+    let targets = completion_notify_targets_on_pg(tx, run_id, agent_id.as_deref()).await?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let entry_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| format!("count auto-queue entries for run {run_id}: {error}"))?;
+    let repo_label = repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(global)");
+    let short_run_id = &run_id[..8.min(run_id.len())];
+    let content = format!("자동큐 완료: {repo_label} / run {short_run_id} / {entry_count}개");
+
+    for channel_id in targets {
+        sqlx::query(
+            "INSERT INTO message_outbox (target, content, bot, source)
+             VALUES ($1, $2, 'notify', 'system')",
+        )
+        .bind(format!("channel:{channel_id}"))
+        .bind(&content)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "queue auto-queue completion notify for run {run_id} channel {channel_id}: {error}"
+            )
+        })?;
     }
 
     Ok(())
@@ -2132,13 +3326,68 @@ fn completion_notify_targets_on_conn(
     targets
 }
 
+async fn completion_notify_targets_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    run_agent_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut targets = Vec::new();
+
+    if let Some(agent_id) = run_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let channel_id: Option<String> =
+            sqlx::query_scalar("SELECT discord_channel_id FROM agents WHERE id = $1")
+                .bind(agent_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|error| {
+                    format!("load completion notify agent channel for run {run_id}: {error}")
+                })?;
+        if let Some(channel_id) = channel_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            targets.push(channel_id);
+        }
+    }
+
+    if targets.is_empty() {
+        let rows = sqlx::query(
+            "SELECT DISTINCT a.discord_channel_id
+             FROM auto_queue_entries e
+             JOIN agents a ON a.id = e.agent_id
+             WHERE e.run_id = $1
+               AND a.discord_channel_id IS NOT NULL
+               AND TRIM(a.discord_channel_id) != ''",
+        )
+        .bind(run_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("load completion notify fallback channels for run {run_id}: {error}")
+        })?;
+        for row in rows {
+            let channel_id: String = row.try_get("discord_channel_id").map_err(|error| {
+                format!("decode completion notify fallback channel for run {run_id}: {error}")
+            })?;
+            targets.push(channel_id);
+        }
+    }
+
+    targets.sort();
+    targets.dedup();
+    Ok(targets)
+}
+
 fn record_entry_transition_on_conn(
     conn: &Connection,
     entry_id: &str,
     from_status: &str,
     to_status: &str,
     trigger_source: &str,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     ensure_entry_transition_audit_schema(conn)?;
     conn.execute(
         "INSERT INTO auto_queue_entry_transitions (
@@ -2148,12 +3397,38 @@ fn record_entry_transition_on_conn(
              trigger_source
          )
          VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![entry_id, from_status, to_status, trigger_source],
+        libsql_rusqlite::params![entry_id, from_status, to_status, trigger_source],
     )?;
     Ok(())
 }
 
-fn ensure_entry_transition_audit_schema(conn: &Connection) -> rusqlite::Result<()> {
+async fn record_entry_transition_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    from_status: &str,
+    to_status: &str,
+    trigger_source: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO auto_queue_entry_transitions (
+             entry_id,
+             from_status,
+             to_status,
+             trigger_source
+         )
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(entry_id)
+    .bind(from_status)
+    .bind(to_status)
+    .bind(trigger_source)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))?;
+    Ok(())
+}
+
+fn ensure_entry_transition_audit_schema(conn: &Connection) -> libsql_rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2170,7 +3445,9 @@ fn ensure_entry_transition_audit_schema(conn: &Connection) -> rusqlite::Result<(
     )
 }
 
-fn map_status_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StatusEntryRecord> {
+fn map_status_entry_row(
+    row: &libsql_rusqlite::Row<'_>,
+) -> libsql_rusqlite::Result<StatusEntryRecord> {
     Ok(StatusEntryRecord {
         id: row.get(0)?,
         agent_id: row.get(1)?,
@@ -2178,24 +3455,90 @@ fn map_status_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StatusEntry
         priority_rank: row.get(3)?,
         reason: row.get(4)?,
         status: row.get(5)?,
-        retry_count: row.get(6)?,
-        created_at: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-        dispatched_at: row.get(8)?,
-        completed_at: row.get(9)?,
-        card_title: row.get(10)?,
-        github_issue_number: row.get(11)?,
-        github_repo: row.get(12)?,
-        thread_group: row.get(13)?,
-        slot_index: row.get(14)?,
-        batch_phase: row.get(15)?,
-        channel_thread_map: row.get(16)?,
-        active_thread_id: row.get(17)?,
-        card_status: row.get(18)?,
-        review_round: row.get::<_, Option<i64>>(19)?.unwrap_or(0),
+        created_at: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+        dispatched_at: row.get(7)?,
+        completed_at: row.get(8)?,
+        card_title: row.get(9)?,
+        github_issue_number: row.get(10)?,
+        github_repo: row.get(11)?,
+        thread_group: row.get(12)?,
+        slot_index: row.get(13)?,
+        batch_phase: row.get(14)?,
+        channel_thread_map: row.get(15)?,
+        active_thread_id: row.get(16)?,
+        card_status: row.get(17)?,
+        review_round: row.get::<_, Option<i64>>(18)?.unwrap_or(0),
     })
 }
 
-fn ensure_agent_slot_rows(conn: &Connection, run_id: &str, agent_id: &str) -> rusqlite::Result<()> {
+fn auto_queue_run_record_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AutoQueueRunRecord, sqlx::Error> {
+    Ok(AutoQueueRunRecord {
+        id: row.try_get("id")?,
+        repo: row.try_get("repo")?,
+        agent_id: row.try_get("agent_id")?,
+        status: row.try_get("status")?,
+        timeout_minutes: row.try_get("timeout_minutes")?,
+        ai_model: row.try_get("ai_model")?,
+        ai_rationale: row.try_get("ai_rationale")?,
+        created_at: row.try_get("created_at")?,
+        completed_at: row.try_get("completed_at")?,
+        max_concurrent_threads: row.try_get("max_concurrent_threads")?,
+        thread_group_count: row.try_get("thread_group_count")?,
+        deploy_phases: row.try_get("deploy_phases")?,
+    })
+}
+
+fn status_entry_record_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StatusEntryRecord, sqlx::Error> {
+    Ok(StatusEntryRecord {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        card_id: row.try_get("kanban_card_id")?,
+        priority_rank: row.try_get("priority_rank")?,
+        reason: row.try_get("reason")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        dispatched_at: row.try_get("dispatched_at")?,
+        completed_at: row.try_get("completed_at")?,
+        card_title: row.try_get("title")?,
+        github_issue_number: row.try_get("github_issue_number")?,
+        github_repo: row.try_get("github_repo")?,
+        thread_group: row.try_get("thread_group")?,
+        slot_index: row.try_get("slot_index")?,
+        batch_phase: row.try_get("batch_phase")?,
+        channel_thread_map: row.try_get("channel_thread_map")?,
+        active_thread_id: row.try_get("active_thread_id")?,
+        card_status: row.try_get("card_status")?,
+        review_round: row.try_get("review_round")?,
+    })
+}
+
+fn auto_queue_run_history_record_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AutoQueueRunHistoryRecord, sqlx::Error> {
+    Ok(AutoQueueRunHistoryRecord {
+        id: row.try_get("id")?,
+        repo: row.try_get("repo")?,
+        agent_id: row.try_get("agent_id")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        completed_at: row.try_get("completed_at")?,
+        entry_count: row.try_get("entry_count")?,
+        done_count: row.try_get("done_count")?,
+        skipped_count: row.try_get("skipped_count")?,
+        pending_count: row.try_get("pending_count")?,
+        dispatched_count: row.try_get("dispatched_count")?,
+    })
+}
+
+fn ensure_agent_slot_rows(
+    conn: &Connection,
+    run_id: &str,
+    agent_id: &str,
+) -> libsql_rusqlite::Result<()> {
     ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
 }
 
@@ -2242,15 +3585,13 @@ fn append_card_filters(
 mod tests {
     use super::{
         ConsultationDispatchRecordError, ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE,
-        ENTRY_STATUS_FAILED, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
+        ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED, EntryStatusUpdateError,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation, SlotAllocationError,
-        allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, current_batch_phase,
-        list_entry_dispatch_history, reactivate_done_entry_on_conn,
-        record_consultation_dispatch_on_conn, record_entry_dispatch_failure_on_conn,
-        release_run_slots, release_slot_for_group_agent, save_phase_gate_state_on_conn,
-        update_entry_status_on_conn,
+        allocate_slot_for_group_agent, clear_phase_gate_state_on_conn, list_entry_dispatch_history,
+        reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn, release_run_slots,
+        release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
-    use rusqlite::{Connection, OpenFlags};
+    use libsql_rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
 
     fn setup_conn() -> Connection {
@@ -2271,7 +3612,6 @@ mod tests {
                 agent_id TEXT,
                 status TEXT,
                 dispatch_id TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0,
                 slot_index INTEGER,
                 thread_group INTEGER DEFAULT 0,
                 batch_phase INTEGER DEFAULT 0,
@@ -2310,9 +3650,7 @@ mod tests {
                 target TEXT,
                 content TEXT,
                 bot TEXT,
-                source TEXT,
-                reason_code TEXT,
-                session_key TEXT
+                source TEXT
             );
             CREATE TABLE task_dispatches (
                 id TEXT PRIMARY KEY,
@@ -2385,7 +3723,6 @@ mod tests {
                 agent_id TEXT,
                 status TEXT,
                 dispatch_id TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0,
                 slot_index INTEGER,
                 thread_group INTEGER DEFAULT 0,
                 batch_phase INTEGER DEFAULT 0,
@@ -2952,165 +4289,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_failure_moves_entry_to_failed_at_retry_limit_and_manual_retry_resets_counter() {
-        let conn = setup_conn();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
-             ) VALUES (
-                 'entry-failure-limit', 'run-1', 'card-failure-limit', 'agent-1', 'dispatched', 'dispatch-1', 0, 0
-             )",
-            [],
-        )
-        .expect("seed dispatched entry");
-
-        let first =
-            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_1")
-                .expect("first dispatch failure");
-        assert_eq!(first.to_status, ENTRY_STATUS_PENDING);
-        assert_eq!(first.retry_count, 1);
-        assert!(first.changed);
-
-        update_entry_status_on_conn(
-            &conn,
-            "entry-failure-limit",
-            ENTRY_STATUS_DISPATCHED,
-            "test_retry_dispatch_2",
-            &EntryStatusUpdateOptions {
-                dispatch_id: Some("dispatch-2".to_string()),
-                slot_index: Some(0),
-            },
-        )
-        .expect("second dispatch reserve");
-        let second =
-            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_2")
-                .expect("second dispatch failure");
-        assert_eq!(second.to_status, ENTRY_STATUS_PENDING);
-        assert_eq!(second.retry_count, 2);
-        assert!(second.changed);
-
-        update_entry_status_on_conn(
-            &conn,
-            "entry-failure-limit",
-            ENTRY_STATUS_DISPATCHED,
-            "test_retry_dispatch_3",
-            &EntryStatusUpdateOptions {
-                dispatch_id: Some("dispatch-3".to_string()),
-                slot_index: Some(0),
-            },
-        )
-        .expect("third dispatch reserve");
-        let third =
-            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-limit", 3, "test_fail_3")
-                .expect("third dispatch failure");
-        assert_eq!(third.to_status, ENTRY_STATUS_FAILED);
-        assert_eq!(third.retry_count, 3);
-        assert!(third.changed);
-
-        let (status, retry_count, dispatch_id): (String, i64, Option<String>) = conn
-            .query_row(
-                "SELECT status, retry_count, dispatch_id
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-failure-limit'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("failed entry row");
-        assert_eq!(status, ENTRY_STATUS_FAILED);
-        assert_eq!(retry_count, 3);
-        assert!(dispatch_id.is_none());
-
-        update_entry_status_on_conn(
-            &conn,
-            "entry-failure-limit",
-            ENTRY_STATUS_PENDING,
-            "manual_update",
-            &EntryStatusUpdateOptions::default(),
-        )
-        .expect("manual retry from failed");
-        let (status, retry_count): (String, i64) = conn
-            .query_row(
-                "SELECT status, retry_count
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-failure-limit'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("retried entry row");
-        assert_eq!(status, ENTRY_STATUS_PENDING);
-        assert_eq!(retry_count, 0);
-    }
-
-    #[test]
-    fn dispatch_failure_is_idempotent_after_entry_already_recovered() {
-        let conn = setup_conn();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, retry_count
-             ) VALUES (
-                 'entry-failure-stale', 'run-1', 'card-failure-stale', 'agent-1', 'dispatched', 'dispatch-1', 0, 0, 1
-             )",
-            [],
-        )
-        .expect("seed dispatched entry");
-
-        let first =
-            record_entry_dispatch_failure_on_conn(&conn, "entry-failure-stale", 3, "test_fail_a")
-                .expect("first dispatch failure");
-        assert_eq!(first.to_status, ENTRY_STATUS_PENDING);
-        assert_eq!(first.retry_count, 2);
-        assert!(first.changed);
-
-        let duplicate = record_entry_dispatch_failure_on_conn(
-            &conn,
-            "entry-failure-stale",
-            3,
-            "test_fail_duplicate",
-        )
-        .expect("duplicate dispatch failure");
-        assert_eq!(duplicate.from_status, ENTRY_STATUS_PENDING);
-        assert_eq!(duplicate.to_status, ENTRY_STATUS_PENDING);
-        assert_eq!(duplicate.retry_count, 2);
-        assert!(!duplicate.changed);
-
-        let retry_count: i64 = conn
-            .query_row(
-                "SELECT retry_count
-                 FROM auto_queue_entries
-                 WHERE id = 'entry-failure-stale'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("retry count row");
-        assert_eq!(retry_count, 2);
-    }
-
-    #[test]
-    fn current_batch_phase_ignores_failed_entries() {
-        let conn = setup_conn();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
-             ) VALUES (
-                 'entry-phase-failed', 'run-1', 'card-phase-failed', 'agent-1', 'failed', 0, 0
-             )",
-            [],
-        )
-        .expect("seed failed phase entry");
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
-             ) VALUES (
-                 'entry-phase-next', 'run-1', 'card-phase-next', 'agent-1', 'pending', 1, 1
-             )",
-            [],
-        )
-        .expect("seed pending phase entry");
-
-        assert_eq!(current_batch_phase(&conn, "run-1"), Some(1));
-    }
-
-    #[test]
     fn reactivate_done_entry_allows_admin_restore_to_dispatched() {
         let conn = setup_conn();
         conn.execute(
@@ -3495,7 +4673,7 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, to_agent_id, status, context)
              VALUES (?1, ?2, 'dispatched', ?3)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "dispatch-sidecar",
                 "agent-1",
                 serde_json::json!({
@@ -3518,7 +4696,7 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, to_agent_id, status, context)
              VALUES (?1, ?2, 'dispatched', ?3)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "dispatch-primary",
                 "agent-1",
                 serde_json::json!({
@@ -3679,7 +4857,7 @@ mod tests {
             )
             .unwrap();
         let rows = stmt
-            .query_map(rusqlite::params!["run-1", 2], |row| {
+            .query_map(libsql_rusqlite::params!["run-1", 2], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
@@ -3725,14 +4903,14 @@ mod tests {
         let phase_two_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                rusqlite::params!["run-1", 2],
+                libsql_rusqlite::params!["run-1", 2],
                 |row| row.get(0),
             )
             .unwrap();
         let phase_three_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                rusqlite::params!["run-1", 3],
+                libsql_rusqlite::params!["run-1", 3],
                 |row| row.get(0),
             )
             .unwrap();

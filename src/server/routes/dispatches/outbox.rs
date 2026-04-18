@@ -4,7 +4,8 @@ use super::{
     },
     thread_reuse::clear_all_threads,
 };
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
+use sqlx::{PgPool, Row as SqlxRow};
 use std::process::Command;
 
 #[derive(Clone, Debug)]
@@ -85,7 +86,15 @@ pub(crate) trait OutboxNotifier: Send + Sync {
 }
 
 /// Production notifier that calls the real Discord functions.
-pub(crate) struct RealOutboxNotifier;
+pub(crate) struct RealOutboxNotifier {
+    pg_pool: Option<PgPool>,
+}
+
+impl RealOutboxNotifier {
+    fn new(pg_pool: Option<PgPool>) -> Self {
+        Self { pg_pool }
+    }
+}
 
 impl OutboxNotifier for RealOutboxNotifier {
     async fn notify_dispatch(
@@ -96,8 +105,9 @@ impl OutboxNotifier for RealOutboxNotifier {
         card_id: String,
         dispatch_id: String,
     ) -> Result<(), String> {
-        super::discord_delivery::send_dispatch_to_discord(
+        super::discord_delivery::send_dispatch_to_discord_with_pg(
             &db,
+            self.pg_pool.as_ref(),
             &agent_id,
             &title,
             &card_id,
@@ -107,7 +117,7 @@ impl OutboxNotifier for RealOutboxNotifier {
     }
 
     async fn handle_followup(&self, db: crate::db::Db, dispatch_id: String) -> Result<(), String> {
-        handle_completed_dispatch_followups(&db, &dispatch_id).await
+        handle_completed_dispatch_followups_with_pg(&db, self.pg_pool.as_ref(), &dispatch_id).await
     }
 
     async fn sync_status_reaction(
@@ -115,7 +125,12 @@ impl OutboxNotifier for RealOutboxNotifier {
         db: crate::db::Db,
         dispatch_id: String,
     ) -> Result<(), String> {
-        super::discord_delivery::sync_dispatch_status_reaction(&db, &dispatch_id).await
+        super::discord_delivery::sync_dispatch_status_reaction_with_pg(
+            &db,
+            self.pg_pool.as_ref(),
+            &dispatch_id,
+        )
+        .await
     }
 }
 
@@ -125,9 +140,9 @@ const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 const MAX_RETRY_COUNT: i32 = 4;
 
 fn dispatch_notify_delivery_suppressed(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
-) -> rusqlite::Result<bool> {
+) -> libsql_rusqlite::Result<bool> {
     let status: Option<String> = conn
         .query_row(
             "SELECT status FROM task_dispatches WHERE id = ?1",
@@ -139,6 +154,162 @@ fn dispatch_notify_delivery_suppressed(
         status.as_deref(),
         Some("completed") | Some("failed") | Some("cancelled")
     ))
+}
+
+async fn dispatch_notify_delivery_suppressed_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let status =
+        sqlx::query_scalar::<_, Option<String>>("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(matches!(
+        status.flatten().as_deref(),
+        Some("completed") | Some("failed") | Some("cancelled")
+    ))
+}
+
+type DispatchOutboxRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i32,
+);
+
+async fn claim_pending_dispatch_outbox_batch_pg(pool: &PgPool) -> Vec<DispatchOutboxRow> {
+    let rows = match sqlx::query(
+        "WITH claimed AS (
+            SELECT id
+              FROM dispatch_outbox
+             WHERE status = 'pending'
+               AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+             ORDER BY id ASC
+             FOR UPDATE SKIP LOCKED
+             LIMIT 5
+        )
+        UPDATE dispatch_outbox o
+           SET status = 'processing'
+          FROM claimed
+         WHERE o.id = claimed.id
+        RETURNING o.id, o.dispatch_id, o.action, o.agent_id, o.card_id, o.title, o.retry_count",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("[dispatch-outbox] failed to claim postgres outbox rows: {error}");
+            return Vec::new();
+        }
+    };
+
+    let mut pending = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row.try_get::<i64, _>("id").ok()?,
+                row.try_get::<String, _>("dispatch_id").ok()?,
+                row.try_get::<String, _>("action").ok()?,
+                row.try_get::<Option<String>, _>("agent_id").ok()?,
+                row.try_get::<Option<String>, _>("card_id").ok()?,
+                row.try_get::<Option<String>, _>("title").ok()?,
+                row.try_get::<i32, _>("retry_count").ok()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    pending.sort_by_key(|row| row.0);
+    pending
+}
+
+async fn mark_dispatch_dispatched_pg(pool: &PgPool, dispatch_id: &str) -> Result<(), String> {
+    let current = sqlx::query(
+        "SELECT status, kanban_card_id, dispatch_type
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch {dispatch_id} for status update: {error}"))?;
+
+    let Some(current) = current else {
+        return Ok(());
+    };
+
+    let current_status = current
+        .try_get::<String, _>("status")
+        .map_err(|error| format!("read postgres dispatch status for {dispatch_id}: {error}"))?;
+    if current_status != "pending" {
+        return Ok(());
+    }
+
+    let kanban_card_id = current
+        .try_get::<Option<String>, _>("kanban_card_id")
+        .map_err(|error| format!("read postgres dispatch card for {dispatch_id}: {error}"))?;
+    let dispatch_type = current
+        .try_get::<Option<String>, _>("dispatch_type")
+        .map_err(|error| format!("read postgres dispatch type for {dispatch_id}: {error}"))?;
+
+    let changed = sqlx::query(
+        "UPDATE task_dispatches
+            SET status = 'dispatched',
+                updated_at = NOW()
+          WHERE id = $1
+            AND status = 'pending'",
+    )
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("update postgres dispatch {dispatch_id} to dispatched: {error}"))?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(dispatch_id)
+    .bind(kanban_card_id)
+    .bind(dispatch_type)
+    .bind(Some(current_status.as_str()))
+    .bind("dispatched")
+    .bind("dispatch_outbox_notify")
+    .bind(Option::<serde_json::Value>::None)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("insert postgres dispatch event for {dispatch_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action)
+         SELECT $1, 'status_reaction'
+          WHERE NOT EXISTS (
+              SELECT 1
+                FROM dispatch_outbox
+               WHERE dispatch_id = $1
+                 AND action = 'status_reaction'
+                 AND status IN ('pending', 'processing')
+          )",
+    )
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("enqueue postgres status_reaction for {dispatch_id}: {error}"))?;
+
+    Ok(())
 }
 
 /// Process one batch of pending outbox entries.
@@ -154,15 +325,17 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     db: &crate::db::Db,
     notifier: &N,
 ) -> usize {
-    let pending: Vec<(
-        i64,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        i32,
-    )> = {
+    process_outbox_batch_with_pg(db, None, notifier).await
+}
+
+pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    notifier: &N,
+) -> usize {
+    let pending: Vec<DispatchOutboxRow> = if let Some(pool) = pg_pool {
+        claim_pending_dispatch_outbox_batch_pg(pool).await
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return 0,
@@ -196,13 +369,29 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     let count = pending.len();
     for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
         if action == "notify" {
-            let suppress_delivery = if let Ok(conn) = db.lock() {
+            let suppress_delivery = if let Some(pool) = pg_pool {
+                dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
+                    .await
+                    .unwrap_or(false)
+            } else if let Ok(conn) = db.lock() {
                 dispatch_notify_delivery_suppressed(&conn, &dispatch_id).unwrap_or(false)
             } else {
                 false
             };
             if suppress_delivery {
-                if let Ok(conn) = db.lock() {
+                if let Some(pool) = pg_pool {
+                    sqlx::query(
+                        "UPDATE dispatch_outbox
+                            SET status = 'done',
+                                processed_at = NOW(),
+                                error = NULL
+                          WHERE id = $1",
+                    )
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .ok();
+                } else if let Ok(conn) = db.lock() {
                     conn.execute(
                         "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now'), error = NULL WHERE id = ?1",
                         [id],
@@ -214,12 +403,14 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
         }
 
         // Mark as processing
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
-                [id],
-            )
-            .ok();
+        if pg_pool.is_none() {
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
+                    [id],
+                )
+                .ok();
+            }
         }
 
         let result = match action.as_str() {
@@ -259,7 +450,21 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
         match result {
             Ok(()) => {
                 // Mark done + transition dispatch pending → dispatched
-                if let Ok(conn) = db.lock() {
+                if let Some(pool) = pg_pool {
+                    sqlx::query(
+                        "UPDATE dispatch_outbox
+                            SET status = 'done',
+                                processed_at = NOW()
+                          WHERE id = $1",
+                    )
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .ok();
+                    if action == "notify" {
+                        mark_dispatch_dispatched_pg(pool, &dispatch_id).await.ok();
+                    }
+                } else if let Ok(conn) = db.lock() {
                     conn.execute(
                         "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
                         [id],
@@ -286,11 +491,26 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                     tracing::error!(
                         "[dispatch-outbox] Permanent failure for entry {id} (dispatch={dispatch_id}, action={action}): {err}"
                     );
-                    if let Ok(conn) = db.lock() {
+                    if let Some(pool) = pg_pool {
+                        sqlx::query(
+                            "UPDATE dispatch_outbox
+                                SET status = 'failed',
+                                    error = $1,
+                                    retry_count = $2,
+                                    processed_at = NOW()
+                              WHERE id = $3",
+                        )
+                        .bind(&err)
+                        .bind(new_count)
+                        .bind(id)
+                        .execute(pool)
+                        .await
+                        .ok();
+                    } else if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE dispatch_outbox SET status = 'failed', error = ?1, \
                              retry_count = ?2, processed_at = datetime('now') WHERE id = ?3",
-                            rusqlite::params![err, new_count, id],
+                            libsql_rusqlite::params![err, new_count, id],
                         )
                         .ok();
                     }
@@ -302,13 +522,29 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                         "[dispatch-outbox] Retry {new_count}/{MAX_RETRY_COUNT} for entry {id} (dispatch={dispatch_id}, action={action}) \
                          in {backoff_secs}s: {err}",
                     );
-                    if let Ok(conn) = db.lock() {
+                    if let Some(pool) = pg_pool {
+                        sqlx::query(
+                            "UPDATE dispatch_outbox
+                                SET status = 'pending',
+                                    error = $1,
+                                    retry_count = $2,
+                                    next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second')
+                              WHERE id = $4",
+                        )
+                        .bind(&err)
+                        .bind(new_count)
+                        .bind(backoff_secs)
+                        .bind(id)
+                        .execute(pool)
+                        .await
+                        .ok();
+                    } else if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE dispatch_outbox SET status = 'pending', error = ?1, \
                              retry_count = ?2, \
                              next_attempt_at = datetime('now', '+' || ?3 || ' seconds') \
                              WHERE id = ?4",
-                            rusqlite::params![err, new_count, backoff_secs, id],
+                            libsql_rusqlite::params![err, new_count, backoff_secs, id],
                         )
                         .ok();
                     }
@@ -715,9 +951,18 @@ pub(crate) async fn handle_completed_dispatch_followups(
     db: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<(), String> {
+    handle_completed_dispatch_followups_with_pg(db, None, dispatch_id).await
+}
+
+pub(crate) async fn handle_completed_dispatch_followups_with_pg(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<(), String> {
     let transport = HttpDispatchTransport::from_runtime(db);
-    handle_completed_dispatch_followups_with_config_and_transport(
+    handle_completed_dispatch_followups_internal(
         db,
+        pg_pool,
         dispatch_id,
         &DispatchFollowupConfig::from_runtime(),
         &transport,
@@ -731,13 +976,7 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config(
     config: &DispatchFollowupConfig,
 ) -> Result<(), String> {
     let transport = HttpDispatchTransport::from_runtime(db);
-    handle_completed_dispatch_followups_with_config_and_transport(
-        db,
-        dispatch_id,
-        config,
-        &transport,
-    )
-    .await
+    handle_completed_dispatch_followups_internal(db, None, dispatch_id, config, &transport).await
 }
 
 pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transport<
@@ -748,32 +987,17 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transpor
     config: &DispatchFollowupConfig,
     transport: &T,
 ) -> Result<(), String> {
-    let info: Option<CompletedDispatchInfo> = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for dispatch lookup".into()),
-        };
-        conn.query_row(
-            "SELECT td.dispatch_type, td.status, kc.id, td.result, td.context, td.thread_id, \
-                    CAST(ROUND((julianday(COALESCE(td.completed_at, td.updated_at, td.created_at)) - julianday(td.created_at)) * 86400) AS INTEGER) \
-             FROM task_dispatches td \
-             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
-             WHERE td.id = ?1",
-            [dispatch_id],
-            |row| {
-                Ok(CompletedDispatchInfo {
-                    dispatch_type: row.get(0)?,
-                    status: row.get(1)?,
-                    card_id: row.get(2)?,
-                    result_json: row.get(3)?,
-                    context_json: row.get(4)?,
-                    thread_id: row.get(5)?,
-                    duration_seconds: row.get(6)?,
-                })
-            },
-        )
-        .ok()
-    };
+    handle_completed_dispatch_followups_internal(db, None, dispatch_id, config, transport).await
+}
+
+async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    config: &DispatchFollowupConfig,
+    transport: &T,
+) -> Result<(), String> {
+    let info = load_completed_dispatch_info(db, pg_pool, dispatch_id).await?;
 
     let Some(mut info) = info else {
         return Err(format!("dispatch {dispatch_id} not found"));
@@ -827,14 +1051,7 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transpor
     // Archive thread on dispatch completion — but only if the card is done.
     // When the card has an active lifecycle (not done), keep the thread open for reuse
     // by subsequent dispatches (rework, review-decision, etc.).
-    let card_status: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [&info.card_id],
-            |row| row.get(0),
-        )
-        .ok()
-    });
+    let card_status = load_card_status(db, pg_pool, &info.card_id).await?;
     let should_archive = card_status.as_deref() == Some("done");
 
     if should_archive {
@@ -849,10 +1066,7 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transpor
                 );
             }
         }
-        // Clear all thread mappings when card is done
-        if let Ok(conn) = db.lock() {
-            clear_all_threads(&conn, &info.card_id);
-        }
+        clear_all_dispatch_threads(db, pg_pool, &info.card_id).await?;
     }
 
     // Generic resend removed — dispatch Discord notification is handled by:
@@ -860,6 +1074,144 @@ pub(crate) async fn handle_completed_dispatch_followups_with_config_and_transpor
     // 2. timeouts.js [I-0] recovery for unnotified dispatches
     // 3. dispatch_notified guard in process_outbox_batch prevents duplicates
     // Previously this generic resend caused 2-3x duplicate messages for every dispatch.
+    Ok(())
+}
+
+async fn load_completed_dispatch_info(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<Option<CompletedDispatchInfo>, String> {
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query(
+            "SELECT td.dispatch_type,
+                    td.status,
+                    kc.id AS card_id,
+                    td.result,
+                    td.context,
+                    td.thread_id,
+                    CAST(
+                        EXTRACT(
+                            EPOCH FROM (
+                                COALESCE(td.completed_at, td.updated_at, td.created_at) - td.created_at
+                            )
+                        ) AS BIGINT
+                    ) AS duration_seconds
+             FROM task_dispatches td
+             JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+             WHERE td.id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load dispatch {dispatch_id} followup info from postgres: {error}"))?;
+
+        return row
+            .map(|row| {
+                Ok(CompletedDispatchInfo {
+                    dispatch_type: row.try_get("dispatch_type").map_err(|error| {
+                        format!("read postgres dispatch_type for {dispatch_id}: {error}")
+                    })?,
+                    status: row.try_get("status").map_err(|error| {
+                        format!("read postgres status for {dispatch_id}: {error}")
+                    })?,
+                    card_id: row.try_get("card_id").map_err(|error| {
+                        format!("read postgres card_id for {dispatch_id}: {error}")
+                    })?,
+                    result_json: row.try_get("result").map_err(|error| {
+                        format!("read postgres result for {dispatch_id}: {error}")
+                    })?,
+                    context_json: row.try_get("context").map_err(|error| {
+                        format!("read postgres context for {dispatch_id}: {error}")
+                    })?,
+                    thread_id: row.try_get("thread_id").map_err(|error| {
+                        format!("read postgres thread_id for {dispatch_id}: {error}")
+                    })?,
+                    duration_seconds: row.try_get("duration_seconds").map_err(|error| {
+                        format!("read postgres duration_seconds for {dispatch_id}: {error}")
+                    })?,
+                })
+            })
+            .transpose();
+    }
+
+    let conn = db
+        .lock()
+        .map_err(|_| "db lock failed for dispatch lookup".to_string())?;
+    conn.query_row(
+        "SELECT td.dispatch_type, td.status, kc.id, td.result, td.context, td.thread_id, \
+                CAST(ROUND((julianday(COALESCE(td.completed_at, td.updated_at, td.created_at)) - julianday(td.created_at)) * 86400) AS INTEGER) \
+         FROM task_dispatches td \
+         JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
+         WHERE td.id = ?1",
+        [dispatch_id],
+        |row| {
+            Ok(CompletedDispatchInfo {
+                dispatch_type: row.get(0)?,
+                status: row.get(1)?,
+                card_id: row.get(2)?,
+                result_json: row.get(3)?,
+                context_json: row.get(4)?,
+                thread_id: row.get(5)?,
+                duration_seconds: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("load dispatch {dispatch_id} followup info: {error}"))
+}
+
+async fn load_card_status(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load postgres card status for {card_id}: {error}"))?;
+        return row
+            .map(|row| {
+                row.try_get("status")
+                    .map_err(|error| format!("read postgres card status for {card_id}: {error}"))
+            })
+            .transpose();
+    }
+
+    Ok(db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }))
+}
+
+async fn clear_all_dispatch_threads(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    card_id: &str,
+) -> Result<(), String> {
+    if let Some(pool) = pg_pool {
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET channel_thread_map = NULL,
+                 active_thread_id = NULL
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("clear postgres thread mappings for {card_id}: {error}"))?;
+        return Ok(());
+    }
+
+    if let Ok(conn) = db.lock() {
+        clear_all_threads(&conn, card_id);
+    }
     Ok(())
 }
 
@@ -1266,21 +1618,22 @@ pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
 ///
 /// This is the SINGLE place where dispatch-related Discord HTTP calls originate.
 /// All other code paths insert into the outbox table and return immediately.
-pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
+pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db, pg_pool: Option<PgPool>) {
     use std::time::Duration;
 
     // Wait for server to be ready
     tokio::time::sleep(Duration::from_secs(3)).await;
     tracing::info!("[dispatch-outbox] Worker started (adaptive backoff 500ms-5s)");
 
-    let notifier = RealOutboxNotifier;
+    let notifier = RealOutboxNotifier::new(pg_pool);
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
 
     loop {
         tokio::time::sleep(poll_interval).await;
 
-        let processed = process_outbox_batch(&db, &notifier).await;
+        let processed =
+            process_outbox_batch_with_pg(&db, notifier.pg_pool.as_ref(), &notifier).await;
         if processed == 0 {
             poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
         } else {
@@ -1295,10 +1648,110 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn test_db() -> crate::db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!(
+                "agentdesk_dispatch_outbox_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url).await.unwrap();
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .unwrap();
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url).await.unwrap();
+            crate::db::postgres::migrate(&pool).await.unwrap();
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url).await.unwrap();
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     #[derive(Clone, Default)]
@@ -1382,5 +1835,159 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "done");
         assert!(row.1.is_some());
+    }
+
+    #[tokio::test]
+    async fn handle_completed_dispatch_followups_with_pg_clears_done_card_threads() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, active_thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-done")
+        .bind("Done Card")
+        .bind("done")
+        .bind("thread-final")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, dispatch_type, status, title, thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-final")
+        .bind("card-done")
+        .bind("implementation")
+        .bind("completed")
+        .bind("Done Card")
+        .bind("thread-final")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        handle_completed_dispatch_followups_with_pg(&sqlite, Some(&pool), "dispatch-final")
+            .await
+            .unwrap();
+
+        let active_thread: Option<String> =
+            sqlx::query_scalar("SELECT active_thread_id FROM kanban_cards WHERE id = $1")
+                .bind("card-done")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            active_thread.is_none(),
+            "done-card followup should clear active_thread_id in postgres"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn process_outbox_batch_with_pg_notify_transitions_dispatch_and_enqueues_reaction() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (
+                id, name, created_at, updated_at
+             ) VALUES ($1, $2, NOW(), NOW())",
+        )
+        .bind("agent-pg")
+        .bind("Agent PG")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-pg-notify")
+        .bind("PG Notify Card")
+        .bind("todo")
+        .bind("agent-pg")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-pg-notify")
+        .bind("card-pg-notify")
+        .bind("agent-pg")
+        .bind("implementation")
+        .bind("pending")
+        .bind("PG Notify Card")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, agent_id, card_id, title
+             ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("dispatch-pg-notify")
+        .bind("notify")
+        .bind("agent-pg")
+        .bind("card-pg-notify")
+        .bind("PG Notify Card")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let notifier = MockOutboxNotifier::default();
+        let processed = process_outbox_batch_with_pg(&sqlite, Some(&pool), &notifier).await;
+        assert_eq!(processed, 1);
+        assert_eq!(
+            notifier.calls.lock().unwrap().as_slice(),
+            ["notify:dispatch-pg-notify"]
+        );
+
+        let outbox_row: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, processed_at::text
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1
+                AND action = 'notify'",
+        )
+        .bind("dispatch-pg-notify")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(outbox_row.0, "done");
+        assert!(outbox_row.1.is_some());
+
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-pg-notify")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dispatch_status, "dispatched");
+
+        let reaction_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1
+                AND action = 'status_reaction'
+                AND status = 'pending'",
+        )
+        .bind("dispatch-pg-notify")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reaction_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

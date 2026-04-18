@@ -1522,7 +1522,7 @@ mod tests {
                 "INSERT INTO sessions
                  (session_key, status, cwd, active_dispatch_id, claude_session_id, created_at)
                  VALUES (?1, 'idle', ?2, 'dispatch-1', 'sid-1', datetime('now'))",
-                rusqlite::params!["host:worktree-cleanup-session", worktree_path],
+                libsql_rusqlite::params!["host:worktree-cleanup-session", worktree_path],
             )
             .unwrap();
 

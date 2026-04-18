@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, Row, params};
+use libsql_rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::Db;
 use crate::db::session_agent_resolution::resolve_agent_id_for_session;
@@ -126,6 +127,21 @@ pub struct SessionTranscriptSearchHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedSessionTranscript {
+    turn_id: String,
+    session_key: Option<String>,
+    channel_id: Option<String>,
+    agent_id: Option<String>,
+    provider: Option<String>,
+    dispatch_id: Option<String>,
+    user_message: String,
+    assistant_message: String,
+    events: Vec<SessionTranscriptEvent>,
+    events_json: String,
+    duration_ms: Option<i64>,
+}
+
 pub fn persist_turn(db: &Db, entry: PersistSessionTranscript<'_>) -> Result<bool> {
     let mut conn = db
         .lock()
@@ -133,36 +149,41 @@ pub fn persist_turn(db: &Db, entry: PersistSessionTranscript<'_>) -> Result<bool
     persist_turn_on_conn(&mut conn, entry)
 }
 
+pub async fn persist_turn_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    entry: PersistSessionTranscript<'_>,
+) -> Result<bool> {
+    let Some(pool) = pg_pool else {
+        return persist_turn(db, entry);
+    };
+
+    let prepared = {
+        let conn = db
+            .lock()
+            .map_err(|e| anyhow!("db lock failed while preparing transcript: {e}"))?;
+        prepare_persist_entry(&conn, entry)?
+    };
+    let Some(prepared) = prepared else {
+        return Ok(false);
+    };
+
+    persist_turn_pg(pool, &prepared).await?;
+    Ok(true)
+}
+
 pub fn persist_turn_on_conn(
     conn: &mut Connection,
     entry: PersistSessionTranscript<'_>,
 ) -> Result<bool> {
-    let turn_id = entry.turn_id.trim();
-    if turn_id.is_empty() {
-        return Err(anyhow!("turn_id is required"));
-    }
-
-    let user_message = entry.user_message.trim();
-    let assistant_message = entry.assistant_message.trim();
-    let events = normalize_events(entry.events);
-    if user_message.is_empty() && assistant_message.is_empty() && events.is_empty() {
+    let Some(prepared) = prepare_persist_entry(conn, entry)? else {
         return Ok(false);
-    }
-
-    let session_key = normalized_opt(entry.session_key);
-    let channel_id = normalized_opt(entry.channel_id);
-    let provider = normalized_opt(entry.provider);
-    let dispatch_id = normalized_opt(entry.dispatch_id);
-    let agent_id = resolve_agent_id_for_session(
-        conn,
-        entry.agent_id,
-        session_key.as_deref(),
-        None,
-        None,
-        dispatch_id.as_deref(),
+    };
+    let search_document = build_search_document(
+        &prepared.user_message,
+        &prepared.assistant_message,
+        &prepared.events,
     );
-    let events_json = serde_json::to_string(&events)?;
-    let search_document = build_search_document(user_message, assistant_message, &events);
 
     let tx = conn.transaction()?;
     tx.execute(
@@ -178,7 +199,7 @@ pub fn persist_turn_on_conn(
             events_json,
             duration_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(turn_id) DO UPDATE SET
+        ON CONFLICT(turn_id) DO UPDATE SET
             session_key = excluded.session_key,
             channel_id = excluded.channel_id,
             agent_id = COALESCE(excluded.agent_id, session_transcripts.agent_id),
@@ -189,22 +210,22 @@ pub fn persist_turn_on_conn(
             events_json = excluded.events_json,
             duration_ms = excluded.duration_ms",
         params![
-            turn_id,
-            session_key,
-            channel_id,
-            agent_id,
-            provider,
-            dispatch_id,
-            user_message,
-            assistant_message,
-            events_json,
-            entry.duration_ms,
+            prepared.turn_id,
+            prepared.session_key,
+            prepared.channel_id,
+            prepared.agent_id,
+            prepared.provider,
+            prepared.dispatch_id,
+            prepared.user_message,
+            prepared.assistant_message,
+            prepared.events_json,
+            prepared.duration_ms,
         ],
     )?;
 
     let row_id: i64 = tx.query_row(
         "SELECT id FROM session_transcripts WHERE turn_id = ?1",
-        [turn_id],
+        [&prepared.turn_id],
         |row| row.get(0),
     )?;
 
@@ -220,6 +241,92 @@ pub fn persist_turn_on_conn(
     tx.commit()?;
 
     Ok(true)
+}
+
+async fn persist_turn_pg(pool: &PgPool, entry: &PreparedSessionTranscript) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO session_transcripts (
+            turn_id,
+            session_key,
+            channel_id,
+            agent_id,
+            provider,
+            dispatch_id,
+            user_message,
+            assistant_message,
+            events_json,
+            duration_ms
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb), $10)
+         ON CONFLICT (turn_id) DO UPDATE SET
+            session_key = EXCLUDED.session_key,
+            channel_id = EXCLUDED.channel_id,
+            agent_id = COALESCE(EXCLUDED.agent_id, session_transcripts.agent_id),
+            provider = EXCLUDED.provider,
+            dispatch_id = EXCLUDED.dispatch_id,
+            user_message = EXCLUDED.user_message,
+            assistant_message = EXCLUDED.assistant_message,
+            events_json = EXCLUDED.events_json,
+            duration_ms = EXCLUDED.duration_ms",
+    )
+    .bind(&entry.turn_id)
+    .bind(&entry.session_key)
+    .bind(&entry.channel_id)
+    .bind(&entry.agent_id)
+    .bind(&entry.provider)
+    .bind(&entry.dispatch_id)
+    .bind(&entry.user_message)
+    .bind(&entry.assistant_message)
+    .bind(&entry.events_json)
+    .bind(entry.duration_ms)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow!("persist postgres transcript failed: {e}"))?;
+    Ok(())
+}
+
+fn prepare_persist_entry(
+    conn: &Connection,
+    entry: PersistSessionTranscript<'_>,
+) -> Result<Option<PreparedSessionTranscript>> {
+    let turn_id = entry.turn_id.trim();
+    if turn_id.is_empty() {
+        return Err(anyhow!("turn_id is required"));
+    }
+
+    let user_message = entry.user_message.trim();
+    let assistant_message = entry.assistant_message.trim();
+    let events = normalize_events(entry.events);
+    if user_message.is_empty() && assistant_message.is_empty() && events.is_empty() {
+        return Ok(None);
+    }
+
+    let session_key = normalized_opt(entry.session_key);
+    let channel_id = normalized_opt(entry.channel_id);
+    let provider = normalized_opt(entry.provider);
+    let dispatch_id = normalized_opt(entry.dispatch_id);
+    let agent_id = resolve_agent_id_for_session(
+        conn,
+        entry.agent_id,
+        session_key.as_deref(),
+        None,
+        None,
+        dispatch_id.as_deref(),
+    );
+    let events_json = serde_json::to_string(&events)?;
+
+    Ok(Some(PreparedSessionTranscript {
+        turn_id: turn_id.to_string(),
+        session_key,
+        channel_id,
+        agent_id,
+        provider,
+        dispatch_id,
+        user_message: user_message.to_string(),
+        assistant_message: assistant_message.to_string(),
+        events,
+        events_json,
+        duration_ms: entry.duration_ms,
+    }))
 }
 
 pub fn list_transcripts_for_agent(
@@ -262,7 +369,23 @@ pub fn list_transcripts_for_agent(
     )?;
 
     let rows = stmt.query_map(params![agent_id, limit], session_transcript_record_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+}
+
+pub async fn list_transcripts_for_agent_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let Some(pool) = pg_pool else {
+        let conn = db
+            .read_conn()
+            .map_err(|e| anyhow!("db read lock failed while listing agent transcripts: {e}"))?;
+        return list_transcripts_for_agent(&conn, agent_id, limit);
+    };
+
+    list_transcripts_for_agent_pg(pool, agent_id, limit).await
 }
 
 pub fn list_transcripts_for_card(
@@ -299,10 +422,55 @@ pub fn list_transcripts_for_card(
     )?;
 
     let rows = stmt.query_map(params![card_id, limit], session_transcript_record_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
-fn session_transcript_record_from_row(row: &Row<'_>) -> rusqlite::Result<SessionTranscriptRecord> {
+pub async fn list_transcripts_for_card_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    card_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let Some(pool) = pg_pool else {
+        let conn = db
+            .read_conn()
+            .map_err(|e| anyhow!("db read lock failed while listing card transcripts: {e}"))?;
+        return list_transcripts_for_card(&conn, card_id, limit);
+    };
+
+    list_transcripts_for_card_pg(pool, card_id, limit).await
+}
+
+pub fn dispatch_has_assistant_response_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<bool> {
+    let Some(pool) = pg_pool else {
+        let conn = db
+            .read_conn()
+            .map_err(|e| anyhow!("db read lock failed while checking transcript evidence: {e}"))?;
+        return conn
+            .query_row(
+                "SELECT COUNT(*) > 0
+                 FROM session_transcripts
+                 WHERE dispatch_id = ?1
+                   AND TRIM(assistant_message) <> ''",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("session transcript lookup failed: {e}"));
+    };
+
+    let dispatch_id = dispatch_id.to_string();
+    run_pg_blocking(pool, move |pool| async move {
+        dispatch_has_assistant_response_pg(&pool, &dispatch_id).await
+    })
+}
+
+fn session_transcript_record_from_row(
+    row: &Row<'_>,
+) -> libsql_rusqlite::Result<SessionTranscriptRecord> {
     let events_json: Option<String> = row.get(13)?;
     Ok(SessionTranscriptRecord {
         id: row.get(0)?,
@@ -321,6 +489,180 @@ fn session_transcript_record_from_row(row: &Row<'_>) -> rusqlite::Result<Session
         events: parse_events_json(events_json.as_deref()),
         duration_ms: row.get(14)?,
         created_at: row.get(15)?,
+    })
+}
+
+async fn list_transcripts_for_agent_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let limit = limit.clamp(1, 100) as i64;
+    let rows = sqlx::query(
+        "SELECT st.id,
+                st.turn_id,
+                st.session_key,
+                st.channel_id,
+                st.agent_id,
+                st.provider,
+                st.dispatch_id,
+                td.kanban_card_id,
+                td.title,
+                kc.title AS card_title,
+                kc.github_issue_number,
+                st.user_message,
+                st.assistant_message,
+                st.events_json::text AS events_json,
+                st.duration_ms,
+                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+         FROM session_transcripts st
+         LEFT JOIN sessions s
+           ON s.session_key = st.session_key
+         LEFT JOIN task_dispatches td
+           ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
+         WHERE COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) = $1
+            OR (
+                COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) IS NULL
+                AND td.to_agent_id = $1
+            )
+         ORDER BY st.created_at DESC, st.id DESC
+         LIMIT $2",
+    )
+    .bind(agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| anyhow!("query agent transcripts failed: {e}"))?;
+
+    rows.into_iter()
+        .map(|row| session_transcript_record_from_pg_row(&row))
+        .collect()
+}
+
+async fn list_transcripts_for_card_pg(
+    pool: &PgPool,
+    card_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionTranscriptRecord>> {
+    let limit = limit.clamp(1, 100) as i64;
+    let rows = sqlx::query(
+        "SELECT st.id,
+                st.turn_id,
+                st.session_key,
+                st.channel_id,
+                st.agent_id,
+                st.provider,
+                st.dispatch_id,
+                td.kanban_card_id,
+                td.title,
+                kc.title AS card_title,
+                kc.github_issue_number,
+                st.user_message,
+                st.assistant_message,
+                st.events_json::text AS events_json,
+                st.duration_ms,
+                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+         FROM session_transcripts st
+         JOIN task_dispatches td
+           ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
+         WHERE td.kanban_card_id = $1
+         ORDER BY st.created_at DESC, st.id DESC
+         LIMIT $2",
+    )
+    .bind(card_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| anyhow!("query card transcripts failed: {e}"))?;
+
+    rows.into_iter()
+        .map(|row| session_transcript_record_from_pg_row(&row))
+        .collect()
+}
+
+async fn dispatch_has_assistant_response_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM session_transcripts
+         WHERE dispatch_id = $1
+           AND BTRIM(assistant_message) <> ''",
+    )
+    .bind(dispatch_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow!("session transcript lookup failed: {e}"))
+}
+
+fn session_transcript_record_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<SessionTranscriptRecord> {
+    let events_json: Option<String> = row
+        .try_get("events_json")
+        .map_err(|e| anyhow!("read transcript events_json: {e}"))?;
+    Ok(SessionTranscriptRecord {
+        id: row
+            .try_get("id")
+            .map_err(|e| anyhow!("read transcript id: {e}"))?,
+        turn_id: row
+            .try_get("turn_id")
+            .map_err(|e| anyhow!("read transcript turn_id: {e}"))?,
+        session_key: row
+            .try_get("session_key")
+            .map_err(|e| anyhow!("read transcript session_key: {e}"))?,
+        channel_id: row
+            .try_get("channel_id")
+            .map_err(|e| anyhow!("read transcript channel_id: {e}"))?,
+        agent_id: row
+            .try_get("agent_id")
+            .map_err(|e| anyhow!("read transcript agent_id: {e}"))?,
+        provider: row
+            .try_get("provider")
+            .map_err(|e| anyhow!("read transcript provider: {e}"))?,
+        dispatch_id: row
+            .try_get("dispatch_id")
+            .map_err(|e| anyhow!("read transcript dispatch_id: {e}"))?,
+        kanban_card_id: row
+            .try_get("kanban_card_id")
+            .map_err(|e| anyhow!("read transcript kanban_card_id: {e}"))?,
+        dispatch_title: row
+            .try_get("title")
+            .map_err(|e| anyhow!("read transcript dispatch title: {e}"))?,
+        card_title: row
+            .try_get("card_title")
+            .map_err(|e| anyhow!("read transcript card title: {e}"))?,
+        github_issue_number: row
+            .try_get("github_issue_number")
+            .map_err(|e| anyhow!("read transcript github_issue_number: {e}"))?,
+        user_message: row
+            .try_get("user_message")
+            .map_err(|e| anyhow!("read transcript user_message: {e}"))?,
+        assistant_message: row
+            .try_get("assistant_message")
+            .map_err(|e| anyhow!("read transcript assistant_message: {e}"))?,
+        events: parse_events_json(events_json.as_deref()),
+        duration_ms: row
+            .try_get("duration_ms")
+            .map_err(|e| anyhow!("read transcript duration_ms: {e}"))?,
+        created_at: row
+            .try_get("created_at")
+            .map_err(|e| anyhow!("read transcript created_at: {e}"))?,
+    })
+}
+
+fn run_pg_blocking<T, F>(
+    pool: &PgPool,
+    future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| {
+        anyhow!("build runtime for postgres transcript query failed: {error}")
     })
 }
 
@@ -372,7 +714,7 @@ pub fn search_transcripts(
         })
     })?;
 
-    let hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let hits = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
     Ok((match_query, hits))
 }
 

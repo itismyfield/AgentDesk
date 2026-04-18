@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use rusqlite::params;
+use libsql_rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -81,9 +81,9 @@ pub async fn list_departments(
         }
     };
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
         .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
         .collect();
 
     let rows = stmt
@@ -133,7 +133,7 @@ pub async fn create_department(
 
     if let Err(e) = conn.execute(
         "INSERT INTO departments (id, name, office_id) VALUES (?1, ?2, ?3)",
-        rusqlite::params![id, body.name, body.office_id],
+        libsql_rusqlite::params![id, body.name, body.office_id],
     ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -170,7 +170,7 @@ pub async fn update_department(
     };
 
     let mut sets: Vec<String> = Vec::new();
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
     if let Some(ref name) = body.name {
@@ -198,7 +198,8 @@ pub async fn update_department(
     );
     values.push(Box::new(id.clone()));
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
+        values.iter().map(|v| v.as_ref()).collect();
     match conn.execute(&sql, params_ref.as_slice()) {
         Ok(0) => {
             return (

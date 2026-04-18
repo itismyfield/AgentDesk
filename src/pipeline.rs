@@ -105,7 +105,7 @@ pub fn resolve(
 
 /// Resolve effective pipeline from DB, looking up repo and agent overrides.
 pub fn resolve_for_card(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     repo_id: Option<&str>,
     agent_id: Option<&str>,
 ) -> PipelineConfig {

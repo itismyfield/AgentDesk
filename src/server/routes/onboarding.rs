@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{Json, extract::State, http::StatusCode};
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1536,7 +1536,7 @@ fn validate_unique_resolved_channels(
 }
 
 fn collect_onboarding_conflicts(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     runtime_root: &Path,
     provider: &str,
     resolved_channels: &[ResolvedChannelMapping],
@@ -1632,7 +1632,7 @@ fn collect_onboarding_conflicts(
         let conflicting_db_channel_owner = conn
             .query_row(
                 "SELECT id FROM agents WHERE discord_channel_id = ?1 AND id != ?2 LIMIT 1",
-                rusqlite::params![mapping.channel_id, mapping.role_id],
+                libsql_rusqlite::params![mapping.channel_id, mapping.role_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -2825,7 +2825,7 @@ async fn complete_with_options(
             Some(value) => {
                 if let Err(error) = tx.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![key, value],
+                    libsql_rusqlite::params![key, value],
                 ) {
                     completion_state.last_error =
                         Some(format!("failed to persist kv_meta {}: {error}", key));
@@ -2874,7 +2874,7 @@ async fn complete_with_options(
                discord_channel_id = excluded.discord_channel_id, \
                description = COALESCE(excluded.description, agents.description), \
                system_prompt = COALESCE(excluded.system_prompt, agents.system_prompt)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 mapping.role_id,
                 mapping.role_id,
                 provider,
@@ -2912,7 +2912,7 @@ async fn complete_with_options(
         let office_id = "hq";
         if let Err(error) = tx.execute(
             "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
+            libsql_rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
         ) {
             completion_state.last_error = Some(format!("failed to upsert default office: {error}"));
             let _ = save_onboarding_completion_state(&root, &completion_state);
@@ -2933,7 +2933,7 @@ async fn complete_with_options(
         if let Err(error) = tx.execute(
             "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 dept_id,
                 template_name,
                 template_name_ko,
@@ -2962,7 +2962,7 @@ async fn complete_with_options(
             if let Err(error) = tx.execute(
                 "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
                  VALUES (?1, ?2, ?3)",
-                rusqlite::params![office_id, mapping.role_id, dept_id],
+                libsql_rusqlite::params![office_id, mapping.role_id, dept_id],
             ) {
                 completion_state.last_error = Some(format!(
                     "failed to assign office agent {}: {error}",
@@ -2983,7 +2983,7 @@ async fn complete_with_options(
             }
             if let Err(error) = tx.execute(
                 "UPDATE agents SET department = ?1 WHERE id = ?2",
-                rusqlite::params![dept_id, mapping.role_id],
+                libsql_rusqlite::params![dept_id, mapping.role_id],
             ) {
                 completion_state.last_error = Some(format!(
                     "failed to set agent department {}: {error}",
@@ -3761,7 +3761,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params!["onboarding_owner_id", "42"],
+                libsql_rusqlite::params!["onboarding_owner_id", "42"],
             )
             .unwrap();
         }
@@ -4115,7 +4115,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "adk-cdx",
                     "adk-cdx",
                     "claude",

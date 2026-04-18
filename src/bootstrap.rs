@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 
 pub(crate) struct BootstrapState {
     pub(crate) config: crate::config::Config,
-    pub(crate) db: crate::db::Db,
 }
 
 pub(crate) fn initialize() -> Result<BootstrapState> {
@@ -31,15 +30,16 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         }
     };
 
-    let db = crate::db::init(&loaded.config).context("Failed to init DB")?;
-    crate::services::termination_audit::init_audit_db(db.clone());
+    // SQLite remains a temporary compatibility seam during config audit, but
+    // bootstrap no longer exports it as part of the runtime state.
+    let audit_db = crate::db::init(&loaded.config).context("Failed to init DB")?;
     let config = if let Some(root) = runtime_root.as_ref() {
         crate::services::discord::config_audit::audit_and_reconcile(
             root,
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
+            &audit_db,
             &legacy_scan,
             false,
         )
@@ -53,5 +53,5 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         tracing::warn!("  [mcp] Failed to sync Codex MCP servers: {error}");
     }
 
-    Ok(BootstrapState { config, db })
+    Ok(BootstrapState { config })
 }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde_json::{Value, json};
+use sqlx::{PgPool, Row as SqlxRow};
 
 #[cfg(test)]
 use crate::db::Db;
@@ -54,10 +55,10 @@ pub struct DispatchCreateOptions {
 /// is a derived projection that must be cleared whenever the linked dispatch is
 /// cancelled so a stale `dispatched` entry cannot block or duplicate work.
 pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
     reason: Option<&str>,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     let cancel_payload = reason.map(|reason| json!({ "reason": reason }));
     let cancelled = if let Some(payload) = cancel_payload.as_ref() {
         set_dispatch_status_on_conn(
@@ -70,7 +71,9 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
             false,
         )
         .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+            libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                e.to_string(),
+            )))
         })?
     } else {
         set_dispatch_status_on_conn(
@@ -83,7 +86,9 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
             false,
         )
         .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+            libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                e.to_string(),
+            )))
         })?
     };
 
@@ -117,14 +122,192 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
             )
             .map_err(|error| match error {
                 crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
-                other => rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                    other.to_string(),
-                ))),
+                other => libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    std::io::Error::other(other.to_string()),
+                )),
             })?;
         }
     }
 
     Ok(cancelled)
+}
+
+pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> Result<usize, String> {
+    let cancel_payload = reason.map(|value| json!({ "reason": value }));
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres dispatch cancel transaction: {error}"))?;
+
+    let current = sqlx::query(
+        "SELECT status, kanban_card_id, dispatch_type
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
+    let Some(current) = current else {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback missing postgres dispatch {dispatch_id}: {error}")
+        })?;
+        return Ok(0);
+    };
+
+    let current_status = current
+        .try_get::<Option<String>, _>("status")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if !matches!(current_status.as_str(), "pending" | "dispatched") {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback postgres dispatch {dispatch_id}: {error}"))?;
+        return Ok(0);
+    }
+
+    let changed = match cancel_payload.as_ref() {
+        Some(payload) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'cancelled',
+                 result = $1,
+                 updated_at = NOW()
+             WHERE id = $2
+               AND status = $3",
+        )
+        .bind(payload.to_string())
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        None => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'cancelled',
+                 updated_at = NOW()
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+    };
+
+    if changed == 0 {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback unchanged postgres dispatch {dispatch_id}: {error}")
+        })?;
+        return Ok(0);
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES ($1, $2, $3, $4, 'cancelled', 'cancel_dispatch', $5)",
+    )
+    .bind(dispatch_id)
+    .bind(
+        current
+            .try_get::<Option<String>, _>("kanban_card_id")
+            .ok()
+            .flatten(),
+    )
+    .bind(
+        current
+            .try_get::<Option<String>, _>("dispatch_type")
+            .ok()
+            .flatten(),
+    )
+    .bind(&current_status)
+    .bind(cancel_payload.clone())
+    .execute(&mut *tx)
+    .await;
+
+    let _ = sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action)
+         SELECT $1, 'status_reaction'
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM dispatch_outbox
+             WHERE dispatch_id = $1
+               AND action = 'status_reaction'
+               AND status IN ('pending', 'processing')
+         )",
+    )
+    .bind(dispatch_id)
+    .execute(&mut *tx)
+    .await;
+
+    let entry_rows = sqlx::query(
+        "SELECT id, status
+         FROM auto_queue_entries
+         WHERE dispatch_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(dispatch_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("load postgres queue entries for dispatch {dispatch_id}: {error}"))?;
+
+    for row in entry_rows {
+        let entry_id: String = row.try_get("id").map_err(|error| {
+            format!("decode postgres queue entry id for {dispatch_id}: {error}")
+        })?;
+        let from_status: String = row.try_get("status").map_err(|error| {
+            format!("decode postgres queue entry status for {entry_id}: {error}")
+        })?;
+        let entry_changed = sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'pending',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NULL
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(&entry_id)
+        .bind(&from_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("reset postgres queue entry {entry_id}: {error}"))?
+        .rows_affected() as usize;
+        if entry_changed > 0 {
+            let _ = sqlx::query(
+                "INSERT INTO auto_queue_entry_transitions (
+                    entry_id,
+                    from_status,
+                    to_status,
+                    trigger_source
+                ) VALUES ($1, $2, 'pending', 'dispatch_cancel')",
+            )
+            .bind(&entry_id)
+            .bind(&from_status)
+            .execute(&mut *tx)
+            .await;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres dispatch cancel {dispatch_id}: {error}"))?;
+
+    Ok(changed)
 }
 
 /// Cancel all live dispatches for a card without resetting auto-queue entries.
@@ -133,10 +316,10 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
 /// case the current work should be abandoned rather than re-queued into the
 /// same active run.
 pub fn cancel_active_dispatches_for_card_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     reason: Option<&str>,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id FROM task_dispatches
          WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
@@ -172,7 +355,9 @@ pub fn cancel_active_dispatches_for_card_on_conn(
             false,
         )
         .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+            libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                e.to_string(),
+            )))
         })?;
     }
     Ok(cancelled)
@@ -418,7 +603,7 @@ pub(crate) fn summarize_dispatch_from_text(
 
 /// Read a single dispatch row as JSON.
 pub fn query_dispatch_row(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
 ) -> Result<serde_json::Value> {
     conn.query_row(
@@ -575,7 +760,7 @@ mod tests {
     }
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         let db = crate::db::wrap_conn(conn);
@@ -639,7 +824,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, created_at, updated_at) VALUES (?1, 'Test Card', ?2, datetime('now'), datetime('now'))",
-            rusqlite::params![card_id, status],
+            libsql_rusqlite::params![card_id, status],
         )
         .unwrap();
     }
@@ -648,7 +833,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "UPDATE kanban_cards SET github_issue_number = ?1 WHERE id = ?2",
-            rusqlite::params![issue_number, card_id],
+            libsql_rusqlite::params![issue_number, card_id],
         )
         .unwrap();
     }
@@ -657,7 +842,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
-            rusqlite::params![repo_id, card_id],
+            libsql_rusqlite::params![repo_id, card_id],
         )
         .unwrap();
     }
@@ -666,7 +851,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "UPDATE kanban_cards SET description = ?1 WHERE id = ?2",
-            rusqlite::params![description, card_id],
+            libsql_rusqlite::params![description, card_id],
         )
         .unwrap();
     }
@@ -684,7 +869,7 @@ mod tests {
         dir
     }
 
-    fn count_notify_outbox(conn: &rusqlite::Connection, dispatch_id: &str) -> i64 {
+    fn count_notify_outbox(conn: &libsql_rusqlite::Connection, dispatch_id: &str) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
             [dispatch_id],
@@ -693,7 +878,7 @@ mod tests {
         .unwrap()
     }
 
-    fn count_status_reaction_outbox(conn: &rusqlite::Connection, dispatch_id: &str) -> i64 {
+    fn count_status_reaction_outbox(conn: &libsql_rusqlite::Connection, dispatch_id: &str) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'status_reaction'",
             [dispatch_id],
@@ -703,7 +888,7 @@ mod tests {
     }
 
     fn load_dispatch_events(
-        conn: &rusqlite::Connection,
+        conn: &libsql_rusqlite::Connection,
         dispatch_id: &str,
     ) -> Vec<(Option<String>, String, String)> {
         let mut stmt = conn
@@ -2746,7 +2931,7 @@ mod tests {
                 'dispatch-review-target', 'card-review-target', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": repo_dir.clone(),
@@ -2809,7 +2994,7 @@ mod tests {
                 'dispatch-review-stale-worktree', 'card-review-stale-worktree', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_wt_path,
@@ -2865,7 +3050,7 @@ mod tests {
                 'dispatch-review-stale-repo', 'card-review-stale-repo', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_wt_path,
@@ -3338,7 +3523,7 @@ mod tests {
                 'dispatch-review-merge-base', 'card-review-merge-base', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": wt_path,
@@ -3403,7 +3588,7 @@ mod tests {
                 'dispatch-review-match', 'card-review-match', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": repo_dir,
@@ -3455,7 +3640,7 @@ mod tests {
                 'dispatch-review-mismatch', 'card-review-mismatch', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": repo_dir,
@@ -3515,7 +3700,7 @@ mod tests {
                 'dispatch-review-worktree-fallback', 'card-review-worktree-fallback', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": wt_path,
@@ -3594,7 +3779,7 @@ mod tests {
                 'dispatch-review-dirty-completion', 'card-review-dirty-completion', 'agent-1', 'implementation', 'completed',
                 'Implemented without commit', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({}).to_string(),
             ],
@@ -3652,7 +3837,7 @@ mod tests {
                 'dispatch-review-external-reject', 'card-review-external-reject', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": external_dir,
@@ -3733,7 +3918,7 @@ mod tests {
                 'dispatch-review-external-accept', 'card-review-external-accept', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": external_dir,
@@ -4202,7 +4387,7 @@ mod tests {
                 'dispatch-review-noop', 'card-review-noop', 'agent-1', 'implementation', 'completed',
                 'No changes needed', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "work_outcome": "noop",
@@ -4283,7 +4468,7 @@ mod tests {
                 'dispatch-review-quality', 'card-review-quality', 'agent-1', 'implementation', 'completed',
                 'Done', ?1, ?2, datetime('now'), datetime('now')
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": repo_dir,
@@ -4425,7 +4610,7 @@ mod tests {
                 'dispatch-summary-row', 'card-summary-row', 'agent-1', 'review-decision', 'completed',
                 'Review decision', ?1, datetime('now'), datetime('now')
              )",
-            rusqlite::params![json!({
+            libsql_rusqlite::params![json!({
                 "decision": "accept",
                 "comment": "Ship it"
             })

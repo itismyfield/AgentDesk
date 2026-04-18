@@ -7,7 +7,7 @@ use super::{
 };
 
 fn test_db() -> Db {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     crate::db::schema::migrate(&conn).unwrap();
     crate::db::wrap_conn(conn)
@@ -611,7 +611,7 @@ fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
              VALUES (?1, ?2, ?3, 'implementation', 'dispatched', 'Queue Dispatch', ?4, datetime('now'), datetime('now'))",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "dispatch-log",
                 "card-log",
                 "ag-queue",
@@ -799,7 +799,7 @@ fn js_set_status_warns_when_bypassing_active_dispatch_gate() {
 }
 
 /// Seed a minimal kanban_cards row for FK satisfaction in review state tests.
-fn seed_card_for_review(conn: &rusqlite::Connection, card_id: &str) {
+fn seed_card_for_review(conn: &libsql_rusqlite::Connection, card_id: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) \
          VALUES ('agent-t', 'Test', '0', '0')",

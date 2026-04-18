@@ -12,7 +12,8 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["full"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+libsql_rusqlite = { package = "libsql-rusqlite", version = "0.33", features = ["bundled"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "chrono", "json"] }
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }

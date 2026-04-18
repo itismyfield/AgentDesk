@@ -28,12 +28,12 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                             "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{} seconds'))",
                             ttl_seconds
                         ),
-                        rusqlite::params![key, value],
+                        libsql_rusqlite::params![key, value],
                     )
                 } else {
                     conn.execute(
                         "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
-                        rusqlite::params![key, value],
+                        libsql_rusqlite::params![key, value],
                     )
                 };
                 match result {

@@ -90,12 +90,12 @@ fn queue_status_raw(db: &Db) -> String {
     }
 }
 
-fn count(conn: &rusqlite::Connection, sql: &str) -> anyhow::Result<i64> {
+fn count(conn: &libsql_rusqlite::Connection, sql: &str) -> anyhow::Result<i64> {
     conn.query_row(sql, [], |row| row.get(0))
         .map_err(anyhow::Error::from)
 }
 
-fn table_exists(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<bool> {
+fn table_exists(conn: &libsql_rusqlite::Connection, table: &str) -> anyhow::Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
         [table],

@@ -130,7 +130,7 @@ fn enforce_session_reset_dilemma_fallback(
              awaiting_dod_at = NULL,
              updated_at = datetime('now')
          WHERE id = ?2",
-        rusqlite::params![blocked_reason, card_id],
+        libsql_rusqlite::params![blocked_reason, card_id],
     );
 
     let payload = serde_json::json!({

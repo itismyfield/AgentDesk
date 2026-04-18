@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 
 use super::AppState;
 
@@ -97,9 +98,9 @@ pub async fn get_stages(
         }
     };
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
         .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
         .collect();
 
     let rows = stmt
@@ -159,7 +160,7 @@ pub async fn put_stages(
                 timeout_minutes, on_failure, skip_condition, provider, agent_override_id,
                 on_failure_target, max_retries, parallel_with)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 body.repo,
                 stage.stage_name,
                 order,
@@ -267,7 +268,7 @@ pub async fn get_card_pipeline(
         |row| row.get(0),
     ) {
         Ok(r) => r,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "card not found"})),
@@ -437,24 +438,38 @@ pub async fn get_card_transcripts(
     Path(card_id): Path<String>,
     Query(params): Query<TranscriptQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
+    let card_exists = if let Some(pool) = state.pg_pool.as_ref() {
+        match sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM kanban_cards WHERE id = $1")
+            .bind(&card_id)
+            .fetch_one(pool)
+            .await
+        {
+            Ok(row) => row.try_get::<i64, _>("count").unwrap_or(0) > 0,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query: {e}")})),
+                );
+            }
         }
-    };
-
-    let card_exists: bool = conn
-        .query_row(
+    } else {
+        let conn = match state.db.read_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        conn.query_row(
             "SELECT COUNT(*) FROM kanban_cards WHERE id = ?1",
             [&card_id],
             |row| row.get::<_, i64>(0),
         )
         .map(|count| count > 0)
-        .unwrap_or(false);
+        .unwrap_or(false)
+    };
     if !card_exists {
         return (
             StatusCode::NOT_FOUND,
@@ -462,11 +477,14 @@ pub async fn get_card_transcripts(
         );
     }
 
-    match crate::db::session_transcripts::list_transcripts_for_card(
-        &conn,
+    match crate::db::session_transcripts::list_transcripts_for_card_db(
+        &state.db,
+        state.pg_pool.as_ref(),
         &card_id,
         params.limit.unwrap_or(10),
-    ) {
+    )
+    .await
+    {
         Ok(transcripts) => (
             StatusCode::OK,
             Json(json!({
@@ -476,7 +494,7 @@ pub async fn get_card_transcripts(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
+            Json(json!({"error": format!("transcripts: {e}")})),
         ),
     }
 }
@@ -636,7 +654,7 @@ pub async fn set_repo_pipeline(
 
     match conn.execute(
         "UPDATE github_repos SET pipeline_config = ?1 WHERE id = ?2",
-        rusqlite::params![config_str, id],
+        libsql_rusqlite::params![config_str, id],
     ) {
         Ok(0) => (
             StatusCode::NOT_FOUND,
@@ -649,7 +667,7 @@ pub async fn set_repo_pipeline(
                 // Rollback: clear the override since merge is invalid
                 let _ = conn.execute(
                     "UPDATE github_repos SET pipeline_config = NULL WHERE id = ?1",
-                    rusqlite::params![id],
+                    libsql_rusqlite::params![id],
                 );
                 return (
                     StatusCode::BAD_REQUEST,
@@ -731,7 +749,7 @@ pub async fn set_agent_pipeline(
 
     match conn.execute(
         "UPDATE agents SET pipeline_config = ?1 WHERE id = ?2",
-        rusqlite::params![config_str, agent_id],
+        libsql_rusqlite::params![config_str, agent_id],
     ) {
         Ok(0) => (
             StatusCode::NOT_FOUND,
@@ -753,7 +771,7 @@ pub async fn set_agent_pipeline(
                 // Rollback: clear the override
                 let _ = conn.execute(
                     "UPDATE agents SET pipeline_config = NULL WHERE id = ?1",
-                    rusqlite::params![agent_id],
+                    libsql_rusqlite::params![agent_id],
                 );
                 return (
                     StatusCode::BAD_REQUEST,
@@ -805,7 +823,9 @@ pub async fn get_pipeline_graph(
 }
 
 /// Extended version that includes dashboard v2 columns
-fn extended_stage_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+fn extended_stage_row_to_json(
+    row: &libsql_rusqlite::Row,
+) -> libsql_rusqlite::Result<serde_json::Value> {
     let repo_id = row.get::<_, Option<String>>(1)?;
     Ok(json!({
         "id": row.get::<_, i64>(0)?,
@@ -837,7 +857,7 @@ mod tests {
     use crate::engine::PolicyEngine;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

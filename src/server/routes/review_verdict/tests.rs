@@ -10,7 +10,7 @@ use std::sync::MutexGuard;
 use std::time::Duration;
 
 fn test_db() -> Db {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     crate::db::schema::migrate(&conn).unwrap();
     crate::db::wrap_conn(conn)
@@ -75,7 +75,7 @@ fn count_active_dispatches(db: &Db, card_id: &str, dispatch_type: &str) -> i64 {
             "SELECT COUNT(*) FROM task_dispatches \
              WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
              AND status IN ('pending', 'dispatched')",
-            rusqlite::params![card_id, dispatch_type],
+            libsql_rusqlite::params![card_id, dispatch_type],
             |row| row.get(0),
         )
         .unwrap()
@@ -613,7 +613,7 @@ fn seed_counter_model_review(
     conn.execute(
         "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
          VALUES (?1, 'card-cm', 'agent-cm', 'review', 'pending', '[Review R1] card-cm', ?2, datetime('now'), datetime('now'))",
-        rusqlite::params![dispatch_id, context],
+        libsql_rusqlite::params![dispatch_id, context],
     ).unwrap();
 }
 

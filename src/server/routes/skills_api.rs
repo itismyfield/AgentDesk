@@ -44,7 +44,7 @@ fn codex_skill_file(path: &Path) -> Option<PathBuf> {
     }
 }
 
-pub(super) fn sync_skills_from_disk(conn: &rusqlite::Connection) {
+pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) {
     let mut roots = Vec::new();
     if let Some(runtime_root) = crate::config::runtime_root() {
         let _ = crate::runtime_layout::sync_managed_skills(&runtime_root);
@@ -114,7 +114,7 @@ pub(super) fn sync_skills_from_disk(conn: &rusqlite::Connection) {
                    description = excluded.description,
                    source_path = excluded.source_path,
                    updated_at = excluded.updated_at",
-                rusqlite::params![name, name, description, source_path, updated_at],
+                libsql_rusqlite::params![name, name, description, source_path, updated_at],
             );
         }
     }
@@ -143,8 +143,8 @@ fn ranking_days(window: &str) -> Option<i64> {
 }
 
 fn load_skill_metadata(
-    conn: &rusqlite::Connection,
-) -> rusqlite::Result<HashMap<String, (String, String)>> {
+    conn: &libsql_rusqlite::Connection,
+) -> libsql_rusqlite::Result<HashMap<String, (String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id,
                 COALESCE(name, id) AS skill_name,

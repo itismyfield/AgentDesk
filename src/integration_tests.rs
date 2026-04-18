@@ -24,7 +24,7 @@ mod tests {
     mod high_risk_recovery;
 
     fn test_db() -> db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
         db::wrap_conn(conn)
@@ -374,7 +374,7 @@ mod tests {
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
              VALUES (?1, 'Test Card', ?2, 'agent-1', datetime('now'), datetime('now'))",
-            rusqlite::params![card_id, status],
+            libsql_rusqlite::params![card_id, status],
         )
         .unwrap();
     }
@@ -383,7 +383,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key, value.to_string()],
+            libsql_rusqlite::params![key, value.to_string()],
         )
         .unwrap();
     }
@@ -393,12 +393,12 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
              VALUES (?1, ?2, 'agent-1', ?3, ?4, 'Test Dispatch', datetime('now'), datetime('now'))",
-            rusqlite::params![dispatch_id, card_id, dtype, status],
+            libsql_rusqlite::params![dispatch_id, card_id, dtype, status],
         )
         .unwrap();
         conn.execute(
             "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = ?2",
-            rusqlite::params![dispatch_id, card_id],
+            libsql_rusqlite::params![dispatch_id, card_id],
         )
         .unwrap();
     }
@@ -448,7 +448,7 @@ mod tests {
                 ?1, ?2, 'agent-1', ?3, 'completed', 'Completed work',
                 ?4, datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
             )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 dispatch_id,
                 card_id,
                 dispatch_type,
@@ -481,7 +481,7 @@ mod tests {
                 ?1, ?2, 'agent-1', ?3, 'completed', 'Completed work',
                 ?4, datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
             )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 dispatch_id,
                 card_id,
                 dispatch_type,
@@ -511,7 +511,7 @@ mod tests {
                 ?1, ?2, 'agent-1', 'review', 'completed', 'Completed review',
                 ?3, datetime('now', '-1 minutes'), datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
             )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 dispatch_id,
                 card_id,
                 serde_json::json!({
@@ -545,7 +545,7 @@ mod tests {
             "INSERT INTO kanban_cards \
              (id, title, status, assigned_agent_id, repo_id, github_issue_number, github_issue_url, active_thread_id, created_at, updated_at) \
              VALUES (?1, 'Codex Card', ?2, 'agent-1', ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 card_id,
                 status,
                 repo_id,
@@ -562,7 +562,7 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat) \
              VALUES (?1, 'agent-1', 'codex', 'idle', ?2, datetime('now'))",
-            rusqlite::params![session_key, thread_channel_id],
+            libsql_rusqlite::params![session_key, thread_channel_id],
         )
         .unwrap();
     }
@@ -572,7 +572,7 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_key, agent_id, provider, status, cwd, last_heartbeat) \
              VALUES (?1, 'agent-1', 'codex', 'working', ?2, datetime('now'))",
-            rusqlite::params![session_key, cwd],
+            libsql_rusqlite::params![session_key, cwd],
         )
         .unwrap();
     }
@@ -581,7 +581,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key, value],
+            libsql_rusqlite::params![key, value],
         )
         .unwrap();
     }
@@ -666,7 +666,7 @@ mod tests {
                     run_id, phase, status, verdict, dispatch_id, pass_verdict,
                     next_phase, final_phase, anchor_card_id, failure_reason
                 ) VALUES (?1, ?2, ?3, ?4, NULL, 'phase_gate_passed', ?5, ?6, ?7, ?8)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     run_id,
                     phase,
                     status,
@@ -687,7 +687,7 @@ mod tests {
                     run_id, phase, status, verdict, dispatch_id, pass_verdict,
                     next_phase, final_phase, anchor_card_id, failure_reason
                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'phase_gate_passed', ?6, ?7, ?8, ?9)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     run_id,
                     phase,
                     status,
@@ -714,7 +714,7 @@ mod tests {
             )
             .unwrap();
         let rows = stmt
-            .query_map(rusqlite::params![run_id, phase], |row| {
+            .query_map(libsql_rusqlite::params![run_id, phase], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
@@ -1024,7 +1024,7 @@ mod tests {
             "INSERT INTO pr_tracking \
              (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
-            rusqlite::params![card_id, repo_id, worktree_path, branch, pr_number, head_sha, state],
+            libsql_rusqlite::params![card_id, repo_id, worktree_path, branch, pr_number, head_sha, state],
         )
         .unwrap();
     }
@@ -1131,7 +1131,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.query_row(
             "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = ?1 AND dispatch_type = ?2",
-            rusqlite::params![card_id, dispatch_type],
+            libsql_rusqlite::params![card_id, dispatch_type],
             |row| row.get(0),
         )
         .unwrap()
@@ -1143,7 +1143,7 @@ mod tests {
             "SELECT COUNT(*) FROM task_dispatches \
              WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
              AND status IN ('pending', 'dispatched')",
-            rusqlite::params![card_id, dispatch_type],
+            libsql_rusqlite::params![card_id, dispatch_type],
             |row| row.get(0),
         )
         .unwrap()
@@ -1153,7 +1153,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.query_row(
             "SELECT title FROM task_dispatches WHERE kanban_card_id = ?1 AND dispatch_type = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
-            rusqlite::params![card_id, dispatch_type],
+            libsql_rusqlite::params![card_id, dispatch_type],
             |row| row.get(0),
         )
         .ok()
@@ -1466,6 +1466,7 @@ mod tests {
 
         let state = AppState {
             db: db.clone(),
+            pg_pool: None,
             engine: test_engine(&db),
             config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
@@ -2092,6 +2093,7 @@ mod tests {
         // no Axum server, so exercise the authoritative activate route directly.
         let state = AppState {
             db: db.clone(),
+            pg_pool: None,
             engine: engine.clone(),
             config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
@@ -3040,7 +3042,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, context, completed_at, created_at, updated_at) \
                  VALUES ('impl-655-pass', 'card-655-pass', 'agent-1', 'implementation', 'completed', '[Impl noop]', ?1, ?2, datetime('now', '-2 minutes'), datetime('now', '-5 minutes'), datetime('now', '-2 minutes'))",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     serde_json::json!({
                         "work_outcome": "noop",
                         "completed_without_changes": true,
@@ -3060,7 +3062,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
                  VALUES ('review-655-pass-stale', 'card-655-pass', 'agent-1', 'review', 'completed', '[Review stale]', ?1, datetime('now', '+1 minute'), datetime('now', '-10 minutes'), datetime('now', '+1 minute'))",
-                rusqlite::params![serde_json::json!({
+                libsql_rusqlite::params![serde_json::json!({
                     "review_mode": "regular_review",
                     "parent_dispatch_id": "impl-655-pass"
                 })
@@ -3070,7 +3072,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
                  VALUES ('review-655-pass', 'card-655-pass', 'agent-1', 'review', 'pending', '[Review noop]', ?1, datetime('now'), datetime('now'))",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     serde_json::json!({
                         "review_mode": "noop_verification",
                         "noop_reason": "already implemented",
@@ -3191,7 +3193,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
                  VALUES ('review-655-reject', 'card-655-reject', 'agent-1', 'review', 'pending', '[Review noop]', ?1, datetime('now'), datetime('now'))",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     serde_json::json!({
                         "review_mode": "noop_verification",
                         "noop_reason": "already implemented elsewhere"
@@ -5251,6 +5253,7 @@ mod tests {
 
         let state = AppState {
             db: db.clone(),
+            pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
@@ -5375,6 +5378,7 @@ mod tests {
 
         let state = AppState {
             db: db.clone(),
+            pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
@@ -5452,6 +5456,7 @@ mod tests {
 
         let state = AppState {
             db: db.clone(),
+            pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
@@ -5647,7 +5652,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "UPDATE kanban_cards SET metadata = ?1 WHERE id = 'card-332'",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 serde_json::json!({
                     "preflight_status": "consult_required",
                     "preflight_summary": "need clarification",
@@ -6374,7 +6379,7 @@ mod tests {
             conn.execute(
                 "UPDATE kanban_cards SET description = ?1, pipeline_stage_id = ?2, updated_at = datetime('now') \
                  WHERE id = 'card-701-e2e-required'",
-                rusqlite::params!["- [ ] E2E test coverage", pre_stage_id.to_string()],
+                libsql_rusqlite::params!["- [ ] E2E test coverage", pre_stage_id.to_string()],
             )
             .unwrap();
         }
@@ -6397,7 +6402,7 @@ mod tests {
                     '{\"verdict\":\"pass\"}',
                     datetime('now', '-1 minute'), datetime('now', '-1 minute'), datetime('now', '-1 minute')
                 )",
-                rusqlite::params![dispatch_id],
+                libsql_rusqlite::params![dispatch_id],
             )
             .unwrap();
         }
@@ -6487,7 +6492,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, completed_at, created_at, updated_at) \
                  VALUES ('impl-701-noop', 'card-701-noop', 'agent-1', 'implementation', 'completed', '[Impl noop]', ?1, datetime('now', '-2 minutes'), datetime('now', '-5 minutes'), datetime('now', '-2 minutes'))",
-                rusqlite::params![serde_json::json!({
+                libsql_rusqlite::params![serde_json::json!({
                     "work_outcome": "noop",
                     "completed_without_changes": true,
                     "notes": "already implemented"
@@ -6498,7 +6503,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
                  VALUES ('review-701-noop', 'card-701-noop', 'agent-1', 'review', 'pending', '[Review noop]', ?1, datetime('now'), datetime('now'))",
-                rusqlite::params![serde_json::json!({
+                libsql_rusqlite::params![serde_json::json!({
                     "review_mode": "noop_verification",
                     "parent_dispatch_id": "impl-701-noop"
                 }).to_string()],
@@ -9758,7 +9763,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.execute(
                 "UPDATE kanban_cards SET description = ?1, metadata = ?2 WHERE id = ?3",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     "too short",
                     serde_json::json!({
                         "deps": "#42",
@@ -9811,7 +9816,7 @@ mod tests {
                     'card-triage-ttl', 'Needs classification', 'backlog', ?1,
                     'https://github.com/test/repo/issues/777', 777, datetime('now'), datetime('now')
                  )",
-                rusqlite::params![serde_json::json!({"labels": ""}).to_string()],
+                libsql_rusqlite::params![serde_json::json!({"labels": ""}).to_string()],
             )
             .unwrap();
         }
@@ -9871,7 +9876,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.execute(
                 "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     serde_json::json!({
                         "preflight_status": "consult_required",
                         "deps": "#42"
@@ -9906,7 +9911,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at) \
                  VALUES ('entry-consult-clear', 'run-consult-clear', 'card-consult-clear', 'agent-1', 'dispatched', 1, ?1, datetime('now'))",
-                rusqlite::params![consultation_id],
+                libsql_rusqlite::params![consultation_id],
             )
             .unwrap();
         }
@@ -9943,7 +9948,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.query_row(
                 "SELECT dispatch_type, status, parent_dispatch_id FROM task_dispatches WHERE id = ?1",
-                rusqlite::params![latest_dispatch_id.clone()],
+                libsql_rusqlite::params![latest_dispatch_id.clone()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()

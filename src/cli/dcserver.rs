@@ -1210,10 +1210,10 @@ pub fn handle_dcserver(token: Option<String>) {
 
         // Initialize SQLite DB — clone handles for Discord bot before moving into HTTP server (#143)
         let mut discord_db: Option<crate::db::Db> = None;
+        let mut discord_pg_pool: Option<sqlx::PgPool> = None;
         let mut discord_engine: Option<PolicyEngine> = None;
         match db::init(&ad_config) {
             Ok(ad_db) => {
-                crate::services::termination_audit::init_audit_db(ad_db.clone());
                 if let Some(root) = runtime_root.as_ref() {
                     match crate::services::discord::config_audit::audit_and_reconcile(
                         root,
@@ -1258,10 +1258,39 @@ pub fn handle_dcserver(token: Option<String>) {
                     }
                 }
 
+                match crate::db::postgres::connect_and_migrate(&ad_config).await {
+                    Ok(pg_pool) => {
+                        if let Some(pool) = pg_pool.as_ref() {
+                            if let Err(error) =
+                                crate::db::postgres::startup_reseed(pool, &ad_config).await
+                            {
+                                eprintln!(
+                                    "  ⚠ PostgreSQL startup reseed failed: {error} — Discord runtime PG path disabled"
+                                );
+                            } else {
+                                discord_pg_pool = pg_pool.clone();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "  ⚠ PostgreSQL connect/migrate failed: {error} — Discord runtime PG path disabled"
+                        );
+                    }
+                }
+                crate::services::termination_audit::init_audit_db(
+                    ad_db.clone(),
+                    discord_pg_pool.clone(),
+                );
+
                 // Start axum HTTP server (background task) — now serves all API
                 // endpoints including /api/send, /api/senddm, /api/health
                 let http_port = ad_config.server.port;
-                match PolicyEngine::new(&ad_config, ad_db.clone()) {
+                match PolicyEngine::new_with_pg(
+                    &ad_config,
+                    ad_db.clone(),
+                    discord_pg_pool.clone(),
+                ) {
                     Ok(engine) => {
                         // Clone for Discord bot — direct finalize_dispatch access (#143)
                         discord_db = Some(ad_db.clone());
@@ -1324,6 +1353,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         health_registry,
                         api_port,
                         db: discord_db,
+                        pg_pool: discord_pg_pool,
                         engine: discord_engine,
                     },
                 )
@@ -1391,6 +1421,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let hr = health_registry.clone();
                     let port = api_port;
                     let db_clone = discord_db.clone();
+                    let pg_pool_clone = discord_pg_pool.clone();
                     let engine_clone = discord_engine.clone();
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
@@ -1403,6 +1434,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 health_registry: hr,
                                 api_port: port,
                                 db: db_clone,
+                                pg_pool: pg_pool_clone,
                                 engine: engine_clone,
                             },
                         )

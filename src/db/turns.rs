@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, params};
+use libsql_rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;

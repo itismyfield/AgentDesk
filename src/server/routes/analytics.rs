@@ -6,6 +6,7 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 use std::{
     collections::{BTreeMap, HashSet},
     process::Command,
@@ -193,13 +194,13 @@ pub async fn achievements(
     let mut sql = String::from(
         "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), xp, avatar_emoji FROM agents WHERE xp > 0",
     );
-    let mut bind_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut bind_params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref agent_id) = params.agent_id {
         sql.push_str(&format!(" AND id = ?{}", bind_params.len() + 1));
         bind_params.push(Box::new(agent_id.clone()));
     }
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+    let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
         bind_params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -328,7 +329,7 @@ pub async fn activity_heatmap(
             };
 
             let mut map = serde_json::Map::new();
-            if let Ok(rows) = stmt.query_map(rusqlite::params![&date, hour as i64], |row| {
+            if let Ok(rows) = stmt.query_map(libsql_rusqlite::params![&date, hour as i64], |row| {
                 let agent_id: String = row.get(0)?;
                 let count: i64 = row.get(1)?;
                 Ok((agent_id, count))
@@ -386,7 +387,7 @@ pub async fn audit_logs(
 
     let logs = if audit_count > 0 {
         let mut conditions = Vec::new();
-        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut bind_values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
 
         if let Some(ref et) = params.entity_type {
@@ -425,7 +426,7 @@ pub async fn audit_logs(
             }
         };
 
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
             bind_values.iter().map(|v| v.as_ref()).collect();
 
         stmt.query_map(params_ref.as_slice(), |row| {
@@ -465,7 +466,7 @@ pub async fn audit_logs(
         }
 
         let mut conditions = Vec::new();
-        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut bind_values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
 
         if let Some(ref card_id) = params.entity_id {
@@ -494,7 +495,7 @@ pub async fn audit_logs(
             Err(_) => return (StatusCode::OK, Json(json!({ "logs": [] }))),
         };
 
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
             bind_values.iter().map(|v| v.as_ref()).collect();
 
         stmt.query_map(params_ref.as_slice(), |row| {
@@ -593,24 +594,27 @@ pub async fn machine_status(
 /// GET /api/rate-limits
 /// Returns cached rate limit data from rate_limit_cache table.
 pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
     let now = chrono::Utc::now().timestamp();
-    let providers = build_rate_limit_provider_payloads(&conn, now);
+    let providers = if let Some(pool) = state.pg_pool.as_ref() {
+        build_rate_limit_provider_payloads_pg(pool, now).await
+    } else {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        build_rate_limit_provider_payloads(&conn, now)
+    };
 
     (StatusCode::OK, Json(json!({"providers": providers})))
 }
 
 fn build_rate_limit_provider_payloads(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     now: i64,
 ) -> Vec<serde_json::Value> {
     let stale_sec: i64 = conn
@@ -706,8 +710,115 @@ fn build_rate_limit_provider_payloads(
     providers
 }
 
+async fn build_rate_limit_provider_payloads_pg(
+    pool: &sqlx::PgPool,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let stale_sec =
+        sqlx::query("SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec' LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| row.try_get::<String, _>("value").ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(600);
+
+    let rows = match sqlx::query(
+        "SELECT provider, data, fetched_at
+         FROM rate_limit_cache
+         ORDER BY provider",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return build_unsupported_rate_limit_entries_pg(pool, now).await,
+    };
+
+    let mut seen = HashSet::new();
+    let mut providers = Vec::new();
+
+    for row in rows {
+        let provider = match row.try_get::<String, _>("provider") {
+            Ok(provider) => provider,
+            Err(_) => continue,
+        };
+        let data = match row.try_get::<String, _>("data") {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        let fetched_at = match row.try_get::<i64, _>("fetched_at") {
+            Ok(fetched_at) => fetched_at,
+            Err(_) => continue,
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let buckets = parsed
+            .get("buckets")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let unsupported = parsed
+            .get("unsupported")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let reason = parsed
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let stale = (now - fetched_at) > stale_sec;
+        seen.insert(provider.to_lowercase());
+        providers.push(json!({
+            "provider": provider,
+            "buckets": buckets,
+            "fetched_at": fetched_at,
+            "stale": stale,
+            "unsupported": unsupported,
+            "reason": reason,
+        }));
+    }
+
+    for (provider, reason) in UNSUPPORTED_RATE_LIMIT_PROVIDERS {
+        if seen.contains(*provider) {
+            continue;
+        }
+        if !provider_has_recent_session_usage_pg(pool, provider, now).await {
+            continue;
+        }
+        providers.push(json!({
+            "provider": provider,
+            "buckets": [],
+            "fetched_at": now,
+            "stale": false,
+            "unsupported": true,
+            "reason": reason,
+        }));
+    }
+
+    providers.sort_by_key(|entry| {
+        match entry
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "claude" => 0,
+            "codex" => 1,
+            "gemini" => 2,
+            "qwen" => 3,
+            _ => 9,
+        }
+    });
+    providers
+}
+
 fn provider_has_recent_session_usage(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     provider: &str,
     now: i64,
 ) -> bool {
@@ -722,14 +833,40 @@ fn provider_has_recent_session_usage(
                  0
                ) >= ?2
          LIMIT 1",
-        rusqlite::params![provider, threshold],
+        libsql_rusqlite::params![provider, threshold],
         |_row| Ok(()),
     )
     .is_ok()
 }
 
+async fn provider_has_recent_session_usage_pg(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    now: i64,
+) -> bool {
+    let threshold = now.saturating_sub(UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS);
+    sqlx::query(
+        "SELECT 1
+         FROM sessions
+         WHERE lower(provider) = lower($1)
+           AND COALESCE(
+                 EXTRACT(EPOCH FROM last_heartbeat)::BIGINT,
+                 EXTRACT(EPOCH FROM created_at)::BIGINT,
+                 0
+               ) >= $2
+         LIMIT 1",
+    )
+    .bind(provider)
+    .bind(threshold)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
 fn build_unsupported_rate_limit_entries(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     now: i64,
 ) -> Vec<serde_json::Value> {
     UNSUPPORTED_RATE_LIMIT_PROVIDERS
@@ -746,6 +883,26 @@ fn build_unsupported_rate_limit_entries(
             })
         })
         .collect()
+}
+
+async fn build_unsupported_rate_limit_entries_pg(
+    pool: &sqlx::PgPool,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let mut providers = Vec::new();
+    for (provider, reason) in UNSUPPORTED_RATE_LIMIT_PROVIDERS {
+        if provider_has_recent_session_usage_pg(pool, provider, now).await {
+            providers.push(json!({
+                "provider": provider,
+                "buckets": [],
+                "fetched_at": now,
+                "stale": false,
+                "unsupported": true,
+                "reason": reason,
+            }));
+        }
+    }
+    providers
 }
 
 /// GET /api/skills-trend?days=30
@@ -798,11 +955,116 @@ pub async fn skills_trend(
 mod tests {
     use super::*;
 
-    fn test_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+    fn test_conn() -> libsql_rusqlite::Connection {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         conn
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_analytics_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url)
+                .await
+                .expect("connect postgres admin db");
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .expect("create postgres test db");
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url)
+                .await
+                .expect("connect postgres test db");
+            crate::db::postgres::migrate(&pool)
+                .await
+                .expect("apply postgres migration");
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
+                .await
+                .expect("reconnect postgres admin db");
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .expect("terminate postgres test db sessions");
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .expect("drop postgres test db");
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     #[test]
@@ -810,7 +1072,7 @@ mod tests {
         let conn = test_conn();
         conn.execute(
             "INSERT INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "claude",
                 serde_json::json!({
                     "buckets": [{
@@ -839,7 +1101,7 @@ mod tests {
         conn.execute(
             "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
              VALUES (?1, ?2, 'completed', ?3, ?4)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 "qwen-session-1",
                 "qwen",
                 "2023-11-14 22:00:00",
@@ -854,5 +1116,69 @@ mod tests {
         assert_eq!(providers[0]["provider"], json!("qwen"));
         assert_eq!(providers[0]["unsupported"], json!(true));
         assert_eq!(providers[0]["buckets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn build_rate_limit_provider_payloads_pg_hides_unused_unsupported_qwen() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO rate_limit_cache (provider, data, fetched_at)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("claude")
+        .bind(
+            serde_json::json!({
+                "buckets": [{
+                    "name": "requests",
+                    "limit": 100,
+                    "used": 20,
+                    "remaining": 80,
+                    "reset": 1_700_000_000_i64
+                }]
+            })
+            .to_string(),
+        )
+        .bind(1_700_000_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads_pg(&pool, 1_700_000_100).await;
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("claude"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn build_rate_limit_provider_payloads_pg_shows_recent_unsupported_qwen_only_when_used() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
+             VALUES ($1, $2, 'completed', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
+        )
+        .bind("qwen-session-1")
+        .bind("qwen")
+        .bind(1_700_000_000_i64)
+        .bind(1_700_000_050_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads_pg(&pool, 1_700_000_100).await;
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("qwen"));
+        assert_eq!(providers[0]["unsupported"], json!(true));
+        assert_eq!(providers[0]["buckets"], json!([]));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

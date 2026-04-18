@@ -549,33 +549,36 @@ pub(super) async fn tmux_output_watcher(
             {
                 let reason_short = read_tmux_exit_reason(&tmux_session_name)
                     .unwrap_or_else(|| "unknown".to_string());
-                // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
-                let reason_text = reason_short
-                    .strip_prefix('[')
-                    .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-                    .unwrap_or(&reason_short);
-                let reason_truncated: String = reason_text.chars().take(100).collect();
-                let session_key = super::adk_session::build_adk_session_key(
-                    &shared,
-                    channel_id,
-                    &watcher_provider,
-                )
-                .await
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}:{}",
-                        crate::services::platform::hostname_short(),
-                        tmux_session_name
+                let is_force_kill = reason_short.contains("force-kill");
+                if !is_force_kill {
+                    // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
+                    let reason_text = reason_short
+                        .strip_prefix('[')
+                        .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
+                        .unwrap_or(&reason_short);
+                    let reason_truncated: String = reason_text.chars().take(100).collect();
+                    let session_key = super::adk_session::build_adk_session_key(
+                        &shared,
+                        channel_id,
+                        &watcher_provider,
                     )
-                });
-                if let Some(ref db) = shared.db {
-                    enqueue_lifecycle_notification(
-                        db,
-                        &format!("channel:{}", channel_id.get()),
-                        Some(session_key.as_str()),
-                        lifecycle_reason_code_for_tmux_exit(reason_text),
-                        &format!("🔴 세션 종료: {reason_truncated}"),
-                    );
+                    .await
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}:{}",
+                            crate::services::platform::hostname_short(),
+                            tmux_session_name
+                        )
+                    });
+                    if let Some(ref db) = shared.db {
+                        enqueue_lifecycle_notification(
+                            db,
+                            &format!("channel:{}", channel_id.get()),
+                            Some(session_key.as_str()),
+                            lifecycle_reason_code_for_tmux_exit(reason_text),
+                            &format!("🔴 세션 종료: {reason_truncated}"),
+                        );
+                    }
                 }
             }
             if !prompt_too_long_killed && !turn_result_relayed {

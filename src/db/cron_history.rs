@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Row, params};
+use libsql_rusqlite::{Connection, Row, params};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,7 @@ pub struct CronJobRunRecord {
     pub duration_ms: i64,
 }
 
-fn map_run_row(row: &Row<'_>) -> rusqlite::Result<CronJobRunRecord> {
+fn map_run_row(row: &Row<'_>) -> libsql_rusqlite::Result<CronJobRunRecord> {
     Ok(CronJobRunRecord {
         job_id: row.get(0)?,
         job_name: row.get(1)?,
@@ -22,7 +22,7 @@ fn map_run_row(row: &Row<'_>) -> rusqlite::Result<CronJobRunRecord> {
     })
 }
 
-pub fn record_run(conn: &Connection, run: &CronJobRunRecord) -> rusqlite::Result<()> {
+pub fn record_run(conn: &Connection, run: &CronJobRunRecord) -> libsql_rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO cron_job_runs (
             job_id,
@@ -44,7 +44,7 @@ pub fn record_run(conn: &Connection, run: &CronJobRunRecord) -> rusqlite::Result
     Ok(())
 }
 
-pub fn latest_runs(conn: &Connection) -> rusqlite::Result<HashMap<String, CronJobRunRecord>> {
+pub fn latest_runs(conn: &Connection) -> libsql_rusqlite::Result<HashMap<String, CronJobRunRecord>> {
     let mut stmt = conn.prepare(
         "SELECT job_id, job_name, status, started_at_ms, completed_at_ms, duration_ms
          FROM cron_job_runs
@@ -62,7 +62,7 @@ pub fn latest_runs(conn: &Connection) -> rusqlite::Result<HashMap<String, CronJo
 pub fn list_runs_since(
     conn: &Connection,
     since_ms: i64,
-) -> rusqlite::Result<Vec<CronJobRunRecord>> {
+) -> libsql_rusqlite::Result<Vec<CronJobRunRecord>> {
     let mut stmt = conn.prepare(
         "SELECT job_id, job_name, status, started_at_ms, completed_at_ms, duration_ms
          FROM cron_job_runs

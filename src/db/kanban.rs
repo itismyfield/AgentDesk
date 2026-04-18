@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Row, types::ToSql};
+use libsql_rusqlite::{Connection, Row, types::ToSql};
 
 #[derive(Debug, Clone, Default)]
 pub struct ListCardsFilter {
@@ -52,7 +52,7 @@ const CARD_SELECT_SQL: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc
     kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth \
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
-pub fn list_registered_repo_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+pub fn list_registered_repo_ids(conn: &Connection) -> libsql_rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT id FROM github_repos")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect()
@@ -62,7 +62,7 @@ pub fn list_cards(
     conn: &Connection,
     filter: &ListCardsFilter,
     registered_repo_ids: &[String],
-) -> rusqlite::Result<Vec<KanbanCardRecord>> {
+) -> libsql_rusqlite::Result<Vec<KanbanCardRecord>> {
     let mut sql = format!("{CARD_SELECT_SQL} WHERE 1=1");
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -101,7 +101,7 @@ pub fn list_cards(
     rows.collect()
 }
 
-fn kanban_card_row_to_record(row: &Row<'_>) -> rusqlite::Result<KanbanCardRecord> {
+fn kanban_card_row_to_record(row: &Row<'_>) -> libsql_rusqlite::Result<KanbanCardRecord> {
     let latest_dispatch_status = row.get::<_, Option<String>>(13).unwrap_or(None);
     let latest_dispatch_type = row.get::<_, Option<String>>(14).unwrap_or(None);
     let latest_dispatch_result_raw = row.get::<_, Option<String>>(17).unwrap_or(None);

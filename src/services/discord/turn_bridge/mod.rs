@@ -1696,8 +1696,9 @@ pub(super) fn spawn_turn_bridge(
 
         if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
             let channel_id_text = channel_id.get().to_string();
-            if let Err(e) = crate::db::session_transcripts::persist_turn(
+            if let Err(e) = crate::db::session_transcripts::persist_turn_db(
                 db,
+                shared_owned.pg_pool.as_ref(),
                 crate::db::session_transcripts::PersistSessionTranscript {
                     turn_id: turn_id.as_str(),
                     session_key: adk_session_key.as_deref(),
@@ -1712,7 +1713,9 @@ pub(super) fn spawn_turn_bridge(
                     events: &transcript_events,
                     duration_ms: Some(turn_duration_ms(turn_start)),
                 },
-            ) {
+            )
+            .await
+            {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!("  [{ts}] ⚠ failed to persist session transcript: {e}");
             }

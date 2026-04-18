@@ -1,6 +1,7 @@
 //! Issue auto-triage: create kanban backlog cards for new GitHub issues.
 
 use crate::db::Db;
+use sqlx::PgPool;
 
 use super::sync::GhIssue;
 
@@ -21,7 +22,7 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-                rusqlite::params![issue.number, repo],
+                libsql_rusqlite::params![issue.number, repo],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -46,7 +47,7 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
         conn.execute(
             "INSERT OR IGNORE INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, github_issue_number, description, metadata, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 card_id,
                 repo,
                 issue.title,
@@ -62,6 +63,77 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
             ],
         )
         .map_err(|e| format!("insert card: {e}"))?;
+
+        tracing::info!(
+            "[triage] Created backlog card for {repo}#{}: {}",
+            issue.number,
+            issue.title
+        );
+        created += 1;
+    }
+
+    Ok(created)
+}
+
+/// PostgreSQL variant of issue auto-triage.
+pub async fn triage_new_issues_pg(
+    pool: &PgPool,
+    repo: &str,
+    issues: &[GhIssue],
+) -> Result<usize, String> {
+    let mut created = 0;
+
+    for issue in issues {
+        if issue.state != "OPEN" {
+            continue;
+        }
+
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM kanban_cards WHERE github_issue_number = $1 AND repo_id = $2",
+        )
+        .bind(issue.number)
+        .bind(repo)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("check existing card: {error}"))?;
+
+        if exists > 0 {
+            continue;
+        }
+
+        let card_id = uuid::Uuid::new_v4().to_string();
+        let labels_str = issue
+            .labels
+            .iter()
+            .map(|label| label.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let metadata = if labels_str.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "labels": labels_str }).to_string())
+        };
+        let github_url = format!("https://github.com/{repo}/issues/{}", issue.number);
+        let priority = infer_priority(&issue.labels);
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, repo_id, title, status, priority, github_issue_url,
+                github_issue_number, description, metadata, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, 'backlog', $4, $5, $6, $7, CAST($8 AS jsonb), NOW(), NOW())",
+        )
+        .bind(&card_id)
+        .bind(repo)
+        .bind(&issue.title)
+        .bind(priority)
+        .bind(&github_url)
+        .bind(issue.number)
+        .bind(issue.body.as_deref())
+        .bind(metadata.as_deref())
+        .execute(pool)
+        .await
+        .map_err(|error| format!("insert card: {error}"))?;
 
         tracing::info!(
             "[triage] Created backlog card for {repo}#{}: {}",
@@ -97,7 +169,7 @@ mod tests {
     use crate::github::sync::{GhIssue, GhLabel};
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

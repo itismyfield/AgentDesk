@@ -6,7 +6,7 @@ pub(crate) fn run(state: crate::bootstrap::BootstrapState) -> Result<()> {
 }
 
 async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
-    let crate::bootstrap::BootstrapState { config, db } = state;
+    let crate::bootstrap::BootstrapState { config } = state;
 
     let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
     if pipeline_path.exists() {
@@ -14,7 +14,14 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
-    let engine = crate::engine::PolicyEngine::new(&config, db.clone())
+    let db = crate::db::init(&config).context("Failed to init DB")?;
+
+    let pg_pool = crate::db::postgres::connect_and_migrate(&config)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("Failed to init PostgreSQL")?;
+
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, db.clone(), pg_pool)
         .context("Failed to init policy engine")?;
 
     tracing::info!(

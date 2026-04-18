@@ -1,6 +1,6 @@
 use crate::db::Db;
+use libsql_rusqlite::OptionalExtension;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use rusqlite::OptionalExtension;
 use serde_json::json;
 
 // ── Agent channel resolution ops (#304) ─────────────────────────

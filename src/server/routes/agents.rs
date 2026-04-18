@@ -6,6 +6,7 @@ use axum::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row;
 use std::sync::OnceLock;
 
 use super::AppState;
@@ -67,7 +68,7 @@ struct ParsedTurnToolEvent {
     identity_value: String,
 }
 
-fn agent_exists(conn: &rusqlite::Connection, id: &str) -> bool {
+fn agent_exists(conn: &libsql_rusqlite::Connection, id: &str) -> bool {
     conn.query_row("SELECT COUNT(*) FROM agents WHERE id = ?1", [id], |row| {
         row.get::<_, i64>(0)
     })
@@ -377,9 +378,9 @@ fn collect_turn_tool_events(
 }
 
 fn find_agent_turn_session(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
-) -> Result<Option<AgentTurnSession>, rusqlite::Error> {
+) -> Result<Option<AgentTurnSession>, libsql_rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(s.session_key, ''), s.provider, s.status, s.active_dispatch_id,
                 s.last_heartbeat, s.created_at, s.thread_channel_id,
@@ -1065,7 +1066,7 @@ pub async fn agent_timeline(
     };
 
     let rows = stmt
-        .query_map(rusqlite::params![id, limit], |row| {
+        .query_map(libsql_rusqlite::params![id, limit], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "source": row.get::<_, String>(1)?,
@@ -1092,28 +1093,48 @@ pub async fn agent_transcripts(
     Path(id): Path<String>,
     Query(params): Query<TranscriptQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
+    let agent_exists = if let Some(pool) = state.pg_pool.as_ref() {
+        match sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM agents WHERE id = $1")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+        {
+            Ok(row) => row.try_get::<i64, _>("count").unwrap_or(0) > 0,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query: {e}")})),
+                );
+            }
         }
+    } else {
+        let conn = match state.db.read_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        agent_exists(&conn, &id)
     };
 
-    if !agent_exists(&conn, &id) {
+    if !agent_exists {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "agent not found"})),
         );
     }
 
-    match crate::db::session_transcripts::list_transcripts_for_agent(
-        &conn,
+    match crate::db::session_transcripts::list_transcripts_for_agent_db(
+        &state.db,
+        state.pg_pool.as_ref(),
         &id,
         params.limit.unwrap_or(8),
-    ) {
+    )
+    .await
+    {
         Ok(transcripts) => (
             StatusCode::OK,
             Json(json!({
@@ -1123,7 +1144,7 @@ pub async fn agent_transcripts(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
+            Json(json!({"error": format!("transcripts: {e}")})),
         ),
     }
 }
@@ -1173,7 +1194,7 @@ pub async fn agent_signal(
 
     conn.execute(
         "UPDATE kanban_cards SET blocked_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
-        rusqlite::params![reason, card_id],
+        libsql_rusqlite::params![reason, card_id],
     )
     .ok();
 
@@ -1194,7 +1215,7 @@ mod tests {
     use crate::engine::PolicyEngine;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

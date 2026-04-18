@@ -19,7 +19,7 @@ pub(super) fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<
 }
 
 fn resolve_skill_usage_agent_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     session_key: Option<&str>,
     role_binding: Option<&RoleBinding>,
 ) -> Option<String> {
@@ -50,7 +50,7 @@ fn record_skill_usage(
     let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
     conn.execute(
         "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        rusqlite::params![skill_id, agent_id, session_key],
+        libsql_rusqlite::params![skill_id, agent_id, session_key],
     )
     .map_err(|e| format!("insert skill_usage failed: {e}"))?;
     Ok(())

@@ -151,8 +151,9 @@ fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
     Some(elapsed.num_milliseconds().max(0))
 }
 
-fn persist_recovered_transcript(
+async fn persist_recovered_transcript(
     db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     dispatch_id: Option<&str>,
@@ -165,8 +166,9 @@ fn persist_recovered_transcript(
 
     let turn_id = format!("discord:{}:{}", state.channel_id, state.user_msg_id);
     let channel_id_text = state.channel_id.to_string();
-    match crate::db::session_transcripts::persist_turn(
+    match crate::db::session_transcripts::persist_turn_db(
         db,
+        pg_pool,
         crate::db::session_transcripts::PersistSessionTranscript {
             turn_id: &turn_id,
             session_key: state.session_key.as_deref(),
@@ -179,7 +181,9 @@ fn persist_recovered_transcript(
             events: &[],
             duration_ms: None,
         },
-    ) {
+    )
+    .await
+    {
         Ok(_) => true,
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -412,6 +416,7 @@ pub(super) async fn restore_inflight_turns(
                     );
                     persist_recovered_transcript(
                         db,
+                        shared.pg_pool.as_ref(),
                         provider,
                         &state,
                         recovered_dispatch_id
@@ -419,6 +424,7 @@ pub(super) async fn restore_inflight_turns(
                             .or(state.dispatch_id.as_deref()),
                         &assistant_response,
                     )
+                    .await
                 } else {
                     !assistant_response.trim().is_empty()
                 };
@@ -500,7 +506,7 @@ pub(super) async fn restore_inflight_turns(
                                 if changed > 0 {
                                     conn.execute(
                                         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                        rusqlite::params![format!("reconcile_dispatch:{did}"), did.as_str()],
+                                        libsql_rusqlite::params![format!("reconcile_dispatch:{did}"), did.as_str()],
                                     ).ok();
                                 }
                                 changed > 0
@@ -962,6 +968,7 @@ pub(super) async fn restore_inflight_turns(
                 );
                 persist_recovered_transcript(
                     db,
+                    shared.pg_pool.as_ref(),
                     provider,
                     &state,
                     recovered_dispatch_id
@@ -969,6 +976,7 @@ pub(super) async fn restore_inflight_turns(
                         .or(state.dispatch_id.as_deref()),
                     &assistant_response,
                 )
+                .await
             } else {
                 !assistant_response.trim().is_empty()
             };
@@ -1768,8 +1776,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn persist_recovered_transcript_stores_dispatch_evidence() {
+    #[tokio::test]
+    async fn persist_recovered_transcript_stores_dispatch_evidence() {
         let db = crate::db::test_db();
         let state = inflight::InflightTurnState {
             version: 1,
@@ -1804,13 +1812,17 @@ mod tests {
             last_watcher_relayed_offset: None,
         };
 
-        assert!(persist_recovered_transcript(
-            &db,
-            &ProviderKind::Codex,
-            &state,
-            Some("dispatch-from-recovery"),
-            "  이미 확인한 내용은 여기까지입니다.  "
-        ));
+        assert!(
+            persist_recovered_transcript(
+                &db,
+                None,
+                &ProviderKind::Codex,
+                &state,
+                Some("dispatch-from-recovery"),
+                "  이미 확인한 내용은 여기까지입니다.  "
+            )
+            .await
+        );
 
         let turn_id = format!("discord:{}:{}", state.channel_id, state.user_msg_id);
         let conn = db.read_conn().unwrap();

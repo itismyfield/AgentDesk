@@ -665,7 +665,7 @@ pub async fn get_meeting(
             apply_selection_reason_fallback(obj, &transcripts);
             (StatusCode::OK, Json(json!({"meeting": meeting})))
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => (
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meeting not found"})),
         ),
@@ -749,7 +749,7 @@ pub async fn update_issue_repo(
 
     if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![key, value],
+        libsql_rusqlite::params![key, value],
     ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -930,7 +930,7 @@ pub async fn create_issues(
                 let conn = state.db.lock().unwrap();
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
+                    libsql_rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
                 )
                 .ok();
                 drop(conn);
@@ -1251,7 +1251,7 @@ pub async fn upsert_meeting(
             participant_names = COALESCE(?22, meetings.participant_names),
             selection_reason = COALESCE(?23, meetings.selection_reason),
             created_at = COALESCE(meetings.created_at, excluded.created_at)",
-        rusqlite::params![
+        libsql_rusqlite::params![
             body.id,
             body.channel_id,
             body.thread_id,
@@ -1322,7 +1322,7 @@ pub async fn upsert_meeting(
                 "INSERT INTO meeting_transcripts (
                     meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     body.id,
                     seq,
                     entry.round,
@@ -1374,7 +1374,7 @@ pub async fn upsert_meeting(
                      content = ?4,
                      is_summary = 1
                  WHERE id = ?1",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     summary_id,
                     summary_round,
                     Some("Summary".to_string()),
@@ -1386,7 +1386,7 @@ pub async fn upsert_meeting(
                 "INSERT INTO meeting_transcripts (
                     meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-                rusqlite::params![
+                libsql_rusqlite::params![
                     body.id,
                     next_seq,
                     summary_round,
@@ -1540,23 +1540,23 @@ fn thread_query_hash(thread_id: &str) -> String {
 }
 
 fn persist_meeting_query_hashes(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     meeting_id: &str,
     thread_id: Option<&str>,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     let meeting_hash = meeting_query_hash(meeting_id);
     let normalized_thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
     let thread_hash = normalized_thread_id.map(thread_query_hash);
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![
+        libsql_rusqlite::params![
             format!("meeting_query_hash:{meeting_id}"),
             meeting_hash.clone()
         ],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![
+        libsql_rusqlite::params![
             format!("meeting_query_hash_lookup:{meeting_hash}"),
             meeting_id
         ],
@@ -1565,11 +1565,11 @@ fn persist_meeting_query_hashes(
     if let (Some(thread_id), Some(thread_hash)) = (normalized_thread_id, thread_hash.as_deref()) {
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![format!("meeting_thread_hash:{meeting_id}"), thread_hash],
+            libsql_rusqlite::params![format!("meeting_thread_hash:{meeting_id}"), thread_hash],
         )?;
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 format!("meeting_thread_hash_lookup:{thread_hash}"),
                 json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string()
             ],
@@ -1586,8 +1586,8 @@ fn persist_meeting_query_hashes(
     Ok(())
 }
 
-fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
-    use rusqlite::types::ValueRef;
+fn row_optional_timestamp(row: &libsql_rusqlite::Row, idx: usize) -> Option<i64> {
+    use libsql_rusqlite::types::ValueRef;
 
     match row.get_ref(idx).ok()? {
         ValueRef::Null => None,
@@ -1612,7 +1612,7 @@ fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
     }
 }
 
-fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+fn meeting_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<serde_json::Value> {
     let meeting_id = row.get::<_, String>(0)?;
     let channel_id = row.get::<_, Option<String>>(1)?;
     let thread_id = row.get::<_, Option<String>>(2)?;
@@ -1659,7 +1659,7 @@ fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Valu
 
 /// Enrich meeting JSON with issue_repo, issue_creation_results from kv_meta.
 fn enrich_meeting_with_issue_data(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     meeting_id: &str,
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) {
@@ -1724,7 +1724,10 @@ fn enrich_meeting_with_issue_data(
     }
 }
 
-fn load_transcripts(conn: &rusqlite::Connection, meeting_id: &str) -> Vec<serde_json::Value> {
+fn load_transcripts(
+    conn: &libsql_rusqlite::Connection,
+    meeting_id: &str,
+) -> Vec<serde_json::Value> {
     let mut stmt = match conn.prepare(
         "SELECT id, meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
          FROM meeting_transcripts
@@ -1769,7 +1772,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_db() -> Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -1782,7 +1785,7 @@ mod tests {
         PolicyEngine::new(&config, db.clone()).unwrap()
     }
 
-    fn transcript_counts(conn: &rusqlite::Connection, meeting_id: &str) -> (i64, i64) {
+    fn transcript_counts(conn: &libsql_rusqlite::Connection, meeting_id: &str) -> (i64, i64) {
         let total = conn
             .query_row(
                 "SELECT COUNT(*) FROM meeting_transcripts WHERE meeting_id = ?1",

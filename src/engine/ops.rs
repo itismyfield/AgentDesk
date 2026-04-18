@@ -36,12 +36,21 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 /// Register all `agentdesk.*` globals in the given JS context.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
-    register_globals_with_supervisor(ctx, db, BridgeHandle::new())
+    register_globals_with_supervisor_and_pg(ctx, db, None, BridgeHandle::new())
 }
 
 pub fn register_globals_with_supervisor(
     ctx: &Ctx<'_>,
     db: Db,
+    supervisor_bridge: BridgeHandle,
+) -> JsResult<()> {
+    register_globals_with_supervisor_and_pg(ctx, db, None, supervisor_bridge)
+}
+
+pub fn register_globals_with_supervisor_and_pg(
+    ctx: &Ctx<'_>,
+    db: Db,
+    pg_pool: Option<sqlx::PgPool>,
     supervisor_bridge: BridgeHandle,
 ) -> JsResult<()> {
     let globals = ctx.globals();
@@ -68,7 +77,7 @@ pub fn register_globals_with_supervisor(
     }
 
     // ── agentdesk.db ─────────────────────────────────────────────
-    db_ops::register_db_ops(ctx, db.clone())?;
+    db_ops::register_db_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.cards ──────────────────────────────────────────
     cards_ops::register_card_ops(ctx, db.clone())?;
@@ -86,7 +95,7 @@ pub fn register_globals_with_supervisor(
     dispatch_ops::register_dispatch_ops(ctx, db.clone())?;
 
     // ── agentdesk.kanban ────────────────────────────────────────
-    kanban_ops::register_kanban_ops(ctx, db.clone())?;
+    kanban_ops::register_kanban_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.kv ─────────────────────────────────────────────
     kv_ops::register_kv_ops(ctx, db.clone())?;
@@ -101,14 +110,20 @@ pub fn register_globals_with_supervisor(
     queue_ops::register_queue_ops(ctx, db.clone())?;
 
     // ── agentdesk.autoQueue ─────────────────────────────────────
-    auto_queue_ops::register_auto_queue_ops(ctx, db.clone(), supervisor_bridge.clone())?;
+    auto_queue_ops::register_auto_queue_ops(
+        ctx,
+        db.clone(),
+        pg_pool.clone(),
+        supervisor_bridge.clone(),
+    )?;
 
     // ── agentdesk.runtime ────────────────────────────────────────
-    runtime_ops::register_runtime_ops(ctx, db.clone(), supervisor_bridge)?;
+    runtime_ops::register_runtime_ops(ctx, db.clone(), pg_pool.clone(), supervisor_bridge)?;
 
     // ── agentdesk.message ────────────────────────────────────────
     let db_for_pipeline = db.clone();
     let db_for_dm_reply = db.clone();
+    let pg_for_dm_reply = pg_pool.clone();
     let db_for_agents = db.clone();
     message_ops::register_message_ops(ctx, db)?;
 
@@ -120,7 +135,7 @@ pub fn register_globals_with_supervisor(
     pipeline_ops::register_pipeline_ops(ctx, db_for_pipeline)?;
 
     // ── agentdesk.dmReply ────────────────────────────────────
-    dm_reply_ops::register_dm_reply_ops(ctx, db_for_dm_reply)?;
+    dm_reply_ops::register_dm_reply_ops(ctx, db_for_dm_reply, pg_for_dm_reply)?;
 
     // ── agentdesk.agents ─────────────────────────────────────────
     agent_ops::register_agent_ops(ctx, db_for_agents)?;
@@ -140,7 +155,7 @@ pub fn review_state_sync(db: &Db, json_str: &str) -> String {
 /// When a card finishes, its active dispatch entry should become `done` and any
 /// stale pending copies in active or paused runs should be skipped so they do
 /// not block other runs.
-pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card_id: &str) {
+pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connection, card_id: &str) {
     kanban_ops::sync_auto_queue_terminal_on_conn(conn, card_id)
 }
 
@@ -149,14 +164,14 @@ pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card
 /// Only active/paused runs are touched. Generated or future runs stay intact so
 /// PMD can intentionally re-queue the card later after fixing prerequisites.
 pub(crate) fn skip_live_auto_queue_entries_for_card_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     kanban_ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)
 }
 
 /// Same as `review_state_sync` but operates on an already-acquired connection.
 /// Use this inside transactions or when a lock is already held (#158).
-pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) -> String {
+pub fn review_state_sync_on_conn(conn: &libsql_rusqlite::Connection, json_str: &str) -> String {
     kanban_ops::review_state_sync_on_conn(conn, json_str)
 }

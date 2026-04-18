@@ -111,7 +111,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 "SELECT COUNT(*) FROM task_dispatches \
                      WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
                      AND status IN ('pending', 'dispatched')",
-                rusqlite::params![card_id],
+                libsql_rusqlite::params![card_id],
                 |row| row.get::<_, i64>(0),
             ) {
                 Ok(cnt) => format!(r#"{{"count":{cnt}}}"#),
@@ -134,7 +134,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 };
                 match conn.execute(
                     "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
-                    rusqlite::params![count, dispatch_id],
+                    libsql_rusqlite::params![count, dispatch_id],
                 ) {
                     Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
                     Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),

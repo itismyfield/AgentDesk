@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use rusqlite::params;
+use libsql_rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -170,7 +170,7 @@ pub async fn create_office(
 
     if let Err(e) = conn.execute(
         "INSERT INTO offices (id, name, layout) VALUES (?1, ?2, ?3)",
-        rusqlite::params![id, body.name, body.layout],
+        libsql_rusqlite::params![id, body.name, body.layout],
     ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -207,7 +207,7 @@ pub async fn update_office(
     };
 
     let mut sets: Vec<String> = Vec::new();
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
     if let Some(ref name) = body.name {
@@ -231,7 +231,8 @@ pub async fn update_office(
     let sql = format!("UPDATE offices SET {} WHERE id = ?{}", sets.join(", "), idx);
     values.push(Box::new(id.clone()));
 
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
+        values.iter().map(|v| v.as_ref()).collect();
     match conn.execute(&sql, params_ref.as_slice()) {
         Ok(0) => {
             return (
@@ -335,7 +336,7 @@ pub async fn add_agent(
 
     if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) VALUES (?1, ?2, ?3)",
-        rusqlite::params![office_id, body.agent_id, body.department_id],
+        libsql_rusqlite::params![office_id, body.agent_id, body.department_id],
     ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -363,7 +364,7 @@ pub async fn remove_agent(
 
     match conn.execute(
         "DELETE FROM office_agents WHERE office_id = ?1 AND agent_id = ?2",
-        rusqlite::params![office_id, agent_id],
+        libsql_rusqlite::params![office_id, agent_id],
     ) {
         Ok(0) => (
             StatusCode::NOT_FOUND,
@@ -395,7 +396,7 @@ pub async fn update_office_agent(
 
     match conn.execute(
         "UPDATE office_agents SET department_id = ?1 WHERE office_id = ?2 AND agent_id = ?3",
-        rusqlite::params![body.department_id, office_id, agent_id],
+        libsql_rusqlite::params![body.department_id, office_id, agent_id],
     ) {
         Ok(0) => (
             StatusCode::NOT_FOUND,
@@ -445,7 +446,7 @@ pub async fn batch_add_agents(
     for agent_id in &body.agent_ids {
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO office_agents (office_id, agent_id) VALUES (?1, ?2)",
-            rusqlite::params![office_id, agent_id],
+            libsql_rusqlite::params![office_id, agent_id],
         ) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

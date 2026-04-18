@@ -269,7 +269,7 @@ fn fetch_persisted_turn_usage(db: &crate::db::Db) -> Option<(Option<String>, i64
         },
     ) {
         Ok(row) => Some(row),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => None,
         Err(error) => panic!("failed to fetch persisted turn usage: {error}"),
     }
 }

@@ -692,6 +692,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_data_dir(cfg),
         check_tmux(),
         check_service_manager(),
+        check_postgres_connection(cfg),
         check_db_integrity(cfg),
         check_stale_zero_byte_db_files(cfg),
         check_github_repo_registry(cfg),
@@ -861,7 +862,7 @@ fn apply_safe_fixes(cfg: &config::Config) -> Vec<FixAction> {
     }
 
     let db_path = cfg.data.dir.join(&cfg.data.db_name);
-    match rusqlite::Connection::open(&db_path) {
+    match libsql_rusqlite::Connection::open(&db_path) {
         Ok(conn) => match schema::migrate(&conn) {
             Ok(()) => actions.push(FixAction::ok(
                 "db_schema",
@@ -1672,7 +1673,7 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
         .with_expected_actual("database file exists", "database file missing")
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]);
     }
-    match rusqlite::Connection::open(&db_path) {
+    match libsql_rusqlite::Connection::open(&db_path) {
         Ok(conn) => {
             match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
                 Ok(result) if result == "ok" => {
@@ -1725,6 +1726,68 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
             format!("database open failed: {e}"),
         )
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
+    }
+}
+
+fn check_postgres_connection(cfg: &config::Config) -> Check {
+    let summary = crate::db::postgres::database_summary(cfg);
+    if !crate::db::postgres::database_enabled(cfg) {
+        return Check::ok(
+            "postgres_connection",
+            CheckGroup::Core,
+            "PostgreSQL",
+            "disabled",
+        )
+        .with_expected_actual("postgres bootstrap configured", "disabled");
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Check::fail(
+                "postgres_connection",
+                CheckGroup::Core,
+                "PostgreSQL",
+                format!("{summary} — runtime init failed"),
+                "postgres 연결 검증용 async runtime 생성에 실패했습니다.",
+            )
+            .with_expected_actual(
+                "postgres check runtime initializes",
+                format!("runtime build failed: {error}"),
+            );
+        }
+    };
+
+    match runtime.block_on(crate::db::postgres::connect(cfg)) {
+        Ok(Some(pool)) => {
+            drop(pool);
+            Check::ok(
+                "postgres_connection",
+                CheckGroup::Core,
+                "PostgreSQL",
+                format!("{summary} — ok"),
+            )
+            .with_expected_actual("postgres connection succeeds", "ok")
+        }
+        Ok(None) => Check::ok(
+            "postgres_connection",
+            CheckGroup::Core,
+            "PostgreSQL",
+            "disabled",
+        )
+        .with_expected_actual("postgres bootstrap configured", "disabled"),
+        Err(error) => Check::fail(
+            "postgres_connection",
+            CheckGroup::Core,
+            "PostgreSQL",
+            format!("{summary} — failed"),
+            "DATABASE_URL 또는 database 설정값(host/port/dbname/user/password)을 확인하세요.",
+        )
+        .with_expected_actual("postgres connection succeeds", error)
+        .with_next_steps(vec!["agentdesk doctor --json".to_string()]),
     }
 }
 
@@ -1873,7 +1936,8 @@ fn normalized_config_repo_ids(cfg: &config::Config) -> (BTreeSet<String>, Vec<St
 }
 
 fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet<String>, String> {
-    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("cannot open: {e}"))?;
+    let conn =
+        libsql_rusqlite::Connection::open(db_path).map_err(|e| format!("cannot open: {e}"))?;
     let mut stmt = conn
         .prepare("SELECT id FROM github_repos ORDER BY id")
         .map_err(|e| format!("prepare: {e}"))?;
@@ -2007,9 +2071,10 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 mod tests {
     use super::{
         Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
-        check_github_repo_registry, check_provider_cli, check_qwen_auth_hints,
-        check_qwen_runtime_artifacts, check_qwen_settings_files, check_server_running,
-        configured_provider_names, discord_bot_check_from_health, provider_capability_summary,
+        check_github_repo_registry, check_postgres_connection, check_provider_cli,
+        check_qwen_auth_hints, check_qwen_runtime_artifacts, check_qwen_settings_files,
+        check_server_running, configured_provider_names, discord_bot_check_from_health,
+        provider_capability_summary,
     };
     use crate::config::ServerConfig;
     use crate::db::schema;
@@ -2069,7 +2134,7 @@ mod tests {
     }
 
     fn write_github_repo_registry(db_path: &Path, repos: &[&str]) {
-        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let conn = libsql_rusqlite::Connection::open(db_path).unwrap();
         schema::migrate(&conn).unwrap();
         for repo in repos {
             conn.execute(
@@ -2366,6 +2431,14 @@ mod tests {
         assert!(check.detail.contains("missing_in_db=owner/repo-missing"));
         assert!(check.detail.contains("extra_in_db=owner/repo-stale"));
         assert!(check.detail.contains("invalid_config=noslash"));
+    }
+
+    #[test]
+    fn postgres_connection_check_is_ok_when_disabled() {
+        let config = crate::config::Config::default();
+        let check = check_postgres_connection(&config);
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.detail, "disabled");
     }
 
     #[test]

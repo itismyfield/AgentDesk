@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, params};
+use libsql_rusqlite::{Connection, params};
 
 use crate::db::Db;
 
@@ -113,7 +113,7 @@ pub fn list_daily_stats(conn: &Connection) -> Result<Vec<MementoFeedbackDailySta
             coverage_rate: row.get(10)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 fn validate_turn_stat(stat: &MementoFeedbackTurnStat) -> Result<()> {

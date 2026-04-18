@@ -1,5 +1,6 @@
 use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 
 // ── Kanban ops ────────────────────────────────────────────────────
 //
@@ -7,16 +8,24 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 // and fires appropriate hooks (OnCardTransition, OnCardTerminal, OnReviewEnter).
 // This replaces direct SQL UPDATEs in policies to ensure hooks always fire.
 
-pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+pub(super) fn register_kanban_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Db,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kanban_obj = Object::new(ctx.clone())?;
 
     let db_set = db.clone();
+    let pg_set = pg_pool.clone();
     kanban_obj.set(
         "__setStatusRaw",
         Function::new(
             ctx.clone(),
             move |card_id: String, new_status: String, force: Option<bool>| -> String {
+                if let Some(pool) = pg_set.as_ref() {
+                    return set_status_raw_pg(pool, &card_id, &new_status, force.unwrap_or(false));
+                }
                 let conn = match db_set.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
@@ -150,7 +159,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now'){} WHERE id = ?2",
                     extra
                 );
-                if let Err(e) = conn.execute(&sql, rusqlite::params![new_status, card_id]) {
+                if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) {
                     return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
                 }
 
@@ -220,6 +229,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     let db_reopen = db.clone();
+    let pg_reopen = pg_pool.clone();
     kanban_obj.set(
         "__reopenRaw",
         Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
@@ -284,7 +294,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 "UPDATE kanban_cards SET status = ?1, completed_at = NULL, updated_at = datetime('now'){} WHERE id = ?2",
                 clock_extra
             );
-            if let Err(e) = conn.execute(&sql, rusqlite::params![new_status, card_id]) {
+            if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) {
                 return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
             }
 
@@ -312,7 +322,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 }
             }
 
-            crate::kanban::correct_tn_to_fn_on_reopen(&db_reopen, &card_id);
+            crate::kanban::correct_tn_to_fn_on_reopen(&db_reopen, pg_reopen.as_ref(), &card_id);
 
             let has_hooks = pipeline
                 .hooks_for_state(&new_status)
@@ -340,9 +350,13 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     let db_get = db.clone();
+    let pg_get = pg_pool.clone();
     kanban_obj.set(
         "__getCardRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
+            if let Some(pool) = pg_get.as_ref() {
+                return get_card_raw_pg(pool, &card_id);
+            }
             let conn = match db_get.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -369,11 +383,19 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     let db_clear_latest = db.clone();
+    let pg_clear_latest = pg_pool.clone();
     kanban_obj.set(
         "__clearLatestDispatchRaw",
         Function::new(
             ctx.clone(),
             move |card_id: String, expected_dispatch_id: Option<String>| -> String {
+                if let Some(pool) = pg_clear_latest.as_ref() {
+                    return clear_latest_dispatch_raw_pg(
+                        pool,
+                        &card_id,
+                        expected_dispatch_id.as_deref(),
+                    );
+                }
                 let conn = match db_clear_latest.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -406,11 +428,15 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     // #155: setReviewStatus — controlled path for review_status + clock updates.
     // Replaces direct SQL UPDATEs so the ExecuteSQL guard can block bare review_status writes.
     let db_review = db.clone();
+    let pg_review = pg_pool.clone();
     kanban_obj.set(
         "__setReviewStatusRaw",
         Function::new(
             ctx.clone(),
             move |card_id: String, opts_json: String| -> String {
+                if let Some(pool) = pg_review.as_ref() {
+                    return set_review_status_raw_pg(pool, &card_id, &opts_json);
+                }
                 let opts: serde_json::Value = match serde_json::from_str(&opts_json) {
                     Ok(v) => v,
                     Err(e) => return format!(r#"{{"error":"bad opts: {}"}}"#, e),
@@ -422,7 +448,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
                 // Build dynamic SET clause
                 let mut sets = vec!["updated_at = datetime('now')".to_string()];
-                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+                let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = vec![];
 
                 if let Some(rs) = opts.get("review_status") {
                     if rs.is_null() {
@@ -486,7 +512,7 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     sets.join(", "),
                     where_clause
                 );
-                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
                     params.iter().map(|p| p.as_ref()).collect();
                 if let Err(e) = conn.execute(&sql, param_refs.as_slice()) {
                     return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
@@ -586,6 +612,437 @@ pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     Ok(())
 }
 
+fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool) -> String {
+    let card_id = card_id.to_string();
+    let new_status = new_status.to_string();
+    match run_async_bridge_pg(pool, move |pool| async move {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("open postgres kanban status transaction: {error}"))?;
+
+        let row = sqlx::query(
+            "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(&card_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("load postgres kanban card {card_id}: {error}"))?
+        .ok_or_else(|| "card not found".to_string())?;
+
+        let old_status: String = row
+            .try_get("status")
+            .map_err(|error| format!("decode old status for {card_id}: {error}"))?;
+        let title: String = row
+            .try_get("title")
+            .map_err(|error| format!("decode title for {card_id}: {error}"))?;
+        let metadata: Option<String> = row
+            .try_get("metadata")
+            .map_err(|error| format!("decode metadata for {card_id}: {error}"))?;
+        let latest_dispatch_id: Option<String> = row
+            .try_get("latest_dispatch_id")
+            .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
+        let repo_id: Option<String> = row
+            .try_get("repo_id")
+            .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?;
+        let assigned_agent_id: Option<String> = row
+            .try_get("assigned_agent_id")
+            .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
+        let old_review_round: Option<i64> = row
+            .try_get("review_round")
+            .map_err(|error| format!("decode review_round for {card_id}: {error}"))?;
+
+        if old_status == new_status {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "changed": false,
+                "status": new_status,
+            }));
+        }
+
+        let latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("load latest dispatch status for {card_id}: {error}"))?
+        } else {
+            None
+        };
+        let effective =
+            resolve_pipeline_with_pg(&pool, repo_id.as_deref(), assigned_agent_id.as_deref())
+                .await?;
+        let transition_rule = effective.find_transition(&old_status, &new_status);
+
+        if effective.is_terminal(&old_status) && old_status != new_status && !force {
+            return Err(format!(
+                "cannot revert terminal card from {old_status} to {new_status}"
+            ));
+        }
+
+        if effective.is_terminal(&new_status)
+            && !force
+            && let Some(t) = transition_rule
+        {
+            let needs_review_pass = t.gates.iter().any(|g| {
+                effective
+                    .gates
+                    .get(g.as_str())
+                    .is_some_and(|gc| gc.check.as_deref() == Some("review_verdict_pass"))
+            });
+            if needs_review_pass {
+                let latest_verdict = sqlx::query_scalar::<_, String>(
+                    "SELECT result ->> 'verdict'
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type = 'review'
+                       AND status = 'completed'
+                     ORDER BY updated_at DESC
+                     LIMIT 1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?;
+                let has_pass = matches!(latest_verdict.as_deref(), Some("pass") | Some("approved"));
+                if !has_pass {
+                    return Err(format!(
+                        "gate blocked: review_verdict_pass — no review pass verdict (from {old_status} to {new_status})"
+                    ));
+                }
+            }
+        }
+
+        let mut active_dispatch_warning: Option<&'static str> = None;
+        if let Some(t) = transition_rule {
+            let needs_active_dispatch = t.gates.iter().any(|g| {
+                effective
+                    .gates
+                    .get(g.as_str())
+                    .is_some_and(|gc| gc.check.as_deref() == Some("has_active_dispatch"))
+            });
+            if needs_active_dispatch {
+                let has_active_dispatch = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&card_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("load active dispatch count for {card_id}: {error}"))?
+                    > 0;
+                if !has_active_dispatch {
+                    active_dispatch_warning = Some(
+                        "transition bypassed has_active_dispatch gate without an active dispatch",
+                    );
+                }
+            }
+        }
+
+        let clock_extra = match effective.clock_for_state(&new_status) {
+            Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
+                format!(", {} = COALESCE({}, NOW())", clock.set, clock.set)
+            }
+            Some(clock) => format!(", {} = NOW()", clock.set),
+            None => String::new(),
+        };
+        let terminal_cleanup = if effective.is_terminal(&new_status) {
+            ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, review_round = NULL, deferred_dod_json = NULL"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "UPDATE kanban_cards SET status = $1, updated_at = NOW(){}{} WHERE id = $2",
+            clock_extra, terminal_cleanup
+        );
+        sqlx::query(&sql)
+            .bind(&new_status)
+            .bind(&card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update kanban card {card_id} status: {error}"))?;
+
+        if effective.is_terminal(&new_status) {
+            crate::github::sync::sync_auto_queue_terminal_on_pg(&mut tx, &card_id).await?;
+
+            sqlx::query(
+                "UPDATE task_dispatches
+                 SET status = 'cancelled',
+                     updated_at = NOW(),
+                     completed_at = COALESCE(completed_at, NOW())
+                 WHERE kanban_card_id = $1
+                   AND dispatch_type IN ('implementation', 'review-decision', 'rework')
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("cancel orphan dispatches for terminal card {card_id}: {error}")
+            })?;
+        }
+
+        let has_hooks = effective
+            .hooks_for_state(&new_status)
+            .is_some_and(|h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
+        let is_review_enter = effective
+            .hooks_for_state(&new_status)
+            .is_some_and(|h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
+        if effective.is_terminal(&new_status) || !has_hooks {
+            crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "idle").await?;
+        } else if is_review_enter {
+            crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "reviewing").await?;
+        }
+
+        tx.commit().await.map_err(|error| {
+            format!("commit postgres kanban status update for {card_id}: {error}")
+        })?;
+
+        let mut response = serde_json::json!({
+            "ok": true,
+            "changed": true,
+            "from": old_status,
+            "to": new_status,
+            "card_id": card_id,
+        });
+        if let Some(warning) = active_dispatch_warning {
+            response["warning"] = serde_json::json!(warning);
+        }
+        let _ = metadata;
+        let _ = latest_dispatch_status;
+        let _ = old_review_round;
+        let _ = title;
+        Ok(response)
+    }) {
+        Ok(response) => response.to_string(),
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
+}
+
+fn get_card_raw_pg(pool: &PgPool, card_id: &str) -> String {
+    let card_id = card_id.to_string();
+    match run_async_bridge_pg(pool, move |pool| async move {
+        let row = sqlx::query(
+            "SELECT id, status, assigned_agent_id, title, review_status, review_round, latest_dispatch_id
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(&card_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|error| format!("load postgres kanban card {card_id}: {error}"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::json!({
+            "id": row.try_get::<String, _>("id").map_err(|error| format!("decode id for {card_id}: {error}"))?,
+            "status": row.try_get::<String, _>("status").map_err(|error| format!("decode status for {card_id}: {error}"))?,
+            "assigned_agent_id": row.try_get::<Option<String>, _>("assigned_agent_id").map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?,
+            "title": row.try_get::<Option<String>, _>("title").map_err(|error| format!("decode title for {card_id}: {error}"))?,
+            "review_status": row.try_get::<Option<String>, _>("review_status").map_err(|error| format!("decode review_status for {card_id}: {error}"))?,
+            "review_round": row.try_get::<Option<i64>, _>("review_round").map_err(|error| format!("decode review_round for {card_id}: {error}"))?,
+            "latest_dispatch_id": row.try_get::<Option<String>, _>("latest_dispatch_id").map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?,
+        })))
+    }) {
+        Ok(Some(card)) => card.to_string(),
+        Ok(None) => r#"{"error":"card not found"}"#.to_string(),
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
+}
+
+fn clear_latest_dispatch_raw_pg(
+    pool: &PgPool,
+    card_id: &str,
+    expected_dispatch_id: Option<&str>,
+) -> String {
+    let card_id = card_id.to_string();
+    let expected_dispatch_id = expected_dispatch_id.map(str::to_string);
+    match run_async_bridge_pg(pool, move |pool| async move {
+        let current_latest = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
+        )
+        .bind(&card_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|error| format!("load latest dispatch for {card_id}: {error}"))?
+        .flatten();
+        if let Some(expected) = expected_dispatch_id.as_deref()
+            && current_latest.as_deref() != Some(expected)
+        {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "rows_affected": 0,
+                "skipped": "latest_mismatch",
+            }));
+        }
+
+        let rows_affected = sqlx::query(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = NULL,
+                 updated_at = NOW()
+             WHERE id = $1
+               AND latest_dispatch_id IS NOT NULL",
+        )
+        .bind(&card_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("clear latest dispatch for {card_id}: {error}"))?
+        .rows_affected();
+        Ok(serde_json::json!({
+            "ok": true,
+            "rows_affected": rows_affected,
+        }))
+    }) {
+        Ok(response) => response.to_string(),
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
+}
+
+fn set_review_status_raw_pg(pool: &PgPool, card_id: &str, opts_json: &str) -> String {
+    let card_id = card_id.to_string();
+    let opts: serde_json::Value = match serde_json::from_str(opts_json) {
+        Ok(value) => value,
+        Err(error) => return format!(r#"{{"error":"bad opts: {}"}}"#, error),
+    };
+
+    match run_async_bridge_pg(pool, move |pool| async move {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("open postgres review status transaction: {error}"))?;
+
+        let mut query = QueryBuilder::<Postgres>::new("UPDATE kanban_cards SET updated_at = NOW()");
+        if let Some(review_status) = opts.get("review_status") {
+            if review_status.is_null() {
+                query.push(", review_status = NULL");
+            } else if let Some(status) = review_status.as_str() {
+                query.push(", review_status = ");
+                query.push_bind(status.to_string());
+            }
+        }
+        if let Some(value) = opts.get("suggestion_pending_at") {
+            if value.is_null() {
+                query.push(", suggestion_pending_at = NULL");
+            } else if value.as_str() == Some("now") {
+                query.push(", suggestion_pending_at = NOW()");
+            }
+        }
+        if let Some(value) = opts.get("review_entered_at") {
+            if value.is_null() {
+                query.push(", review_entered_at = NULL");
+            } else if value.as_str() == Some("now") {
+                query.push(", review_entered_at = NOW()");
+            }
+        }
+        if let Some(value) = opts.get("awaiting_dod_at") {
+            if value.is_null() {
+                query.push(", awaiting_dod_at = NULL");
+            } else if value.as_str() == Some("now") {
+                query.push(", awaiting_dod_at = NOW()");
+            }
+        }
+        if let Some(value) = opts.get("blocked_reason") {
+            if value.is_null() {
+                query.push(", blocked_reason = NULL");
+            } else if let Some(reason) = value.as_str() {
+                query.push(", blocked_reason = ");
+                query.push_bind(reason.to_string());
+            }
+        }
+
+        query.push(" WHERE id = ");
+        query.push_bind(card_id.clone());
+        if let Some(exclude_status) = opts.get("exclude_status").and_then(|value| value.as_str()) {
+            query.push(" AND status != ");
+            query.push_bind(exclude_status.to_string());
+        }
+        query
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update review status for {card_id}: {error}"))?;
+
+        if let Some(review_status) = opts.get("review_status") {
+            let review_state = if review_status.is_null() {
+                Some("idle")
+            } else {
+                review_status.as_str()
+            };
+            if let Some(review_state) = review_state {
+                crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, review_state)
+                    .await?;
+            }
+        }
+
+        tx.commit().await.map_err(|error| {
+            format!("commit postgres review status update for {card_id}: {error}")
+        })?;
+        Ok(serde_json::json!({ "ok": true }))
+    }) {
+        Ok(response) => response.to_string(),
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
+}
+
+async fn resolve_pipeline_with_pg(
+    pool: &PgPool,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<crate::pipeline::PipelineConfig, String> {
+    crate::pipeline::ensure_loaded();
+
+    let repo_override = if let Some(repo_id) = repo_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config FROM github_repos WHERE id = $1",
+        )
+        .bind(repo_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+        .map(|json| crate::pipeline::parse_override(&json))
+        .transpose()
+        .map_err(|error| format!("parse repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+    } else {
+        None
+    };
+    let agent_override = if let Some(agent_id) = agent_id {
+        sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
+            .map(|json| crate::pipeline::parse_override(&json))
+            .transpose()
+            .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
+    } else {
+        None
+    };
+
+    Ok(crate::pipeline::resolve(
+        repo_override.as_ref(),
+        agent_override.as_ref(),
+    ))
+}
+
+fn run_async_bridge_pg<F, T>(
+    pool: &PgPool,
+    future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| error)
+}
+
 /// Rust implementation of card_review_state sync (#158).
 /// Single entrypoint for all review-state mutations.
 /// Used by both the JS bridge and Rust route handlers.
@@ -602,7 +1059,7 @@ pub(super) fn review_state_sync(db: &Db, json_str: &str) -> String {
 /// When a card finishes, its active dispatch entry should become `done` and any
 /// stale pending copies in active or paused runs should be skipped so they do
 /// not block other runs.
-pub(super) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card_id: &str) {
+pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connection, card_id: &str) {
     let dispatched_ids: Vec<String> = conn
         .prepare(
             "SELECT id FROM auto_queue_entries
@@ -669,9 +1126,9 @@ pub(super) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card
 /// Only active/paused runs are touched. Generated or future runs stay intact so
 /// PMD can intentionally re-queue the card later after fixing prerequisites.
 pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id FROM auto_queue_entries
          WHERE kanban_card_id = ?1
@@ -694,9 +1151,9 @@ pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
         )
         .map_err(|error| match error {
             crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
-            other => rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                other.to_string(),
-            ))),
+            other => libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other(other.to_string()),
+            )),
         })?
         .changed
         {
@@ -709,7 +1166,10 @@ pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
 
 /// Same as `review_state_sync` but operates on an already-acquired connection.
 /// Use this inside transactions or when a lock is already held (#158).
-pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) -> String {
+pub(super) fn review_state_sync_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    json_str: &str,
+) -> String {
     let params: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
@@ -725,7 +1185,7 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
     if state == "clear_verdict" {
         let result = conn.execute(
             "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
-            rusqlite::params![card_id],
+            libsql_rusqlite::params![card_id],
         );
         return match result {
             Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
@@ -760,7 +1220,7 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
          session_reset_round = COALESCE(?8, session_reset_round), \
          review_entered_at = COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
          updated_at = datetime('now')",
-        rusqlite::params![
+        libsql_rusqlite::params![
             card_id,
             state,
             review_round,

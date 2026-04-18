@@ -4,15 +4,18 @@ use super::outbox::{
 };
 use super::resolve_channel_alias;
 use super::thread_reuse::{
-    clear_thread_for_channel, get_thread_for_channel, set_thread_for_channel, try_reuse_thread,
+    clear_thread_for_channel, get_thread_for_channel, get_thread_for_channel_pg,
+    set_thread_for_channel, set_thread_for_channel_pg, try_reuse_thread,
 };
 use crate::db::agents::{
-    resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
-    resolve_agent_primary_channel_on_conn,
+    resolve_agent_channel_for_provider_on_conn, resolve_agent_channel_for_provider_pg,
+    resolve_agent_dispatch_channel_on_conn, resolve_agent_dispatch_channel_pg,
+    resolve_agent_primary_channel_on_conn, resolve_agent_primary_channel_pg,
 };
 use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch_excluding};
 use crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding;
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
+use sqlx::{PgPool, Row as SqlxRow};
 use std::sync::OnceLock;
 
 const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
@@ -267,14 +270,20 @@ pub(crate) struct HttpDispatchTransport {
     announce_bot_token: Option<String>,
     discord_api_base: String,
     thread_owner_user_id: Option<u64>,
+    pg_pool: Option<PgPool>,
 }
 
 impl HttpDispatchTransport {
     pub(crate) fn from_runtime(db: &crate::db::Db) -> Self {
+        Self::from_runtime_with_pg(db, None)
+    }
+
+    pub(crate) fn from_runtime_with_pg(db: &crate::db::Db, pg_pool: Option<PgPool>) -> Self {
         Self {
             announce_bot_token: crate::credential::read_bot_token("announce"),
             discord_api_base: discord_api_base_url(),
             thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db),
+            pg_pool,
         }
     }
 
@@ -287,6 +296,7 @@ impl HttpDispatchTransport {
             announce_bot_token: announce_bot_token.map(str::to_string),
             discord_api_base: discord_api_base.to_string(),
             thread_owner_user_id,
+            pg_pool: None,
         }
     }
 }
@@ -311,7 +321,7 @@ impl DispatchTransport for HttpDispatchTransport {
                     return Err("no announce bot token".into());
                 }
             };
-            send_dispatch_to_discord_inner_with_context(
+            send_dispatch_to_discord_inner_with_context_pg(
                 &db,
                 &agent_id,
                 &title,
@@ -320,6 +330,7 @@ impl DispatchTransport for HttpDispatchTransport {
                 token,
                 &transport.discord_api_base,
                 transport.thread_owner_user_id,
+                transport.pg_pool.as_ref(),
             )
             .await
         }
@@ -360,11 +371,11 @@ impl DispatchTransport for HttpDispatchTransport {
 // message post path) — reading them is just no longer needed here.
 
 pub(super) fn persist_dispatch_message_target_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
     channel_id: &str,
     message_id: &str,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT context FROM task_dispatches WHERE id = ?1",
@@ -385,15 +396,126 @@ pub(super) fn persist_dispatch_message_target_on_conn(
          SET context = ?1,
              updated_at = datetime('now')
          WHERE id = ?2",
-        rusqlite::params![context.to_string(), dispatch_id],
+        libsql_rusqlite::params![context.to_string(), dispatch_id],
     )?;
     Ok(())
 }
 
-// #750: update_dispatch_reaction_presence + apply_dispatch_status_reaction_state
-// removed. They were the Discord REST wrappers used by the announce-bot
-// lifecycle emoji path; with sync_dispatch_status_reaction now a no-op they
-// have no callers.
+async fn persist_dispatch_message_target_on_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    let existing: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch context for {dispatch_id}: {error}"))?
+    .flatten();
+
+    let mut context = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    context["discord_message_channel_id"] = serde_json::json!(channel_id);
+    context["discord_message_id"] = serde_json::json!(message_id);
+
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = $1,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(context.to_string())
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        format!("persist postgres dispatch message target for {dispatch_id}: {error}")
+    })?;
+    Ok(())
+}
+
+async fn update_dispatch_reaction_presence(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    target: &DispatchMessageTarget,
+    emoji: char,
+    present: bool,
+) -> Result<(), String> {
+    let encoded_emoji = dispatch_reaction_emoji_path(emoji)
+        .ok_or_else(|| format!("unsupported dispatch reaction emoji: {emoji}"))?;
+    let url = discord_api_url(
+        base_url,
+        &format!(
+            "/channels/{}/messages/{}/reactions/{}/@me",
+            target.channel_id, target.message_id, encoded_emoji
+        ),
+    );
+    let response = if present {
+        client
+            .put(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to add reaction {emoji} to dispatch message {}: {error}",
+                    target.message_id
+                )
+            })?
+    } else {
+        client
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to remove reaction {emoji} from dispatch message {}: {error}",
+                    target.message_id
+                )
+            })?
+    };
+
+    if response.status().is_success() || (!present && response.status().as_u16() == 404) {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let action = if present { "add" } else { "remove" };
+    Err(format!(
+        "failed to {action} reaction {emoji} for dispatch message {}: {status} {body}",
+        target.message_id
+    ))
+}
+
+async fn apply_dispatch_status_reaction_state(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    target: &DispatchMessageTarget,
+    state: DispatchStatusReactionState,
+) -> Result<(), String> {
+    match state {
+        DispatchStatusReactionState::Succeeded => {
+            update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '❌', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', true).await
+        }
+        DispatchStatusReactionState::Failed => {
+            update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '❌', true).await
+        }
+    }
+}
 
 fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
     if status != reqwest::StatusCode::BAD_REQUEST {
@@ -524,11 +646,40 @@ pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
     channel_id: &str,
     message_id: &str,
 ) -> Result<(), String> {
-    let conn = db
-        .lock()
-        .map_err(|_| format!("db lock failed while saving message target for {dispatch_id}"))?;
-    persist_dispatch_message_target_on_conn(&conn, dispatch_id, channel_id, message_id)
-        .map_err(|error| format!("persist dispatch message target for {dispatch_id}: {error}"))?;
+    persist_dispatch_message_target_and_add_pending_reaction_with_pg(
+        db,
+        _client,
+        _token,
+        _base_url,
+        dispatch_id,
+        channel_id,
+        message_id,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction_with_pg(
+    db: &crate::db::Db,
+    _client: &reqwest::Client,
+    _token: &str,
+    _base_url: &str,
+    dispatch_id: &str,
+    channel_id: &str,
+    message_id: &str,
+    pg_pool: Option<&PgPool>,
+) -> Result<(), String> {
+    if let Some(pool) = pg_pool {
+        persist_dispatch_message_target_on_pg(pool, dispatch_id, channel_id, message_id).await?;
+    } else {
+        let conn = db
+            .lock()
+            .map_err(|_| format!("db lock failed while saving message target for {dispatch_id}"))?;
+        persist_dispatch_message_target_on_conn(&conn, dispatch_id, channel_id, message_id)
+            .map_err(|error| {
+                format!("persist dispatch message target for {dispatch_id}: {error}")
+            })?;
+    }
     Ok(())
 }
 
@@ -555,23 +706,19 @@ pub(crate) async fn sync_dispatch_status_reaction(
     db: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let (status, target) = {
-        let conn = db
-            .lock()
-            .map_err(|_| format!("db lock failed for {dispatch_id} status reaction"))?;
-        let row: Option<(String, Option<String>)> = conn
-            .query_row(
-                "SELECT status, context FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("lookup dispatch {dispatch_id}: {error}"))?;
-        let Some((status, context)) = row else {
-            return Ok(());
-        };
-        (status, parse_dispatch_message_target(context.as_deref()))
+    sync_dispatch_status_reaction_with_pg(db, None, dispatch_id).await
+}
+
+pub(crate) async fn sync_dispatch_status_reaction_with_pg(
+    db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    let Some((status, context)) = load_dispatch_reaction_row(db, pg_pool, dispatch_id).await?
+    else {
+        return Ok(());
     };
+    let target = parse_dispatch_message_target(context.as_deref());
 
     let state = match status.as_str() {
         "completed" => DispatchStatusReactionState::Succeeded,
@@ -597,6 +744,45 @@ pub(crate) async fn sync_dispatch_status_reaction(
     .await
 }
 
+async fn load_dispatch_reaction_row(
+    db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
+    dispatch_id: &str,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query("SELECT status, context FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                format!("load postgres dispatch reaction target for {dispatch_id}: {error}")
+            })?;
+        return row
+            .map(|row| {
+                Ok((
+                    row.try_get("status").map_err(|error| {
+                        format!("read postgres dispatch status for {dispatch_id}: {error}")
+                    })?,
+                    row.try_get("context").map_err(|error| {
+                        format!("read postgres dispatch context for {dispatch_id}: {error}")
+                    })?,
+                ))
+            })
+            .transpose();
+    }
+
+    let conn = db
+        .lock()
+        .map_err(|_| format!("db lock failed for dispatch reaction sync {dispatch_id}"))?;
+    conn.query_row(
+        "SELECT status, context FROM task_dispatches WHERE id = ?1",
+        [dispatch_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|error| format!("load dispatch reaction target for {dispatch_id}: {error}"))
+}
+
 fn thread_id_from_slot_map(thread_id_map: Option<&str>, channel_id: u64) -> Option<String> {
     thread_id_map
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -608,10 +794,10 @@ fn thread_id_from_slot_map(thread_id_map: Option<&str>, channel_id: u64) -> Opti
 }
 
 fn persist_dispatch_slot_index(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
     slot_index: i64,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT context FROM task_dispatches WHERE id = ?1",
@@ -634,13 +820,71 @@ fn persist_dispatch_slot_index(
          SET context = ?1,
              updated_at = datetime('now')
          WHERE id = ?2",
-        rusqlite::params![context.to_string(), dispatch_id],
+        libsql_rusqlite::params![context.to_string(), dispatch_id],
     )?;
     Ok(())
 }
 
+async fn persist_dispatch_slot_index_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    slot_index: i64,
+) -> Result<(), String> {
+    let existing: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch context for {dispatch_id}: {error}"))?
+    .flatten();
+    let mut context = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if context.get("slot_index").and_then(|value| value.as_i64()) == Some(slot_index) {
+        return Ok(());
+    }
+    context["slot_index"] = serde_json::json!(slot_index);
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = $1,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(context.to_string())
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("persist postgres slot index for {dispatch_id}: {error}"))?;
+    Ok(())
+}
+
+async fn ensure_agent_slot_pool_rows_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_pool_size: i64,
+) -> Result<(), String> {
+    for slot_index in 0..slot_pool_size.clamp(1, 32) {
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ($1, $2, '{}'::jsonb)
+             ON CONFLICT (agent_id, slot_index) DO NOTHING",
+        )
+        .bind(agent_id)
+        .bind(slot_index)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("ensure postgres slot pool row {agent_id}:{slot_index}: {error}")
+        })?;
+    }
+    Ok(())
+}
+
 fn read_slot_thread_binding(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
     channel_id: u64,
@@ -651,7 +895,7 @@ fn read_slot_thread_binding(
             "SELECT thread_id_map
              FROM auto_queue_slots
              WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index],
             |row| row.get(0),
         )
         .ok()
@@ -661,6 +905,31 @@ fn read_slot_thread_binding(
         slot_index,
         thread_id: thread_id_from_slot_map(thread_id_map.as_deref(), channel_id),
     })
+}
+
+async fn read_slot_thread_binding_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    channel_id: u64,
+) -> Result<Option<SlotThreadBinding>, String> {
+    ensure_agent_slot_pool_rows_pg(pool, agent_id, slot_index + 1).await?;
+    let thread_id_map: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT thread_id_map::text
+         FROM auto_queue_slots
+         WHERE agent_id = $1 AND slot_index = $2",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres slot thread map for {agent_id}:{slot_index}: {error}"))?
+    .flatten();
+    Ok(Some(SlotThreadBinding {
+        agent_id: agent_id.to_string(),
+        slot_index,
+        thread_id: thread_id_from_slot_map(thread_id_map.as_deref(), channel_id),
+    }))
 }
 
 fn push_unique_thread_candidate(candidates: &mut Vec<String>, thread_id: Option<&str>) {
@@ -673,7 +942,7 @@ fn push_unique_thread_candidate(candidates: &mut Vec<String>, thread_id: Option<
 }
 
 fn recent_slot_thread_history(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
 ) -> Vec<String> {
@@ -695,7 +964,7 @@ fn recent_slot_thread_history(
         Err(_) => return Vec::new(),
     };
 
-    let rows = match stmt.query_map(rusqlite::params![agent_id, slot_index], |row| {
+    let rows = match stmt.query_map(libsql_rusqlite::params![agent_id, slot_index], |row| {
         row.get::<_, String>(0)
     }) {
         Ok(rows) => rows,
@@ -709,8 +978,42 @@ fn recent_slot_thread_history(
     candidates
 }
 
+async fn recent_slot_thread_history_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query(
+        "SELECT thread_id, context
+         FROM task_dispatches
+         WHERE to_agent_id = $1
+           AND thread_id IS NOT NULL
+           AND BTRIM(thread_id) != ''
+         ORDER BY COALESCE(updated_at, created_at) DESC",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres slot history for {agent_id}:{slot_index}: {error}"))?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let thread_id: Option<String> = row.try_get("thread_id").ok().flatten();
+        let context: Option<String> = row.try_get("context").ok().flatten();
+        let matches_slot = context
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.get("slot_index").and_then(|value| value.as_i64()))
+            == Some(slot_index);
+        if matches_slot {
+            push_unique_thread_candidate(&mut candidates, thread_id.as_deref());
+        }
+    }
+    Ok(candidates)
+}
+
 fn collect_slot_thread_candidates(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     card_id: &str,
     slot_binding: Option<&SlotThreadBinding>,
@@ -734,8 +1037,35 @@ fn collect_slot_thread_candidates(
     candidates
 }
 
+async fn collect_slot_thread_candidates_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    card_id: &str,
+    slot_binding: Option<&SlotThreadBinding>,
+    channel_id: u64,
+    include_recent_slot_history: bool,
+) -> Result<Vec<String>, String> {
+    let mut candidates = Vec::new();
+    push_unique_thread_candidate(
+        &mut candidates,
+        slot_binding.and_then(|binding| binding.thread_id.as_deref()),
+    );
+    push_unique_thread_candidate(
+        &mut candidates,
+        get_thread_for_channel_pg(pool, card_id, channel_id)
+            .await?
+            .as_deref(),
+    );
+    if include_recent_slot_history && let Some(binding) = slot_binding {
+        for thread_id in recent_slot_thread_history_pg(pool, agent_id, binding.slot_index).await? {
+            push_unique_thread_candidate(&mut candidates, Some(thread_id.as_str()));
+        }
+    }
+    Ok(candidates)
+}
+
 fn allocate_manual_slot_binding(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     dispatch_id: &str,
     channel_id: u64,
@@ -751,8 +1081,32 @@ fn allocate_manual_slot_binding(
     None
 }
 
+async fn allocate_manual_slot_binding_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    dispatch_id: &str,
+    channel_id: u64,
+) -> Result<Option<SlotThreadBinding>, String> {
+    for slot_index in 0..SLOT_THREAD_MAX_SLOTS {
+        ensure_agent_slot_pool_rows_pg(pool, agent_id, slot_index + 1).await?;
+        if crate::services::auto_queue::runtime::slot_has_active_dispatch_excluding_pg(
+            pool,
+            agent_id,
+            slot_index,
+            Some(dispatch_id),
+        )
+        .await?
+        {
+            continue;
+        }
+        persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
+        return read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await;
+    }
+    Ok(None)
+}
+
 fn resolve_slot_thread_binding_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     card_id: &str,
     dispatch_id: &str,
@@ -770,7 +1124,7 @@ fn resolve_slot_thread_binding_on_conn(
              WHERE dispatch_id = ?1
                AND agent_id = ?2
                AND slot_index IS NOT NULL",
-            rusqlite::params![dispatch_id, agent_id],
+            libsql_rusqlite::params![dispatch_id, agent_id],
             |row| row.get(0),
         )
         .ok()
@@ -785,7 +1139,7 @@ fn resolve_slot_thread_binding_on_conn(
                  ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END,
                           priority_rank ASC
                  LIMIT 1",
-                rusqlite::params![card_id, agent_id],
+                libsql_rusqlite::params![card_id, agent_id],
                 |row| row.get(0),
             )
             .ok()
@@ -799,8 +1153,61 @@ fn resolve_slot_thread_binding_on_conn(
     allocate_manual_slot_binding(conn, agent_id, dispatch_id, channel_id)
 }
 
+async fn resolve_slot_thread_binding_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    dispatch_context: Option<&serde_json::Value>,
+    channel_id: u64,
+) -> Result<Option<SlotThreadBinding>, String> {
+    if let Some(slot_index) = context_slot_index(dispatch_context) {
+        return read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await;
+    }
+
+    let auto_queue_slot: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT slot_index
+         FROM auto_queue_entries
+         WHERE dispatch_id = $1
+           AND agent_id = $2
+           AND slot_index IS NOT NULL
+         LIMIT 1",
+    )
+    .bind(dispatch_id)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch slot for {dispatch_id}: {error}"))?
+    .flatten()
+    .or(sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT slot_index
+             FROM auto_queue_entries
+             WHERE kanban_card_id = $1
+               AND agent_id = $2
+               AND status IN ('pending', 'dispatched')
+               AND slot_index IS NOT NULL
+             ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END,
+                      priority_rank ASC
+             LIMIT 1",
+    )
+    .bind(card_id)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres card slot for {card_id}: {error}"))?
+    .flatten());
+
+    if let Some(slot_index) = auto_queue_slot {
+        let binding = read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await?;
+        persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
+        return Ok(binding);
+    }
+
+    allocate_manual_slot_binding_pg(pool, agent_id, dispatch_id, channel_id).await
+}
+
 fn upsert_slot_thread_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
     channel_id: u64,
@@ -811,7 +1218,7 @@ fn upsert_slot_thread_id(
             "SELECT COALESCE(thread_id_map, '{}')
              FROM auto_queue_slots
              WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index],
             |row| row.get(0),
         )
         .unwrap_or_else(|_| "{}".to_string());
@@ -825,13 +1232,52 @@ fn upsert_slot_thread_id(
          SET thread_id_map = ?1,
              updated_at = datetime('now')
          WHERE agent_id = ?2 AND slot_index = ?3",
-        rusqlite::params![map.to_string(), agent_id, slot_index],
+        libsql_rusqlite::params![map.to_string(), agent_id, slot_index],
     )
     .ok();
 }
 
+async fn upsert_slot_thread_id_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    channel_id: u64,
+    thread_id: &str,
+) -> Result<(), String> {
+    let existing: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT COALESCE(thread_id_map::text, '{}')
+         FROM auto_queue_slots
+         WHERE agent_id = $1 AND slot_index = $2",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres slot map for {agent_id}:{slot_index}: {error}"))?
+    .flatten()
+    .unwrap_or_else(|| "{}".to_string());
+    let mut map: serde_json::Value = serde_json::from_str::<serde_json::Value>(&existing)
+        .ok()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    map[channel_id.to_string()] = serde_json::json!(thread_id);
+    sqlx::query(
+        "UPDATE auto_queue_slots
+         SET thread_id_map = $1::jsonb,
+             updated_at = NOW()
+         WHERE agent_id = $2 AND slot_index = $3",
+    )
+    .bind(map.to_string())
+    .bind(agent_id)
+    .bind(slot_index)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("save postgres slot map for {agent_id}:{slot_index}: {error}"))?;
+    Ok(())
+}
+
 fn clear_slot_thread_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
     channel_id: u64,
@@ -841,7 +1287,7 @@ fn clear_slot_thread_id(
             "SELECT COALESCE(thread_id_map, '{}')
              FROM auto_queue_slots
              WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index],
             |row| row.get(0),
         )
         .unwrap_or_else(|_| "{}".to_string());
@@ -853,11 +1299,49 @@ fn clear_slot_thread_id(
                  SET thread_id_map = ?1,
                      updated_at = datetime('now')
                  WHERE agent_id = ?2 AND slot_index = ?3",
-                rusqlite::params![map.to_string(), agent_id, slot_index],
+                libsql_rusqlite::params![map.to_string(), agent_id, slot_index],
             )
             .ok();
         }
     }
+}
+
+async fn clear_slot_thread_id_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    channel_id: u64,
+) -> Result<(), String> {
+    let existing: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT COALESCE(thread_id_map::text, '{}')
+         FROM auto_queue_slots
+         WHERE agent_id = $1 AND slot_index = $2",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres slot map for {agent_id}:{slot_index}: {error}"))?
+    .flatten()
+    .unwrap_or_else(|| "{}".to_string());
+    if let Ok(mut map) = serde_json::from_str::<serde_json::Value>(&existing)
+        && let Some(obj) = map.as_object_mut()
+    {
+        obj.remove(&channel_id.to_string());
+        sqlx::query(
+            "UPDATE auto_queue_slots
+             SET thread_id_map = $1::jsonb,
+                 updated_at = NOW()
+             WHERE agent_id = $2 AND slot_index = $3",
+        )
+        .bind(map.to_string())
+        .bind(agent_id)
+        .bind(slot_index)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("clear postgres slot map for {agent_id}:{slot_index}: {error}"))?;
+    }
+    Ok(())
 }
 
 fn discord_thread_created_at(
@@ -881,6 +1365,7 @@ fn discord_thread_created_at(
 
 async fn reset_stale_slot_thread_if_needed(
     db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
     client: &reqwest::Client,
     token: &str,
     discord_api_base: &str,
@@ -936,13 +1421,23 @@ async fn reset_stale_slot_thread_if_needed(
         total_message_sent,
         age_limit_hit,
     );
-    reset_slot_thread_bindings_excluding(
-        db,
-        &slot_binding.agent_id,
-        slot_binding.slot_index,
-        Some(dispatch_id),
-    )
-    .await?;
+    if let Some(pool) = pg_pool {
+        crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+            pool,
+            &slot_binding.agent_id,
+            slot_binding.slot_index,
+            Some(dispatch_id),
+        )
+        .await?;
+    } else {
+        reset_slot_thread_bindings_excluding(
+            db,
+            &slot_binding.agent_id,
+            slot_binding.slot_index,
+            Some(dispatch_id),
+        )
+        .await?;
+    }
     Ok(true)
 }
 
@@ -1086,9 +1581,10 @@ fn build_slot_thread_name(
             )
             .ok()?;
         let issues: Vec<(i64, String)> = stmt
-            .query_map(rusqlite::params![run_id, thread_group, card_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
+            .query_map(
+                libsql_rusqlite::params![run_id, thread_group, card_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
             .ok()?
             .filter_map(|row| row.ok())
             .collect();
@@ -1129,6 +1625,140 @@ fn build_slot_thread_name(
         .collect()
 }
 
+async fn build_slot_thread_name_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    card_id: &str,
+    slot_index: i64,
+    issue_number: Option<i64>,
+    title: &str,
+) -> Result<String, String> {
+    let mut batch_phase_for_label = 0i64;
+    let group_info = sqlx::query(
+        "SELECT run_id, COALESCE(thread_group, 0) AS thread_group, COALESCE(batch_phase, 0) AS batch_phase
+         FROM auto_queue_entries
+         WHERE dispatch_id = $1
+         LIMIT 1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres slot group for {dispatch_id}: {error}"))?
+    .map(|row| {
+        Ok::<_, String>((
+            row.try_get::<String, _>("run_id")
+                .map_err(|error| format!("read postgres run_id for {dispatch_id}: {error}"))?,
+            row.try_get::<i64, _>("thread_group").map_err(|error| {
+                format!("read postgres thread_group for {dispatch_id}: {error}")
+            })?,
+            row.try_get::<i64, _>("batch_phase").map_err(|error| {
+                format!("read postgres batch_phase for {dispatch_id}: {error}")
+            })?,
+        ))
+    })
+    .transpose()?
+    .or(
+        sqlx::query(
+            "SELECT run_id, COALESCE(thread_group, 0) AS thread_group, COALESCE(batch_phase, 0) AS batch_phase
+             FROM auto_queue_entries
+             WHERE kanban_card_id = $1
+               AND status IN ('pending', 'dispatched')
+             ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END,
+                      priority_rank ASC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres card slot group for {card_id}: {error}"))?
+        .map(|row| {
+            Ok::<_, String>((
+                row.try_get::<String, _>("run_id")
+                    .map_err(|error| format!("read postgres run_id for {card_id}: {error}"))?,
+                row.try_get::<i64, _>("thread_group").map_err(|error| {
+                    format!("read postgres thread_group for {card_id}: {error}")
+                })?,
+                row.try_get::<i64, _>("batch_phase").map_err(|error| {
+                    format!("read postgres batch_phase for {card_id}: {error}")
+                })?,
+            ))
+        })
+        .transpose()?,
+    );
+
+    let grouped_issue_label = if let Some((run_id, thread_group, batch_phase)) = group_info {
+        batch_phase_for_label = batch_phase;
+        let rows = sqlx::query(
+            "SELECT kc.github_issue_number, e.kanban_card_id
+             FROM auto_queue_entries e
+             JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+             WHERE e.run_id = $1
+               AND COALESCE(e.thread_group, 0) = $2
+               AND COALESCE(e.batch_phase, 0) = (
+                   SELECT COALESCE(e2.batch_phase, 0)
+                   FROM auto_queue_entries e2
+                   WHERE e2.kanban_card_id = $3
+                     AND e2.run_id = $1
+                   LIMIT 1
+               )
+               AND kc.github_issue_number IS NOT NULL
+             ORDER BY e.priority_rank ASC",
+        )
+        .bind(&run_id)
+        .bind(thread_group)
+        .bind(card_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres grouped issues for {card_id}: {error}"))?;
+        let issues: Vec<(i64, String)> = rows
+            .into_iter()
+            .filter_map(|row| {
+                Some((
+                    i64::from(row.try_get::<i32, _>("github_issue_number").ok()?),
+                    row.try_get::<String, _>("kanban_card_id").ok()?,
+                ))
+            })
+            .collect();
+        if issues.len() > 1 {
+            Some(
+                issues
+                    .into_iter()
+                    .map(|(issue_number, issue_card_id)| {
+                        if issue_card_id == card_id {
+                            format!("▸{}", issue_number)
+                        } else {
+                            format!("#{}", issue_number)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let base = if let Some(grouped) = grouped_issue_label {
+        grouped
+    } else if let Some(number) = issue_number {
+        let short_title: String = title.chars().take(80).collect();
+        format!("#{} {}", number, short_title)
+    } else {
+        title.chars().take(90).collect()
+    };
+    let phase_prefix = if batch_phase_for_label > 0 {
+        format!("P{} ", batch_phase_for_label)
+    } else {
+        String::new()
+    };
+    Ok(format!("[slot {}] {}{}", slot_index, phase_prefix, base)
+        .chars()
+        .take(100)
+        .collect())
+}
+
 fn review_source_provider_from_context(dispatch_context: Option<&str>) -> Option<String> {
     dispatch_context_value(dispatch_context).and_then(|ctx| {
         ctx.get("from_provider")
@@ -1138,7 +1768,7 @@ fn review_source_provider_from_context(dispatch_context: Option<&str>) -> Option
 }
 
 fn latest_completed_review_provider_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> Option<String> {
     let review_context: Option<String> = conn
@@ -1154,8 +1784,32 @@ fn latest_completed_review_provider_on_conn(
     review_source_provider_from_context(review_context.as_deref())
 }
 
+async fn latest_completed_review_provider_pg(
+    pool: &PgPool,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    let rows = sqlx::query(
+        "SELECT context
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = 'review'
+           AND status = 'completed'
+         ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres review provider for {card_id}: {error}"))?;
+
+    Ok(rows.into_iter().find_map(|row| {
+        let context: Option<String> = row.try_get("context").ok().flatten();
+        review_source_provider_from_context(context.as_deref())
+    }))
+}
+
 fn latest_work_dispatch_thread_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> Option<String> {
     conn.query_row(
@@ -1183,12 +1837,63 @@ fn latest_work_dispatch_thread_on_conn(
     .filter(|value| !value.is_empty())
 }
 
+async fn latest_work_dispatch_thread_pg(
+    pool: &PgPool,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    let rows = sqlx::query(
+        "SELECT thread_id, context
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('implementation', 'rework')
+         ORDER BY
+           CASE status
+             WHEN 'dispatched' THEN 0
+             WHEN 'pending' THEN 1
+             WHEN 'completed' THEN 2
+             ELSE 3
+           END,
+           COALESCE(completed_at, updated_at, created_at) DESC",
+    )
+    .bind(card_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres work dispatch thread for {card_id}: {error}"))?;
+
+    for row in rows {
+        let thread_id: Option<String> = row.try_get("thread_id").ok().flatten();
+        if let Some(thread_id) = thread_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(thread_id));
+        }
+        let context: Option<String> = row.try_get("context").ok().flatten();
+        if let Some(thread_id) = context
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("thread_id")
+                    .and_then(|value| value.as_str())
+                    .map(std::string::ToString::to_string)
+            })
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(thread_id));
+        }
+    }
+
+    Ok(None)
+}
+
 fn resolve_agent_channel_with_provider_override_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     dispatch_type: Option<&str>,
     provider_override: Option<&str>,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
         if let Some(channel) =
             resolve_agent_channel_for_provider_on_conn(conn, agent_id, Some(provider))?
@@ -1199,13 +1904,35 @@ fn resolve_agent_channel_with_provider_override_on_conn(
     resolve_agent_dispatch_channel_on_conn(conn, agent_id, dispatch_type)
 }
 
+async fn resolve_agent_channel_with_provider_override_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    dispatch_type: Option<&str>,
+    provider_override: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
+        if let Some(channel) = resolve_agent_channel_for_provider_pg(pool, agent_id, Some(provider))
+            .await
+            .map_err(|error| {
+                format!("resolve postgres provider channel for {agent_id} ({provider}): {error}")
+            })?
+        {
+            return Ok(Some(channel));
+        }
+    }
+
+    resolve_agent_dispatch_channel_pg(pool, agent_id, dispatch_type)
+        .await
+        .map_err(|error| format!("resolve postgres dispatch channel for {agent_id}: {error}"))
+}
+
 pub(super) fn resolve_dispatch_delivery_channel_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     card_id: &str,
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
-) -> rusqlite::Result<Option<String>> {
+) -> libsql_rusqlite::Result<Option<String>> {
     let provider_override = if dispatch_type == Some("review-decision") {
         review_source_provider_from_context(dispatch_context)
             .or_else(|| latest_completed_review_provider_on_conn(conn, card_id))
@@ -1220,11 +1947,45 @@ pub(super) fn resolve_dispatch_delivery_channel_on_conn(
     )
 }
 
-fn resolve_review_followup_channel_on_conn(
-    conn: &rusqlite::Connection,
+async fn resolve_dispatch_delivery_channel_pg(
+    pool: &PgPool,
     agent_id: &str,
-) -> rusqlite::Result<Option<String>> {
+    card_id: &str,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> Result<Option<String>, String> {
+    let provider_override = if dispatch_type == Some("review-decision") {
+        match review_source_provider_from_context(dispatch_context) {
+            Some(provider) => Some(provider),
+            None => latest_completed_review_provider_pg(pool, card_id).await?,
+        }
+    } else {
+        None
+    };
+
+    resolve_agent_channel_with_provider_override_pg(
+        pool,
+        agent_id,
+        dispatch_type,
+        provider_override.as_deref(),
+    )
+    .await
+}
+
+fn resolve_review_followup_channel_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    agent_id: &str,
+) -> libsql_rusqlite::Result<Option<String>> {
     resolve_agent_primary_channel_on_conn(conn, agent_id)
+}
+
+async fn resolve_review_followup_channel_pg(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Option<String>, String> {
+    resolve_agent_primary_channel_pg(pool, agent_id)
+        .await
+        .map_err(|error| format!("resolve postgres primary review channel for {agent_id}: {error}"))
 }
 
 async fn add_thread_member_to_dispatch_thread(
@@ -1325,6 +2086,191 @@ async fn maybe_add_owner_to_dispatch_thread(
     }
 }
 
+async fn claim_dispatch_delivery_guard(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    if let Some(pool) = pg_pool {
+        let notified: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM kv_meta WHERE key = $1 LIMIT 1")
+                .bind(format!("dispatch_notified:{dispatch_id}"))
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| {
+                    format!("check postgres delivery guard for {dispatch_id}: {error}")
+                })?;
+        if notified.is_some() {
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(format!("dispatch_reserving:{dispatch_id}"))
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("claim postgres delivery guard for {dispatch_id}: {error}"))?;
+        return Ok(result.rows_affected() > 0);
+    }
+
+    let conn = db
+        .lock()
+        .map_err(|_| "db lock failed for delivery guard".to_string())?;
+    let notified = conn
+        .query_row(
+            "SELECT 1 FROM kv_meta WHERE key = ?1",
+            [&format!("dispatch_notified:{dispatch_id}")],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if notified {
+        return Ok(false);
+    }
+    let claimed = conn
+        .execute(
+            "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            libsql_rusqlite::params![format!("dispatch_reserving:{dispatch_id}"), dispatch_id],
+        )
+        .unwrap_or(0)
+        > 0;
+    Ok(claimed)
+}
+
+async fn finalize_dispatch_delivery_guard(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    success: bool,
+) {
+    if let Some(pool) = pg_pool {
+        sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+            .bind(format!("dispatch_reserving:{dispatch_id}"))
+            .execute(pool)
+            .await
+            .ok();
+        if success {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(format!("dispatch_notified:{dispatch_id}"))
+            .bind(dispatch_id)
+            .execute(pool)
+            .await
+            .ok();
+        }
+        return;
+    }
+
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "DELETE FROM kv_meta WHERE key = ?1",
+            [&format!("dispatch_reserving:{dispatch_id}")],
+        )
+        .ok();
+        if success {
+            conn.execute(
+                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
+            )
+            .ok();
+        }
+    }
+}
+
+async fn load_dispatch_delivery_metadata(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query(
+            "SELECT dispatch_type, status, context
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres dispatch metadata for {dispatch_id}: {error}"))?;
+        return row
+            .map(|row| {
+                Ok::<(Option<String>, Option<String>, Option<String>), String>((
+                    row.try_get("dispatch_type").map_err(|error| {
+                        format!("read postgres dispatch_type for {dispatch_id}: {error}")
+                    })?,
+                    row.try_get("status").map_err(|error| {
+                        format!("read postgres status for {dispatch_id}: {error}")
+                    })?,
+                    row.try_get("context").map_err(|error| {
+                        format!("read postgres context for {dispatch_id}: {error}")
+                    })?,
+                ))
+            })
+            .transpose()?
+            .ok_or_else(|| format!("dispatch {dispatch_id} not found"));
+    }
+
+    let conn = db
+        .lock()
+        .map_err(|_| "db lock failed for dispatch metadata query".to_string())?;
+    conn.query_row(
+        "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
+        [dispatch_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|_| format!("dispatch {dispatch_id} not found"))
+}
+
+async fn load_card_issue_info(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    card_id: &str,
+) -> Result<(Option<String>, Option<i64>), String> {
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query(
+            "SELECT github_issue_url, github_issue_number
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres card issue info for {card_id}: {error}"))?;
+        return row
+            .map(|row| {
+                Ok((
+                    row.try_get("github_issue_url").map_err(|error| {
+                        format!("read postgres github_issue_url for {card_id}: {error}")
+                    })?,
+                    row.try_get::<Option<i32>, _>("github_issue_number")
+                        .map(|value| value.map(i64::from))
+                        .map_err(|error| {
+                            format!("read postgres github_issue_number for {card_id}: {error}")
+                        })?,
+                ))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or_default());
+    }
+
+    let conn = db
+        .lock()
+        .map_err(|_| "db lock failed for issue lookup".to_string())?;
+    Ok(conn
+        .query_row(
+            "SELECT github_issue_url, github_issue_number FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or_default())
+}
+
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
 /// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
@@ -1337,8 +2283,29 @@ pub(crate) async fn send_dispatch_to_discord(
     dispatch_id: &str,
 ) -> Result<(), String> {
     let transport = HttpDispatchTransport::from_runtime(db);
-    send_dispatch_to_discord_with_transport(db, agent_id, title, card_id, dispatch_id, &transport)
+    send_dispatch_to_discord_guarded(db, None, agent_id, title, card_id, dispatch_id, &transport)
         .await
+}
+
+pub(crate) async fn send_dispatch_to_discord_with_pg(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
+    send_dispatch_to_discord_guarded(
+        db,
+        pg_pool,
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        &transport,
+    )
+    .await
 }
 
 pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport>(
@@ -1349,43 +2316,23 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
     dispatch_id: &str,
     transport: &T,
 ) -> Result<(), String> {
-    // Two-phase delivery guard (prevents duplicates across all callers):
-    // 1. Check dispatch_notified (confirmed prior delivery) → skip if present
-    // 2. Claim dispatch_reserving (atomic lock) → skip if another path holds it
-    // 3. Send to Discord
-    // 4. On success: release reserving, commit notified
-    // 5. On failure: release reserving, return Err
-    // Boot recovery clears stale reserving markers on startup.
-    {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for delivery guard".into()),
-        };
-        // Already confirmed delivered?
-        let notified = conn
-            .query_row(
-                "SELECT 1 FROM kv_meta WHERE key = ?1",
-                [&format!("dispatch_notified:{dispatch_id}")],
-                |_| Ok(()),
-            )
-            .is_ok();
-        if notified {
-            return Ok(()); // Confirmed prior delivery — idempotent skip
-        }
-        // Atomic reservation claim
-        let claimed = conn
-            .execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("dispatch_reserving:{dispatch_id}"), dispatch_id],
-            )
-            .unwrap_or(0)
-            > 0;
-        if !claimed {
-            return Ok(()); // Another path is actively delivering — skip
-        }
+    send_dispatch_to_discord_guarded(db, None, agent_id, title, card_id, dispatch_id, transport)
+        .await
+}
+
+async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    transport: &T,
+) -> Result<(), String> {
+    if !claim_dispatch_delivery_guard(db, pg_pool, dispatch_id).await? {
+        return Ok(());
     }
 
-    // Wrap the actual send so we can always release the reservation
     let send_result = transport
         .send_dispatch(
             db.clone(),
@@ -1396,22 +2343,7 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
         )
         .await;
 
-    // Release reservation and commit notified marker on success
-    if let Ok(conn) = db.lock() {
-        conn.execute(
-            "DELETE FROM kv_meta WHERE key = ?1",
-            [&format!("dispatch_reserving:{dispatch_id}")],
-        )
-        .ok();
-        if send_result.is_ok() {
-            conn.execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
-            )
-            .ok();
-        }
-    }
-
+    finalize_dispatch_delivery_guard(db, pg_pool, dispatch_id, send_result.is_ok()).await;
     send_result
 }
 
@@ -1425,23 +2357,34 @@ async fn send_dispatch_to_discord_inner_with_context(
     discord_api_base: &str,
     thread_owner_user_id: Option<u64>,
 ) -> Result<(), String> {
+    send_dispatch_to_discord_inner_with_context_pg(
+        db,
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        token,
+        discord_api_base,
+        thread_owner_user_id,
+        None,
+    )
+    .await
+}
+
+async fn send_dispatch_to_discord_inner_with_context_pg(
+    db: &crate::db::Db,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    token: &str,
+    discord_api_base: &str,
+    thread_owner_user_id: Option<u64>,
+    pg_pool: Option<&PgPool>,
+) -> Result<(), String> {
     // Determine dispatch type + status before attempting Discord delivery.
-    let (dispatch_type, dispatch_status, dispatch_context): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for dispatch metadata query".into()),
-        };
-        conn.query_row(
-            "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|_| format!("dispatch {dispatch_id} not found"))?
-    };
+    let (dispatch_type, dispatch_status, dispatch_context) =
+        load_dispatch_delivery_metadata(db, pg_pool, dispatch_id).await?;
 
     if !matches!(
         dispatch_status.as_deref(),
@@ -1456,7 +2399,16 @@ async fn send_dispatch_to_discord_inner_with_context(
     }
 
     // Look up agent's discord channel
-    let channel_id: Option<String> = {
+    let channel_id = if let Some(pool) = pg_pool {
+        resolve_dispatch_delivery_channel_pg(
+            pool,
+            agent_id,
+            card_id,
+            dispatch_type.as_deref(),
+            dispatch_context.as_deref(),
+        )
+        .await?
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for channel lookup".into()),
@@ -1502,18 +2454,7 @@ async fn send_dispatch_to_discord_inner_with_context(
     };
 
     // Look up the issue URL and number for context
-    let (issue_url, issue_number): (Option<String>, Option<i64>) = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for issue lookup".into()),
-        };
-        conn.query_row(
-            "SELECT github_issue_url, github_issue_number FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or_default()
-    };
+    let (issue_url, issue_number) = load_card_issue_info(db, pg_pool, card_id).await?;
 
     let dispatch_context_json = dispatch_context_value(dispatch_context.as_deref());
 
@@ -1549,7 +2490,7 @@ async fn send_dispatch_to_discord_inner_with_context(
         )
         .await
         .map_err(|error| error.to_string())?;
-        persist_dispatch_message_target_and_add_pending_reaction(
+        persist_dispatch_message_target_and_add_pending_reaction_with_pg(
             db,
             &client,
             token,
@@ -1557,6 +2498,7 @@ async fn send_dispatch_to_discord_inner_with_context(
             dispatch_id,
             &channel_id_text,
             &message_id,
+            pg_pool,
         )
         .await?;
         tracing::info!(
@@ -1564,7 +2506,17 @@ async fn send_dispatch_to_discord_inner_with_context(
         );
         return Ok(());
     }
-    let mut slot_binding = {
+    let mut slot_binding = if let Some(pool) = pg_pool {
+        resolve_slot_thread_binding_pg(
+            pool,
+            agent_id,
+            card_id,
+            dispatch_id,
+            dispatch_context_json.as_ref(),
+            channel_id_num,
+        )
+        .await?
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for slot binding lookup".into()),
@@ -1584,28 +2536,29 @@ async fn send_dispatch_to_discord_inner_with_context(
         && let Some(binding) = slot_binding.clone()
         && binding.thread_id.is_some()
     {
-        reset_slot_thread_bindings_excluding(
-            db,
-            &binding.agent_id,
-            binding.slot_index,
-            Some(dispatch_id),
-        )
-        .await?;
-        slot_binding = db.lock().ok().and_then(|conn| {
-            read_slot_thread_binding(&conn, &binding.agent_id, binding.slot_index, channel_id_num)
-        });
-    }
-    if let Some(binding) = slot_binding.clone() {
-        if reset_stale_slot_thread_if_needed(
-            db,
-            &client,
-            &token,
-            discord_api_base,
-            dispatch_id,
-            &binding,
-        )
-        .await?
-        {
+        if let Some(pool) = pg_pool {
+            crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+                pool,
+                &binding.agent_id,
+                binding.slot_index,
+                Some(dispatch_id),
+            )
+            .await?;
+            slot_binding = read_slot_thread_binding_pg(
+                pool,
+                &binding.agent_id,
+                binding.slot_index,
+                channel_id_num,
+            )
+            .await?;
+        } else {
+            reset_slot_thread_bindings_excluding(
+                db,
+                &binding.agent_id,
+                binding.slot_index,
+                Some(dispatch_id),
+            )
+            .await?;
             slot_binding = db.lock().ok().and_then(|conn| {
                 read_slot_thread_binding(
                     &conn,
@@ -1616,33 +2569,80 @@ async fn send_dispatch_to_discord_inner_with_context(
             });
         }
     }
+    if let Some(binding) = slot_binding.clone() {
+        if reset_stale_slot_thread_if_needed(
+            db,
+            pg_pool,
+            &client,
+            token,
+            discord_api_base,
+            dispatch_id,
+            &binding,
+        )
+        .await?
+        {
+            slot_binding = if let Some(pool) = pg_pool {
+                read_slot_thread_binding_pg(
+                    pool,
+                    &binding.agent_id,
+                    binding.slot_index,
+                    channel_id_num,
+                )
+                .await?
+            } else {
+                db.lock().ok().and_then(|conn| {
+                    read_slot_thread_binding(
+                        &conn,
+                        &binding.agent_id,
+                        binding.slot_index,
+                        channel_id_num,
+                    )
+                })
+            };
+        }
+    }
 
     let slot_index = slot_binding
         .as_ref()
         .map(|binding| binding.slot_index)
         .or_else(|| context_slot_index(dispatch_context_json.as_ref()))
         .unwrap_or(0);
-    let thread_name =
-        build_slot_thread_name(db, dispatch_id, card_id, slot_index, issue_number, title);
-    let existing_thread_ids = db
-        .lock()
-        .ok()
-        .map(|conn| {
-            collect_slot_thread_candidates(
-                &conn,
-                agent_id,
-                card_id,
-                slot_binding.as_ref(),
-                channel_id_num,
-                !reset_slot_thread_before_reuse,
-            )
-        })
-        .unwrap_or_default();
+    let thread_name = if let Some(pool) = pg_pool {
+        build_slot_thread_name_pg(pool, dispatch_id, card_id, slot_index, issue_number, title)
+            .await?
+    } else {
+        build_slot_thread_name(db, dispatch_id, card_id, slot_index, issue_number, title)
+    };
+    let existing_thread_ids = if let Some(pool) = pg_pool {
+        collect_slot_thread_candidates_pg(
+            pool,
+            agent_id,
+            card_id,
+            slot_binding.as_ref(),
+            channel_id_num,
+            !reset_slot_thread_before_reuse,
+        )
+        .await?
+    } else {
+        db.lock()
+            .ok()
+            .map(|conn| {
+                collect_slot_thread_candidates(
+                    &conn,
+                    agent_id,
+                    card_id,
+                    slot_binding.as_ref(),
+                    channel_id_num,
+                    !reset_slot_thread_before_reuse,
+                )
+            })
+            .unwrap_or_default()
+    };
 
     for existing_tid in &existing_thread_ids {
         match try_reuse_thread(
             &client,
-            &token,
+            token,
             discord_api_base,
             existing_tid,
             channel_id_num,
@@ -1652,12 +2652,26 @@ async fn send_dispatch_to_discord_inner_with_context(
             dispatch_id,
             card_id,
             db,
+            pg_pool,
         )
         .await
         {
             Ok(Some(reused)) => {
                 if reused {
-                    if let Ok(conn) = db.lock() {
+                    if let Some(pool) = pg_pool {
+                        set_thread_for_channel_pg(pool, card_id, channel_id_num, existing_tid)
+                            .await?;
+                        if let Some(binding) = slot_binding.as_ref() {
+                            upsert_slot_thread_id_pg(
+                                pool,
+                                &binding.agent_id,
+                                binding.slot_index,
+                                channel_id_num,
+                                existing_tid,
+                            )
+                            .await?;
+                        }
+                    } else if let Ok(conn) = db.lock() {
                         set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
                         if let Some(binding) = slot_binding.as_ref() {
                             upsert_slot_thread_id(
@@ -1671,7 +2685,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                     }
                     archive_duplicate_slot_threads(
                         &client,
-                        &token,
+                        token,
                         discord_api_base,
                         channel_id_num,
                         existing_tid,
@@ -1680,7 +2694,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                     .await;
                     maybe_add_owner_to_dispatch_thread(
                         &client,
-                        &token,
+                        token,
                         &discord_api_base,
                         existing_tid,
                         dispatch_id,
@@ -1701,7 +2715,10 @@ async fn send_dispatch_to_discord_inner_with_context(
     }
 
     if let Some(binding) = slot_binding.as_ref() {
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            clear_slot_thread_id_pg(pool, &binding.agent_id, binding.slot_index, channel_id_num)
+                .await?;
+        } else if let Ok(conn) = db.lock() {
             clear_slot_thread_id(&conn, &binding.agent_id, binding.slot_index, channel_id_num);
         }
     }
@@ -1742,10 +2759,36 @@ async fn send_dispatch_to_discord_inner_with_context(
                     {
                         Ok(message_id) => {
                             // Persist thread_id on success
-                            if let Ok(conn) = db.lock() {
+                            if let Some(pool) = pg_pool {
+                                sqlx::query(
+                                    "UPDATE task_dispatches
+                                     SET thread_id = $1,
+                                         updated_at = NOW()
+                                     WHERE id = $2",
+                                )
+                                .bind(thread_id)
+                                .bind(dispatch_id)
+                                .execute(pool)
+                                .await
+                                .map_err(|error| {
+                                    format!("persist postgres thread_id for {dispatch_id}: {error}")
+                                })?;
+                                set_thread_for_channel_pg(pool, card_id, channel_id_num, thread_id)
+                                    .await?;
+                                if let Some(binding) = slot_binding.as_ref() {
+                                    upsert_slot_thread_id_pg(
+                                        pool,
+                                        &binding.agent_id,
+                                        binding.slot_index,
+                                        channel_id_num,
+                                        thread_id,
+                                    )
+                                    .await?;
+                                }
+                            } else if let Ok(conn) = db.lock() {
                                 conn.execute(
                                     "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                                    rusqlite::params![thread_id, dispatch_id],
+                                    libsql_rusqlite::params![thread_id, dispatch_id],
                                 )
                                 .ok();
                                 set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
@@ -1759,7 +2802,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                                     );
                                 }
                             }
-                            persist_dispatch_message_target_and_add_pending_reaction(
+                            persist_dispatch_message_target_and_add_pending_reaction_with_pg(
                                 db,
                                 &client,
                                 token,
@@ -1767,11 +2810,12 @@ async fn send_dispatch_to_discord_inner_with_context(
                                 dispatch_id,
                                 thread_id,
                                 &message_id,
+                                pg_pool,
                             )
                             .await?;
                             archive_duplicate_slot_threads(
                                 &client,
-                                &token,
+                                token,
                                 discord_api_base,
                                 channel_id_num,
                                 thread_id,
@@ -1780,7 +2824,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                             .await;
                             maybe_add_owner_to_dispatch_thread(
                                 &client,
-                                &token,
+                                token,
                                 &discord_api_base,
                                 thread_id,
                                 dispatch_id,
@@ -1829,7 +2873,7 @@ async fn send_dispatch_to_discord_inner_with_context(
             .await
             {
                 Ok(message_id) => {
-                    persist_dispatch_message_target_and_add_pending_reaction(
+                    persist_dispatch_message_target_and_add_pending_reaction_with_pg(
                         db,
                         &client,
                         token,
@@ -1837,6 +2881,7 @@ async fn send_dispatch_to_discord_inner_with_context(
                         dispatch_id,
                         &channel_id_text,
                         &message_id,
+                        pg_pool,
                     )
                     .await?;
                     tracing::info!(
@@ -2298,7 +3343,7 @@ mod tests {
     };
 
     fn test_db() -> crate::db::Db {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -2344,6 +3389,106 @@ mod tests {
             "announce-token\n",
         )
         .unwrap();
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!(
+                "agentdesk_dispatch_reaction_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url).await.unwrap();
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .unwrap();
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url).await.unwrap();
+            crate::db::postgres::migrate(&pool).await.unwrap();
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url).await.unwrap();
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     #[derive(Clone, Debug, Default)]
@@ -3602,6 +4747,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sync_dispatch_status_reaction_with_pg_marks_completed_dispatch_success() {
+        let _env_lock = env_lock();
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+        let temp = tempfile::tempdir().unwrap();
+        write_announce_token(temp.path());
+        let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("agent-1")
+        .bind("Agent 1")
+        .bind("123")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+        )
+        .bind("card-1")
+        .bind("Complete card")
+        .bind("in_progress")
+        .bind("agent-1")
+        .bind("dispatch-complete")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind("dispatch-complete")
+        .bind("card-1")
+        .bind("agent-1")
+        .bind("implementation")
+        .bind("completed")
+        .bind("Complete me")
+        .bind("{\"discord_message_channel_id\":\"123\",\"discord_message_id\":\"message-123\"}")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sync_dispatch_status_reaction_with_pg(&sqlite, Some(&pool), "dispatch-complete")
+            .await
+            .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        let reaction_calls: Vec<String> = state
+            .calls
+            .iter()
+            .filter(|call| call.contains("/channels/123/messages/message-123/reactions/"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            reaction_calls,
+            vec![
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
+                "PUT /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+            ]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     fn insert_review_followup_fixture(db: &crate::db::Db) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -3902,6 +5124,142 @@ mod tests {
                 .calls
                 .contains(&"POST /channels/123/messages".to_string()),
             "main channel fallback must not happen when the mapped thread still exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() {
+        let _env_lock = env_lock();
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+        let temp = tempfile::tempdir().unwrap();
+        write_announce_token(temp.path());
+        let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("agent-1")
+        .bind("Agent 1")
+        .bind("123")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, github_issue_number, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("card-1")
+        .bind("PG card")
+        .bind("requested")
+        .bind("agent-1")
+        .bind("dispatch-1")
+        .bind(701_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-1")
+        .bind("card-1")
+        .bind("agent-1")
+        .bind("implementation")
+        .bind("pending")
+        .bind("PG card")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        send_dispatch_to_discord_with_pg(
+            &sqlite,
+            Some(&pool),
+            "agent-1",
+            "PG card",
+            "card-1",
+            "dispatch-1",
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+
+        let state = state.lock().unwrap();
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/123/threads".to_string()),
+            "pg delivery should create a dispatch thread"
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/thread-created/messages".to_string()),
+            "pg delivery should post the dispatch message into the created thread"
+        );
+        assert!(state.calls.contains(
+            &"DELETE /channels/thread-created/messages/message-thread-created/reactions/%E2%9C%85/@me"
+                .to_string()
+        ));
+        assert!(state.calls.contains(
+            &"DELETE /channels/thread-created/messages/message-thread-created/reactions/%E2%9D%8C/@me"
+                .to_string()
+        ));
+        assert!(state.calls.contains(
+            &"PUT /channels/thread-created/messages/message-thread-created/reactions/%E2%8F%B3/@me"
+                .to_string()
+        ));
+
+        let thread_id: Option<String> =
+            sqlx::query_scalar("SELECT thread_id FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(thread_id.as_deref(), Some("thread-created"));
+
+        let context: Option<String> =
+            sqlx::query_scalar("SELECT context FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
+        assert_eq!(context["discord_message_channel_id"], "thread-created");
+        assert_eq!(context["discord_message_id"], "message-thread-created");
+        assert_eq!(context["slot_index"], 0);
+
+        let channel_thread_map: Option<String> =
+            sqlx::query_scalar("SELECT channel_thread_map::text FROM kanban_cards WHERE id = $1")
+                .bind("card-1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&channel_thread_map.unwrap()).unwrap()["123"],
+            "thread-created"
+        );
+
+        let slot_map: Option<String> = sqlx::query_scalar(
+            "SELECT thread_id_map::text
+             FROM auto_queue_slots
+             WHERE agent_id = $1 AND slot_index = 0",
+        )
+        .bind("agent-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&slot_map.unwrap()).unwrap()["123"],
+            "thread-created"
         );
     }
 }

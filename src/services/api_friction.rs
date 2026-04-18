@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use libsql_rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
@@ -971,7 +971,7 @@ fn load_pattern_evidence(
             },
         )
         .map_err(|err| format!("query api_friction evidence: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
+    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
         .map_err(|err| format!("collect api_friction evidence: {err}"))
 }
 

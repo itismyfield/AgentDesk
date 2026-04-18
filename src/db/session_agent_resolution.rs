@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use libsql_rusqlite::Connection;
 
 use crate::db::agents::AgentChannelBindings;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;

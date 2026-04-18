@@ -306,7 +306,7 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
         return false;
     };
     let db_path = root.join("data/agentdesk.sqlite");
-    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+    let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) else {
         return false;
     };
     let changed = crate::dispatch::set_dispatch_status_on_conn(
@@ -322,7 +322,7 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
     if changed > 0 {
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+            libsql_rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
         )
         .ok();
     }
@@ -330,9 +330,9 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
 }
 
 fn reset_linked_auto_queue_entries_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
-) -> rusqlite::Result<usize> {
+) -> libsql_rusqlite::Result<usize> {
     conn.execute(
         "UPDATE auto_queue_entries
          SET status = 'pending',
@@ -351,7 +351,7 @@ fn runtime_db_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
         return false;
     };
     let db_path = root.join("data/agentdesk.sqlite");
-    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+    let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) else {
         return false;
     };
     reset_linked_auto_queue_entries_on_conn(&conn, dispatch_id)
@@ -714,7 +714,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     tracing::error!("dispatch PATCH failed after retries; falling back to direct DB");
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let db_path = root.join("data/agentdesk.sqlite");
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        if let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) {
             let fallback_result = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true});
             let _ = crate::dispatch::set_dispatch_status_on_conn(
                 &conn,
@@ -731,7 +731,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
             // Leave reconciliation marker for onTick to pick up and run hook chain
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+                libsql_rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
             );
         }
     }
@@ -897,7 +897,10 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             if changed > 0 {
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+                    libsql_rusqlite::params![
+                        format!("reconcile_dispatch:{dispatch_id}"),
+                        dispatch_id
+                    ],
                 )
                 .ok();
             }
@@ -1226,7 +1229,7 @@ mod tests {
 
     #[test]
     fn reset_linked_auto_queue_entries_on_conn_resets_pending_and_dispatched_rows() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        let conn = libsql_rusqlite::Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch(
             "CREATE TABLE auto_queue_entries (
                 id TEXT PRIMARY KEY,

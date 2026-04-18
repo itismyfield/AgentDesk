@@ -87,6 +87,51 @@ fn prompt_select(msg: &str, options: &[&str]) -> usize {
     }
 }
 
+fn prompt_yes_no(msg: &str, default: bool) -> bool {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    loop {
+        let input = prompt_line(&format!("{msg} {suffix}: "));
+        let normalized = input.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return default;
+        }
+        match normalized.as_str() {
+            "y" | "yes" => return true,
+            "n" | "no" => return false,
+            _ => println!("y 또는 n으로 입력하세요."),
+        }
+    }
+}
+
+fn prompt_line_default(msg: &str, default: &str) -> String {
+    let input = prompt_line(&format!("{msg} [{default}]: "));
+    if input.trim().is_empty() {
+        default.to_string()
+    } else {
+        input
+    }
+}
+
+fn prompt_u16_default(msg: &str, default: u16) -> u16 {
+    loop {
+        let input = prompt_line_default(msg, &default.to_string());
+        match input.trim().parse::<u16>() {
+            Ok(value) => return value,
+            Err(_) => println!("유효한 포트 번호를 입력하세요."),
+        }
+    }
+}
+
+fn prompt_u32_default(msg: &str, default: u32) -> u32 {
+    loop {
+        let input = prompt_line_default(msg, &default.to_string());
+        match input.trim().parse::<u32>() {
+            Ok(value) if value > 0 => return value,
+            Ok(_) | Err(_) => println!("1 이상의 숫자를 입력하세요."),
+        }
+    }
+}
+
 fn cli_init_provider_labels() -> Vec<&'static str> {
     ProviderKind::cli_init_labels()
 }
@@ -480,6 +525,7 @@ fn write_agentdesk_discord_config(
     provider: &str,
     owner_id: Option<&str>,
     allowed_channel_ids: &[u64],
+    database: &crate::config::DatabaseConfig,
     reconfigure: bool,
 ) -> Result<PathBuf, String> {
     let config_path = init_config_path(root);
@@ -493,6 +539,7 @@ fn write_agentdesk_discord_config(
     config.discord.guild_id = Some(guild_id.trim().to_string());
     config.discord.owner_id = parse_owner_id(owner_id)?;
     upsert_command_bot(&mut config, token, provider, allowed_channel_ids);
+    config.database = database.clone();
 
     let rendered = serde_yaml::to_string(&config)
         .map_err(|e| format!("Failed to serialize config {}: {e}", config_path.display()))?;
@@ -500,6 +547,90 @@ fn write_agentdesk_discord_config(
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))?;
 
     Ok(config_path)
+}
+
+fn load_init_config_defaults(root: &Path) -> crate::config::Config {
+    let config_path = init_config_path(root);
+    if config_path.is_file() {
+        crate::config::load_from_path(&config_path)
+            .unwrap_or_else(|_| crate::config::Config::default())
+    } else {
+        crate::config::Config::default()
+    }
+}
+
+fn prompt_postgres_config(
+    existing: &crate::config::DatabaseConfig,
+) -> crate::config::DatabaseConfig {
+    let mut database = existing.clone();
+    let enabled = prompt_yes_no("PostgreSQL 부트스트랩 설정을 추가할까요?", existing.enabled);
+    database.enabled = enabled;
+    if !enabled {
+        return database;
+    }
+
+    database.host = prompt_line_default("  PostgreSQL host", &database.host);
+    database.port = prompt_u16_default("  PostgreSQL port", database.port);
+    database.dbname = prompt_line_default("  PostgreSQL database name", &database.dbname);
+    database.user = prompt_line_default("  PostgreSQL user", &database.user);
+
+    let current_password = database
+        .password
+        .clone()
+        .unwrap_or_else(|| "agentdesk".to_string());
+    let password = prompt_line_default("  PostgreSQL password", &current_password);
+    database.password = Some(password);
+    database.pool_max = prompt_u32_default("  PostgreSQL pool_max", database.pool_max.max(1));
+    database
+}
+
+fn postgres_compose_yaml(database: &crate::config::DatabaseConfig) -> String {
+    let password = database
+        .password
+        .clone()
+        .unwrap_or_else(|| "agentdesk".to_string());
+    format!(
+        r#"services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    ports:
+      - "{port}:5432"
+    environment:
+      POSTGRES_DB: "{dbname}"
+      POSTGRES_USER: "{user}"
+      POSTGRES_PASSWORD: "{password}"
+    volumes:
+      - agentdesk-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {user} -d {dbname}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  agentdesk-postgres:
+"#,
+        port = database.port,
+        dbname = database.dbname,
+        user = database.user,
+        password = password,
+    )
+}
+
+fn write_postgres_compose_template(
+    root: &Path,
+    database: &crate::config::DatabaseConfig,
+    reconfigure: bool,
+) -> Result<Option<PathBuf>, String> {
+    if !database.enabled {
+        return Ok(None);
+    }
+
+    let compose_path = root.join("docker-compose.postgres.yml");
+    write_with_backup(&compose_path, &postgres_compose_yaml(database), reconfigure)
+        .map_err(|e| format!("Failed to write {}: {e}", compose_path.display()))?;
+    Ok(Some(compose_path))
 }
 
 fn write_init_artifacts(
@@ -511,8 +642,9 @@ fn write_init_artifacts(
     provider: &str,
     owner_id: Option<&str>,
     allowed_channel_ids: &[u64],
+    database: &crate::config::DatabaseConfig,
     reconfigure: bool,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<(PathBuf, PathBuf, Option<PathBuf>), String> {
     // Validate before mutating the runtime layout so invalid owner_id input
     // never leaves partial init artifacts behind.
     parse_owner_id(owner_id)?;
@@ -556,6 +688,7 @@ fn write_init_artifacts(
         provider,
         owner_id,
         allowed_channel_ids,
+        database,
         reconfigure,
     )?;
     if !agentdesk_config_path.exists() {
@@ -565,7 +698,9 @@ fn write_init_artifacts(
         ));
     }
 
-    Ok((org_path, agentdesk_config_path))
+    let compose_path = write_postgres_compose_template(root, database, reconfigure)?;
+
+    Ok((org_path, agentdesk_config_path, compose_path))
 }
 
 // ── Main init flow ─────────────────────────────────────────────────
@@ -589,6 +724,8 @@ pub fn handle_init(reconfigure: bool) {
     if reconfigure {
         println!("[재설정 모드] 기존 설정을 보존하며 변경합니다.\n");
     }
+
+    let existing_config = load_init_config_defaults(&root);
 
     // Step 1: Bot token
     println!("Step 1/5: Discord 봇 토큰");
@@ -716,7 +853,7 @@ pub fn handle_init(reconfigure: bool) {
     let provider = cli_init_provider_from_index(provider_idx);
 
     // Owner user ID (optional)
-    println!("\nStep 4/5: 소유자 설정");
+    println!("\nStep 4/6: 소유자 설정");
     let owner_input =
         prompt_line("Discord 사용자 ID (Enter로 건너뛰기 — 첫 메시지 발신자가 자동 등록): ");
     let owner_id = if owner_input.is_empty() {
@@ -730,9 +867,12 @@ pub fn handle_init(reconfigure: bool) {
         .filter_map(|(_, channel_id)| channel_id.parse::<u64>().ok())
         .collect::<Vec<_>>();
 
+    println!("\nStep 5/6: PostgreSQL 설정");
+    let database = prompt_postgres_config(&existing_config.database);
+
     // Generate configs
-    println!("\nStep 5/5: 설정 파일 생성\n");
-    let (org_path, agentdesk_config_path) = match write_init_artifacts(
+    println!("\nStep 6/6: 설정 파일 생성\n");
+    let (org_path, agentdesk_config_path, compose_path) = match write_init_artifacts(
         &root,
         &channel_mappings,
         template_idx,
@@ -741,6 +881,7 @@ pub fn handle_init(reconfigure: bool) {
         provider,
         owner_id,
         &allowed_channel_ids,
+        &database,
         reconfigure,
     ) {
         Ok(paths) => paths,
@@ -751,6 +892,9 @@ pub fn handle_init(reconfigure: bool) {
     };
     println!("  [OK] {}", org_path.display());
     println!("  [OK] {}", agentdesk_config_path.display());
+    if let Some(compose_path) = compose_path {
+        println!("  [OK] {}", compose_path.display());
+    }
 
     // Create prompts
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
@@ -971,6 +1115,7 @@ mod tests {
         let root = temp_dir.path().join(".adk").join("runtime");
         let org_path = crate::runtime_layout::config_dir(&root).join("org.yaml");
         let agentdesk_config_path = init_config_path(&root);
+        let database = crate::config::DatabaseConfig::default();
 
         let error = write_init_artifacts(
             &root,
@@ -985,6 +1130,7 @@ mod tests {
             "claude",
             Some("7"),
             &[123456789012345678],
+            &database,
             false,
         )
         .unwrap_err();
@@ -992,6 +1138,72 @@ mod tests {
         assert!(error.contains("owner_id must be a Discord user id"));
         assert!(!org_path.exists());
         assert!(!agentdesk_config_path.exists());
+    }
+
+    #[test]
+    fn write_postgres_compose_template_skips_when_disabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join(".adk").join("runtime");
+        let compose_path = write_postgres_compose_template(
+            &root,
+            &crate::config::DatabaseConfig::default(),
+            false,
+        )
+        .unwrap();
+
+        assert!(compose_path.is_none());
+        assert!(!root.join("docker-compose.postgres.yml").exists());
+    }
+
+    #[test]
+    fn write_init_artifacts_writes_postgres_compose_and_database_config_when_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join(".adk").join("runtime");
+        let mut database = crate::config::DatabaseConfig::default();
+        database.enabled = true;
+        database.host = "db.internal".to_string();
+        database.port = 5433;
+        database.dbname = "agentdesk_dev".to_string();
+        database.user = "agentdesk_app".to_string();
+        database.password = Some("secretpw".to_string());
+        database.pool_max = 16;
+
+        let (org_path, config_path, compose_path) = write_init_artifacts(
+            &root,
+            &[(
+                "123456789012345678".to_string(),
+                "general".to_string(),
+                "assistant".to_string(),
+            )],
+            0,
+            "guild-123",
+            "test-token",
+            "claude",
+            Some("1469509284508340276"),
+            &[123456789012345678],
+            &database,
+            false,
+        )
+        .unwrap();
+
+        let compose_path = compose_path.expect("postgres compose path should be created");
+        let compose = fs::read_to_string(&compose_path).unwrap();
+        let config = fs::read_to_string(&config_path).unwrap();
+
+        assert!(org_path.exists());
+        assert!(config_path.exists());
+        assert!(compose_path.exists());
+        assert!(compose.contains("image: postgres:17"));
+        assert!(compose.contains("POSTGRES_DB: \"agentdesk_dev\""));
+        assert!(compose.contains("POSTGRES_USER: \"agentdesk_app\""));
+        assert!(compose.contains("POSTGRES_PASSWORD: \"secretpw\""));
+        assert!(config.contains("database:"));
+        assert!(config.contains("enabled: true"));
+        assert!(config.contains("host: db.internal"));
+        assert!(config.contains("port: 5433"));
+        assert!(config.contains("dbname: agentdesk_dev"));
+        assert!(config.contains("user: agentdesk_app"));
+        assert!(config.contains("pool_max: 16"));
     }
 }
 

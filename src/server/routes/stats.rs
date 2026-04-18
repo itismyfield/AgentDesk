@@ -223,7 +223,7 @@ pub async fn get_stats(
             }
         }
 
-        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut bind_values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
         let mut dept_sql = String::from("SELECT id, name, name_ko, icon, color FROM departments");
         if let Some(ref oid) = params.office_id {
             dept_sql.push_str(
@@ -237,7 +237,7 @@ pub async fn get_stats(
         }
         dept_sql.push_str(" ORDER BY sort_order, id");
 
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
             bind_values.iter().map(|v| v.as_ref()).collect();
         let mut stmt = match conn.prepare(&dept_sql) {
             Ok(stmt) => stmt,

@@ -1,6 +1,6 @@
 use crate::db::Db;
+use libsql_rusqlite::OptionalExtension;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use rusqlite::OptionalExtension;
 use serde_json::json;
 
 pub(crate) const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
@@ -241,22 +241,22 @@ fn review_record_entry_raw(db: &Db, card_id: &str, opts_json: &str) -> String {
             (Some(round), Some(status)) => conn.execute(
                 "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now') \
                  WHERE id = ?2 AND status != ?3",
-                rusqlite::params![round, card_id, status],
+                libsql_rusqlite::params![round, card_id, status],
             )?,
             (Some(round), None) => conn.execute(
                 "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now') \
                  WHERE id = ?2",
-                rusqlite::params![round, card_id],
+                libsql_rusqlite::params![round, card_id],
             )?,
             (None, Some(status)) => conn.execute(
                 "UPDATE kanban_cards SET updated_at = datetime('now') \
                  WHERE id = ?1 AND status != ?2",
-                rusqlite::params![card_id, status],
+                libsql_rusqlite::params![card_id, status],
             )?,
             (None, None) => conn.execute(
                 "UPDATE kanban_cards SET updated_at = datetime('now') \
                  WHERE id = ?1",
-                rusqlite::params![card_id],
+                libsql_rusqlite::params![card_id],
             )?,
         };
 
@@ -301,9 +301,9 @@ fn review_has_active_work_raw(db: &Db, card_id: &str) -> String {
 }
 
 fn clear_review_round_advance_hint_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
-) -> rusqlite::Result<()> {
+) -> libsql_rusqlite::Result<()> {
     let metadata_raw: Option<String> = conn
         .query_row(
             "SELECT metadata FROM kanban_cards WHERE id = ?1",
@@ -332,7 +332,7 @@ fn clear_review_round_advance_hint_on_conn(
     };
     conn.execute(
         "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
-        rusqlite::params![stored_metadata, card_id],
+        libsql_rusqlite::params![stored_metadata, card_id],
     )?;
     Ok(())
 }

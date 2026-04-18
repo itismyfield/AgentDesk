@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
+use sqlx::PgPool;
 
 use super::ws::{BatchBuffer, BroadcastTx};
 
@@ -258,6 +259,7 @@ pub(crate) struct SupervisedWorkerRegistry {
     db: Db,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<PgPool>,
     running: Vec<RunningWorker>,
 }
 
@@ -267,12 +269,14 @@ impl SupervisedWorkerRegistry {
         db: Db,
         engine: PolicyEngine,
         health_registry: Option<Arc<HealthRegistry>>,
+        pg_pool: Option<PgPool>,
     ) -> Self {
         Self {
             config,
             db,
             engine,
             health_registry,
+            pg_pool,
             running: Vec::new(),
         }
     }
@@ -387,30 +391,39 @@ impl SupervisedWorkerRegistry {
             }
             ServerWorkerId::RateLimitSync => {
                 let rate_limit_db = self.db.clone();
+                let rate_limit_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::rate_limit_sync_loop(rate_limit_db).await;
+                    super::rate_limit_sync_loop(rate_limit_db, rate_limit_pg_pool).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::MessageOutbox => {
                 let outbox_db = self.db.clone();
                 let outbox_health_registry = self.health_registry.clone();
+                let outbox_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::message_outbox_loop(outbox_db, outbox_health_registry).await;
+                    super::message_outbox_loop(outbox_db, outbox_pg_pool, outbox_health_registry)
+                        .await;
                 });
                 Ok(None)
             }
             ServerWorkerId::DispatchOutbox => {
                 let dispatch_outbox_db = self.db.clone();
+                let dispatch_outbox_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::routes::dispatches::dispatch_outbox_loop(dispatch_outbox_db).await;
+                    super::routes::dispatches::dispatch_outbox_loop(
+                        dispatch_outbox_db,
+                        dispatch_outbox_pg_pool,
+                    )
+                    .await;
                 });
                 Ok(None)
             }
             ServerWorkerId::DmReplyRetry => {
                 let dm_retry_db = self.db.clone();
+                let dm_retry_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::dm_reply_retry_loop(dm_retry_db).await;
+                    super::dm_reply_retry_loop(dm_retry_db, dm_retry_pg_pool).await;
                 });
                 Ok(None)
             }

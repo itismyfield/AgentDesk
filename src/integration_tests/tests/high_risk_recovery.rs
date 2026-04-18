@@ -456,7 +456,7 @@ mod outbox_boundary {
         conn.execute(
             "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
              VALUES (?1, ?2, 'agent-1', 'card-160', 'Test', 'pending')",
-            rusqlite::params![dispatch_id, action],
+            libsql_rusqlite::params![dispatch_id, action],
         )
         .unwrap();
     }
@@ -487,10 +487,12 @@ mod outbox_boundary {
                  ORDER BY id",
             )
             .unwrap();
-        stmt.query_map(rusqlite::params![dispatch_id, action], |row| row.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        stmt.query_map(libsql_rusqlite::params![dispatch_id, action], |row| {
+            row.get(0)
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     fn has_reconcile_marker(db: &db::Db, dispatch_id: &str) -> bool {
@@ -624,7 +626,7 @@ mod outbox_boundary {
             fallback_conn
                 .execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params!["reconcile_dispatch:d-160r2", "d-160r2"],
+                    libsql_rusqlite::params!["reconcile_dispatch:d-160r2", "d-160r2"],
                 )
                 .unwrap();
         }

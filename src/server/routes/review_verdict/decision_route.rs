@@ -1,11 +1,11 @@
 use axum::{Json, extract::State, http::StatusCode};
-use rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::super::AppState;
 use super::review_state_repo::update_card_review_state;
-use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed};
+use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
 
@@ -110,9 +110,9 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
 }
 
 fn mark_next_review_round_advance_on_conn(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
-) -> rusqlite::Result<bool> {
+) -> libsql_rusqlite::Result<bool> {
     let metadata_raw: Option<String> = conn
         .query_row(
             "SELECT metadata FROM kanban_cards WHERE id = ?1",
@@ -145,7 +145,7 @@ fn mark_next_review_round_advance_on_conn(
     );
     conn.execute(
         "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
-        rusqlite::params![metadata.to_string(), card_id],
+        libsql_rusqlite::params![metadata.to_string(), card_id],
     )?;
     Ok(true)
 }
@@ -255,36 +255,33 @@ pub async fn submit_review_decision(
         );
     }
 
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
+    let pending_rd_id: Option<String> = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        let card_exists = conn
+            .query_row(
+                "SELECT 1 FROM kanban_cards WHERE id = ?1",
+                [&body.card_id],
+                |_row| Ok(()),
+            )
+            .is_ok();
+
+        if !card_exists {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "card not found"})),
             );
         }
-    };
 
-    // Verify card exists
-    let card_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [&body.card_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if card_status.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        );
-    }
-
-    // #117: Look up pending review-decision via canonical card_review_state first,
-    // falling back to legacy latest_dispatch_id for cards not yet in the canonical table.
-    let pending_rd_id: Option<String> = conn
-        .query_row(
+        conn.query_row(
             "SELECT td.id FROM task_dispatches td \
              JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
              WHERE crs.card_id = ?1 AND td.dispatch_type = 'review-decision' \
@@ -294,7 +291,6 @@ pub async fn submit_review_decision(
         )
         .ok()
         .or_else(|| {
-            // Fallback: legacy path via latest_dispatch_id
             conn.query_row(
                 "SELECT td.id FROM task_dispatches td \
                  JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
@@ -304,7 +300,8 @@ pub async fn submit_review_decision(
                 |row| row.get(0),
             )
             .ok()
-        });
+        })
+    };
 
     if pending_rd_id.is_none() {
         // No pending review-decision dispatch → stale or duplicate call
@@ -335,14 +332,11 @@ pub async fn submit_review_decision(
             );
         }
     }
-
     match body.decision.as_str() {
         "accept" => {
             // #195: Agent accepts review feedback — create a rework dispatch so the
             // agent can address the findings. When the rework dispatch completes,
             // OnDispatchCompleted (kanban-rules.js) transitions to review for re-review.
-            drop(conn);
-
             let (card_status_now, card_repo_id, card_agent_id, card_title): (
                 String,
                 Option<String>,
@@ -840,8 +834,15 @@ pub async fn submit_review_decision(
             }
 
             // #119: Record tuning outcome
-            record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
-            spawn_aggregate_if_needed(&state.db);
+            record_decision_tuning(
+                &state.db,
+                state.pg_pool.as_ref(),
+                &body.card_id,
+                "accept",
+                pending_rd_id.as_deref(),
+            )
+            .await;
+            spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
 
             // #117: Update canonical review state.
             // For direct review: OnReviewEnter already set the state, so skip the
@@ -886,36 +887,48 @@ pub async fn submit_review_decision(
             );
         }
         "dispute" => {
-            // #155: Use intents for review_status mutation (executor boundary)
-            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-            let dispute_intents = vec![
-                TransitionIntent::SetReviewStatus {
-                    card_id: body.card_id.clone(),
-                    review_status: Some("reviewing".to_string()),
-                },
-                TransitionIntent::SyncReviewState {
-                    card_id: body.card_id.clone(),
-                    state: "reviewing".to_string(),
-                },
-            ];
-            for intent in &dispute_intents {
-                execute_intent_on_conn(&conn, intent).ok();
+            {
+                let conn = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("database lock poisoned: {e}")})),
+                        );
+                    }
+                };
+                // #155: Use intents for review_status mutation (executor boundary)
+                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+                let dispute_intents = vec![
+                    TransitionIntent::SetReviewStatus {
+                        card_id: body.card_id.clone(),
+                        review_status: Some("reviewing".to_string()),
+                    },
+                    TransitionIntent::SyncReviewState {
+                        card_id: body.card_id.clone(),
+                        state: "reviewing".to_string(),
+                    },
+                ];
+                for intent in &dispute_intents {
+                    execute_intent_on_conn(&conn, intent).ok();
+                }
+                conn.execute(
+                    "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
+                    [&body.card_id],
+                )
+                .ok();
             }
-            conn.execute(
-                "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
-                [&body.card_id],
-            )
-            .ok();
-            drop(conn);
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
             record_decision_tuning(
                 &state.db,
+                state.pg_pool.as_ref(),
                 &body.card_id,
                 "dispute",
                 pending_rd_id.as_deref(),
-            );
-            spawn_aggregate_if_needed(&state.db);
+            )
+            .await;
+            spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
 
             // #229: Cancel stale pending/dispatched review dispatches for this card.
             // Without this, the dedup guard in create_dispatch_core blocks
@@ -1157,7 +1170,6 @@ pub async fn submit_review_decision(
             // Agent dismisses review → transition to terminal state, then clean up stale state.
             // Order matters: transition_status requires an active dispatch, so we must
             // transition BEFORE cancelling pending dispatches.
-            drop(conn);
             crate::pipeline::ensure_loaded();
             let terminal_state = {
                 let conn_lock = match state.db.lock() {
@@ -1265,11 +1277,13 @@ pub async fn submit_review_decision(
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
     record_decision_tuning(
         &state.db,
+        state.pg_pool.as_ref(),
         &body.card_id,
         &body.decision,
         pending_rd_id.as_deref(),
-    );
-    spawn_aggregate_if_needed(&state.db);
+    )
+    .await;
+    spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
 
     // Emit kanban_card_updated for real-time dashboard
     if let Ok(conn) = state.db.lock() {

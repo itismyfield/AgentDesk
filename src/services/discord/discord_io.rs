@@ -50,6 +50,7 @@ pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bo
 /// to the source agent's Discord channel so its session can process the reply.
 pub(super) async fn try_handle_pending_dm_reply(
     db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
     msg: &serenity::Message,
 ) -> bool {
     if msg.author.bot || msg.guild_id.is_some() {
@@ -61,14 +62,9 @@ pub(super) async fn try_handle_pending_dm_reply(
     }
     let user_id_str = msg.author.id.get().to_string();
     let username = msg.author.name.clone();
-    let db = db.clone();
     let answer_owned = answer.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        consume_pending_dm_reply(&db, &user_id_str, &answer_owned)
-    })
-    .await;
-    match result {
-        Ok(Some(info)) => {
+    match consume_pending_dm_reply(db, pg_pool, &user_id_str, &answer_owned).await {
+        Some(info) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ✉️ DM reply consumed: user={} agent={} id={}",
@@ -94,26 +90,18 @@ pub(super) async fn try_handle_pending_dm_reply(
                 let db3 = info.db.clone();
                 let reply_id = info.id;
                 let err_msg = format!("{e}");
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = db3.separate_conn() {
-                        let _ = conn.execute(
-                            "UPDATE pending_dm_replies SET context = \
-                             json_set(context, '$._notify_failed', json('true'), '$._notify_error', ?1) \
-                             WHERE id = ?2",
-                            rusqlite::params![err_msg, reply_id],
-                        );
-                    }
-                })
+                let _ = crate::services::discord::dm_reply_store::mark_pending_dm_reply_notify_failed_db(
+                    &db3,
+                    pg_pool,
+                    reply_id,
+                    &err_msg,
+                )
                 .await;
             }
 
             true
         }
-        Ok(None) => false,
-        Err(e) => {
-            tracing::warn!("  [dm-reply] consume task error: {e}");
-            false
-        }
+        None => false,
     }
 }
 
@@ -193,40 +181,27 @@ fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
 
 /// Retry DM reply notifications that previously failed (`_notify_failed` in context).
 /// Called from the 5-min tick loop.
-pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
-    let db2 = db.clone();
-    let entries: Vec<(i64, String, String, Option<String>)> =
-        match tokio::task::spawn_blocking(move || {
-            let conn = db2.separate_conn().map_err(|e| format!("{e}"))?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-                     WHERE status = 'consumed' AND json_extract(context, '$._notify_failed') IS NOT NULL \
-                     LIMIT 10",
-                )
-                .map_err(|e| format!("{e}"))?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map_err(|e| format!("{e}"))?
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>();
-            Ok::<_, String>(rows)
-        })
+pub async fn retry_failed_dm_notifications(db: &crate::db::Db, pg_pool: Option<&sqlx::PgPool>) {
+    let entries =
+        match crate::services::discord::dm_reply_store::load_failed_consumed_dm_replies_db(
+            db, pg_pool,
+        )
         .await
         {
-            Ok(Ok(v)) => v,
-            _ => return,
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!("  [dm-reply] list failed notifications: {error}");
+                return;
+            }
         };
 
     if entries.is_empty() {
         return;
     }
 
-    for (id, source_agent, context_str, channel_id) in entries {
+    for entry in entries {
         let ctx: serde_json::Value =
-            serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
+            serde_json::from_str(&entry.context_json).unwrap_or(serde_json::json!({}));
         let answer = ctx.get("_answer").and_then(|v| v.as_str()).unwrap_or("");
         if answer.is_empty() {
             continue;
@@ -234,9 +209,9 @@ pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
 
         match notify_source_agent(
             db,
-            &source_agent,
-            id,
-            channel_id.as_deref(),
+            &entry.source_agent,
+            entry.id,
+            entry.channel_id.as_deref(),
             "(retry)",
             answer,
             &ctx,
@@ -245,23 +220,21 @@ pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
         {
             Ok(()) => {
                 // Clear _notify_failed on success
-                let db3 = db.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = db3.separate_conn() {
-                        let _ = conn.execute(
-                            "UPDATE pending_dm_replies SET context = \
-                             json_remove(context, '$._notify_failed', '$._notify_error') \
-                             WHERE id = ?1",
-                            rusqlite::params![id],
-                        );
-                    }
-                })
+                let _ = crate::services::discord::dm_reply_store::clear_pending_dm_reply_notify_failure_db(
+                    db,
+                    pg_pool,
+                    entry.id,
+                )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
+                tracing::info!(
+                    "  [{ts}] ✉️ DM reply retry OK: id={} agent={}",
+                    entry.id,
+                    entry.source_agent
+                );
             }
             Err(e) => {
-                tracing::warn!("  [dm-reply] retry still failing id={id}: {e}");
+                tracing::warn!("  [dm-reply] retry still failing id={}: {e}", entry.id);
             }
         }
     }
@@ -276,48 +249,44 @@ struct ConsumedDmReply {
     db: crate::db::Db,
 }
 
-fn consume_pending_dm_reply(
+async fn consume_pending_dm_reply(
     db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
     user_id: &str,
     answer: &str,
 ) -> Option<ConsumedDmReply> {
-    let conn = db.separate_conn().ok()?;
-    // FIFO: consume oldest non-expired pending entry
-    let row: Result<(i64, String, String, Option<String>), _> = conn.query_row(
-        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-         WHERE user_id = ?1 AND status = 'pending' \
-         AND (expires_at IS NULL OR expires_at > datetime('now')) \
-         ORDER BY created_at ASC LIMIT 1",
-        rusqlite::params![user_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    let (id, source_agent, context_str, channel_id) = row.ok()?;
+    let row = crate::services::discord::dm_reply_store::load_oldest_pending_dm_reply_db(
+        db, pg_pool, user_id,
+    )
+    .await
+    .ok()??;
 
     // Merge the answer into the context JSON
     let mut context: serde_json::Value =
-        serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
+        serde_json::from_str(&row.context_json).unwrap_or(serde_json::json!({}));
     let notification_context = context.clone();
     context["_answer"] = serde_json::Value::String(answer.to_string());
     let updated_context = serde_json::to_string(&context).unwrap_or_default();
 
     // CAS: only mark consumed if still pending (guards against race)
-    let updated = conn.execute(
-        "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now'), \
-         context = ?1 WHERE id = ?2 AND status = 'pending'",
-        rusqlite::params![updated_context, id],
-    );
-    match updated {
-        Ok(0) => return None,
-        Err(_) => return None,
-        _ => {}
+    let updated = crate::services::discord::dm_reply_store::mark_pending_dm_reply_consumed_db(
+        db,
+        pg_pool,
+        row.id,
+        &updated_context,
+    )
+    .await
+    .ok()?;
+    if !updated {
+        return None;
     }
 
     Some(ConsumedDmReply {
-        id,
-        source_agent,
+        id: row.id,
+        source_agent: row.source_agent,
         answer: answer.to_string(),
         context: notification_context,
-        channel_id,
+        channel_id: row.channel_id,
         db: db.clone(),
     })
 }
@@ -512,8 +481,8 @@ mod tests {
         assert!(lines.next().is_none());
     }
 
-    #[test]
-    fn consume_pending_dm_reply_stores_answer_but_returns_original_context() {
+    #[tokio::test]
+    async fn consume_pending_dm_reply_stores_answer_but_returns_original_context() {
         let db = crate::db::test_db();
         let reply_id = crate::services::discord::dm_reply_store::register_pending_dm_reply(
             &db,
@@ -525,8 +494,9 @@ mod tests {
         )
         .expect("insert should succeed");
 
-        let consumed =
-            consume_pending_dm_reply(&db, "12345", "지난주에 했어").expect("reply should consume");
+        let consumed = consume_pending_dm_reply(&db, None, "12345", "지난주에 했어")
+            .await
+            .expect("reply should consume");
 
         assert_eq!(consumed.id, reply_id);
         assert_eq!(consumed.source_agent, "family-counsel");
@@ -545,7 +515,7 @@ mod tests {
             .expect("db connection")
             .query_row(
                 "SELECT context FROM pending_dm_replies WHERE id = ?1",
-                rusqlite::params![reply_id],
+                libsql_rusqlite::params![reply_id],
                 |row| row.get(0),
             )
             .expect("stored context should exist");

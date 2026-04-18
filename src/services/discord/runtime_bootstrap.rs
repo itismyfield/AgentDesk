@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Row as SqlxRow;
 
 pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -7,7 +8,34 @@ pub(crate) struct RunBotContext {
     pub(crate) health_registry: Arc<health::HealthRegistry>,
     pub(crate) api_port: u16,
     pub(crate) db: Option<crate::db::Db>,
+    pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
+}
+
+const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
+
+fn discord_gateway_lock_id(token_hash: &str) -> i64 {
+    let hex = token_hash
+        .get(..16)
+        .filter(|prefix| prefix.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .unwrap_or("0");
+    let parsed = u64::from_str_radix(hex, 16).unwrap_or(0);
+    let suffix = parsed & 0x0000_FFFF_FFFF_FFFF;
+    (DISCORD_GATEWAY_LOCK_PREFIX | suffix) as i64
+}
+
+async fn try_acquire_discord_gateway_lease(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+    provider: &ProviderKind,
+) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
+    crate::db::postgres::AdvisoryLockLease::try_acquire(
+        pool,
+        discord_gateway_lock_id(token_hash),
+        format!("discord gateway {}", provider.as_str()),
+    )
+    .await
 }
 
 fn restored_intervention_message_ids(item: &Intervention) -> Vec<u64> {
@@ -264,6 +292,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         Some(d) => d,
         None => return,
     };
+    let pg_pool = shared.pg_pool.as_ref();
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
     // not a wall-clock offset that could mis-classify old pending dispatches.
@@ -297,7 +326,50 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     // 4. created_at < boot_time (pre-restart, using pid mtime)
     // 5. no newer dispatch for the same card (using rowid for monotonic ordering,
     //    avoids same-second ambiguity with created_at)
-    let orphans: Vec<(String, String, String, String, String)> = {
+    let orphans: Vec<(String, String, String, String, String)> = if let Some(pool) = pg_pool {
+        match sqlx::query(
+            "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
+               FROM task_dispatches d
+               JOIN kanban_cards kc ON kc.id = d.kanban_card_id
+              WHERE d.status = 'pending'
+                AND d.created_at < $1::timestamptz
+                AND kc.assigned_agent_id = d.to_agent_id
+                AND NOT EXISTS (
+                    SELECT 1 FROM sessions s
+                     WHERE s.agent_id = d.to_agent_id
+                       AND s.status = 'working'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_dispatches d2
+                     WHERE d2.kanban_card_id = d.kanban_card_id
+                       AND d2.status NOT IN ('cancelled', 'failed')
+                       AND d2.created_at > d.created_at
+                )",
+        )
+        .bind(&boot_time)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some((
+                        row.try_get::<String, _>("id").ok()?,
+                        row.try_get::<String, _>("to_agent_id").ok()?,
+                        row.try_get::<String, _>("kanban_card_id").ok()?,
+                        row.try_get::<String, _>("title").ok()?,
+                        row.try_get::<String, _>("dispatch_type").ok()?,
+                    ))
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    "[dispatch-recovery] failed to query postgres orphan dispatches: {error}"
+                );
+                return;
+            }
+        }
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
@@ -353,15 +425,23 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         // Clear any existing dispatch_notified marker — the 5-condition query already
         // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
-            let conn = match db.lock() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            conn.execute(
-                "DELETE FROM kv_meta WHERE key = ?1",
-                [&format!("dispatch_notified:{dispatch_id}")],
-            )
-            .ok();
+            if let Some(pool) = pg_pool {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(format!("dispatch_notified:{dispatch_id}"))
+                    .execute(pool)
+                    .await
+                    .ok();
+            } else {
+                let conn = match db.lock() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                conn.execute(
+                    "DELETE FROM kv_meta WHERE key = ?1",
+                    [&format!("dispatch_notified:{dispatch_id}")],
+                )
+                .ok();
+            }
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -374,15 +454,27 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
 
         // send_dispatch_to_discord handles its own two-phase delivery guard
         // (reserving → send → notified), so no manual marker management needed here.
-        match crate::server::routes::dispatches::send_dispatch_to_discord(
-            db,
-            agent_id,
-            title,
-            card_id,
-            dispatch_id,
-        )
-        .await
-        {
+        let send_result = if let Some(pool) = pg_pool {
+            crate::server::routes::dispatches::send_dispatch_to_discord_with_pg(
+                db,
+                Some(pool),
+                agent_id,
+                title,
+                card_id,
+                dispatch_id,
+            )
+            .await
+        } else {
+            crate::server::routes::dispatches::send_dispatch_to_discord(
+                db,
+                agent_id,
+                title,
+                card_id,
+                dispatch_id,
+            )
+            .await
+        };
+        match send_result {
             Ok(()) => {
                 delivered += 1;
             }
@@ -430,6 +522,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         health_registry,
         api_port,
         db,
+        pg_pool,
         engine,
     } = context;
 
@@ -443,7 +536,46 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         return;
     }
 
-    super::internal_api::init(db.clone(), engine.clone(), health_registry.clone());
+    let token_hash = settings::discord_token_hash(token);
+    let gateway_lease = match pg_pool.as_ref() {
+        Some(pool) => match try_acquire_discord_gateway_lease(pool, &token_hash, &provider).await {
+            Ok(Some(lease)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
+                    provider.display_name()
+                );
+                Some(lease)
+            }
+            Ok(None) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
+                    provider.display_name()
+                );
+                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+            Err(error) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
+                    provider.display_name(),
+                    error
+                );
+                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+        },
+        None => None,
+    };
+
+    super::internal_api::init(
+        db.clone(),
+        pg_pool.clone(),
+        engine.clone(),
+        health_registry.clone(),
+    );
 
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
@@ -471,6 +603,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let provider_for_shutdown = provider.clone();
     let provider_for_error = provider.clone();
+    let provider_for_framework = provider.clone();
 
     let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_model_overrides
@@ -530,9 +663,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         turn_start_times: dashmap::DashMap::new(),
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
-        token_hash: settings::discord_token_hash(token),
+        token_hash: token_hash.clone(),
         api_port,
         db,
+        pg_pool,
         engine,
         health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
@@ -616,7 +750,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         .setup(move |ctx, _ready, framework| {
             let shared_for_migrate = shared_clone.clone();
             let health_registry_for_setup = health_registry.clone();
-            let provider_for_setup = provider.clone();
+            let provider_for_setup = provider_for_framework.clone();
             let token_for_ready = token_owned.clone();
             Box::pin(async move {
                 // Register in each guild for instant slash command propagation
@@ -656,7 +790,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
                 // Background: poll for deferred restart marker when idle
                 let shared_for_deferred = shared_for_tmux.clone();
-                let provider_for_deferred = provider.clone();
+                let provider_for_deferred = provider_for_setup.clone();
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
@@ -705,7 +839,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Background: hot-reload skills on file changes (30s polling)
                 // Scans home-level AND all active project-level skill directories.
                 let shared_for_skills = shared_for_tmux.clone();
-                let provider_for_skills = provider.clone();
+                let provider_for_skills = provider_for_setup.clone();
                 tokio::spawn(async move {
                     let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
                     loop {
@@ -759,7 +893,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 let ctx_for_kickoff = ctx.clone();
                 let token_for_kickoff = token_owned.clone();
                 let shared_for_restart_reports = shared_for_tmux.clone();
-                let provider_for_restore = provider.clone();
+                let provider_for_restore = provider_for_setup.clone();
                 tokio::spawn(async move {
                     let is_utility_bot = {
                         let s = shared_for_tmux2.settings.read().await;
@@ -892,7 +1026,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                     for ch in &recovery_channels {
                                         conn.execute(
                                             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                            rusqlite::params![
+                                            libsql_rusqlite::params![
                                                 format!("recovery_handled_channel:{ch}"),
                                                 chrono::Utc::now().timestamp().to_string(),
                                             ],
@@ -1026,7 +1160,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 Ok(Data {
                     shared: shared_clone,
                     token: token_owned,
-                    provider,
+                    provider: provider_for_setup,
                 })
             })
         })
@@ -1038,6 +1172,74 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         .framework(framework)
         .await
         .expect("Failed to create Discord client");
+
+    let gateway_lease_task = gateway_lease.map(|mut lease| {
+        let shared_for_lease = shared.clone();
+        let provider_for_lease = provider.clone();
+        let shard_manager = client.shard_manager.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+
+                if shared_for_lease
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let _ = lease.unlock().await;
+                    return;
+                }
+
+                if let Err(error) = lease.keepalive().await {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::error!(
+                        "  [{ts}] ⛔ GATEWAY-LEASE: {} lost singleton lease: {} — self-fencing",
+                        provider_for_lease.display_name(),
+                        error
+                    );
+
+                    shared_for_lease
+                        .bot_connected
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    shared_for_lease
+                        .shutting_down
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    shared_for_lease
+                        .restart_pending
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    for entry in shared_for_lease.tmux_watchers.iter() {
+                        entry
+                            .value()
+                            .cancel
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+
+                    let queue_count =
+                        mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
+                    if queue_count > 0 {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 📋 GATEWAY-LEASE: persisted {queue_count} pending queue item(s) before self-fence"
+                        );
+                    }
+
+                    let ids: std::collections::HashMap<u64, u64> = shared_for_lease
+                        .last_message_ids
+                        .iter()
+                        .map(|entry| (entry.key().get(), *entry.value()))
+                        .collect();
+                    if !ids.is_empty() {
+                        runtime_store::save_all_last_message_ids(provider_for_lease.as_str(), &ids);
+                    }
+
+                    shard_manager.shutdown_all().await;
+                    return;
+                }
+            }
+        })
+    });
 
     // Graceful shutdown: on SIGTERM, cancel all tmux watchers before dying
     let shared_for_signal = shared.clone();
@@ -1244,12 +1446,17 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     if let Err(e) = client.start().await {
         tracing::warn!("  ✗ {} bot error: {e}", provider_for_error.display_name());
     }
+
+    if let Some(handle) = gateway_lease_task {
+        handle.abort();
+        let _ = handle.await;
+    }
 }
 
 /// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
 async fn gc_stale_thread_sessions_via_api(api_port: u16) {
     let _ = api_port;
-    match super::internal_api::gc_stale_thread_sessions() {
+    match super::internal_api::gc_stale_thread_sessions().await {
         Ok(gc) if gc > 0 => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
@@ -1265,11 +1472,14 @@ async fn gc_stale_thread_sessions_via_api(api_port: u16) {
 /// Periodic GC: disconnect stale fixed-channel working sessions from the DB so
 /// restart recovery cannot restore dead provider session IDs.
 async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
-    let Some(db) = &shared.db else {
-        return;
-    };
+    let cleared = if let Some(pool) = shared.pg_pool.as_ref() {
+        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool)
+            .await
+    } else {
+        let Some(db) = &shared.db else {
+            return;
+        };
 
-    let cleared = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -1295,6 +1505,123 @@ mod tests {
     use poise::serenity_prelude::{MessageId, UserId};
     use std::collections::HashSet;
     use std::time::Instant;
+
+    struct PgTestDatabase {
+        admin_url: String,
+        database_name: String,
+    }
+
+    impl PgTestDatabase {
+        async fn create() -> Self {
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_runtime_pg_{}", uuid::Uuid::new_v4().simple());
+            let admin_pool = sqlx::PgPool::connect(&admin_url)
+                .await
+                .expect("connect postgres admin db");
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .expect("create postgres runtime test db");
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+            }
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
+                .await
+                .expect("reconnect postgres admin db");
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .expect("terminate postgres runtime test db sessions");
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .expect("drop postgres runtime test db");
+            admin_pool.close().await;
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
+    fn pg_runtime_test_config(test_db: &PgTestDatabase) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.pool_max = 4;
+        config.database.host = "localhost".to_string();
+        config.database.port = std::env::var("PGPORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(5432);
+        config.database.dbname = test_db.database_name.clone();
+        config.database.user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        config.database.password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        config
+    }
 
     fn make_intervention(message_id: u64, source_message_ids: &[u64], text: &str) -> Intervention {
         Intervention {
@@ -1342,5 +1669,142 @@ mod tests {
         ));
 
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn discord_gateway_lock_id_is_stable_for_same_token_hash() {
+        let token_hash = "9f86d081884c7d659a2feaa0c55ad015";
+        assert_eq!(
+            discord_gateway_lock_id(token_hash),
+            discord_gateway_lock_id(token_hash)
+        );
+    }
+
+    #[test]
+    fn discord_gateway_lock_id_changes_for_different_token_hashes() {
+        let left = discord_gateway_lock_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let right = discord_gateway_lock_id("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_ne!(left, right);
+    }
+
+    #[tokio::test]
+    async fn discord_gateway_lease_allows_only_one_live_runtime_per_token_hash() {
+        let test_db = PgTestDatabase::create().await;
+        let config = pg_runtime_test_config(&test_db);
+        let pool = crate::db::postgres::connect_and_migrate(&config)
+            .await
+            .expect("connect and migrate postgres")
+            .expect("postgres pool");
+
+        let token_hash = "0123456789abcdef0123456789abcdef";
+        let mut first = try_acquire_discord_gateway_lease(&pool, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("acquire first discord gateway lease")
+            .expect("first discord gateway lease holder");
+        first.keepalive().await.expect("first lease keepalive");
+
+        let second = try_acquire_discord_gateway_lease(&pool, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("attempt second discord gateway lease");
+        assert!(second.is_none(), "same token hash must stay singleton");
+
+        first
+            .unlock()
+            .await
+            .expect("unlock first discord gateway lease");
+
+        let third = try_acquire_discord_gateway_lease(&pool, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("acquire third discord gateway lease")
+            .expect("third discord gateway lease holder");
+        third
+            .unlock()
+            .await
+            .expect("unlock third discord gateway lease");
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn discord_gateway_lease_allows_parallel_runtimes_for_different_token_hashes() {
+        let test_db = PgTestDatabase::create().await;
+        let config = pg_runtime_test_config(&test_db);
+        let pool = crate::db::postgres::connect_and_migrate(&config)
+            .await
+            .expect("connect and migrate postgres")
+            .expect("postgres pool");
+
+        let first = try_acquire_discord_gateway_lease(
+            &pool,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &ProviderKind::Codex,
+        )
+        .await
+        .expect("acquire first discord gateway lease")
+        .expect("first discord gateway lease holder");
+        let second = try_acquire_discord_gateway_lease(
+            &pool,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &ProviderKind::Codex,
+        )
+        .await
+        .expect("acquire second discord gateway lease")
+        .expect("second discord gateway lease holder");
+
+        second
+            .unlock()
+            .await
+            .expect("unlock second discord gateway lease");
+        first
+            .unlock()
+            .await
+            .expect("unlock first discord gateway lease");
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn discord_gateway_lease_fails_over_across_separate_runtime_pools() {
+        let test_db = PgTestDatabase::create().await;
+        let config = pg_runtime_test_config(&test_db);
+        let pool_a = crate::db::postgres::connect_and_migrate(&config)
+            .await
+            .expect("connect and migrate postgres runtime pool A")
+            .expect("postgres runtime pool A");
+        let pool_b = crate::db::postgres::connect_and_migrate(&config)
+            .await
+            .expect("connect and migrate postgres runtime pool B")
+            .expect("postgres runtime pool B");
+
+        let token_hash = "feedfacefeedfacefeedfacefeedface";
+        let holder_a = try_acquire_discord_gateway_lease(&pool_a, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("acquire discord gateway lease on runtime pool A")
+            .expect("runtime pool A should hold singleton lease");
+
+        let denied_b = try_acquire_discord_gateway_lease(&pool_b, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("attempt discord gateway lease on runtime pool B");
+        assert!(
+            denied_b.is_none(),
+            "second runtime pool must be fenced while first holder is alive"
+        );
+
+        drop(holder_a);
+
+        let holder_b = try_acquire_discord_gateway_lease(&pool_b, token_hash, &ProviderKind::Codex)
+            .await
+            .expect("acquire discord gateway lease on runtime pool B after failover")
+            .expect("runtime pool B should acquire lease after holder drop");
+        holder_b
+            .unlock()
+            .await
+            .expect("unlock discord gateway lease on runtime pool B");
+
+        pool_b.close().await;
+        pool_a.close().await;
+        test_db.drop().await;
     }
 }

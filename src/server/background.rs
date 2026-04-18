@@ -31,7 +31,7 @@ pub(super) async fn rate_limit_sync_loop(db: Db) {
                 if let Ok(conn) = db.lock() {
                     conn.execute(
                         "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["claude", data, now],
+                        libsql_rusqlite::params!["claude", data, now],
                     )
                     .ok();
                 }
@@ -56,7 +56,7 @@ pub(super) async fn rate_limit_sync_loop(db: Db) {
                 if let Ok(conn) = db.lock() {
                     conn.execute(
                         "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["codex", data, now],
+                        libsql_rusqlite::params!["codex", data, now],
                     )
                     .ok();
                 }
@@ -504,7 +504,7 @@ pub(super) async fn message_outbox_loop(db: Db, port: u16) {
                     if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                            rusqlite::params![format!("{status}: {err_text}"), id],
+                            libsql_rusqlite::params![format!("{status}: {err_text}"), id],
                         )
                         .ok();
                     }
@@ -514,7 +514,7 @@ pub(super) async fn message_outbox_loop(db: Db, port: u16) {
                     if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                            rusqlite::params![error.to_string(), id],
+                            libsql_rusqlite::params![error.to_string(), id],
                         )
                         .ok();
                     }
@@ -525,11 +525,11 @@ pub(super) async fn message_outbox_loop(db: Db, port: u16) {
     }
 }
 
-pub(super) async fn dm_reply_retry_loop(db: Db) {
+pub(super) async fn dm_reply_retry_loop(db: Db, pg_pool: Option<sqlx::PgPool>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     interval.tick().await;
     loop {
         interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(&db).await;
+        crate::services::discord::retry_failed_dm_notifications(&db, pg_pool.as_ref()).await;
     }
 }

@@ -21,6 +21,7 @@ use crate::{
 #[derive(Clone)]
 struct DirectApiContext {
     db: Db,
+    pg_pool: Option<sqlx::PgPool>,
     engine: PolicyEngine,
     health_registry: Arc<HealthRegistry>,
 }
@@ -43,6 +44,7 @@ fn load_context() -> Result<DirectApiContext, String> {
 
 pub(super) fn init(
     db: Option<Db>,
+    pg_pool: Option<sqlx::PgPool>,
     engine: Option<PolicyEngine>,
     health_registry: Arc<HealthRegistry>,
 ) {
@@ -52,6 +54,7 @@ pub(super) fn init(
     if let Ok(mut guard) = context_slot().write() {
         *guard = Some(DirectApiContext {
             db,
+            pg_pool,
             engine,
             health_registry,
         });
@@ -62,6 +65,7 @@ fn app_state() -> Result<AppState, String> {
     let ctx = load_context()?;
     Ok(AppState {
         db: ctx.db.clone(),
+        pg_pool: ctx.pg_pool.clone(),
         engine: ctx.engine.clone(),
         config: Arc::new(crate::config::load_graceful()),
         broadcast_tx: ws::new_broadcast(),
@@ -230,7 +234,7 @@ pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
         .map_err(|err| format!("db lock failed: {err}"))?;
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![key, value],
+        libsql_rusqlite::params![key, value],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
@@ -244,22 +248,28 @@ pub(super) fn take_kv_value(key: &str) -> Result<Option<String>, String> {
         .map_err(|err| format!("db lock failed: {err}"))?;
     let value = match conn.query_row(
         "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
-        rusqlite::params![key],
+        libsql_rusqlite::params![key],
         |row| row.get::<_, String>(0),
     ) {
         Ok(value) => Some(value),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => None,
         Err(err) => return Err(err.to_string()),
     };
     if value.is_some() {
-        conn.execute("DELETE FROM kv_meta WHERE key = ?1", rusqlite::params![key])
-            .map_err(|err| err.to_string())?;
+        conn.execute(
+            "DELETE FROM kv_meta WHERE key = ?1",
+            libsql_rusqlite::params![key],
+        )
+        .map_err(|err| err.to_string())?;
     }
     Ok(value)
 }
 
-pub(super) fn gc_stale_thread_sessions() -> Result<usize, String> {
+pub(super) async fn gc_stale_thread_sessions() -> Result<usize, String> {
     let ctx = load_context()?;
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        return Ok(routes::dispatched_sessions::gc_stale_thread_sessions_pg(pool).await);
+    }
     let conn = ctx
         .db
         .lock()

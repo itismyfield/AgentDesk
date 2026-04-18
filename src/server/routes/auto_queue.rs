@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::{Postgres, QueryBuilder, Row as SqlxRow};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -169,9 +170,9 @@ fn deploy_phase_api_enabled(state: &AppState) -> bool {
 }
 
 fn load_run_ids_with_status(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     statuses: &[&str],
-) -> rusqlite::Result<Vec<String>> {
+) -> libsql_rusqlite::Result<Vec<String>> {
     if statuses.is_empty() {
         return Ok(Vec::new());
     }
@@ -184,16 +185,16 @@ fn load_run_ids_with_status(
         "SELECT id FROM auto_queue_runs WHERE status IN ({placeholders}) ORDER BY rowid ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(statuses.iter()), |row| {
+    stmt.query_map(libsql_rusqlite::params_from_iter(statuses.iter()), |row| {
         row.get(0)
     })?
     .collect::<Result<Vec<_>, _>>()
 }
 
 fn load_slot_bindings_for_runs(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
-) -> rusqlite::Result<Vec<(String, String, i64)>> {
+) -> libsql_rusqlite::Result<Vec<(String, String, i64)>> {
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -209,14 +210,14 @@ fn load_slot_bindings_for_runs(
            AND assigned_run_id IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| {
+    stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })?
     .collect::<Result<Vec<_>, _>>()
 }
 
 fn slot_thread_map_has_bindings(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
 ) -> bool {
@@ -225,7 +226,7 @@ fn slot_thread_map_has_bindings(
             "SELECT thread_id_map
              FROM auto_queue_slots
              WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index],
             |row| row.get(0),
         )
         .ok()
@@ -247,7 +248,7 @@ fn slot_thread_map_has_bindings(
 }
 
 fn slot_has_dispatch_thread_history(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
 ) -> bool {
@@ -262,14 +263,14 @@ fn slot_has_dispatch_thread_history(
                      THEN NULL
                  ELSE CAST(json_extract(context, '$.slot_index') AS INTEGER)
                END = ?2",
-        rusqlite::params![agent_id, slot_index],
+        libsql_rusqlite::params![agent_id, slot_index],
         |row| row.get(0),
     )
     .unwrap_or(false)
 }
 
 fn slot_requires_thread_reset_before_reuse(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
     newly_assigned: bool,
@@ -278,6 +279,95 @@ fn slot_requires_thread_reset_before_reuse(
     (newly_assigned || reassigned_from_other_group)
         && (slot_thread_map_has_bindings(conn, agent_id, slot_index)
             || slot_has_dispatch_thread_history(conn, agent_id, slot_index))
+}
+
+async fn slot_thread_map_has_bindings_pg(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<bool, String> {
+    let raw_map = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT COALESCE(thread_id_map::text, '{}')
+         FROM auto_queue_slots
+         WHERE agent_id = $1 AND slot_index = $2",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres slot thread map for {agent_id}:{slot_index}: {error}"))?
+    .flatten()
+    .unwrap_or_else(|| "{}".to_string());
+
+    Ok(serde_json::from_str::<serde_json::Value>(&raw_map)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .map(|map| {
+            map.values().any(|value| {
+                value
+                    .as_str()
+                    .map(|raw| !raw.trim().is_empty())
+                    .or_else(|| value.as_u64().map(|_| true))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false))
+}
+
+async fn slot_has_dispatch_thread_history_pg(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<bool, String> {
+    let rows = sqlx::query(
+        "SELECT thread_id, context
+         FROM task_dispatches
+         WHERE to_agent_id = $1
+           AND thread_id IS NOT NULL
+           AND BTRIM(thread_id) != ''",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        format!("load postgres dispatch thread history for {agent_id}:{slot_index}: {error}")
+    })?;
+
+    for row in rows {
+        let context: Option<String> = row.try_get("context").ok().flatten();
+        let Some(context) = context else {
+            continue;
+        };
+        let Some(context_json) = serde_json::from_str::<serde_json::Value>(&context).ok() else {
+            continue;
+        };
+        if context_json
+            .get("slot_index")
+            .and_then(|value| value.as_i64())
+            == Some(slot_index)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn slot_requires_thread_reset_before_reuse_pg(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    newly_assigned: bool,
+    reassigned_from_other_group: bool,
+) -> Result<bool, String> {
+    if !(newly_assigned || reassigned_from_other_group) {
+        return Ok(false);
+    }
+
+    Ok(
+        slot_thread_map_has_bindings_pg(pool, agent_id, slot_index).await?
+            || slot_has_dispatch_thread_history_pg(pool, agent_id, slot_index).await?,
+    )
 }
 
 fn build_auto_queue_dispatch_context(
@@ -304,24 +394,495 @@ fn build_auto_queue_dispatch_context(
     serde_json::Value::Object(context)
 }
 
+fn resolve_activate_dispatch_channel_id(channel: &str) -> Option<u64> {
+    channel
+        .parse::<u64>()
+        .ok()
+        .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(channel))
+}
+
+async fn group_has_dispatched_entries_pg(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    thread_group: i64,
+) -> Result<bool, String> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND COALESCE(thread_group, 0) = $2
+           AND status = 'dispatched'",
+    )
+    .bind(run_id)
+    .bind(thread_group)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        format!("count dispatched postgres auto-queue entries for {run_id}:{thread_group}: {error}")
+    })?;
+    Ok(count > 0)
+}
+
+async fn execute_activate_transition_intent_pg(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    intent: &crate::engine::transition::TransitionIntent,
+) -> Result<(), String> {
+    match intent {
+        crate::engine::transition::TransitionIntent::UpdateStatus { card_id, to, .. } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET status = $1,
+                     updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(to)
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("update status for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+            card_id,
+            dispatch_id,
+        } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET latest_dispatch_id = $1,
+                     updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(dispatch_id.as_deref())
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("set latest_dispatch_id for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id,
+            review_status,
+        } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET review_status = $1,
+                     updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(review_status.as_deref())
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("set review_status for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::ApplyClock { card_id, clock, .. } => {
+            if let Some(clock) = clock {
+                let sql = if clock.mode.as_deref() == Some("coalesce") {
+                    format!(
+                        "UPDATE kanban_cards
+                         SET {field} = COALESCE({field}, NOW()),
+                             updated_at = NOW()
+                         WHERE id = $1",
+                        field = clock.set
+                    )
+                } else {
+                    format!(
+                        "UPDATE kanban_cards
+                         SET {field} = NOW(),
+                             updated_at = NOW()
+                         WHERE id = $1",
+                        field = clock.set
+                    )
+                };
+                sqlx::query(&sql)
+                    .bind(card_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|error| format!("apply clock {} for {card_id}: {error}", clock.set))?;
+            }
+        }
+        crate::engine::transition::TransitionIntent::ClearTerminalFields { card_id } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET review_status = NULL,
+                     suggestion_pending_at = NULL,
+                     review_entered_at = NULL,
+                     awaiting_dod_at = NULL,
+                     blocked_reason = NULL,
+                     review_round = NULL,
+                     deferred_dod_json = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("clear terminal fields for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SyncAutoQueue { card_id } => {
+            crate::github::sync::sync_auto_queue_terminal_on_pg(tx, card_id).await?;
+        }
+        crate::engine::transition::TransitionIntent::SyncReviewState { card_id, state } => {
+            crate::github::sync::sync_review_state_on_pg(tx, card_id, state).await?;
+        }
+        crate::engine::transition::TransitionIntent::AuditLog {
+            card_id,
+            from,
+            to,
+            source,
+            message,
+        } => {
+            sqlx::query(
+                "INSERT INTO kanban_audit_logs (
+                    card_id, from_status, to_status, source, result
+                 ) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(card_id)
+            .bind(from)
+            .bind(to)
+            .bind(source)
+            .bind(message)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("insert audit log for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::CancelDispatch { dispatch_id } => {
+            sqlx::query(
+                "UPDATE task_dispatches
+                 SET status = 'cancelled',
+                     updated_at = NOW(),
+                     completed_at = COALESCE(completed_at, NOW())
+                 WHERE id = $1
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(dispatch_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn create_activate_dispatch_pg(
+    deps: &AutoQueueActivateDeps,
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<String, String> {
+    if dispatch_type != "review-decision"
+        && let Some(existing_id) = sqlx::query_scalar::<_, String>(
+            "SELECT id
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = $2
+               AND status IN ('pending', 'dispatched')
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .bind(dispatch_type)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("lookup active postgres dispatch for {card_id}: {error}"))?
+    {
+        return Ok(existing_id);
+    }
+
+    let row = sqlx::query(
+        "SELECT status,
+                review_status,
+                latest_dispatch_id,
+                repo_id,
+                assigned_agent_id,
+                github_issue_number::BIGINT AS github_issue_number
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch card {card_id}: {error}"))?
+    .ok_or_else(|| format!("card {card_id} not found"))?;
+
+    let old_status: String = row
+        .try_get("status")
+        .map_err(|error| format!("decode old status for {card_id}: {error}"))?;
+    let review_status: Option<String> = row
+        .try_get("review_status")
+        .map_err(|error| format!("decode review_status for {card_id}: {error}"))?;
+    let latest_dispatch_id: Option<String> = row
+        .try_get("latest_dispatch_id")
+        .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
+    let repo_id: Option<String> = row
+        .try_get("repo_id")
+        .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?;
+    let assigned_agent_id: Option<String> = row
+        .try_get("assigned_agent_id")
+        .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
+    let github_issue_number: Option<i64> = row
+        .try_get("github_issue_number")
+        .map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?;
+
+    let agent_exists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM agents WHERE id = $1")
+            .bind(to_agent_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("check postgres dispatch agent {to_agent_id}: {error}"))?
+            > 0;
+    if !agent_exists {
+        return Err(format!(
+            "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' not found (card {card_id})"
+        ));
+    }
+
+    let channel_value = crate::db::agents::resolve_agent_dispatch_channel_pg(
+        pool,
+        to_agent_id,
+        Some(dispatch_type),
+    )
+    .await
+    .map_err(|error| {
+        format!("resolve postgres dispatch channel for {to_agent_id} ({dispatch_type}): {error}")
+    })?
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .ok_or_else(|| {
+        format!(
+            "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has no discord channel (card {card_id})"
+        )
+    })?;
+    if resolve_activate_dispatch_channel_id(&channel_value).is_none() {
+        return Err(format!(
+            "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has invalid discord channel '{channel_value}' (card {card_id})"
+        ));
+    }
+
+    let effective =
+        resolve_activate_pipeline_pg(pool, repo_id.as_deref(), assigned_agent_id.as_deref())
+            .await?;
+    if effective.is_terminal(&old_status) {
+        return Err(format!(
+            "Cannot create {dispatch_type} dispatch for terminal card {card_id} (status: {old_status})"
+        ));
+    }
+
+    let mut context_with_strategy = if context.is_object() {
+        context.clone()
+    } else {
+        json!({})
+    };
+    if let Some(default_force_new_session) =
+        crate::dispatch::dispatch_type_force_new_session_default(Some(dispatch_type))
+        && let Some(obj) = context_with_strategy.as_object_mut()
+    {
+        obj.entry("force_new_session".to_string())
+            .or_insert(json!(default_force_new_session));
+    }
+    if let Some(obj) = context_with_strategy.as_object_mut() {
+        if let Some(repo_id) = repo_id.as_deref() {
+            obj.entry("repo".to_string())
+                .or_insert_with(|| json!(repo_id));
+            obj.entry("target_repo".to_string())
+                .or_insert_with(|| json!(repo_id));
+        }
+        if let Some(issue_number) = github_issue_number {
+            obj.entry("issue_number".to_string())
+                .or_insert_with(|| json!(issue_number));
+        }
+    }
+    if let Ok(Some((worktree_path, worktree_branch, _))) =
+        crate::dispatch::resolve_card_worktree(&deps.db, card_id, Some(&context_with_strategy))
+        && let Some(obj) = context_with_strategy.as_object_mut()
+    {
+        obj.entry("worktree_path".to_string())
+            .or_insert_with(|| json!(worktree_path));
+        obj.entry("worktree_branch".to_string())
+            .or_insert_with(|| json!(worktree_branch));
+    }
+
+    let parent_dispatch_id = context_with_strategy
+        .get("parent_dispatch_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let chain_depth = if let Some(parent_dispatch_id) = parent_dispatch_id.as_deref() {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(chain_depth, 0)::BIGINT + 1
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind(parent_dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!("load parent dispatch chain depth for {parent_dispatch_id}: {error}")
+        })?
+        .unwrap_or(1)
+    } else {
+        0
+    };
+
+    let dispatch_id = uuid::Uuid::new_v4().to_string();
+    let kickoff_state = if matches!(
+        dispatch_type,
+        "review" | "review-decision" | "rework" | "consultation"
+    ) {
+        None
+    } else {
+        Some(
+            effective
+                .kickoff_for(&old_status)
+                .unwrap_or_else(|| effective.initial_state().to_string()),
+        )
+    };
+    let decision = crate::engine::transition::decide_transition(
+        &crate::engine::transition::TransitionContext {
+            card: crate::engine::transition::CardState {
+                id: card_id.to_string(),
+                status: old_status.clone(),
+                review_status,
+                latest_dispatch_id,
+            },
+            pipeline: effective.clone(),
+            gates: crate::engine::transition::GateSnapshot::default(),
+        },
+        &crate::engine::transition::TransitionEvent::DispatchAttached {
+            dispatch_id: dispatch_id.clone(),
+            dispatch_type: dispatch_type.to_string(),
+            kickoff_state,
+        },
+    );
+    if let crate::engine::transition::TransitionOutcome::Blocked(reason) = &decision.outcome {
+        return Err(reason.clone());
+    }
+
+    let context_str = serde_json::to_string(&context_with_strategy)
+        .map_err(|error| format!("encode dispatch context for {card_id}: {error}"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("open postgres activate dispatch transaction: {error}"))?;
+
+    if dispatch_type != "review-decision"
+        && let Some(existing_id) = sqlx::query_scalar::<_, String>(
+            "SELECT id
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = $2
+               AND status IN ('pending', 'dispatched')
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .bind(dispatch_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!("recheck active postgres dispatch for {card_id} during create: {error}")
+        })?
+    {
+        tx.rollback().await.ok();
+        return Ok(existing_id);
+    }
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            status,
+            title,
+            context,
+            parent_dispatch_id,
+            chain_depth,
+            created_at,
+            updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, NOW(), NOW()
+        )",
+    )
+    .bind(&dispatch_id)
+    .bind(card_id)
+    .bind(to_agent_id)
+    .bind(dispatch_type)
+    .bind(title)
+    .bind(&context_str)
+    .bind(parent_dispatch_id.as_deref())
+    .bind(chain_depth)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("insert postgres dispatch {dispatch_id} for {card_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES (
+            $1, $2, $3, NULL, 'pending', 'create_dispatch', NULL
+        )",
+    )
+    .bind(&dispatch_id)
+    .bind(card_id)
+    .bind(dispatch_type)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("insert postgres dispatch event for {dispatch_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title)
+         VALUES ($1, 'notify', $2, $3, $4)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&dispatch_id)
+    .bind(to_agent_id)
+    .bind(card_id)
+    .bind(title)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("insert postgres dispatch outbox for {dispatch_id}: {error}"))?;
+
+    for intent in &decision.intents {
+        execute_activate_transition_intent_pg(&mut tx, intent).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres dispatch {dispatch_id}: {error}"))?;
+
+    Ok(dispatch_id)
+}
+
 fn load_live_dispatch_ids_for_runs(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
-) -> rusqlite::Result<Vec<String>> {
+) -> libsql_rusqlite::Result<Vec<String>> {
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
 
     let sql = live_dispatches_for_runs_sql("td.id", run_ids.len());
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()
+    stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
+        row.get(0)
+    })?
+    .collect::<Result<Vec<_>, _>>()
 }
 
 fn load_dispatched_card_ids_for_runs(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
-) -> rusqlite::Result<Vec<String>> {
+) -> libsql_rusqlite::Result<Vec<String>> {
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -339,12 +900,14 @@ fn load_dispatched_card_ids_for_runs(
            AND TRIM(kanban_card_id) != ''"
     );
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()
+    stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
+        row.get(0)
+    })?
+    .collect::<Result<Vec<_>, _>>()
 }
 
 fn rollback_cancelled_run_cards(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_ids: &[String],
     source: &str,
 ) -> usize {
@@ -445,7 +1008,10 @@ fn rollback_cancelled_run_cards(
     rolled_back
 }
 
-fn delete_phase_gate_rows_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> usize {
+fn delete_phase_gate_rows_for_runs(
+    conn: &libsql_rusqlite::Connection,
+    run_ids: &[String],
+) -> usize {
     if run_ids.is_empty() {
         return 0;
     }
@@ -458,19 +1024,21 @@ fn delete_phase_gate_rows_for_runs(conn: &rusqlite::Connection, run_ids: &[Strin
         "DELETE FROM auto_queue_phase_gates
          WHERE run_id IN ({placeholders})"
     );
-    conn.execute(&sql, rusqlite::params_from_iter(run_ids.iter()))
+    conn.execute(&sql, libsql_rusqlite::params_from_iter(run_ids.iter()))
         .unwrap_or(0)
 }
 
-fn count_live_dispatches_for_runs(conn: &rusqlite::Connection, run_ids: &[String]) -> i64 {
+fn count_live_dispatches_for_runs(conn: &libsql_rusqlite::Connection, run_ids: &[String]) -> i64 {
     if run_ids.is_empty() {
         return 0;
     }
 
     let sql = live_dispatches_for_runs_sql("COUNT(*)", run_ids.len());
-    conn.query_row(&sql, rusqlite::params_from_iter(run_ids.iter()), |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        &sql,
+        libsql_rusqlite::params_from_iter(run_ids.iter()),
+        |row| row.get(0),
+    )
     .unwrap_or(0)
 }
 
@@ -508,7 +1076,7 @@ fn live_dispatches_for_runs_sql(select_expr: &str, run_count: usize) -> String {
 }
 
 fn cancel_live_dispatches_for_runs(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
     reason: &str,
 ) -> usize {
@@ -528,7 +1096,7 @@ fn cancel_live_dispatches_for_runs(
 
 fn clear_and_release_slots_for_runs(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
 ) -> SlotCleanupResult {
     let mut released_slots: HashSet<(String, i64)> = HashSet::new();
@@ -609,9 +1177,962 @@ fn slot_cleanup_warning(warnings: &[String]) -> Option<String> {
     (!warnings.is_empty()).then(|| warnings.join("; "))
 }
 
+async fn load_run_ids_with_status_pg(
+    pool: &sqlx::PgPool,
+    statuses: &[&str],
+) -> Result<Vec<String>, String> {
+    if statuses.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut query =
+        QueryBuilder::<Postgres>::new("SELECT id FROM auto_queue_runs WHERE status IN (");
+    let mut separated = query.separated(", ");
+    for status in statuses {
+        separated.push_bind(*status);
+    }
+    separated.push_unseparated(") ORDER BY created_at ASC, id ASC");
+    query
+        .build_query_scalar::<String>()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres auto_queue_runs by status: {error}"))
+}
+
+async fn load_slot_bindings_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> Result<Vec<(String, String, i64)>, String> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT DISTINCT assigned_run_id, agent_id, slot_index
+         FROM auto_queue_slots
+         WHERE assigned_run_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for run_id in run_ids {
+        separated.push_bind(run_id);
+    }
+    separated.push_unseparated(") AND assigned_run_id IS NOT NULL");
+
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres slot bindings for runs: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("assigned_run_id")
+                    .map_err(|error| format!("decode postgres assigned_run_id: {error}"))?,
+                row.try_get::<String, _>("agent_id")
+                    .map_err(|error| format!("decode postgres slot agent_id: {error}"))?,
+                row.try_get::<i64, _>("slot_index")
+                    .map_err(|error| format!("decode postgres slot_index: {error}"))?,
+            ))
+        })
+        .collect()
+}
+
+async fn load_live_dispatch_ids_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar(
+        "SELECT DISTINCT td.id
+         FROM task_dispatches td
+         WHERE td.status IN ('pending', 'dispatched')
+           AND (
+               EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.dispatch_id = td.id
+                     AND e.run_id = ANY($1)
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.dispatch_id = td.id
+                     AND pg.run_id = ANY($1)
+               )
+               OR (
+                   CASE
+                       WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
+                       ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
+                   END
+               ) = ANY($1)
+           )
+         ORDER BY td.id",
+    )
+    .bind(run_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "load postgres live dispatch ids for runs {:?}: {error}",
+            run_ids
+        )
+    })
+}
+
+async fn load_dispatched_card_ids_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar(
+        "SELECT DISTINCT e.kanban_card_id
+         FROM auto_queue_entries e
+         WHERE e.run_id = ANY($1)
+           AND e.status = 'dispatched'
+           AND e.kanban_card_id IS NOT NULL
+           AND BTRIM(e.kanban_card_id) <> ''
+         ORDER BY e.kanban_card_id",
+    )
+    .bind(run_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "load postgres dispatched card ids for runs {:?}: {error}",
+            run_ids
+        )
+    })
+}
+
+async fn delete_phase_gate_rows_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> Result<usize, String> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut query =
+        QueryBuilder::<Postgres>::new("DELETE FROM auto_queue_phase_gates WHERE run_id IN (");
+    let mut separated = query.separated(", ");
+    for run_id in run_ids {
+        separated.push_bind(run_id);
+    }
+    separated.push_unseparated(")");
+
+    query
+        .build()
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected() as usize)
+        .map_err(|error| format!("delete postgres auto_queue_phase_gates: {error}"))
+}
+
+async fn count_live_dispatches_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> Result<i64, String> {
+    load_live_dispatch_ids_for_runs_pg(pool, run_ids)
+        .await
+        .map(|rows| rows.len() as i64)
+}
+
+async fn cancel_live_dispatches_for_runs_pg(
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+    reason: &str,
+) -> Result<usize, String> {
+    let dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, run_ids).await?;
+    let mut cancelled = 0usize;
+    for dispatch_id in dispatch_ids {
+        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            pool,
+            &dispatch_id,
+            Some(reason),
+        )
+        .await?;
+    }
+    Ok(cancelled)
+}
+
+async fn clear_sessions_for_dispatches_pg(
+    pool: &sqlx::PgPool,
+    dispatch_ids: &[String],
+) -> Result<usize, String> {
+    let mut cleared_sessions = 0usize;
+    for dispatch_id in dispatch_ids {
+        let result = sqlx::query(
+            "UPDATE sessions
+             SET status = 'idle',
+                 active_dispatch_id = NULL,
+                 session_info = $1,
+                 claude_session_id = NULL,
+                 tokens = 0,
+                 last_heartbeat = NOW()
+             WHERE active_dispatch_id = $2
+               AND status IN ('working', 'idle')",
+        )
+        .bind("Dispatch cancelled")
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("clear postgres sessions for cancelled dispatch {dispatch_id}: {error}")
+        })?;
+        cleared_sessions += result.rows_affected() as usize;
+    }
+    Ok(cleared_sessions)
+}
+
+async fn transition_entry_to_skipped_pg(
+    pool: &sqlx::PgPool,
+    entry_id: &str,
+    trigger_source: &str,
+) -> Result<bool, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres entry skip transaction {entry_id}: {error}"))?;
+
+    let current_status = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT status
+         FROM auto_queue_entries
+         WHERE id = $1",
+    )
+    .bind(entry_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("load postgres entry status {entry_id}: {error}"))?
+    .flatten();
+    let Some(current_status) = current_status else {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback missing postgres entry {entry_id}: {error}"))?;
+        return Ok(false);
+    };
+    if !matches!(current_status.as_str(), "pending" | "dispatched") {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback non-skippable postgres entry {entry_id}: {error}")
+        })?;
+        return Ok(false);
+    }
+
+    let changed = sqlx::query(
+        "UPDATE auto_queue_entries
+         SET status = 'skipped',
+             dispatch_id = NULL,
+             dispatched_at = NULL,
+             completed_at = NOW()
+         WHERE id = $1
+           AND status = $2",
+    )
+    .bind(entry_id)
+    .bind(&current_status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("skip postgres entry {entry_id}: {error}"))?
+    .rows_affected() as usize;
+    if changed == 0 {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback unchanged postgres entry {entry_id}: {error}"))?;
+        return Ok(false);
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO auto_queue_entry_transitions (
+            entry_id,
+            from_status,
+            to_status,
+            trigger_source
+        ) VALUES ($1, $2, 'skipped', $3)",
+    )
+    .bind(entry_id)
+    .bind(&current_status)
+    .bind(trigger_source)
+    .execute(&mut *tx)
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres entry skip {entry_id}: {error}"))?;
+    Ok(true)
+}
+
+async fn rollback_cancelled_run_cards_pg(
+    pool: &sqlx::PgPool,
+    card_ids: &[String],
+    source: &str,
+) -> usize {
+    let mut rolled_back = 0usize;
+
+    for card_id in card_ids {
+        let status = match sqlx::query_scalar::<_, Option<String>>(
+            "SELECT status FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(status)) => status,
+            Ok(None) => continue,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "run_cancel_card_status_pg_failed",
+                    AutoQueueLogContext::new().card(card_id),
+                    "[auto-queue] failed to load postgres card {} during run cancel rollback: {}",
+                    card_id,
+                    error
+                );
+                continue;
+            }
+        };
+        if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
+            continue;
+        }
+
+        let has_active_dispatch = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches
+             WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
+        )
+        .bind(card_id)
+        .fetch_one(pool)
+        .await
+        .ok()
+        .unwrap_or(0)
+            > 0;
+        if has_active_dispatch {
+            continue;
+        }
+
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "run_cancel_card_rollback_pg_begin_failed",
+                    AutoQueueLogContext::new().card(card_id),
+                    "[auto-queue] failed to open postgres rollback transaction for card {} during run cancel: {}",
+                    card_id,
+                    error
+                );
+                continue;
+            }
+        };
+
+        let rollback_result = async {
+            let changed = sqlx::query(
+                "UPDATE kanban_cards
+                 SET status = 'ready',
+                     latest_dispatch_id = NULL,
+                     review_status = NULL,
+                     review_round = 0,
+                     review_notes = NULL,
+                     suggestion_pending_at = NULL,
+                     review_entered_at = NULL,
+                     awaiting_dod_at = NULL,
+                     blocked_reason = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status IN ('requested', 'in_progress')",
+            )
+            .bind(card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("rollback postgres card {card_id}: {error}"))?
+            .rows_affected() as usize;
+            if changed == 0 {
+                return Ok(false);
+            }
+
+            sqlx::query(
+                "INSERT INTO card_review_state (
+                    card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+                    decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
+                 ) VALUES (
+                    $1, 0, 'idle', NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NOW()
+                 )
+                 ON CONFLICT (card_id) DO UPDATE SET
+                    review_round = 0,
+                    state = 'idle',
+                    pending_dispatch_id = NULL,
+                    last_verdict = NULL,
+                    last_decision = NULL,
+                    decided_by = NULL,
+                    decided_at = NULL,
+                    approach_change_round = NULL,
+                    session_reset_round = NULL,
+                    review_entered_at = NULL,
+                    updated_at = NOW()",
+            )
+            .bind(card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("reset postgres card review state {card_id}: {error}"))?;
+
+            sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
+                .bind(format!("pm_pending:{card_id}"))
+                .bind(format!("pm_decision_sent:{card_id}"))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("clear postgres card escalation state {card_id}: {error}"))?;
+
+            sqlx::query(
+                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
+                 VALUES ($1, $2, 'ready', $3, 'OK (run cancel rollback)')",
+            )
+            .bind(card_id)
+            .bind(&status)
+            .bind(source)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
+
+            Ok::<bool, String>(true)
+        }
+        .await;
+
+        match rollback_result {
+            Ok(true) => {
+                if tx.commit().await.is_ok() {
+                    rolled_back += 1;
+                }
+            }
+            Ok(false) => {
+                let _ = tx.rollback().await;
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                crate::auto_queue_log!(
+                    warn,
+                    "run_cancel_card_rollback_pg_failed",
+                    AutoQueueLogContext::new().card(card_id),
+                    "[auto-queue] failed to roll back postgres card {} during run cancel: {}",
+                    card_id,
+                    error
+                );
+            }
+        }
+    }
+
+    rolled_back
+}
+
+async fn clear_and_release_slots_for_runs_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &sqlx::PgPool,
+    run_ids: &[String],
+) -> SlotCleanupResult {
+    let mut released_slots: HashSet<(String, i64)> = HashSet::new();
+    let mut released_slot_count = 0usize;
+    let mut cleared_sessions = 0usize;
+    let mut warnings = Vec::new();
+    for run_id in run_ids {
+        match sqlx::query(
+            "UPDATE auto_queue_slots
+             SET assigned_run_id = NULL,
+                 assigned_thread_group = NULL,
+                 updated_at = NOW()
+             WHERE assigned_run_id = $1
+             RETURNING agent_id, slot_index",
+        )
+        .bind(run_id)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => {
+                released_slot_count += rows.len();
+                for row in rows {
+                    let agent_id = match row.try_get::<String, _>("agent_id") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            warnings.push(format!(
+                                "failed to decode released slot agent for run {run_id}: {error}"
+                            ));
+                            continue;
+                        }
+                    };
+                    let slot_index = match row.try_get::<i64, _>("slot_index") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            warnings.push(format!(
+                                "failed to decode released slot index for run {run_id}: {error}"
+                            ));
+                            continue;
+                        }
+                    };
+                    if released_slots.insert((agent_id.clone(), slot_index)) {
+                        match crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg(
+                            health_registry.clone(),
+                            pool,
+                            &agent_id,
+                            slot_index,
+                        )
+                        .await
+                        {
+                            Ok(cleared) => cleared_sessions += cleared,
+                            Err(error) => {
+                                crate::auto_queue_log!(
+                                    warn,
+                                    "clear_slot_threads_pg_failed",
+                                    AutoQueueLogContext::new().agent(&agent_id),
+                                    "[auto-queue] failed to clear postgres slot thread sessions for {}:{}: {}",
+                                    agent_id,
+                                    slot_index,
+                                    error
+                                );
+                                warnings.push(format!(
+                                    "failed to clear slot thread sessions for {agent_id}:{slot_index}: {error}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "clear_slot_release_pg_failed",
+                    AutoQueueLogContext::new().run(run_id),
+                    "[auto-queue] failed to release postgres slots while clearing run {}: {}",
+                    run_id,
+                    error
+                );
+                warnings.push(format!("failed to release slots for run {run_id}: {error}"));
+            }
+        }
+    }
+
+    SlotCleanupResult {
+        released_slots: released_slot_count,
+        cleared_slot_sessions: cleared_sessions,
+        warnings,
+    }
+}
+
+async fn cancel_selected_runs_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &sqlx::PgPool,
+    target_run_ids: &[String],
+    reason: &str,
+) -> Result<serde_json::Value, String> {
+    let rollback_candidate_card_ids =
+        load_dispatched_card_ids_for_runs_pg(pool, target_run_ids).await?;
+    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, target_run_ids).await?;
+    let cancelled_dispatches =
+        cancel_live_dispatches_for_runs_pg(pool, target_run_ids, reason).await?;
+    let deleted_phase_gates = delete_phase_gate_rows_for_runs_pg(pool, target_run_ids).await?;
+    let mut slot_cleanup =
+        clear_and_release_slots_for_runs_pg(health_registry, pool, target_run_ids).await;
+    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
+        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "run_cancel_dispatch_session_clear_pg_failed",
+                target_run_ids
+                    .first()
+                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
+                    .unwrap_or_default(),
+                "[auto-queue] failed to clear postgres sessions for cancelled dispatches {:?}: {}",
+                live_dispatch_ids,
+                error
+            );
+            slot_cleanup.warnings.push(format!(
+                "failed to clear sessions for cancelled dispatches {:?}: {}",
+                live_dispatch_ids, error
+            ));
+        }
+    }
+
+    let cancelled_runs = if target_run_ids.is_empty() {
+        0
+    } else {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "UPDATE auto_queue_runs
+             SET status = 'cancelled',
+                 completed_at = NOW()
+             WHERE id IN (",
+        );
+        let mut separated = query.separated(", ");
+        for run_id in target_run_ids {
+            separated.push_bind(run_id);
+        }
+        separated.push_unseparated(format!(
+            ") AND status IN ('active', 'paused', '{}')",
+            RUN_STATUS_RESTORING
+        ));
+        query
+            .build()
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "cancel postgres auto_queue_runs {:?}: {error}",
+                    target_run_ids
+                )
+            })?
+            .rows_affected() as usize
+    };
+
+    let entry_rows: Vec<String> = if target_run_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id
+             FROM auto_queue_entries
+             WHERE run_id = ANY($1)
+               AND status IN ('pending', 'dispatched')
+             ORDER BY id ASC",
+        )
+        .bind(target_run_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "load postgres cancel entry ids {:?}: {error}",
+                target_run_ids
+            )
+        })?
+    };
+
+    let mut cancelled_entries = 0usize;
+    for entry_id in entry_rows {
+        match transition_entry_to_skipped_pg(pool, &entry_id, "run_cancel").await {
+            Ok(true) => cancelled_entries += 1,
+            Ok(false) => {}
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "run_cancel_entry_pg_failed",
+                AutoQueueLogContext::new().entry(&entry_id),
+                "[auto-queue] failed to cancel postgres entry {} during run cancel: {}",
+                entry_id,
+                error
+            ),
+        }
+    }
+
+    let rolled_back_cards =
+        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
+    let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
+    if remaining_live_dispatches > 0 {
+        let log_ctx = target_run_ids
+            .first()
+            .map(|run_id| AutoQueueLogContext::new().run(run_id))
+            .unwrap_or_default();
+        crate::auto_queue_log!(
+            warn,
+            "run_cancel_remaining_live_dispatches_pg",
+            log_ctx,
+            "[auto-queue] postgres cancel left {} non-terminal dispatches for runs {:?}",
+            remaining_live_dispatches,
+            target_run_ids
+        );
+    }
+
+    let mut response = json!({
+        "ok": true,
+        "cancelled_entries": cancelled_entries,
+        "cancelled_runs": cancelled_runs,
+        "cancelled_dispatches": cancelled_dispatches,
+        "deleted_phase_gates": deleted_phase_gates,
+        "rolled_back_cards": rolled_back_cards,
+        "remaining_live_dispatches": remaining_live_dispatches,
+        "released_slots": slot_cleanup.released_slots,
+        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+    });
+    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+        response["warning"] = json!(warning);
+    }
+    Ok(response)
+}
+
+async fn reset_with_pg(body: &ResetBody, pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
+    let agent_id = body
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let (deleted_entries, completed_runs, protected_active_runs, warning) = if let Some(agent_id) =
+        agent_id
+    {
+        let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
+            .bind(agent_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
+            .rows_affected() as usize;
+        let completed_runs = sqlx::query(
+            "UPDATE auto_queue_runs
+                 SET status = 'completed',
+                     completed_at = NOW()
+                 WHERE status IN ('generated', 'pending', 'active', 'paused')
+                   AND agent_id = $1",
+        )
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
+        .rows_affected() as usize;
+        (deleted_entries, completed_runs, 0usize, None)
+    } else {
+        let protected_active_runs = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_runs WHERE status = 'active'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("count active auto_queue_runs: {error}"))?;
+        if protected_active_runs > 0 {
+            crate::auto_queue_log!(
+                warn,
+                "reset_global_preserved_active_runs",
+                AutoQueueLogContext::new(),
+                "[auto-queue] Global PG reset requested without agent_id; preserving {protected_active_runs} active run(s)"
+            );
+        } else {
+            crate::auto_queue_log!(
+                warn,
+                "reset_global_unscoped",
+                AutoQueueLogContext::new(),
+                "[auto-queue] Global PG reset requested without agent_id; applying unscoped reset"
+            );
+        }
+
+        let deleted_entries = if protected_active_runs > 0 {
+            sqlx::query(
+                "DELETE FROM auto_queue_entries
+                     WHERE run_id IS NULL
+                        OR run_id NOT IN (
+                            SELECT id FROM auto_queue_runs WHERE status = 'active'
+                        )",
+            )
+            .execute(pool)
+            .await
+            .map_err(|error| format!("delete inactive auto_queue_entries: {error}"))?
+            .rows_affected() as usize
+        } else {
+            sqlx::query("DELETE FROM auto_queue_entries")
+                .execute(pool)
+                .await
+                .map_err(|error| format!("delete all auto_queue_entries: {error}"))?
+                .rows_affected() as usize
+        };
+        let completed_runs = if protected_active_runs > 0 {
+            sqlx::query(
+                "UPDATE auto_queue_runs
+                     SET status = 'completed',
+                         completed_at = NOW()
+                     WHERE status IN ('generated', 'pending', 'paused')",
+            )
+            .execute(pool)
+            .await
+            .map_err(|error| format!("complete inactive auto_queue_runs: {error}"))?
+            .rows_affected() as usize
+        } else {
+            sqlx::query(
+                "UPDATE auto_queue_runs
+                     SET status = 'completed',
+                         completed_at = NOW()
+                     WHERE status IN ('generated', 'pending', 'active', 'paused')",
+            )
+            .execute(pool)
+            .await
+            .map_err(|error| format!("complete all auto_queue_runs: {error}"))?
+            .rows_affected() as usize
+        };
+        let warning = (protected_active_runs > 0).then(|| {
+                format!(
+                    "global reset preserved {protected_active_runs} active run(s); use agent_id to reset a specific queue"
+                )
+            });
+        (
+            deleted_entries,
+            completed_runs,
+            protected_active_runs as usize,
+            warning,
+        )
+    };
+
+    let mut response = json!({
+        "ok": true,
+        "deleted_entries": deleted_entries,
+        "completed_runs": completed_runs,
+        "protected_active_runs": protected_active_runs,
+    });
+    if let Some(warning) = warning {
+        response["warning"] = json!(warning);
+    }
+    Ok(response)
+}
+
+async fn update_run_with_pg(
+    run_id: &str,
+    body: &UpdateRunBody,
+    pool: &sqlx::PgPool,
+) -> Result<usize, String> {
+    let mut changed = 0usize;
+
+    if let Some(ref status) = body.status {
+        let result = if status == "completed" {
+            sqlx::query(
+                "UPDATE auto_queue_runs
+                 SET status = $1,
+                     completed_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(status)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("update postgres auto_queue_runs status for {run_id}: {error}")
+            })?
+        } else {
+            sqlx::query(
+                "UPDATE auto_queue_runs
+                 SET status = $1,
+                     completed_at = NULL
+                 WHERE id = $2",
+            )
+            .bind(status)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("update postgres auto_queue_runs status for {run_id}: {error}")
+            })?
+        };
+        changed += result.rows_affected() as usize;
+    }
+
+    if let Some(ref deploy_phases) = body.deploy_phases {
+        let json_str = serde_json::to_string(deploy_phases)
+            .map_err(|error| format!("serialize deploy_phases for run {run_id}: {error}"))?;
+        let result = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET deploy_phases = $1::jsonb
+             WHERE id = $2",
+        )
+        .bind(json_str)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("update postgres auto_queue_runs deploy_phases for {run_id}: {error}")
+        })?;
+        changed += result.rows_affected() as usize;
+    }
+
+    if let Some(max_concurrent_threads) = body.max_concurrent_threads {
+        let result = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET max_concurrent_threads = $1
+             WHERE id = $2",
+        )
+        .bind(max_concurrent_threads)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("update postgres auto_queue_runs max_concurrent_threads for {run_id}: {error}")
+        })?;
+        changed += result.rows_affected() as usize;
+    }
+
+    Ok(changed)
+}
+
+async fn reorder_with_pg(body: &ReorderBody, pool: &sqlx::PgPool) -> Result<(), String> {
+    let mut run_id = None;
+    for id in &body.ordered_ids {
+        let found = sqlx::query_scalar::<_, String>(
+            "SELECT run_id
+             FROM auto_queue_entries
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load auto_queue_entries run_id for {id}: {error}"))?;
+        if found.is_some() {
+            run_id = found;
+            break;
+        }
+    }
+
+    let Some(run_id) = run_id else {
+        return Err("not_found:no matching queue entries found".to_string());
+    };
+
+    let current_entries: Vec<QueueEntryOrder> = sqlx::query(
+        "SELECT id,
+                COALESCE(status, 'pending') AS status,
+                COALESCE(agent_id, '') AS agent_id
+         FROM auto_queue_entries
+         WHERE run_id = $1
+         ORDER BY priority_rank ASC, created_at ASC, id ASC",
+    )
+    .bind(&run_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load auto_queue_entries for reorder run {run_id}: {error}"))?
+    .into_iter()
+    .map(|row| {
+        Ok(QueueEntryOrder {
+            id: row
+                .try_get("id")
+                .map_err(|error| format!("decode reorder entry id: {error}"))?,
+            status: row
+                .try_get("status")
+                .map_err(|error| format!("decode reorder entry status: {error}"))?,
+            agent_id: row
+                .try_get("agent_id")
+                .map_err(|error| format!("decode reorder entry agent_id: {error}"))?,
+        })
+    })
+    .collect::<Result<Vec<_>, String>>()?;
+
+    let reordered_ids = reorder_entry_ids(
+        &current_entries,
+        &body.ordered_ids,
+        body.agent_id.as_deref(),
+    )?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin reorder transaction: {error}"))?;
+    for (rank, id) in reordered_ids.iter().enumerate() {
+        sqlx::query("UPDATE auto_queue_entries SET priority_rank = $1 WHERE id = $2")
+            .bind(rank as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("update auto_queue_entries priority_rank for {id}: {error}")
+            })?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit reorder transaction: {error}"))?;
+
+    Ok(())
+}
+
 pub(crate) fn cancel_with_conn(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
 ) -> serde_json::Value {
     let target_run_ids =
         load_run_ids_with_status(conn, &["active", "paused", RUN_STATUS_RESTORING])
@@ -619,9 +2140,72 @@ pub(crate) fn cancel_with_conn(
     cancel_selected_runs_with_conn(health_registry, conn, &target_run_ids, "auto_queue_cancel")
 }
 
+async fn pause_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &sqlx::PgPool,
+) -> Result<serde_json::Value, String> {
+    let active_run_ids = load_run_ids_with_status_pg(pool, &["active"]).await?;
+    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, &active_run_ids).await?;
+    let cancelled_dispatches =
+        cancel_live_dispatches_for_runs_pg(pool, &active_run_ids, "auto_queue_pause").await?;
+    let mut slot_cleanup =
+        clear_and_release_slots_for_runs_pg(health_registry, pool, &active_run_ids).await;
+    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
+        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "run_pause_dispatch_session_clear_pg_failed",
+                active_run_ids
+                    .first()
+                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
+                    .unwrap_or_default(),
+                "[auto-queue] failed to clear postgres sessions for paused dispatches {:?}: {}",
+                live_dispatch_ids,
+                error
+            );
+            slot_cleanup.warnings.push(format!(
+                "failed to clear sessions for paused dispatches {:?}: {}",
+                live_dispatch_ids, error
+            ));
+        }
+    }
+    let paused = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'paused',
+             completed_at = NULL
+         WHERE status = 'active'",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("pause postgres auto_queue_runs: {error}"))?
+    .rows_affected() as usize;
+
+    let mut response = json!({
+        "ok": true,
+        "paused_runs": paused,
+        "cancelled_dispatches": cancelled_dispatches,
+        "released_slots": slot_cleanup.released_slots,
+        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+    });
+    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+        response["warning"] = json!(warning);
+    }
+    Ok(response)
+}
+
+async fn cancel_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &sqlx::PgPool,
+) -> Result<serde_json::Value, String> {
+    let target_run_ids =
+        load_run_ids_with_status_pg(pool, &["active", "paused", RUN_STATUS_RESTORING]).await?;
+    cancel_selected_runs_with_pg(health_registry, pool, &target_run_ids, "auto_queue_cancel").await
+}
+
 fn cancel_selected_runs_with_conn(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     target_run_ids: &[String],
     reason: &str,
 ) -> serde_json::Value {
@@ -642,8 +2226,11 @@ fn cancel_selected_runs_with_conn(
              SET status = 'cancelled', completed_at = datetime('now')
              WHERE id IN ({placeholders}) AND status IN ('active', 'paused', '{RUN_STATUS_RESTORING}')"
         );
-        conn.execute(&sql, rusqlite::params_from_iter(target_run_ids.iter()))
-            .unwrap_or(0)
+        conn.execute(
+            &sql,
+            libsql_rusqlite::params_from_iter(target_run_ids.iter()),
+        )
+        .unwrap_or(0)
     };
     let entry_ids: Vec<String> = if target_run_ids.is_empty() {
         Vec::new()
@@ -660,9 +2247,10 @@ fn cancel_selected_runs_with_conn(
         conn.prepare(&sql)
             .ok()
             .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params_from_iter(target_run_ids.iter()), |row| {
-                    row.get::<_, String>(0)
-                })
+                stmt.query_map(
+                    libsql_rusqlite::params_from_iter(target_run_ids.iter()),
+                    |row| row.get::<_, String>(0),
+                )
                 .ok()
                 .map(|rows| rows.filter_map(|row| row.ok()).collect())
             })
@@ -803,7 +2391,7 @@ impl ActivateCardState {
             )
     }
 
-    fn is_terminal(&self, conn: &rusqlite::Connection) -> bool {
+    fn is_terminal(&self, conn: &libsql_rusqlite::Connection) -> bool {
         crate::pipeline::ensure_loaded();
         crate::pipeline::resolve_for_card(
             conn,
@@ -857,10 +2445,10 @@ struct RestoreDispatchAttemptResult {
 }
 
 fn load_activate_card_state(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     entry_id: &str,
-) -> rusqlite::Result<ActivateCardState> {
+) -> libsql_rusqlite::Result<ActivateCardState> {
     let (status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id): (
         String,
         String,
@@ -912,10 +2500,115 @@ fn load_activate_card_state(
     })
 }
 
+async fn load_activate_card_state_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    entry_id: &str,
+) -> Result<ActivateCardState, String> {
+    let row = sqlx::query(
+        "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres card {card_id}: {error}"))?
+    .ok_or_else(|| format!("postgres card {card_id} not found"))?;
+
+    let latest_dispatch_id: Option<String> = row
+        .try_get("latest_dispatch_id")
+        .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
+    let latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
+        sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load postgres dispatch status for {dispatch_id}: {error}"))?
+    } else {
+        None
+    };
+    let entry_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                format!("load postgres auto-queue entry status for {entry_id}: {error}")
+            })?
+            .unwrap_or_else(|| "pending".to_string());
+
+    Ok(ActivateCardState {
+        status: row
+            .try_get("status")
+            .map_err(|error| format!("decode status for {card_id}: {error}"))?,
+        title: row
+            .try_get("title")
+            .map_err(|error| format!("decode title for {card_id}: {error}"))?,
+        metadata: row
+            .try_get("metadata")
+            .map_err(|error| format!("decode metadata for {card_id}: {error}"))?,
+        latest_dispatch_id,
+        latest_dispatch_status,
+        entry_status,
+        repo_id: row
+            .try_get("repo_id")
+            .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?,
+        assigned_agent_id: row
+            .try_get("assigned_agent_id")
+            .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?,
+    })
+}
+
+async fn resolve_activate_pipeline_pg(
+    pool: &sqlx::PgPool,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<crate::pipeline::PipelineConfig, String> {
+    crate::pipeline::ensure_loaded();
+
+    let repo_override = if let Some(repo_id) = repo_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config FROM github_repos WHERE id = $1",
+        )
+        .bind(repo_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+        .map(|json| crate::pipeline::parse_override(&json))
+        .transpose()
+        .map_err(|error| format!("parse repo pipeline override for {repo_id}: {error}"))?
+        .flatten()
+    } else {
+        None
+    };
+
+    let agent_override = if let Some(agent_id) = agent_id {
+        sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
+            .map(|json| crate::pipeline::parse_override(&json))
+            .transpose()
+            .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
+    } else {
+        None
+    };
+
+    Ok(crate::pipeline::resolve(
+        repo_override.as_ref(),
+        agent_override.as_ref(),
+    ))
+}
+
 fn load_restore_entries(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     run_id: &str,
-) -> rusqlite::Result<Vec<RestoreEntryRecord>> {
+) -> libsql_rusqlite::Result<Vec<RestoreEntryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, kanban_card_id, agent_id, COALESCE(thread_group, 0)
          FROM auto_queue_entries
@@ -935,9 +2628,9 @@ fn load_restore_entries(
 }
 
 fn decide_restore_transition(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     entry: &RestoreEntryRecord,
-) -> rusqlite::Result<RestoreEntryDecision> {
+) -> libsql_rusqlite::Result<RestoreEntryDecision> {
     let card_state = load_activate_card_state(conn, &entry.card_id, &entry.entry_id)?;
     let dispatch_history =
         crate::db::auto_queue::list_entry_dispatch_history(conn, &entry.entry_id)?;
@@ -963,7 +2656,7 @@ fn decide_restore_transition(
 }
 
 fn apply_restore_state_changes(
-    conn: &mut rusqlite::Connection,
+    conn: &mut libsql_rusqlite::Connection,
     run_id: &str,
     run_status: Option<&str>,
 ) -> Result<(RestoreRunCounts, Vec<RestoreDispatchCandidate>), String> {
@@ -978,7 +2671,7 @@ fn apply_restore_state_changes(
                      completed_at = NULL
                  WHERE id = ?1
                    AND status = 'cancelled'",
-                rusqlite::params![run_id, RUN_STATUS_RESTORING],
+                libsql_rusqlite::params![run_id, RUN_STATUS_RESTORING],
             )
             .map_err(|error| {
                 format!("failed to start restore for cancelled run '{run_id}': {error}")
@@ -1352,7 +3045,7 @@ fn attempt_restore_dispatch(
     }
 }
 
-fn finalize_restore_run(conn: &rusqlite::Connection, run_id: &str) -> Result<(), String> {
+fn finalize_restore_run(conn: &libsql_rusqlite::Connection, run_id: &str) -> Result<(), String> {
     let finalized = conn
         .execute(
             "UPDATE auto_queue_runs
@@ -1360,7 +3053,7 @@ fn finalize_restore_run(conn: &rusqlite::Connection, run_id: &str) -> Result<(),
                  completed_at = NULL
              WHERE id = ?1
                AND status = ?2",
-            rusqlite::params![run_id, RUN_STATUS_RESTORING],
+            libsql_rusqlite::params![run_id, RUN_STATUS_RESTORING],
         )
         .map_err(|error| format!("failed to finalize restore for run '{run_id}': {error}"))?;
     if finalized > 0 {
@@ -1390,6 +3083,7 @@ fn finalize_restore_run(conn: &rusqlite::Connection, run_id: &str) -> Result<(),
 #[derive(Clone)]
 pub(crate) struct AutoQueueActivateDeps {
     db: crate::db::Db,
+    pg_pool: Option<sqlx::PgPool>,
     engine: crate::engine::PolicyEngine,
     config: Arc<crate::config::Config>,
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
@@ -1400,6 +3094,7 @@ impl AutoQueueActivateDeps {
     fn from_state(state: &AppState) -> Self {
         Self {
             db: state.db.clone(),
+            pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
             health_registry: state.health_registry.clone(),
@@ -1410,6 +3105,7 @@ impl AutoQueueActivateDeps {
     pub(crate) fn for_bridge(db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
         Self {
             db,
+            pg_pool: None,
             engine,
             config: Arc::new(crate::config::Config::default()),
             health_registry: None,
@@ -1424,6 +3120,13 @@ impl AutoQueueActivateDeps {
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
         self.auto_queue_service()
             .entry_json(entry_id, self.guild_id.as_deref())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    async fn entry_json_pg(&self, pool: &sqlx::PgPool, entry_id: &str) -> serde_json::Value {
+        self.auto_queue_service()
+            .entry_json_with_pg(pool, entry_id, self.guild_id.as_deref())
+            .await
             .unwrap_or(serde_json::Value::Null)
     }
 }
@@ -1948,7 +3651,7 @@ fn normalize_dispatch_entries(body: &DispatchBody) -> Result<Vec<GenerateEntryBo
 }
 
 fn resolve_dispatch_cards(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     repo: Option<&String>,
     issue_numbers: &[i64],
 ) -> Result<HashMap<i64, ResolvedDispatchCard>, String> {
@@ -1956,7 +3659,7 @@ fn resolve_dispatch_cards(
         return Ok(HashMap::new());
     }
 
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
     let mut conditions = Vec::new();
 
     if let Some(repo) = repo {
@@ -1981,7 +3684,8 @@ fn resolve_dispatch_cards(
          WHERE {}",
         conditions.join(" AND ")
     );
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql).map_err(|err| format!("{err}"))?;
     let rows: Vec<ResolvedDispatchCard> = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -2025,8 +3729,71 @@ fn resolve_dispatch_cards(
     Ok(cards_by_issue)
 }
 
+async fn resolve_dispatch_cards_with_pg(
+    pool: &sqlx::PgPool,
+    repo: Option<&String>,
+    issue_numbers: &[i64],
+) -> Result<HashMap<i64, ResolvedDispatchCard>, String> {
+    if issue_numbers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT id,
+                repo_id,
+                status,
+                assigned_agent_id,
+                github_issue_number::BIGINT AS github_issue_number
+         FROM kanban_cards
+         WHERE ($1::TEXT IS NULL OR repo_id = $1)
+           AND github_issue_number::BIGINT = ANY($2::BIGINT[])",
+    )
+    .bind(repo.map(String::as_str))
+    .bind(issue_numbers.to_vec())
+    .fetch_all(pool)
+    .await
+    .map_err(|err| format!("{err}"))?;
+
+    let mut cards_by_issue = HashMap::new();
+    for row in rows {
+        let card = ResolvedDispatchCard {
+            card_id: row.try_get("id").map_err(|err| format!("{err}"))?,
+            repo_id: row.try_get("repo_id").map_err(|err| format!("{err}"))?,
+            status: row.try_get("status").map_err(|err| format!("{err}"))?,
+            assigned_agent_id: row
+                .try_get("assigned_agent_id")
+                .map_err(|err| format!("{err}"))?,
+            issue_number: row
+                .try_get("github_issue_number")
+                .map_err(|err| format!("{err}"))?,
+        };
+        if cards_by_issue
+            .insert(card.issue_number, card.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "multiple kanban cards matched issue #{}; specify repo to disambiguate",
+                card.issue_number
+            ));
+        }
+    }
+
+    for issue_number in issue_numbers {
+        if !cards_by_issue.contains_key(issue_number) {
+            let suffix = repo
+                .map(|repo| format!(" in repo {repo}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "kanban card not found for issue #{issue_number}{suffix}"
+            ));
+        }
+    }
+
+    Ok(cards_by_issue)
+}
+
 fn apply_dispatch_agent_assignments(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     cards_by_issue: &mut HashMap<i64, ResolvedDispatchCard>,
     agent_id: Option<&str>,
     auto_assign_agent: bool,
@@ -2065,7 +3832,7 @@ fn apply_dispatch_agent_assignments(
                          updated_at = datetime('now')
                      WHERE id = ?2
                        AND (assigned_agent_id IS NULL OR TRIM(assigned_agent_id) = '')",
-                    rusqlite::params![target, card.card_id],
+                    libsql_rusqlite::params![target, card.card_id],
                 )
                 .map_err(|err| format!("{err}"))?;
                 card.assigned_agent_id = Some(target.to_string());
@@ -2088,7 +3855,7 @@ fn apply_dispatch_agent_assignments(
 }
 
 fn validate_dispatchable_cards(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
 ) -> Result<(), String> {
     crate::pipeline::ensure_loaded();
@@ -2120,13 +3887,13 @@ fn validate_dispatchable_cards(
 }
 
 fn find_matching_active_run_id(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     repo: Option<&str>,
     agent_id: Option<&str>,
 ) -> Result<Vec<(String, String)>, String> {
     let mut sql =
         String::from("SELECT id, status FROM auto_queue_runs WHERE status IN ('active', 'paused')");
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
         params.push(Box::new(repo.to_string()));
@@ -2144,7 +3911,8 @@ fn find_matching_active_run_id(
     }
     sql.push_str(" ORDER BY created_at DESC, id DESC");
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|err| format!("prepare live run lookup: {err}"))?;
@@ -2162,7 +3930,7 @@ struct AddedRunEntry {
 }
 
 fn enqueue_entries_into_existing_run(
-    conn: &mut rusqlite::Connection,
+    conn: &mut libsql_rusqlite::Connection,
     run_id: &str,
     requested_entries: &[GenerateEntryBody],
     cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
@@ -2256,7 +4024,7 @@ fn enqueue_entries_into_existing_run(
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
              )",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 &entry_id,
                 run_id,
                 &card.card_id,
@@ -2282,6 +4050,173 @@ fn enqueue_entries_into_existing_run(
     }
 
     tx.commit()
+        .map_err(|err| format!("commit enqueue transaction: {err}"))?;
+    Ok(inserted)
+}
+
+async fn sync_run_group_metadata_with_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<(), String> {
+    let thread_group_count = sqlx::query_scalar::<_, i64>(
+        "SELECT GREATEST(
+                COALESCE(COUNT(DISTINCT COALESCE(thread_group, 0)), 0),
+                1
+            )::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|err| format!("count thread groups for run {run_id}: {err}"))?;
+
+    sqlx::query(
+        "UPDATE auto_queue_runs
+         SET thread_group_count = $1,
+             max_concurrent_threads = $1
+         WHERE id = $2",
+    )
+    .bind(thread_group_count)
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| format!("sync run group metadata for {run_id}: {err}"))?;
+    Ok(())
+}
+
+async fn enqueue_entries_into_existing_run_with_pg(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    requested_entries: &[GenerateEntryBody],
+    cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
+) -> Result<Vec<AddedRunEntry>, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| format!("begin enqueue transaction: {err}"))?;
+
+    let existing_live_cards: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT kanban_card_id
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(run_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|err| format!("query existing queued cards: {err}"))?
+    .into_iter()
+    .collect();
+
+    let mut next_rank_by_group = HashMap::new();
+    for row in sqlx::query(
+        "SELECT COALESCE(thread_group, 0)::BIGINT AS thread_group,
+                (COALESCE(MAX(priority_rank), -1) + 1)::BIGINT AS next_priority_rank
+         FROM auto_queue_entries
+         WHERE run_id = $1
+         GROUP BY COALESCE(thread_group, 0)",
+    )
+    .bind(run_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|err| format!("query group ranks: {err}"))?
+    {
+        let thread_group: i64 = row
+            .try_get("thread_group")
+            .map_err(|err| format!("decode thread_group: {err}"))?;
+        let next_priority_rank: i64 = row
+            .try_get("next_priority_rank")
+            .map_err(|err| format!("decode next_priority_rank: {err}"))?;
+        next_rank_by_group.insert(thread_group, next_priority_rank);
+    }
+
+    let mut next_auto_group = sqlx::query_scalar::<_, i64>(
+        "SELECT (COALESCE(MAX(COALESCE(thread_group, 0)), -1) + 1)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|err| format!("query next thread group: {err}"))?;
+
+    let mut existing_live_cards = existing_live_cards;
+    let mut inserted = Vec::new();
+
+    for entry in requested_entries {
+        let Some(card) = cards_by_issue.get(&entry.issue_number) else {
+            continue;
+        };
+        if existing_live_cards.contains(&card.card_id) {
+            return Err(format!(
+                "issue #{} is already queued in run {run_id}",
+                entry.issue_number
+            ));
+        }
+
+        let has_active_dispatch = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(&card.card_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| format!("query active dispatches for {}: {err}", card.card_id))?;
+        if has_active_dispatch > 0 {
+            return Err(format!(
+                "issue #{} already has an active dispatch and cannot be queued again",
+                entry.issue_number
+            ));
+        }
+
+        let thread_group = entry.thread_group.unwrap_or_else(|| {
+            let chosen = next_auto_group;
+            next_auto_group += 1;
+            chosen
+        });
+        let priority_rank = *next_rank_by_group.entry(thread_group).or_insert(0);
+        next_rank_by_group.insert(thread_group, priority_rank + 1);
+        let entry_id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, reason
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+             )",
+        )
+        .bind(&entry_id)
+        .bind(run_id)
+        .bind(&card.card_id)
+        .bind(card.assigned_agent_id.as_deref().unwrap_or(""))
+        .bind(priority_rank)
+        .bind(thread_group)
+        .bind(entry.batch_phase.unwrap_or(0))
+        .bind(format!(
+            "manual run entry add for issue #{}",
+            entry.issue_number
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| format!("insert auto-queue entry: {err}"))?;
+
+        existing_live_cards.insert(card.card_id.clone());
+        inserted.push(AddedRunEntry {
+            entry_id,
+            thread_group,
+            priority_rank,
+        });
+    }
+
+    if !inserted.is_empty() {
+        sync_run_group_metadata_with_pg_tx(&mut tx, run_id).await?;
+    }
+
+    tx.commit()
+        .await
         .map_err(|err| format!("commit enqueue transaction: {err}"))?;
     Ok(inserted)
 }
@@ -3364,7 +5299,7 @@ pub async fn generate(
     if let Err(error) = tx.execute(
         "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count) \
          VALUES (?1, ?2, ?3, 'generated', ?4, ?5, 0, ?6, ?7)",
-        rusqlite::params![
+        libsql_rusqlite::params![
             run_id,
             body.repo,
             body.agent_id,
@@ -3392,7 +5327,7 @@ pub async fn generate(
         if let Err(error) = tx.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 entry_id,
                 run_id,
                 card.card_id,
@@ -3444,7 +5379,1263 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    activate_with_deps(&AutoQueueActivateDeps::from_state(&state), body)
+    let deps = AutoQueueActivateDeps::from_state(&state);
+    let body = if let Some(pool) = state.pg_pool.as_ref() {
+        match activate_preflight_with_pg(pool, body).await {
+            ActivatePgPreflight::Return(response) => return response,
+            ActivatePgPreflight::Continue(body) => body,
+        }
+    } else {
+        body
+    };
+
+    if deps.pg_pool.is_some() {
+        activate_with_deps_pg(&deps, body).await
+    } else {
+        activate_with_deps(&deps, body)
+    }
+}
+
+enum ActivatePgPreflight {
+    Return((StatusCode, Json<serde_json::Value>)),
+    Continue(ActivateBody),
+}
+
+async fn activate_preflight_with_pg(
+    pool: &sqlx::PgPool,
+    mut body: ActivateBody,
+) -> ActivatePgPreflight {
+    let active_only = body.active_only.unwrap_or(false);
+    let selected_run = if let Some(run_id) = body
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match sqlx::query(
+            "SELECT id, status
+             FROM auto_queue_runs
+             WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(row)) => {
+                let id = match row.try_get::<String, _>("id") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return ActivatePgPreflight::Return((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("decode postgres auto-queue run {run_id}: {error}")}),
+                            ),
+                        ));
+                    }
+                };
+                let status = match row.try_get::<String, _>("status") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return ActivatePgPreflight::Return((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("decode postgres auto-queue run status {run_id}: {error}")}),
+                            ),
+                        ));
+                    }
+                };
+                Some((id, status))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                return ActivatePgPreflight::Return((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres auto-queue run {run_id}: {error}")}),
+                    ),
+                ));
+            }
+        }
+    } else {
+        let repo = body
+            .repo
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let agent_id = body
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let status_clause = if active_only {
+            "status = 'active'"
+        } else {
+            "status IN ('active', 'generated', 'pending')"
+        };
+        let query = format!(
+            "SELECT id, status
+             FROM auto_queue_runs
+             WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
+               AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+               AND {status_clause}
+             ORDER BY created_at DESC
+             LIMIT 1"
+        );
+        match sqlx::query(&query)
+            .bind(repo)
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(row)) => {
+                let id = match row.try_get::<String, _>("id") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return ActivatePgPreflight::Return((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("decode postgres auto-queue selected run id: {error}")}),
+                            ),
+                        ));
+                    }
+                };
+                let status = match row.try_get::<String, _>("status") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return ActivatePgPreflight::Return((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("decode postgres auto-queue selected run status: {error}")}),
+                            ),
+                        ));
+                    }
+                };
+                Some((id, status))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                return ActivatePgPreflight::Return((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres auto-queue selected run: {error}")}),
+                    ),
+                ));
+            }
+        }
+    };
+
+    let Some((run_id, status)) = selected_run else {
+        return ActivatePgPreflight::Return((
+            StatusCode::OK,
+            Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+        ));
+    };
+
+    let blocking_phase_gate = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM auto_queue_phase_gates
+             WHERE run_id = $1
+               AND status IN ('pending', 'failed')
+         )",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return ActivatePgPreflight::Return((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue phase gates for {run_id}: {error}")}),
+                ),
+            ));
+        }
+    };
+
+    match status.as_str() {
+        "paused" => {
+            let message = if blocking_phase_gate {
+                "Run is waiting on phase gate"
+            } else {
+                "Run is paused"
+            };
+            return ActivatePgPreflight::Return((
+                StatusCode::OK,
+                Json(json!({ "dispatched": [], "count": 0, "message": message })),
+            ));
+        }
+        RUN_STATUS_RESTORING => {
+            return ActivatePgPreflight::Return((
+                StatusCode::OK,
+                Json(json!({ "dispatched": [], "count": 0, "message": "Run is restoring" })),
+            ));
+        }
+        _ if active_only && status != "active" => {
+            return ActivatePgPreflight::Return((
+                StatusCode::OK,
+                Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+            ));
+        }
+        _ if blocking_phase_gate => {
+            return ActivatePgPreflight::Return((
+                StatusCode::OK,
+                Json(
+                    json!({ "dispatched": [], "count": 0, "message": "Run is waiting on phase gate" }),
+                ),
+            ));
+        }
+        _ => {}
+    }
+
+    if body.run_id.is_none() {
+        body.run_id = Some(run_id);
+    }
+
+    ActivatePgPreflight::Continue(body)
+}
+
+async fn activate_with_deps_pg(
+    deps: &AutoQueueActivateDeps,
+    body: ActivateBody,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let _ignored_unified_thread = body.unified_thread.is_some();
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool is not configured"})),
+        );
+    };
+
+    let active_only = body.active_only.unwrap_or(false);
+    let run_id = if let Some(run_id) = body.run_id.clone() {
+        run_id
+    } else {
+        let repo = body
+            .repo
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let agent_id = body
+            .agent_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let status_clause = if active_only {
+            "status = 'active'"
+        } else {
+            "status IN ('active', 'generated', 'pending')"
+        };
+        let query = format!(
+            "SELECT id
+             FROM auto_queue_runs
+             WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
+               AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+               AND {status_clause}
+             ORDER BY created_at DESC
+             LIMIT 1"
+        );
+        match sqlx::query_scalar::<_, String>(&query)
+            .bind(repo)
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(run_id)) => run_id,
+            Ok(None) => {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("load postgres auto-queue run: {error}")})),
+                );
+            }
+        }
+    };
+    let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
+
+    if !active_only
+        && let Err(error) = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active'
+             WHERE id = $1
+               AND status IN ('generated', 'pending')",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("promote postgres auto-queue run {run_id}: {error}")})),
+        );
+    }
+
+    if let Err(error) = crate::db::auto_queue::clear_inactive_slot_assignments_pg(pool).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("clear inactive postgres auto-queue slots for {run_id}: {error}")}),
+            ),
+        );
+    }
+    let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
+
+    let entry_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("count postgres auto-queue entries for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    if entry_count == 0 {
+        if let Err(error) = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'completed',
+                 completed_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("complete stale postgres auto-queue run {run_id}: {error}")}),
+                ),
+            );
+        }
+        crate::auto_queue_log!(
+            info,
+            "activate_stale_empty_run_completed_pg",
+            run_log_ctx.clone(),
+            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
+        );
+        return (
+            StatusCode::OK,
+            Json(
+                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
+            ),
+        );
+    }
+
+    let (max_concurrent, _thread_group_count) = match sqlx::query(
+        "SELECT COALESCE(max_concurrent_threads, 1)::BIGINT AS max_concurrent_threads,
+                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(row) => {
+            let max_concurrent = match row.try_get::<i64, _>("max_concurrent_threads") {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres auto-queue max_concurrent_threads for {run_id}: {error}")}),
+                        ),
+                    );
+                }
+            };
+            let thread_group_count = match row.try_get::<i64, _>("thread_group_count") {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres auto-queue thread_group_count for {run_id}: {error}")}),
+                        ),
+                    );
+                }
+            };
+            (max_concurrent, thread_group_count)
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue run capacity for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+
+    let run_agents_rows = match sqlx::query(
+        "SELECT DISTINCT agent_id
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(&run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue run agents for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    for row in run_agents_rows {
+        let agent_id: String = match row.try_get("agent_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("decode postgres auto-queue run agent for {run_id}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if let Err(error) =
+            crate::db::auto_queue::ensure_agent_slot_pool_rows_pg(pool, &agent_id, max_concurrent)
+                .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("prepare postgres slot pool rows for run {run_id} agent {agent_id}: {error}")}),
+                ),
+            );
+        }
+    }
+
+    let current_phase = match crate::db::auto_queue::current_batch_phase_pg(pool, &run_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres auto-queue current phase for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+
+    let active_groups_rows = match sqlx::query(
+        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'dispatched'
+         ORDER BY thread_group ASC",
+    )
+    .bind(&run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres active groups for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    let active_groups: Vec<i64> = {
+        let mut groups = Vec::with_capacity(active_groups_rows.len());
+        for row in active_groups_rows {
+            match row.try_get::<i64, _>("thread_group") {
+                Ok(value) => groups.push(value),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres active group for {run_id}: {error}")}),
+                        ),
+                    );
+                }
+            }
+        }
+        groups
+    };
+    let active_group_count = active_groups.len() as i64;
+
+    let pending_group_rows = match sqlx::query(
+        "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group,
+                         COALESCE(batch_phase, 0)::BIGINT AS batch_phase
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'pending'
+         ORDER BY thread_group ASC, batch_phase ASC",
+    )
+    .bind(&run_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres pending groups for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    let pending_groups: Vec<i64> = {
+        let active_set: HashSet<i64> = active_groups.iter().copied().collect();
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+        for row in pending_group_rows {
+            let thread_group = match row.try_get::<i64, _>("thread_group") {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres pending group for {run_id}: {error}")}),
+                        ),
+                    );
+                }
+            };
+            let batch_phase = match row.try_get::<i64, _>("batch_phase") {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("decode postgres pending batch_phase for {run_id}: {error}")}),
+                        ),
+                    );
+                }
+            };
+            if !active_set.contains(&thread_group)
+                && crate::db::auto_queue::batch_phase_is_eligible(batch_phase, current_phase)
+                && seen.insert(thread_group)
+            {
+                groups.push(thread_group);
+            }
+        }
+        groups
+    };
+
+    let mut dispatched = Vec::new();
+    let mut groups_to_dispatch = Vec::new();
+
+    if let Some(group) = body.thread_group {
+        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
+            pool,
+            &run_id,
+            group,
+            current_phase,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres pending group eligibility for {run_id}:{group}: {error}")}),
+                    ),
+                );
+            }
+        };
+        let has_dispatched = match group_has_dispatched_entries_pg(pool, &run_id, group).await {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres dispatched group state for {run_id}:{group}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if has_pending && !has_dispatched {
+            groups_to_dispatch.push(group);
+        }
+    }
+
+    match crate::db::auto_queue::assigned_groups_with_pending_entries_pg(
+        pool,
+        &run_id,
+        current_phase,
+    )
+    .await
+    {
+        Ok(groups) => {
+            for group in groups {
+                if !groups_to_dispatch.contains(&group) {
+                    groups_to_dispatch.push(group);
+                }
+            }
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres assigned groups for {run_id}: {error}")}),
+                ),
+            );
+        }
+    }
+
+    for &group in &active_groups {
+        let has_pending = match crate::db::auto_queue::group_has_pending_entries_pg(
+            pool,
+            &run_id,
+            group,
+            current_phase,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres continuation eligibility for {run_id}:{group}: {error}")}),
+                    ),
+                );
+            }
+        };
+        let has_dispatched = match group_has_dispatched_entries_pg(pool, &run_id, group).await {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres dispatched continuation state for {run_id}:{group}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if has_pending && !has_dispatched && !groups_to_dispatch.contains(&group) {
+            groups_to_dispatch.push(group);
+        }
+    }
+
+    for group in pending_groups {
+        if !groups_to_dispatch.contains(&group) {
+            groups_to_dispatch.push(group);
+        }
+    }
+
+    let mut dispatched_groups_this_activate = 0_i64;
+    for group in &groups_to_dispatch {
+        if (active_group_count + dispatched_groups_this_activate) >= max_concurrent {
+            break;
+        }
+
+        let entry = match crate::db::auto_queue::first_pending_entry_for_group_pg(
+            pool,
+            &run_id,
+            *group,
+            current_phase,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres pending entry for {run_id}:{group}: {error}")}),
+                    ),
+                );
+            }
+        };
+        let Some((entry_id, card_id, agent_id, batch_phase)) = entry else {
+            continue;
+        };
+        let entry_log_ctx = AutoQueueLogContext::new()
+            .run(&run_id)
+            .entry(&entry_id)
+            .card(&card_id)
+            .agent(&agent_id)
+            .thread_group(*group)
+            .batch_phase(batch_phase);
+
+        let initial_state = match load_activate_card_state_pg(pool, &card_id, &entry_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_load_card_failed_pg",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to load PG card {} before activate for entry {}: {error}",
+                    card_id,
+                    entry_id
+                );
+                continue;
+            }
+        };
+
+        let busy = match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM kanban_cards
+                 WHERE assigned_agent_id = $1
+                   AND status IN ('requested', 'in_progress', 'review')
+                   AND id != $2
+                   AND id NOT IN (
+                       SELECT kanban_card_id
+                       FROM auto_queue_entries
+                       WHERE run_id = $3
+                   )
+             )",
+        )
+        .bind(&agent_id)
+        .bind(&card_id)
+        .bind(&run_id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres busy-agent guard for run {run_id} agent {agent_id}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if busy {
+            crate::auto_queue_log!(
+                info,
+                "activate_busy_agent_guard_blocked_pg",
+                entry_log_ctx.clone(),
+                "[auto-queue] Skipping activate for {agent_id}: agent has active cards outside auto-queue"
+            );
+            continue;
+        }
+
+        let effective = match resolve_activate_pipeline_pg(
+            pool,
+            initial_state.repo_id.as_deref(),
+            initial_state.assigned_agent_id.as_deref(),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_pipeline_resolve_failed_pg",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to resolve PG pipeline for card {} during activate: {}",
+                    card_id,
+                    error
+                );
+                continue;
+            }
+        };
+
+        if initial_state.entry_status != "pending" {
+            if initial_state.entry_status == "dispatched" {
+                dispatched_groups_this_activate += 1;
+            }
+            continue;
+        }
+
+        if effective.is_terminal(&initial_state.status) || initial_state.status == "done" {
+            if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+                pool,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+                "activate_done_skip_pg",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await
+            {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_done_skip_failed_pg",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to skip terminal PG card entry {} during activate: {}",
+                    entry_id,
+                    error
+                );
+            }
+            continue;
+        }
+
+        if initial_state.has_active_dispatch() {
+            let dispatch_id = initial_state
+                .latest_dispatch_id
+                .as_ref()
+                .expect("active dispatch state requires dispatch id")
+                .clone();
+            if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+                pool,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                "activate_attach_existing_dispatch_pg",
+                &crate::db::auto_queue::EntryStatusUpdateOptions {
+                    dispatch_id: Some(dispatch_id.clone()),
+                    slot_index: None,
+                },
+            )
+            .await
+            {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_attach_existing_dispatch_failed_pg",
+                    entry_log_ctx.clone().dispatch(&dispatch_id),
+                    "[auto-queue] failed to attach existing PG dispatch {dispatch_id} to entry {entry_id}: {error}"
+                );
+            }
+            dispatched_groups_this_activate += 1;
+            continue;
+        }
+
+        let still_pending = match sqlx::query_scalar::<_, bool>(
+            "SELECT status = 'pending'
+             FROM auto_queue_entries
+             WHERE id = $1",
+        )
+        .bind(&entry_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => false,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("recheck postgres auto-queue entry status for {entry_id}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if !still_pending {
+            crate::auto_queue_log!(
+                warn,
+                "activate_concurrent_race_detected_pg",
+                entry_log_ctx.clone(),
+                "[auto-queue] entry {entry_id} is no longer pending before slot allocation; concurrent activate likely claimed it"
+            );
+            dispatched_groups_this_activate += 1;
+            continue;
+        }
+
+        let slot_allocation = match crate::db::auto_queue::allocate_slot_for_group_agent_pg(
+            pool, &run_id, *group, &agent_id,
+        )
+        .await
+        {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_slot_allocation_failed_pg",
+                    entry_log_ctx.clone(),
+                    "[auto-queue] failed to allocate PG slot for entry {} run {} agent {} group {}: {}",
+                    entry_id,
+                    run_id,
+                    agent_id,
+                    group,
+                    error
+                );
+                continue;
+            }
+        };
+        let slot_index = slot_allocation
+            .as_ref()
+            .map(|allocation| allocation.slot_index);
+        let mut reset_slot_thread_before_reuse = false;
+        let Some(allocation) = slot_allocation else {
+            crate::auto_queue_log!(
+                warn,
+                "activate_slot_pool_exhausted_pg",
+                entry_log_ctx.clone(),
+                "[auto-queue] Skipping group {group} for {agent_id}: no free PG slot in pool (possible concurrent slot claim)"
+            );
+            continue;
+        };
+
+        reset_slot_thread_before_reuse = match slot_requires_thread_reset_before_reuse_pg(
+            pool,
+            &agent_id,
+            allocation.slot_index,
+            allocation.newly_assigned,
+            allocation.reassigned_from_other_group,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_slot_reset_probe_failed_pg",
+                    entry_log_ctx.clone().slot_index(allocation.slot_index),
+                    "[auto-queue] failed to inspect PG slot reuse state for {} slot {}: {}",
+                    agent_id,
+                    allocation.slot_index,
+                    error
+                );
+                false
+            }
+        };
+        let clear_slot_session_before_dispatch =
+            reset_slot_thread_before_reuse || !allocation.newly_assigned;
+        let slot_key = (agent_id.clone(), allocation.slot_index);
+        if clear_slot_session_before_dispatch && !cleared_slots.contains(&slot_key) {
+            match crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg(
+                deps.health_registry.clone(),
+                pool,
+                &agent_id,
+                allocation.slot_index,
+            )
+            .await
+            {
+                Ok(cleared) => {
+                    if cleared > 0 {
+                        crate::auto_queue_log!(
+                            info,
+                            "activate_slot_cleared_before_dispatch_pg",
+                            entry_log_ctx.clone().slot_index(allocation.slot_index),
+                            "[auto-queue] cleared {cleared} PG slot thread session(s) before dispatching {agent_id} slot {} group {group}",
+                            allocation.slot_index
+                        );
+                    }
+                }
+                Err(error) => crate::auto_queue_log!(
+                    warn,
+                    "activate_slot_clear_failed_pg",
+                    entry_log_ctx.clone().slot_index(allocation.slot_index),
+                    "[auto-queue] failed to clear PG slot thread session(s) for {} slot {}: {}",
+                    agent_id,
+                    allocation.slot_index,
+                    error
+                ),
+            }
+            cleared_slots.insert(slot_key);
+        }
+
+        match crate::db::auto_queue::update_entry_status_on_pg(
+            pool,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+            "activate_dispatch_reserve_pg",
+            &crate::db::auto_queue::EntryStatusUpdateOptions {
+                dispatch_id: None,
+                slot_index,
+            },
+        )
+        .await
+        {
+            Ok(result) if !result.changed => {
+                crate::auto_queue_log!(
+                    info,
+                    "activate_dispatch_reserve_already_claimed_pg",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
+                    "[auto-queue] entry {entry_id} was already reserved by another activate worker; skipping duplicate PG dispatch creation"
+                );
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_dispatch_reserve_failed_pg",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
+                    "[auto-queue] failed to reserve PG entry {} before create_dispatch: {}",
+                    entry_id,
+                    error
+                );
+                continue;
+            }
+        }
+
+        let dispatch_context = build_auto_queue_dispatch_context(
+            &entry_id,
+            *group,
+            slot_index,
+            reset_slot_thread_before_reuse,
+            std::iter::empty(),
+        );
+        let dispatch_id = match create_activate_dispatch_pg(
+            deps,
+            pool,
+            &card_id,
+            &agent_id,
+            "implementation",
+            &initial_state.title,
+            &dispatch_context,
+        )
+        .await
+        {
+            Ok(dispatch_id) => dispatch_id,
+            Err(error) => {
+                let recovered_state = load_activate_card_state_pg(pool, &card_id, &entry_id)
+                    .await
+                    .ok();
+                if let Some(dispatch_id) = recovered_state
+                    .as_ref()
+                    .filter(|state| state.has_active_dispatch())
+                    .and_then(|state| state.latest_dispatch_id.clone())
+                {
+                    if let Err(update_error) = crate::db::auto_queue::update_entry_status_on_pg(
+                        pool,
+                        &entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                        "activate_dispatch_error_recover_pg",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions {
+                            dispatch_id: Some(dispatch_id),
+                            slot_index,
+                        },
+                    )
+                    .await
+                    {
+                        crate::auto_queue_log!(
+                            warn,
+                            "activate_create_dispatch_recover_failed_pg",
+                            entry_log_ctx.clone().maybe_slot_index(slot_index),
+                            "[auto-queue] failed to recover PG entry {entry_id} after create_dispatch error: {update_error}"
+                        );
+                    } else {
+                        continue;
+                    }
+                }
+
+                if recovered_state.as_ref().is_some_and(|state| {
+                    state.latest_dispatch_id.is_some() || state.status != initial_state.status
+                }) {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_create_dispatch_error_kept_reservation_pg",
+                        entry_log_ctx
+                            .clone()
+                            .maybe_slot_index(slot_index)
+                            .maybe_dispatch(
+                                recovered_state
+                                    .as_ref()
+                                    .and_then(|state| state.latest_dispatch_id.as_deref())
+                            ),
+                        "[auto-queue] create_dispatch PG errored for entry {entry_id} after card progressed; keeping reservation"
+                    );
+                    continue;
+                }
+
+                if let Err(update_error) = crate::db::auto_queue::update_entry_status_on_pg(
+                    pool,
+                    &entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                    "activate_dispatch_reserve_revert_pg",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                )
+                .await
+                {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_dispatch_reserve_revert_failed_pg",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] failed to revert PG reservation for entry {} after create_dispatch error: {}",
+                        entry_id,
+                        update_error
+                    );
+                } else if let Some(assigned_slot) = slot_index
+                    && let Err(release_error) =
+                        crate::db::auto_queue::release_slot_for_group_agent_pg(
+                            pool,
+                            &run_id,
+                            *group,
+                            &agent_id,
+                            assigned_slot,
+                        )
+                        .await
+                {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_dispatch_revert_slot_release_failed_pg",
+                        entry_log_ctx.clone().slot_index(assigned_slot),
+                        "[auto-queue] failed to release PG slot {} for entry {} after create_dispatch error: {}",
+                        assigned_slot,
+                        entry_id,
+                        release_error
+                    );
+                }
+                crate::auto_queue_log!(
+                    error,
+                    "activate_dispatch_create_failed_pg",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
+                    "[auto-queue] create_dispatch PG failed for entry {entry_id} (group {group}), leaving as pending for retry: {error}"
+                );
+                continue;
+            }
+        };
+
+        if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+            pool,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+            "activate_dispatch_created_pg",
+            &crate::db::auto_queue::EntryStatusUpdateOptions {
+                dispatch_id: Some(dispatch_id.clone()),
+                slot_index,
+            },
+        )
+        .await
+        {
+            crate::auto_queue_log!(
+                warn,
+                "activate_dispatch_mark_failed_pg",
+                entry_log_ctx
+                    .clone()
+                    .dispatch(&dispatch_id)
+                    .maybe_slot_index(slot_index),
+                "[auto-queue] failed to mark PG entry {} dispatched after create_dispatch: {}",
+                entry_id,
+                error
+            );
+        }
+
+        dispatched_groups_this_activate += 1;
+        dispatched.push(deps.entry_json_pg(pool, &entry_id).await);
+    }
+
+    let remaining = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("count postgres remaining entries for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    if remaining == 0 {
+        if let Err(error) = crate::db::auto_queue::release_run_slots_pg(pool, &run_id).await {
+            crate::auto_queue_log!(
+                warn,
+                "activate_release_run_slots_failed_pg",
+                run_log_ctx.clone(),
+                "[auto-queue] failed to release PG slots for drained run {}: {}",
+                run_id,
+                error
+            );
+        }
+        let still_dispatched = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_entries
+             WHERE run_id = $1
+               AND status = 'dispatched'",
+        )
+        .bind(&run_id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("count postgres dispatched entries for {run_id}: {error}")}),
+                    ),
+                );
+            }
+        };
+        if still_dispatched == 0
+            && let Err(error) = sqlx::query(
+                "UPDATE auto_queue_runs
+                 SET status = 'completed',
+                     completed_at = NOW()
+                 WHERE id = $1
+                   AND status IN ('active', 'paused', 'generated', 'pending')",
+            )
+            .bind(&run_id)
+            .execute(pool)
+            .await
+        {
+            crate::auto_queue_log!(
+                warn,
+                "activate_finalize_run_failed_pg",
+                run_log_ctx.clone(),
+                "[auto-queue] failed to finalize PG run {} after dispatch drain: {}",
+                run_id,
+                error
+            );
+        }
+    }
+
+    let active_group_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'dispatched'",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("count postgres active groups for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    let pending_group_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'pending'",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("count postgres pending groups for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "dispatched": dispatched,
+            "count": dispatched.len(),
+            "active_groups": active_group_count,
+            "pending_groups": pending_group_count,
+        })),
+    )
 }
 
 pub(crate) fn activate_with_deps(
@@ -3469,7 +6660,7 @@ pub(crate) fn activate_with_deps(
     } else {
         "status IN ('active', 'generated', 'pending')".to_string()
     };
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         run_filter.push_str(&format!(
             " AND (repo = ?{} OR repo IS NULL OR repo = '')",
@@ -3536,7 +6727,7 @@ pub(crate) fn activate_with_deps(
         }
         Some(run_id)
     } else {
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
         conn.query_row(
             &format!(
@@ -3709,7 +6900,7 @@ pub(crate) fn activate_with_deps(
                  WHERE run_id = ?1
                    AND COALESCE(thread_group, 0) = ?2
                    AND status = 'dispatched'",
-                rusqlite::params![run_id, group],
+                libsql_rusqlite::params![run_id, group],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -3746,7 +6937,7 @@ pub(crate) fn activate_with_deps(
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM auto_queue_entries \
                      WHERE run_id = ?1 AND COALESCE(thread_group, 0) = ?2 AND status = 'dispatched'",
-                    rusqlite::params![run_id, grp],
+                    libsql_rusqlite::params![run_id, grp],
                     |row| row.get(0),
                 )
                 .unwrap_or(false);
@@ -3825,7 +7016,7 @@ pub(crate) fn activate_with_deps(
                  WHERE assigned_agent_id = ?1 AND status IN ('requested', 'in_progress', 'review') \
                  AND id != ?2 \
                  AND id NOT IN (SELECT kanban_card_id FROM auto_queue_entries WHERE run_id = ?3)",
-                rusqlite::params![agent_id, card_id, run_id],
+                libsql_rusqlite::params![agent_id, card_id, run_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -4758,7 +7949,7 @@ pub async fn dispatch(
             if let Ok(json_str) = serde_json::to_string(deploy_phases) {
                 let _ = conn.execute(
                     "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
-                    rusqlite::params![json_str, run_id],
+                    libsql_rusqlite::params![json_str, run_id],
                 );
             }
         }
@@ -4777,7 +7968,7 @@ pub async fn dispatch(
                  priority_rank = ?2
              WHERE run_id = ?3
                AND kanban_card_id = ?4",
-            rusqlite::params![thread_group, *priority_rank, run_id, card.card_id],
+            libsql_rusqlite::params![thread_group, *priority_rank, run_id, card.card_id],
         ) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4851,13 +8042,19 @@ pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state
-        .auto_queue_service()
-        .status(crate::services::auto_queue::StatusInput {
-            repo: query.repo,
-            agent_id: query.agent_id,
-            guild_id: state.config.discord.guild_id.clone(),
-        }) {
+    let input = crate::services::auto_queue::StatusInput {
+        repo: query.repo,
+        agent_id: query.agent_id,
+        guild_id: state.config.discord.guild_id.clone(),
+    };
+
+    let result = if let Some(pool) = state.pg_pool.as_ref() {
+        state.auto_queue_service().status_with_pg(pool, input).await
+    } else {
+        state.auto_queue_service().status(input)
+    };
+
+    match result {
         Ok(response) => (StatusCode::OK, Json(json!(response))),
         Err(error) => error.into_json_response(),
     }
@@ -4869,30 +8066,39 @@ pub async fn history(
     Query(query): Query<HistoryQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let limit = query.limit.unwrap_or(8).clamp(1, 20);
-    let conn = match state.db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let filter = crate::db::auto_queue::StatusFilter {
+        repo: query.repo,
+        agent_id: query.agent_id,
     };
+    let records = if let Some(pool) = state.pg_pool.as_ref() {
+        match crate::db::auto_queue::list_run_history_pg(pool, &filter, limit).await {
+            Ok(records) => records,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("list run history: {error}")})),
+                );
+            }
+        }
+    } else {
+        let conn = match state.db.separate_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
 
-    let records = match crate::db::auto_queue::list_run_history(
-        &conn,
-        &crate::db::auto_queue::StatusFilter {
-            repo: query.repo,
-            agent_id: query.agent_id,
-        },
-        limit,
-    ) {
-        Ok(records) => records,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("list run history: {error}")})),
-            );
+        match crate::db::auto_queue::list_run_history(&conn, &filter, limit) {
+            Ok(records) => records,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("list run history: {error}")})),
+                );
+            }
         }
     };
 
@@ -5106,7 +8312,12 @@ pub async fn update_entry(
                      batch_phase = COALESCE(?3, batch_phase)
                  WHERE id = ?4
                    AND status = 'pending'",
-                rusqlite::params![body.thread_group, body.priority_rank, body.batch_phase, id],
+                libsql_rusqlite::params![
+                    body.thread_group,
+                    body.priority_rank,
+                    body.batch_phase,
+                    id
+                ],
             )
             .unwrap_or(0);
         if changed == 0 {
@@ -5139,6 +8350,189 @@ pub async fn update_entry(
 }
 
 /// POST /api/auto-queue/runs/{id}/entries
+async fn add_run_entry_with_pg(
+    state: &AppState,
+    run_id: &str,
+    body: &AddRunEntryBody,
+    batch_phase: i64,
+    pool: &sqlx::PgPool,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let run_row = match sqlx::query(
+        "SELECT status, repo, agent_id
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
+            );
+        }
+    };
+    let Some(run_row) = run_row else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
+        );
+    };
+
+    let run_status: String = match run_row.try_get("status") {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run status: {error}")})),
+            );
+        }
+    };
+    let run_repo: Option<String> = match run_row.try_get("repo") {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
+            );
+        }
+    };
+    let run_agent_id: Option<String> = match run_row.try_get("agent_id") {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run agent: {error}")})),
+            );
+        }
+    };
+    if run_status != "active" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("auto-queue run '{run_id}' is not active (status={run_status})"),
+                "run_id": run_id,
+                "status": run_status,
+            })),
+        );
+    }
+
+    let issue_numbers = [body.issue_number];
+    let cards_by_issue =
+        match resolve_dispatch_cards_with_pg(pool, run_repo.as_ref(), &issue_numbers).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                let status = if err.contains("not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                return (status, Json(json!({"error": err})));
+            }
+        };
+    let Some(card) = cards_by_issue.get(&body.issue_number) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(
+                json!({"error": format!("kanban card not found for issue #{}", body.issue_number)}),
+            ),
+        );
+    };
+    if card.status != "ready" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "issue #{} must be in ready status to be added to an active run (current={})",
+                    body.issue_number,
+                    card.status
+                )
+            })),
+        );
+    }
+
+    let run_agent = run_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let card_agent = card
+        .assigned_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (run_agent, card_agent) {
+        (_, None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("issue #{} has no assigned agent", body.issue_number)
+                })),
+            );
+        }
+        (Some(run_agent), Some(card_agent)) if run_agent != card_agent => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "issue #{} is assigned to {}, not the active run agent {}",
+                        body.issue_number,
+                        card_agent,
+                        run_agent
+                    )
+                })),
+            );
+        }
+        _ => {}
+    }
+
+    let inserted = match enqueue_entries_into_existing_run_with_pg(
+        pool,
+        run_id,
+        &[GenerateEntryBody {
+            issue_number: body.issue_number,
+            batch_phase: Some(batch_phase),
+            thread_group: body.thread_group,
+        }],
+        &cards_by_issue,
+    )
+    .await
+    {
+        Ok(entries) => entries,
+        Err(err) => {
+            let status = if err.contains("already queued") || err.contains("active dispatch") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return (status, Json(json!({"error": err})));
+        }
+    };
+    let Some(inserted_entry) = inserted.into_iter().next() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "failed to create auto-queue entry"})),
+        );
+    };
+    let entry = state
+        .auto_queue_service()
+        .entry_json_with_pg(pool, &inserted_entry.entry_id, None)
+        .await
+        .unwrap_or(serde_json::Value::Null);
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "ok": true,
+            "run_id": run_id,
+            "thread_group": inserted_entry.thread_group,
+            "priority_rank": inserted_entry.priority_rank,
+            "entry": entry,
+        })),
+    )
+}
+
 pub async fn add_run_entry(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -5164,6 +8558,9 @@ pub async fn add_run_entry(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "batch_phase must be >= 0"})),
         );
+    }
+    if let Some(pg_pool) = state.pg_pool.clone() {
+        return add_run_entry_with_pg(&state, &run_id, &body, batch_phase, &pg_pool).await;
     }
 
     let mut conn = match state.db.separate_conn() {
@@ -5524,7 +8921,7 @@ pub async fn rebind_slot(
              FROM auto_queue_slots
              WHERE agent_id = ?1
                AND slot_index = ?2",
-            rusqlite::params![&agent_id, slot_index],
+            libsql_rusqlite::params![&agent_id, slot_index],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
@@ -5649,6 +9046,43 @@ pub async fn update_run(
         );
     }
 
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(max_concurrent_threads) = body.max_concurrent_threads {
+            if max_concurrent_threads <= 0 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "max_concurrent_threads must be > 0"})),
+                );
+            }
+        }
+
+        let ignored_unified_thread = body.unified_thread.is_some();
+        if body.status.is_none()
+            && body.deploy_phases.is_none()
+            && body.max_concurrent_threads.is_none()
+            && !ignored_unified_thread
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "no fields to update"})),
+            );
+        }
+
+        return match update_run_with_pg(&id, &body, pool).await {
+            Ok(_) => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "ignored": ignored_unified_thread.then_some(vec!["unified_thread"]),
+                })),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -5671,7 +9105,7 @@ pub async fn update_run(
                 &format!(
                     "UPDATE auto_queue_runs SET status = ?1, completed_at = {completed_at} WHERE id = ?2"
                 ),
-                rusqlite::params![status, id],
+                libsql_rusqlite::params![status, id],
             )
             .unwrap_or(0);
     }
@@ -5681,7 +9115,7 @@ pub async fn update_run(
             changed += conn
                 .execute(
                     "UPDATE auto_queue_runs SET deploy_phases = ?1 WHERE id = ?2",
-                    rusqlite::params![json_str, id],
+                    libsql_rusqlite::params![json_str, id],
                 )
                 .unwrap_or(0);
         }
@@ -5699,7 +9133,7 @@ pub async fn update_run(
                 "UPDATE auto_queue_runs
                  SET max_concurrent_threads = ?1
                  WHERE id = ?2",
-                rusqlite::params![max_concurrent_threads, id],
+                libsql_rusqlite::params![max_concurrent_threads, id],
             )
             .unwrap_or(0);
     }
@@ -5731,6 +9165,33 @@ pub async fn reset_slot_thread(
     State(state): State<AppState>,
     Path((agent_id, slot_index)): Path<(String, i64)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match crate::services::auto_queue::runtime::reset_slot_thread_bindings_pg(
+            pool, &agent_id, slot_index,
+        )
+        .await
+        {
+            Ok((archived_threads, cleared_sessions, cleared_bindings)) => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "agent_id": agent_id,
+                    "slot_index": slot_index,
+                    "archived_threads": archived_threads,
+                    "cleared_sessions": cleared_sessions,
+                    "cleared_bindings": cleared_bindings,
+                })),
+            ),
+            Err(err) if err.contains("has active dispatch") => {
+                (StatusCode::CONFLICT, Json(json!({"error": err})))
+            }
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": err})),
+            ),
+        };
+    }
+
     match crate::services::auto_queue::runtime::reset_slot_thread_bindings(
         &state.db, &agent_id, slot_index,
     )
@@ -5763,15 +9224,6 @@ pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
     let body: ResetBody = if body.is_empty() {
         ResetBody::default()
     } else {
@@ -5783,6 +9235,26 @@ pub async fn reset(
                     Json(json!({"error": format!("invalid reset body: {error}")})),
                 );
             }
+        }
+    };
+
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match reset_with_pg(&body, pool).await {
+            Ok(response) => (StatusCode::OK, Json(response)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
         }
     };
 
@@ -5798,14 +9270,14 @@ pub async fn reset(
         let deleted_entries = conn
             .execute(
                 "DELETE FROM auto_queue_entries WHERE agent_id = ?1",
-                rusqlite::params![agent_id],
+                libsql_rusqlite::params![agent_id],
             )
             .unwrap_or(0);
         let completed_runs = conn
                 .execute(
                     "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
                      WHERE status IN ('generated', 'pending', 'active', 'paused') AND agent_id = ?1",
-                    rusqlite::params![agent_id],
+                    libsql_rusqlite::params![agent_id],
                 )
                 .unwrap_or(0);
         (deleted_entries, completed_runs, 0usize, None)
@@ -5887,6 +9359,16 @@ pub async fn reset(
 
 /// POST /api/auto-queue/pause — pause all active runs
 pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match pause_with_pg(state.health_registry.clone(), pool).await {
+            Ok(response) => (StatusCode::OK, Json(response)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -5925,6 +9407,85 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
 
 /// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
 pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let blocked_runs = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM auto_queue_runs r
+             WHERE r.status = 'paused'
+               AND EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.run_id = r.id
+                     AND pg.status IN ('pending', 'failed')
+               )",
+        )
+        .fetch_one(pool)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("count postgres blocked auto-queue runs: {error}")}),
+                    ),
+                );
+            }
+        };
+        let resumed = match sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 completed_at = NULL
+             WHERE status = 'paused'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.run_id = auto_queue_runs.id
+                     AND pg.status IN ('pending', 'failed')
+               )",
+        )
+        .execute(pool)
+        .await
+        {
+            Ok(result) => result.rows_affected() as i64,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("resume postgres auto-queue runs: {error}")})),
+                );
+            }
+        };
+
+        if resumed > 0 {
+            let (_status, body) = activate(
+                State(state),
+                Json(ActivateBody {
+                    run_id: None,
+                    repo: None,
+                    agent_id: None,
+                    thread_group: None,
+                    unified_thread: None,
+                    active_only: Some(true),
+                }),
+            )
+            .await;
+            let dispatched = body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            return (
+                StatusCode::OK,
+                Json(
+                    json!({"ok": true, "resumed_runs": resumed, "blocked_runs": blocked_runs, "dispatched": dispatched}),
+                ),
+            );
+        }
+
+        return (
+            StatusCode::OK,
+            Json(
+                json!({"ok": true, "resumed_runs": 0, "blocked_runs": blocked_runs, "message": "No resumable runs"}),
+            ),
+        );
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -6001,6 +9562,88 @@ pub async fn cancel(
     State(state): State<AppState>,
     Query(query): Query<CancelQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(run_id) = query
+            .run_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let run_status = match sqlx::query_scalar::<_, Option<String>>(
+                "SELECT status
+                 FROM auto_queue_runs
+                 WHERE id = $1",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            {
+                Ok(Some(status)) => status,
+                Ok(None) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": format!("auto-queue run '{run_id}' not found"),
+                            "run_id": run_id,
+                        })),
+                    );
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": format!("load auto-queue run '{run_id}': {error}")
+                        })),
+                    );
+                }
+            };
+            match run_status.as_deref() {
+                Some("active") | Some("paused") | Some(RUN_STATUS_RESTORING) => {
+                    return match cancel_selected_runs_with_pg(
+                        state.health_registry.clone(),
+                        pool,
+                        &[run_id.to_string()],
+                        "auto_queue_cancel",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (StatusCode::OK, Json(payload)),
+                        Err(error) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        ),
+                    };
+                }
+                Some(status) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("auto-queue run '{run_id}' is not cancelable (status={status})"),
+                            "run_id": run_id,
+                            "status": status,
+                        })),
+                    );
+                }
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": format!("auto-queue run '{run_id}' not found"),
+                            "run_id": run_id,
+                        })),
+                    );
+                }
+            }
+        }
+        return match cancel_with_pg(state.health_registry.clone(), pool).await {
+            Ok(payload) => (StatusCode::OK, Json(payload)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -6065,6 +9708,29 @@ pub async fn reorder(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match reorder_with_pg(&body, pool).await {
+            Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+            Err(error) if error.starts_with("not_found:") => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": error.trim_start_matches("not_found:")})),
+            ),
+            Err(error)
+                if error == "orderedIds cannot be empty"
+                    || error == "no pending entries found for reorder scope"
+                    || error == "orderedIds do not match any pending entries in scope"
+                    || error == "replacement sequence exhausted"
+                    || error == "replacement sequence was not fully consumed" =>
+            {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+            }
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let mut conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -6140,7 +9806,7 @@ pub async fn reorder(
     for (rank, id) in reordered_ids.iter().enumerate() {
         if let Err(e) = tx.execute(
             "UPDATE auto_queue_entries SET priority_rank = ?1 WHERE id = ?2",
-            rusqlite::params![rank as i64, id],
+            libsql_rusqlite::params![rank as i64, id],
         ) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -6172,6 +9838,245 @@ pub struct OrderBody {
 
 /// POST /api/auto-queue/runs/:id/order
 /// Authenticated callback: provides the ordered card list for a pending run.
+async fn resolve_submit_order_card_with_pg(
+    pool: &sqlx::PgPool,
+    run_repo: Option<&str>,
+    item: &serde_json::Value,
+) -> Result<Option<ResolvedDispatchCard>, String> {
+    let row = if let Some(issue_number) = item.as_i64() {
+        sqlx::query(
+            "SELECT id,
+                    repo_id,
+                    status,
+                    assigned_agent_id,
+                    github_issue_number::BIGINT AS github_issue_number
+             FROM kanban_cards
+             WHERE github_issue_number = $1
+               AND ($2::TEXT IS NULL OR repo_id = $2)
+             ORDER BY id ASC
+             LIMIT 1",
+        )
+        .bind(issue_number)
+        .bind(run_repo)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load kanban card for issue #{issue_number}: {error}"))?
+    } else if let Some(card_id) = item.as_str() {
+        sqlx::query(
+            "SELECT id,
+                    repo_id,
+                    status,
+                    assigned_agent_id,
+                    github_issue_number::BIGINT AS github_issue_number
+             FROM kanban_cards
+             WHERE id = $1
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load kanban card {card_id}: {error}"))?
+    } else {
+        None
+    };
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    Ok(Some(ResolvedDispatchCard {
+        issue_number: row
+            .try_get("github_issue_number")
+            .map_err(|error| format!("decode github_issue_number: {error}"))?,
+        card_id: row
+            .try_get("id")
+            .map_err(|error| format!("decode card id: {error}"))?,
+        repo_id: row
+            .try_get("repo_id")
+            .map_err(|error| format!("decode repo_id: {error}"))?,
+        status: row
+            .try_get("status")
+            .map_err(|error| format!("decode status: {error}"))?,
+        assigned_agent_id: row
+            .try_get("assigned_agent_id")
+            .map_err(|error| format!("decode assigned_agent_id: {error}"))?,
+    }))
+}
+
+async fn submit_order_with_pg(
+    state: &AppState,
+    run_id: &str,
+    headers: &HeaderMap,
+    body: &OrderBody,
+    pool: &sqlx::PgPool,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let caller_agent_id =
+        crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, headers).await;
+    let run_row = match sqlx::query(
+        "SELECT status, repo
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
+            );
+        }
+    };
+    let Some(run_row) = run_row else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run not found or not pending"})),
+        );
+    };
+    let run_status: String = match run_row.try_get("status") {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run status: {error}")})),
+            );
+        }
+    };
+    if run_status != "pending" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run not found or not pending"})),
+        );
+    }
+    let run_repo: Option<String> = match run_row.try_get("repo") {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
+            );
+        }
+    };
+    let run_log_ctx = AutoQueueLogContext::new().run(run_id);
+
+    let mut created = 0;
+    for (rank, item) in body.order.iter().enumerate() {
+        let card = match resolve_submit_order_card_with_pg(pool, run_repo.as_deref(), item).await {
+            Ok(Some(card)) => card,
+            Ok(None) => continue,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+        let dispatchable_check = crate::pipeline::try_get()
+            .map(|pipeline| {
+                pipeline
+                    .dispatchable_states()
+                    .iter()
+                    .any(|state| *state == card.status)
+            })
+            .unwrap_or(card.status == "ready");
+        if !dispatchable_check {
+            crate::auto_queue_log!(
+                info,
+                "submit_order_card_not_dispatchable",
+                run_log_ctx.clone().card(&card.card_id),
+                "[auto-queue] Skipping card {} (status={}, not dispatchable)",
+                card.card_id,
+                card.status
+            );
+            continue;
+        }
+
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        if sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&entry_id)
+        .bind(run_id)
+        .bind(&card.card_id)
+        .bind(card.assigned_agent_id.as_deref().unwrap_or(""))
+        .bind(rank as i64)
+        .execute(pool)
+        .await
+        .is_ok()
+        {
+            created += 1;
+        }
+    }
+
+    let rationale = body
+        .rationale
+        .clone()
+        .or(body.reasoning.clone())
+        .unwrap_or_else(|| {
+            caller_agent_id
+                .as_deref()
+                .map(|agent_id| format!("{agent_id} order submitted"))
+                .unwrap_or_else(|| "API order submitted".to_string())
+        });
+    if created > 0 {
+        if let Err(error) = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 ai_rationale = $1
+             WHERE id = $2",
+        )
+        .bind(&rationale)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),
+            );
+        }
+    } else {
+        crate::auto_queue_log!(
+            warn,
+            "submit_order_no_ready_cards",
+            run_log_ctx.clone(),
+            "[auto-queue] submit_order: no ready cards enqueued, run {run_id} stays pending"
+        );
+        if let Err(error) = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'completed',
+                 ai_rationale = $1
+             WHERE id = $2",
+        )
+        .bind(format!("{rationale} (no ready cards — auto-completed)"))
+        .bind(run_id)
+        .execute(pool)
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
+            );
+        }
+    }
+
+    let _ = state;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "created": created,
+            "run_id": run_id,
+            "message": "Queue active. Call POST /api/auto-queue/activate to start dispatching.",
+        })),
+    )
+}
+
 pub async fn submit_order(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -6182,6 +10087,9 @@ pub async fn submit_order(
         crate::server::routes::kanban::require_explicit_bearer_token(&headers, "submit_order")
     {
         return response;
+    }
+    if let Some(pg_pool) = state.pg_pool.clone() {
+        return submit_order_with_pg(&state, &run_id, &headers, &body, &pg_pool).await;
     }
 
     let conn = match state.db.separate_conn() {
@@ -6225,7 +10133,7 @@ pub async fn submit_order(
             if let Some(ref repo) = run_repo {
                 conn.query_row(
                     "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-                    rusqlite::params![num, repo],
+                    libsql_rusqlite::params![num, repo],
                     |row| row.get(0),
                 )
                 .ok()
@@ -6278,7 +10186,7 @@ pub async fn submit_order(
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![entry_id, run_id, card_id, agent_id, rank as i64],
+            libsql_rusqlite::params![entry_id, run_id, card_id, agent_id, rank as i64],
         )
         .ok();
         created += 1;
@@ -6299,7 +10207,7 @@ pub async fn submit_order(
     if created > 0 {
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'active', ai_rationale = ?1 WHERE id = ?2",
-            rusqlite::params![rationale, run_id],
+            libsql_rusqlite::params![rationale, run_id],
         )
         .ok();
     } else {
@@ -6311,7 +10219,7 @@ pub async fn submit_order(
         );
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'completed', ai_rationale = ?1 WHERE id = ?2",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 format!("{rationale} (no ready cards — auto-completed)"),
                 run_id
             ],
@@ -6341,7 +10249,7 @@ mod tests {
         extract_dependency_parse_result, reorder_entry_ids,
         slot_requires_thread_reset_before_reuse,
     };
-    use rusqlite::Connection;
+    use libsql_rusqlite::Connection;
     use std::collections::HashMap;
 
     fn entry(id: &str, status: &str, agent_id: &str) -> QueueEntryOrder {

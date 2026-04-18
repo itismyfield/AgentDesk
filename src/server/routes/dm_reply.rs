@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::services::discord::dm_reply_store::register_pending_dm_reply;
+use crate::services::discord::dm_reply_store::register_pending_dm_reply_db;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -38,30 +38,24 @@ pub async fn register_handler(
         .unwrap_or_else(|_| "{}".to_string());
     let ttl_seconds = body.ttl_seconds.unwrap_or(3600);
 
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let id = register_pending_dm_reply(
-            &db,
-            &source_agent,
-            &user_id,
-            channel_id.as_deref(),
-            &context_str,
-            ttl_seconds,
-        )?;
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
-        );
-        Ok::<_, String>(id)
-    })
-    .await;
-
-    match result {
-        Ok(Ok(id)) => (StatusCode::OK, Json(json!({"ok": true, "id": id}))),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("task join: {e}")})),
-        ),
+    match register_pending_dm_reply_db(
+        &state.db,
+        state.pg_pool.as_ref(),
+        &source_agent,
+        &user_id,
+        channel_id.as_deref(),
+        &context_str,
+        ttl_seconds,
+    )
+    .await
+    {
+        Ok(id) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
+            );
+            (StatusCode::OK, Json(json!({"ok": true, "id": id})))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }

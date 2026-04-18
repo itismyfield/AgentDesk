@@ -1041,7 +1041,7 @@ fn resolve_rework_resume_target(
                 "SELECT from_status FROM kanban_audit_logs \
                  WHERE card_id = ?1 AND to_status = ?2 \
                  ORDER BY created_at DESC, id DESC LIMIT 1",
-                rusqlite::params![card_id, to_status],
+                libsql_rusqlite::params![card_id, to_status],
                 |row| row.get::<_, String>(0),
             )
             .ok()
@@ -1071,7 +1071,7 @@ fn resolve_rework_resume_target(
 }
 
 fn clear_manual_intervention_markers(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> Result<(), String> {
     conn.execute(
@@ -1083,7 +1083,7 @@ fn clear_manual_intervention_markers(
 }
 
 fn sync_review_state(
-    conn: &rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection,
     card_id: &str,
     review_status: Option<&str>,
     state: &str,
@@ -1115,7 +1115,7 @@ fn write_audit_log(db: &crate::db::Db, card_id: &str, from_status: &str, reason:
         conn.execute(
             "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) \
              VALUES (?1, ?2, ?2, 'resume', ?3)",
-            rusqlite::params![card_id, from_status, reason],
+            libsql_rusqlite::params![card_id, from_status, reason],
         )
         .ok();
     }

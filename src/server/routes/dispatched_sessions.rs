@@ -1367,13 +1367,19 @@ pub(crate) async fn force_kill_session_impl_with_reason(
                 }
             })
             .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
-        enqueue_lifecycle_notification(
-            &state.db,
-            &format!("channel:{channel_id_str}"),
-            Some(session_key),
-            lifecycle_reason_code,
-            &format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
-        );
+        if let Some(pool) = state.pg_pool.as_ref() {
+            let _ =
+                enqueue_force_kill_notify_message_pg(pool, channel_id_str, agent_label, &exit_reason)
+                    .await;
+        } else {
+            enqueue_lifecycle_notification(
+                &state.db,
+                &format!("channel:{channel_id_str}"),
+                Some(session_key),
+                lifecycle_reason_code,
+                &format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
+            );
+        }
     }
 
     (
