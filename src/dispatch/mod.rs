@@ -3641,11 +3641,16 @@ mod tests {
         .unwrap();
         drop(conn);
 
+        // #761: Trusted internal callers may pre-seed `target_repo` to steer
+        // review at an external repo. Public API callers cannot — the field
+        // is stripped before the validation chain runs (see
+        // review_context_strips_untrusted_input_target_repo for the negative
+        // case).
         let context = build_review_context(
             &db,
             "card-review-external-accept",
             "agent-1",
-            &json!({ "target_repo": external_dir }),
+            &json!({ "target_repo": external_dir, "_trusted_review_target": true }),
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
@@ -3666,6 +3671,10 @@ mod tests {
         assert_eq!(parsed["branch"], "codex/627-target-repo");
         assert_eq!(actual_worktree, expected_external_dir);
         assert_eq!(actual_target_repo, expected_external_dir);
+        assert!(
+            parsed.get("_trusted_review_target").is_none(),
+            "trusted sentinel must be consumed and not persisted into the dispatch context"
+        );
     }
 
     #[test]

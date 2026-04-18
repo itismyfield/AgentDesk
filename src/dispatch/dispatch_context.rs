@@ -1034,10 +1034,36 @@ fn resolve_repo_head_fallback_target(
     }))
 }
 
+/// Review-target fields that steer the agent's execution state (which commit
+/// to check out, which worktree to inspect, which branch to compare against).
+///
+/// #761: These fields must be treated as untrusted when they arrive via the
+/// public dispatch-create API. A caller could craft a context that pins the
+/// review to any commit/path. `build_review_context` strips them before
+/// running the validation/refresh chain unless the caller set the
+/// `REVIEW_TARGET_TRUSTED_FLAG` sentinel.
+pub(super) const UNTRUSTED_REVIEW_TARGET_FIELDS: &[&str] =
+    &["reviewed_commit", "worktree_path", "branch", "target_repo"];
+
+/// Sentinel context flag signalling that review-target fields on the incoming
+/// context were populated by a trusted internal code path (e.g. a re-review
+/// follow-up that carries a validated `reviewed_commit` from
+/// `latest_completed_work_dispatch_target`). When absent or not `true`,
+/// `build_review_context` strips review-target fields and re-runs the full
+/// validation/refresh chain.
+pub(super) const REVIEW_TARGET_TRUSTED_FLAG: &str = "_trusted_review_target";
+
 /// Build the context JSON string for a review dispatch.
 ///
 /// Injects `reviewed_commit`, `branch`, `worktree_path`, and provider info.
 /// Prefers worktree branch (if found for this card's issue) over main HEAD.
+///
+/// #761: Review-target fields on `context` are treated as untrusted by
+/// default — they are stripped unless the caller set
+/// `REVIEW_TARGET_TRUSTED_FLAG` to `true`. Untrusted callers (anyone reaching
+/// `POST /api/dispatches`) cannot preseed `reviewed_commit` / `worktree_path`
+/// / `branch` / `target_repo` to bypass the card-issue commit validation,
+/// stale-worktree refresh, or target-repo recovery paths.
 pub(super) fn build_review_context(
     db: &Db,
     kanban_card_id: &str,
@@ -1045,6 +1071,33 @@ pub(super) fn build_review_context(
     context: &serde_json::Value,
 ) -> Result<String> {
     let mut ctx_val = dispatch_context_with_session_strategy("review", context);
+
+    // #761: Strip untrusted review-target fields before any downstream code
+    // consumes them. The trusted-internal flag opts out but is consumed here
+    // so it never propagates into the persisted dispatch context.
+    let trusted_target = ctx_val
+        .get(REVIEW_TARGET_TRUSTED_FLAG)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if let Some(obj) = ctx_val.as_object_mut() {
+        obj.remove(REVIEW_TARGET_TRUSTED_FLAG);
+        if !trusted_target {
+            let mut stripped: Vec<&str> = Vec::new();
+            for field in UNTRUSTED_REVIEW_TARGET_FIELDS {
+                if obj.remove(*field).is_some() {
+                    stripped.push(field);
+                }
+            }
+            if !stripped.is_empty() {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: stripped untrusted review-target fields from input context ({}) — validation/refresh chain will resolve them from card history",
+                    kanban_card_id,
+                    stripped.join(", ")
+                );
+            }
+        }
+    }
+
     let target_repo = resolve_card_target_repo_ref(db, kanban_card_id, Some(&ctx_val));
     if let Some(obj) = ctx_val.as_object_mut() {
         if let Some(target_repo) = target_repo.as_deref() {

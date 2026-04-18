@@ -2624,6 +2624,125 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
     );
 }
 
+/// #761: A crafted `POST /api/dispatches` call that preseeds review-target
+/// fields (`reviewed_commit`, `worktree_path`, `branch`, `target_repo`) must
+/// NOT be able to steer the review dispatch at an arbitrary commit/path. The
+/// fields are stripped before `build_review_context` runs, and the
+/// validation/refresh chain resolves the real target from the card's history.
+#[tokio::test]
+async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context() {
+    let db = test_db();
+    seed_test_agents(&db);
+    let engine = test_engine(&db);
+
+    // Real repo with a commit that mentions issue #761 — this is the commit
+    // the validation/refresh chain must resolve to, NOT the injected one.
+    let (repo, _repo_override) = setup_test_repo();
+    let real_commit = git_commit(repo.path(), "fix: real work for card (#761)");
+    let real_worktree_path = repo.path().to_string_lossy().into_owned();
+
+    // Card in the review-ready state (pre-review), linked to the real repo
+    // via a repo_id that resolves (via AGENTDESK_REPO_DIR set by
+    // setup_test_repo) to `repo.path()`.
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES (
+                'card-761', 'Preseed review target', 'in_progress', 'medium', 'ch-td', 761,
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Simulate a malicious / buggy caller preseeding review-target fields.
+    // The injected commit SHA is syntactically valid but points at nothing
+    // in this repo; the injected worktree path doesn't exist either.
+    let injected_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let injected_worktree = "/tmp/agentdesk-761-attacker-controlled-worktree";
+    let injected_target_repo = "/tmp/agentdesk-761-attacker-controlled-repo";
+    let body = serde_json::json!({
+        "kanban_card_id": "card-761",
+        "to_agent_id": "ch-td",
+        "dispatch_type": "review",
+        "title": "[Review R1] card-761",
+        "context": {
+            "reviewed_commit": injected_commit,
+            "worktree_path": injected_worktree,
+            "branch": "attacker/controlled-branch",
+            "target_repo": injected_target_repo,
+        }
+    })
+    .to_string();
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatches")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let context = &json["dispatch"]["context"];
+
+    // The injected values MUST NOT survive into the persisted dispatch
+    // context. Either the field is missing (validation chain found nothing)
+    // or it was overwritten with the real target from the card's history.
+    assert_ne!(
+        context["reviewed_commit"].as_str(),
+        Some(injected_commit),
+        "injected reviewed_commit must not propagate into review dispatch context"
+    );
+    assert_ne!(
+        context["worktree_path"].as_str(),
+        Some(injected_worktree),
+        "injected worktree_path must not propagate into review dispatch context"
+    );
+    assert_ne!(
+        context["branch"].as_str(),
+        Some("attacker/controlled-branch"),
+        "injected branch must not propagate into review dispatch context"
+    );
+    assert_ne!(
+        context["target_repo"].as_str(),
+        Some(injected_target_repo),
+        "injected target_repo must not propagate into review dispatch context"
+    );
+
+    // The real target (resolved via find_latest_commit_for_issue for #761)
+    // must have replaced the injected one.
+    assert_eq!(
+        context["reviewed_commit"].as_str(),
+        Some(real_commit.as_str()),
+        "validation chain must overwrite reviewed_commit with the real commit for this card's issue"
+    );
+    let canonical = |value: &str| {
+        std::fs::canonicalize(value)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert_eq!(
+        canonical(context["worktree_path"].as_str().unwrap()),
+        canonical(&real_worktree_path),
+        "worktree_path must resolve to the card's real repo dir"
+    );
+}
+
 #[tokio::test]
 async fn api_docs_returns_category_summaries_by_default() {
     let db = test_db();
