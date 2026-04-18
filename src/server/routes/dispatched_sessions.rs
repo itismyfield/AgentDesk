@@ -1632,6 +1632,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_kill_session_path_route_retries_active_dispatch_pg_path() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        let mut state = AppState::test_state(db, engine);
+        state.pg_pool = Some(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ($1, $2, 'codex', $3, NOW(), NOW())",
+        )
+        .bind("agent-force-pg")
+        .bind("Agent agent-force-pg")
+        .bind("123456789012345678")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ($1, 'Force Kill Card', 'requested', $2, NOW(), NOW())",
+        )
+        .bind("card-force-pg")
+        .bind("dispatch-force-pg")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id,
+                kanban_card_id,
+                to_agent_id,
+                dispatch_type,
+                status,
+                title,
+                context,
+                retry_count,
+                created_at,
+                updated_at
+            ) VALUES ($1, $2, $3, 'implementation', 'pending', 'Recover me', '{}', 0, NOW(), NOW())",
+        )
+        .bind("dispatch-force-pg")
+        .bind("card-force-pg")
+        .bind("agent-force-pg")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (
+                session_key,
+                agent_id,
+                status,
+                active_dispatch_id,
+                provider,
+                last_heartbeat,
+                created_at
+            ) VALUES ($1, $2, 'working', $3, 'codex', NOW(), NOW())",
+        )
+        .bind("host:codex-agent-force-pg")
+        .bind("agent-force-pg")
+        .bind("dispatch-force-pg")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, body) = force_kill_session(
+            State(state),
+            Path("host:codex-agent-force-pg".to_string()),
+            Json(ForceKillOptions {
+                retry: true,
+                reason: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        let retry_dispatch_id = body["retry_dispatch_id"].as_str().unwrap().to_string();
+        assert!(!retry_dispatch_id.is_empty());
+        assert_eq!(body["queue_activation_requested"], false);
+
+        let session_state = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, active_dispatch_id
+             FROM sessions
+             WHERE session_key = $1",
+        )
+        .bind("host:codex-agent-force-pg")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(session_state.0, "disconnected");
+        assert!(session_state.1.is_none());
+
+        let old_dispatch_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-force-pg")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(old_dispatch_status, "failed");
+
+        let new_dispatch = sqlx::query_as::<_, (String, i64)>(
+            "SELECT status, retry_count::BIGINT FROM task_dispatches WHERE id = $1",
+        )
+        .bind(&retry_dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(new_dispatch.0, "pending");
+        assert_eq!(new_dispatch.1, 1);
+
+        let latest_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
+        )
+        .bind("card-force-pg")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            latest_dispatch_id.as_deref(),
+            Some(retry_dispatch_id.as_str())
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn force_kill_session_legacy_wrapper_uses_same_core_without_retry() {
         let db = test_db();
         let engine = test_engine(&db);

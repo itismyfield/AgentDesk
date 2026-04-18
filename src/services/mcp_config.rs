@@ -448,6 +448,8 @@ mod tests {
     #[test]
     fn provider_has_memento_mcp_stays_false_for_codex_without_matching_config() {
         with_test_env(|temp_root| {
+            let previous_memento_access_key = std::env::var_os("MEMENTO_ACCESS_KEY");
+            unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") };
             let runtime_root = temp_root.join(".adk").join("release");
             let config_path = crate::runtime_layout::config_file_path(&runtime_root);
             let mut config = Config::default();
@@ -469,6 +471,11 @@ mod tests {
             .unwrap();
 
             assert!(!provider_has_memento_mcp(&ProviderKind::Codex));
+
+            match previous_memento_access_key {
+                Some(value) => unsafe { std::env::set_var("MEMENTO_ACCESS_KEY", value) },
+                None => unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") },
+            }
         });
     }
 
