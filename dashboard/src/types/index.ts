@@ -68,6 +68,7 @@ export interface Agent {
   department_name_ko?: string | null;
   department_color?: string | null;
   avatar_emoji: string;
+  avatar_seed?: number | null;
   sprite_number?: number | null;
   personality: string | null;
   status: AgentStatus;

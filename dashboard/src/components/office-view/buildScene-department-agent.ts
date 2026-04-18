@@ -2,6 +2,7 @@ import type { MutableRefObject } from "react";
 import { AnimatedSprite, Container, Graphics, Text, TextStyle, type Texture } from "pixi.js";
 import { getAgentWarnings, getAgentWorkSummary } from "../../agent-insights";
 import type { Agent, SubAgent, Task } from "../../types";
+import { FONT_STACK_MONO, getFontFamilyForText } from "../../lib/fonts";
 import type { ActiveIssueInfo, AnimItem, CallbackSnapshot, SubCloneAnimItem } from "./buildScene-types";
 import {
   DESK_W,
@@ -184,7 +185,7 @@ export function renderDeskAgentAndSubClones({
       style: new TextStyle({
         fontSize: 6.5,
         fill: 0x333333,
-        fontFamily: "system-ui, sans-serif",
+        fontFamily: getFontFamilyForText(bubbleBody, "pixel"),
         wordWrap: true,
         wordWrapWidth: 85,
       }),
@@ -233,7 +234,7 @@ export function renderDeskAgentAndSubClones({
     room.addChild(badgeBg);
     const badgeText = new Text({
       text: warning.code === "missing_work_detail" ? "?" : "!",
-      style: new TextStyle({ fontSize: 8, fill: 0xffffff, fontWeight: "bold", fontFamily: "monospace" }),
+      style: new TextStyle({ fontSize: 8, fill: 0xffffff, fontWeight: "bold", fontFamily: FONT_STACK_MONO }),
     });
     badgeText.anchor.set(0.5, 0.5);
     badgeText.position.set(badgeX, badgeY);
@@ -246,7 +247,7 @@ export function renderDeskAgentAndSubClones({
     room.addChild(countBg);
     const countTxt = new Text({
       text: `x${workingSubs.length}`,
-      style: new TextStyle({ fontSize: 6.5, fill: 0xe2e8f8, fontWeight: "bold", fontFamily: "monospace" }),
+      style: new TextStyle({ fontSize: 6.5, fill: 0xe2e8f8, fontWeight: "bold", fontFamily: FONT_STACK_MONO }),
     });
     countTxt.anchor.set(0.5, 0.5);
     countTxt.position.set(ax + 26, deskY - 13);

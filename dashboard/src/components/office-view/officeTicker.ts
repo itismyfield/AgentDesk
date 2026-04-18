@@ -1,6 +1,7 @@
 import type { MutableRefObject } from "react";
 import { Container, Graphics, Text, TextStyle, type AnimatedSprite, type Sprite } from "pixi.js";
 import type { MeetingPresence } from "../../types";
+import { FONT_STACK_MONO, getFontFamilyForText } from "../../lib/fonts";
 import {
   type Delivery,
   type RoomRect,
@@ -238,7 +239,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         if (tick % 80 === 0) {
           const sleepy = new Text({
             text: "z",
-            style: new TextStyle({ fontSize: 7 + Math.random() * 3, fill: 0xaaaacc, fontFamily: "monospace" }),
+            style: new TextStyle({ fontSize: 7 + Math.random() * 3, fill: 0xaaaacc, fontFamily: FONT_STACK_MONO }),
           });
           sleepy.anchor.set(0.5, 0.5);
           sleepy.position.set(headX + 6, bedCenterY - 18);
@@ -410,7 +411,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
       const label = `${item.emoji} ${item.text}`;
       const bubbleText = new Text({
         text: label,
-        style: new TextStyle({ fontSize: 7, fill: 0xffffff, fontFamily: "system-ui, sans-serif" }),
+        style: new TextStyle({ fontSize: 7, fill: 0xffffff, fontFamily: getFontFamilyForText(label, "pixel") }),
       });
       bubbleText.anchor.set(0.5, 0.5);
       const bubbleWidth = bubbleText.width + 10;

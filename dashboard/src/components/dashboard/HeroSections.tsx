@@ -1,5 +1,6 @@
 import AgentAvatar from "../AgentAvatar";
 import type { Agent } from "../../types";
+import { getFontFamilyForText } from "../../lib/fonts";
 import { getRankTier, RankBadge, XpBar, type TFunction } from "./model";
 import { cx, dashboardBadge, dashboardCard, dashboardText } from "./ui";
 
@@ -256,8 +257,12 @@ export function DashboardRankingBoard({
                           <AgentAvatar agent={selectedAgent} agents={agents} size={avatarSize} rounded="2xl" />
                         </div>
                         <span
-                          className={`max-w-[80px] truncate text-center font-bold ${isFirst ? "text-sm" : "text-xs"}`}
-                          style={{ color: tier.color, textShadow: isFirst ? `0 0 8px ${tier.glow}` : "none" }}
+                          className={`font-pixel max-w-[80px] truncate text-center font-bold ${isFirst ? "text-sm" : "text-xs"}`}
+                          style={{
+                            color: tier.color,
+                            textShadow: isFirst ? `0 0 8px ${tier.glow}` : "none",
+                            fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                          }}
                         >
                           {agent.name}
                         </span>
@@ -277,8 +282,12 @@ export function DashboardRankingBoard({
                         </div>
 
                         <span
-                          className={`max-w-[80px] truncate text-center font-bold ${isFirst ? "text-sm" : "text-xs"}`}
-                          style={{ color: tier.color, textShadow: isFirst ? `0 0 8px ${tier.glow}` : "none" }}
+                          className={`font-pixel max-w-[80px] truncate text-center font-bold ${isFirst ? "text-sm" : "text-xs"}`}
+                          style={{
+                            color: tier.color,
+                            textShadow: isFirst ? `0 0 8px ${tier.glow}` : "none",
+                            fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                          }}
                         >
                           {agent.name}
                         </span>
@@ -343,7 +352,13 @@ export function DashboardRankingBoard({
                           <AgentAvatar agent={selectedAgent} agents={agents} size={36} rounded="xl" />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-bold" style={{ color: "var(--th-text-primary)" }}>
+                          <p
+                            className="font-pixel truncate text-sm font-bold"
+                            style={{
+                              color: "var(--th-text-primary)",
+                              fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                            }}
+                          >
                             {agent.name}
                           </p>
                           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -360,7 +375,13 @@ export function DashboardRankingBoard({
                           <AgentAvatar agent={selectedAgent} agents={agents} size={36} rounded="xl" />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-bold" style={{ color: "var(--th-text-primary)" }}>
+                          <p
+                            className="font-pixel truncate text-sm font-bold"
+                            style={{
+                              color: "var(--th-text-primary)",
+                              fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                            }}
+                          >
                             {agent.name}
                           </p>
                           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -415,7 +436,13 @@ export function DashboardRankingBoard({
                         <AgentAvatar agent={selectedAgent} agents={agents} size={52} rounded="2xl" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-base font-black" style={{ color: tier.color }}>
+                        <p
+                          className="font-pixel text-base font-black"
+                          style={{
+                            color: tier.color,
+                            fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                          }}
+                        >
                           {agent.name}
                         </p>
                         <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -432,7 +459,13 @@ export function DashboardRankingBoard({
                         <AgentAvatar agent={selectedAgent} agents={agents} size={52} rounded="2xl" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-base font-black" style={{ color: tier.color }}>
+                        <p
+                          className="font-pixel text-base font-black"
+                          style={{
+                            color: tier.color,
+                            fontFamily: getFontFamilyForText(agent.name, "pixel"),
+                          }}
+                        >
                           {agent.name}
                         </p>
                         <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
