@@ -342,6 +342,31 @@ fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
         .is_some_and(|output| output.status.success())
 }
 
+/// #682: Exact-HEAD check — returns true only when the worktree's current
+/// HEAD resolves to `commit_sha`. Git's object store is shared across
+/// worktrees of the same repo, so `git cat-file -e` (git_commit_exists)
+/// is satisfied by any commit anywhere in the repo; `merge-base --is-ancestor`
+/// additionally accepts any descendant HEAD, which means a path that was
+/// recycled for follow-up work still passes — but the filesystem state the
+/// reviewer sees is the descendant, not the reviewed commit. Exact HEAD
+/// match is the only way to guarantee the on-disk state matches the
+/// reviewed commit.
+fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
+    let Some(output) = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    head == commit_sha
+}
+
 fn resolve_review_target_branch(
     db: &Db,
     card_id: &str,
@@ -367,26 +392,58 @@ fn refresh_review_target_worktree(
     context: &serde_json::Value,
     target: &DispatchExecutionTarget,
 ) -> Result<Option<DispatchExecutionTarget>> {
-    if target
-        .worktree_path
-        .as_deref()
-        .is_some_and(|path| std::path::Path::new(path).is_dir())
-    {
-        return Ok(Some(target.clone()));
+    // #682 (Codex review, [medium]): the recorded worktree_path may still
+    // exist as a directory but point at a *different* checkout now (e.g. a
+    // later session recycled the path for another issue). Accept the
+    // recorded path only when the reviewed_commit is reachable from the
+    // worktree's current HEAD; otherwise fall through to recovery.
+    //
+    // git_commit_exists is insufficient here — git's object store is
+    // shared across worktrees of the same repo, so any commit anywhere
+    // in the repo satisfies it. worktree_head_reaches_commit confirms
+    // the reviewed state is actually what is checked out.
+    if let Some(recorded) = target.worktree_path.as_deref() {
+        if std::path::Path::new(recorded).is_dir()
+            && worktree_head_matches_commit(recorded, &target.reviewed_commit)
+        {
+            return Ok(Some(target.clone()));
+        }
     }
 
     if let Some(stale_path) = target.worktree_path.as_deref() {
         tracing::warn!(
-            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer exists — attempting fallback",
+            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer holds commit {} — attempting fallback",
             card_id,
-            stale_path
+            stale_path,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
         );
     }
 
+    // #682 (Codex round 2, [high]): resolve_card_worktree picks the repo
+    // from the current card/context, not the historical completion's
+    // target_repo. For an external-repo completion whose card's canonical
+    // repo differs, this would miss the right worktree. Inject target_repo
+    // into a local context copy so resolve_card_worktree's repo lookup
+    // honors the completion's recorded repo before falling back to the
+    // card's default.
+    let resolve_context = if let Some(tr) = target.target_repo.as_deref() {
+        let mut merged = context.clone();
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("target_repo".to_string(), json!(tr));
+        }
+        std::borrow::Cow::Owned(merged)
+    } else {
+        std::borrow::Cow::Borrowed(context)
+    };
+
     if let Some((wt_path, wt_branch, _wt_commit)) =
-        resolve_card_worktree(db, card_id, Some(context))?
+        resolve_card_worktree(db, card_id, Some(resolve_context.as_ref()))?
     {
-        if git_commit_exists(&wt_path, &target.reviewed_commit) {
+        // Use the exact-HEAD check here too — a worktree whose HEAD has
+        // advanced past reviewed_commit still satisfies git_commit_exists
+        // via the shared object store, but the files on disk are the
+        // descendant state, not what was reviewed.
+        if worktree_head_matches_commit(&wt_path, &target.reviewed_commit) {
             let branch = resolve_review_target_branch(
                 db,
                 card_id,
@@ -410,19 +467,44 @@ fn refresh_review_target_worktree(
         }
 
         tracing::warn!(
-            "[dispatch] Review dispatch for card {}: active issue worktree does not contain commit {} — skipping path refresh",
+            "[dispatch] Review dispatch for card {}: active issue worktree HEAD does not match reviewed commit {} — skipping path refresh",
             card_id,
             &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
         );
     }
 
-    if let Some(repo_dir) = resolve_card_repo_dir_with_context(
-        db,
-        card_id,
-        Some(context),
-        "recover review target repo",
-    )? {
-        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+    // #682 (Codex review, [high]): prefer the explicit target_repo recorded
+    // on the completion before falling back to card-scoped repo resolution.
+    // Issue-less cards that ran against an external repo (recorded as
+    // target_repo on the work dispatch) would otherwise lose the original
+    // repo when their worktree was cleaned up.
+    let fallback_repo_dir = target
+        .target_repo
+        .as_deref()
+        .and_then(|value| {
+            crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+                .ok()
+                .flatten()
+        })
+        .or_else(|| {
+            resolve_card_repo_dir_with_context(
+                db,
+                card_id,
+                Some(context),
+                "recover review target repo",
+            )
+            .ok()
+            .flatten()
+        });
+
+    if let Some(repo_dir) = fallback_repo_dir {
+        // #682 (Codex round 3, [high]): require the repo_dir's HEAD to be
+        // exactly reviewed_commit before emitting it as worktree_path. The
+        // shared git object store makes git_commit_exists trivially pass
+        // for any commit anywhere in the repo — but if HEAD is checked out
+        // at something else, the reviewer sees unrelated filesystem state.
+        // Exact HEAD match guarantees the on-disk state is what was reviewed.
+        if worktree_head_matches_commit(&repo_dir, &target.reviewed_commit) {
             let branch = resolve_review_target_branch(
                 db,
                 card_id,
@@ -440,6 +522,31 @@ fn refresh_review_target_worktree(
                 reviewed_commit: target.reviewed_commit.clone(),
                 branch,
                 worktree_path: Some(repo_dir),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: repo_dir '{}' HEAD does not match reviewed commit {} — emitting reviewed_commit without worktree_path",
+            card_id,
+            repo_dir,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+        // We know the commit exists in this repo (cat-file via the earlier
+        // branch); hand back reviewed_commit and let the reviewer inspect
+        // it via git commands, without misleading worktree_path.
+        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch(
+                db,
+                card_id,
+                &repo_dir,
+                &target.reviewed_commit,
+                target.branch.as_deref(),
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: None,
                 target_repo: target.target_repo.clone(),
             }));
         }
@@ -925,11 +1032,15 @@ pub(super) fn build_review_context(
                     );
                 }
                 if valid {
-                    if card_issue_number.is_none() {
-                        Some(target.clone())
-                    } else {
-                        refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
-                    }
+                    // #682: Always refresh to catch stale worktree_path even for
+                    // issue-less cards. refresh_review_target_worktree tries
+                    // resolve_card_worktree first (needs issue_number — returns
+                    // None here) and falls back to the card's repo_dir when the
+                    // reviewed_commit still lives there. Prior code returned the
+                    // recorded target unchanged when issue_number was None, which
+                    // meant a stale worktree_path propagated into the dispatch
+                    // context and failed `Path::exists()` at review execution.
+                    refresh_review_target_worktree(db, kanban_card_id, &ctx_snapshot, target)?
                 } else {
                     None
                 }
