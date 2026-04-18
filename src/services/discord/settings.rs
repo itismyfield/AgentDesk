@@ -780,7 +780,6 @@ memory:
                         "/tmp",
                         ChannelId::new(1),
                         "tok",
-                        "",
                         None,
                         false,
                         super::super::prompt_builder::DispatchProfile::Full,

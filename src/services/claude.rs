@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
-use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage, is_valid_session_id};
+use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
@@ -143,17 +143,14 @@ pub fn execute_command(
     prompt: &str,
     session_id: Option<&str>,
     working_dir: &str,
-    allowed_tools: Option<&[String]>,
+    _allowed_tools: Option<&[String]>,
 ) -> ClaudeResponse {
-    let tools_str = match allowed_tools {
-        Some(tools) => tools.join(","),
-        None => DEFAULT_ALLOWED_TOOLS.join(","),
-    };
+    // Tool whitelist policy deprecated (#794): Claude CLI is invoked without
+    // `--allowed-tools` so all currently-available tools are exposed. The
+    // `_allowed_tools` parameter is kept for ABI stability with existing call sites.
     let mut args = vec![
         "-p".to_string(),
         "--dangerously-skip-permissions".to_string(),
-        "--tools".to_string(),
-        tools_str,
         "--output-format".to_string(),
         "json".to_string(),
         "--append-system-prompt".to_string(),
@@ -483,15 +480,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#;
 
-    let tools_str = match allowed_tools {
-        Some(tools) => tools.join(","),
-        None => DEFAULT_ALLOWED_TOOLS.join(","),
-    };
+    // Tool whitelist policy deprecated (#794): Claude CLI is invoked without
+    // `--allowed-tools` so all currently-available tools (e.g. `Monitor`) are exposed.
+    // The `allowed_tools` parameter still flows through for logging/context only.
+    let _ = allowed_tools;
     let mut args = vec![
         "-p".to_string(),
         "--dangerously-skip-permissions".to_string(),
-        "--tools".to_string(),
-        tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
