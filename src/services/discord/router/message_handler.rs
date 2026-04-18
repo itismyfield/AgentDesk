@@ -68,8 +68,15 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
-fn should_add_turn_pending_reaction(dispatch_id: Option<&str>) -> bool {
-    dispatch_id.is_none()
+fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
+    // #750: announce bot no longer writes lifecycle emojis, so the command bot
+    // is now the single source of ⏳ for both regular and dispatch turns.
+    // Users stop an active dispatch turn by removing this ⏳, which
+    // intake_gate's classify_removed_control_reaction catches.
+    // (#559 originally skipped this for dispatches to avoid duplicating the
+    // announce bot's ⏳. With the announce-bot path gone, we must re-add it
+    // here so the stop-via-reaction-removal path keeps working.)
+    true
 }
 
 fn session_reset_reason_for_turn(
@@ -3265,12 +3272,15 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_turns_skip_generic_pending_reaction() {
+    fn dispatch_turns_add_pending_reaction_as_single_source() {
+        // #750: announce bot no longer writes ⏳. Command bot must add it on
+        // dispatch turn start so the stop-via-reaction-removal path still
+        // works.
         let dispatch_id = crate::services::discord::adk_session::parse_dispatch_id(
             "DISPATCH:550e8400-e29b-41d4-a716-446655440000 - Fix login bug",
         );
 
-        assert!(!should_add_turn_pending_reaction(dispatch_id.as_deref()));
+        assert!(should_add_turn_pending_reaction(dispatch_id.as_deref()));
     }
 
     #[test]

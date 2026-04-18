@@ -228,10 +228,16 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                     .await
             }
             "status_reaction" => {
-                // #750: announce bot no longer writes lifecycle emoji reactions
-                // (command bot's turn-lifecycle emojis are the single source of
-                // truth). Any pre-existing status_reaction rows in the wild are
-                // drained as no-op so the outbox queue doesn't block.
+                // #750: announce bot no longer writes lifecycle emoji reactions.
+                // Command bot (turn_bridge) removes ⏳ on turn end and adds ✅
+                // on success, so the legacy announce-bot sync path is redundant.
+                // Any pre-existing status_reaction rows in the wild (from before
+                // this deploy) are drained as no-op — the command bot has
+                // already handled the ⏳→✅ transition on those turns, so no
+                // reaction state is actually lost.
+                tracing::debug!(
+                    "[dispatch-outbox] drop legacy status_reaction row (dispatch={dispatch_id}) — command bot handles reactions"
+                );
                 Ok(())
             }
             other => {
