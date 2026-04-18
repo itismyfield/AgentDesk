@@ -9,7 +9,9 @@ var BENIGN_BLOCKED_REASON_PREFIXES = [
   "ci:rerunning",
   "ci:rework",
   "deploy:waiting",
-  "deploy:deploying:"
+  "deploy:deploying:",
+  // #743: create-pr dispatch in flight — benign progress state
+  "pr:creating"
 ];
 
 function isBenignBlockedReason(reason) {

@@ -20,6 +20,7 @@ mod log_ops;
 mod message_ops;
 mod pipeline_ops;
 mod queue_ops;
+mod review_automation_ops;
 mod review_ops;
 mod runtime_ops;
 
@@ -92,6 +93,9 @@ pub fn register_globals_with_supervisor(
 
     // ── agentdesk.review ─────────────────────────────────────────
     review_ops::register_review_ops(ctx, db.clone())?;
+
+    // ── agentdesk.reviewAutomation ─────────────────────────────── #743
+    review_automation_ops::register_review_automation_ops(ctx, db.clone())?;
 
     // ── agentdesk.queue ──────────────────────────────────────────
     queue_ops::register_queue_ops(ctx, db.clone())?;

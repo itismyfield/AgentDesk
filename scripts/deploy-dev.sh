@@ -220,6 +220,26 @@ if [ "$DEV_DEPLOY_TEST_MODE" = "1" ]; then
     exit 0
 fi
 
+# #743: Zero-inflight gate for create-pr dispatches. A restart during an
+# in-flight create-pr dispatch would leave the completion unstamped after
+# the new code rolls out. If the API is unreachable the gate is skipped so
+# recovery deploys are not blocked.
+DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
+if ! curl -sf --max-time 3 "http://127.0.0.1:${DEV_PORT}/api/health" > /dev/null 2>&1; then
+    echo "▸ [gate] API not reachable on :${DEV_PORT} — skipping zero-inflight check"
+else
+    gate_pending=$(curl -s --max-time 3 "http://127.0.0.1:${DEV_PORT}/api/dispatches?status=pending" \
+        | jq '[.dispatches[] | select(.dispatch_type=="create-pr")] | length' 2>/dev/null || echo 0)
+    gate_dispatched=$(curl -s --max-time 3 "http://127.0.0.1:${DEV_PORT}/api/dispatches?status=dispatched" \
+        | jq '[.dispatches[] | select(.dispatch_type=="create-pr")] | length' 2>/dev/null || echo 0)
+    if [ "${gate_pending:-0}" -gt 0 ] || [ "${gate_dispatched:-0}" -gt 0 ]; then
+        echo "✗ [gate] ${gate_pending} pending + ${gate_dispatched} dispatched create-pr dispatches inflight."
+        echo "  Wait for completion or cancel via API, then retry deploy."
+        exit 1
+    fi
+    echo "▸ [gate] Zero create-pr dispatches inflight — proceeding."
+fi
+
 # 2. Stop dev only — leave release untouched
 echo "▸ Stopping dev..."
 launchctl bootout "gui/$(id -u)/$PLIST" 2>/dev/null || true
@@ -307,8 +327,7 @@ fi
 echo "▸ Starting dev..."
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"
 
-# 5. Health check
-DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
+# 5. Health check (DEV_PORT already assigned earlier for zero-inflight gate)
 echo "▸ Waiting for dev health on :${DEV_PORT}..."
 DEV_HEALTHY=false
 if wait_for_http_service_health "$PLIST" "$DEV_PORT" "$DEV_HEALTH_RETRIES" "$DEV_HEALTH_DELAY_SECS" 0 1; then

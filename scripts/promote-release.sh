@@ -311,6 +311,26 @@ else
     fi
 fi
 
+# #743: Zero-inflight gate for create-pr dispatches on the release runtime.
+# A restart during an in-flight create-pr dispatch leaves its completion
+# unstamped after the new code rolls out. If the release API is unreachable
+# the gate skips itself (recovery deploys must not be false-blocked).
+REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+if ! curl -sf --max-time 3 "http://127.0.0.1:${REL_PORT}/api/health" > /dev/null 2>&1; then
+    echo "▸ [gate] Release API not reachable on :${REL_PORT} — skipping zero-inflight check"
+else
+    gate_pending=$(curl -s --max-time 3 "http://127.0.0.1:${REL_PORT}/api/dispatches?status=pending" \
+        | jq '[.dispatches[] | select(.dispatch_type=="create-pr")] | length' 2>/dev/null || echo 0)
+    gate_dispatched=$(curl -s --max-time 3 "http://127.0.0.1:${REL_PORT}/api/dispatches?status=dispatched" \
+        | jq '[.dispatches[] | select(.dispatch_type=="create-pr")] | length' 2>/dev/null || echo 0)
+    if [ "${gate_pending:-0}" -gt 0 ] || [ "${gate_dispatched:-0}" -gt 0 ]; then
+        echo "✗ [gate] ${gate_pending} pending + ${gate_dispatched} dispatched create-pr dispatches inflight on release."
+        echo "  Wait for completion or cancel via API, then retry promotion."
+        exit 1
+    fi
+    echo "▸ [gate] Zero create-pr dispatches inflight on release — proceeding."
+fi
+
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
     echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
     echo "  looked for:"
@@ -379,7 +399,7 @@ rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
 # Wait for active turns to finish before stopping the server.
 # Without this, the SIGTERM interrupts mid-response, cutting off output.
-REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+# REL_PORT already assigned earlier for the zero-inflight gate.
 TURN_WAIT_MAX=120
 TURN_WAIT=0
 _health_busy_count() {

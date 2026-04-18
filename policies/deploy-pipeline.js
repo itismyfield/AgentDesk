@@ -198,15 +198,8 @@ function advancePipelineStage(cardId) {
         if (skipPrHelperAvailable) {
           var skipPrResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
           if (skipPrResult.status === "dispatched") {
-            // #701: Mark the card as owned by the PR/CI flow. Without a
-            // blocked_reason the card would look like naked in_progress
-            // work to stale-work detection (timeouts.js [B] skips cards
-            // with any blocked_reason). Cleared to 'ci:waiting' by the
-            // create-pr completion handler.
-            agentdesk.db.execute(
-              "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') WHERE id = ?",
-              [cardId]
-            );
+            // #743: handoffCreatePr's transaction already set
+            // blocked_reason='pr:creating'; no duplicate UPDATE needed.
             agentdesk.log.info("[deploy-pipeline] Card " + cardId + " e2e-skip — create-pr dispatched, awaiting CI/merge");
           } else if (skipPrResult.status === "error") {
             agentdesk.reviewAutomation.markPrCreateFailed(cardId, skipPrResult.reason);
@@ -301,14 +294,8 @@ function advancePipelineStage(cardId) {
     if (prHelperAvailable) {
       var prResult = agentdesk.reviewAutomation.attemptCreatePr(cardId);
       if (prResult.status === "dispatched") {
-        // #701: Mark the card as owned by the PR/CI flow — see the
-        // e2e-skip path above for rationale (stale-work detection skips
-        // cards with any blocked_reason; create-pr completion clears to
-        // 'ci:waiting').
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') WHERE id = ?",
-          [cardId]
-        );
+        // #743: handoffCreatePr's transaction already set
+        // blocked_reason='pr:creating'; no duplicate UPDATE needed.
         agentdesk.log.info("[deploy-pipeline] Card " + cardId + " completed all pipeline stages — create-pr dispatched, awaiting CI/merge");
       } else if (prResult.status === "error") {
         agentdesk.reviewAutomation.markPrCreateFailed(cardId, prResult.reason);
