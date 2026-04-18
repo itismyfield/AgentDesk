@@ -221,6 +221,7 @@ pub struct AutoQueueStatusEntryView {
     pub card_title: Option<String>,
     pub github_issue_number: Option<i64>,
     pub github_repo: Option<String>,
+    pub retry_count: i64,
     pub thread_group: i64,
     pub slot_index: Option<i64>,
     pub batch_phase: i64,
@@ -237,6 +238,7 @@ pub struct AutoQueueStatusCounts {
     pub dispatched: i64,
     pub done: i64,
     pub skipped: i64,
+    pub failed: i64,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -245,6 +247,7 @@ pub struct AutoQueueThreadGroupView {
     pub dispatched: i64,
     pub done: i64,
     pub skipped: i64,
+    pub failed: i64,
     pub entries: Vec<AutoQueueThreadGroupEntryView>,
     pub reason: Option<String>,
     pub status: String,
@@ -588,6 +591,7 @@ impl AutoQueueStatusEntryView {
             card_title: record.card_title,
             github_issue_number: record.github_issue_number,
             github_repo: record.github_repo,
+            retry_count: record.retry_count,
             thread_group: record.thread_group,
             slot_index: record.slot_index,
             batch_phase: record.batch_phase,
@@ -651,6 +655,8 @@ fn build_status_response(
             "active".to_string()
         } else if group.pending > 0 {
             "pending".to_string()
+        } else if group.failed > 0 {
+            "failed".to_string()
         } else {
             "done".to_string()
         };
@@ -749,6 +755,7 @@ fn increment_status_counts(counts: &mut AutoQueueStatusCounts, status: &str) {
         "dispatched" => counts.dispatched += 1,
         "done" => counts.done += 1,
         "skipped" => counts.skipped += 1,
+        "failed" => counts.failed += 1,
         _ => {}
     }
 }
@@ -759,6 +766,7 @@ fn increment_thread_group_counts(group: &mut AutoQueueThreadGroupView, status: &
         "dispatched" => group.dispatched += 1,
         "done" => group.done += 1,
         "skipped" => group.skipped += 1,
+        "failed" => group.failed += 1,
         _ => {}
     }
 }

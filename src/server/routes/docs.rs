@@ -1179,11 +1179,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({
                 "current": {
                     "dispatchPollSec": 15,
-                    "maxRetries": 7
+                    "maxRetries": 7,
+                    "maxEntryRetries": 4
                 },
                 "defaults": {
                     "dispatchPollSec": 30,
-                    "maxRetries": 3
+                    "maxRetries": 3,
+                    "maxEntryRetries": 3
                 }
             }),
         ),
@@ -1196,7 +1198,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({
                 "dispatchPollSec": 15,
-                "maxRetries": 7
+                "maxRetries": 7,
+                "maxEntryRetries": 4
             }),
             json!({"ok": true}),
         ),

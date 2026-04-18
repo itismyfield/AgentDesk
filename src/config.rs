@@ -560,6 +560,8 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entry_retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_reminder_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_warning_pct: Option<u64>,
@@ -588,6 +590,7 @@ impl RuntimeSettingsConfig {
             && self.issue_triage_poll_sec.is_none()
             && self.ceo_warn_depth.is_none()
             && self.max_retries.is_none()
+            && self.max_entry_retries.is_none()
             && self.review_reminder_min.is_none()
             && self.rate_limit_warning_pct.is_none()
             && self.rate_limit_danger_pct.is_none()
@@ -1349,6 +1352,7 @@ mod tests {
             issue_triage_poll_sec: Some(360),
             ceo_warn_depth: Some(4),
             max_retries: Some(5),
+            max_entry_retries: Some(6),
             review_reminder_min: Some(25),
             rate_limit_warning_pct: Some(78),
             rate_limit_danger_pct: Some(93),
@@ -1501,6 +1505,7 @@ mod tests {
         assert_eq!(loaded.runtime.issue_triage_poll_sec, Some(360));
         assert_eq!(loaded.runtime.ceo_warn_depth, Some(4));
         assert_eq!(loaded.runtime.max_retries, Some(5));
+        assert_eq!(loaded.runtime.max_entry_retries, Some(6));
         assert_eq!(loaded.runtime.review_reminder_min, Some(25));
         assert_eq!(loaded.runtime.rate_limit_warning_pct, Some(78));
         assert_eq!(loaded.runtime.rate_limit_danger_pct, Some(93));

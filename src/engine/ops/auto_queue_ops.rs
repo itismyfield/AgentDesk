@@ -99,6 +99,21 @@ pub(super) fn register_auto_queue_ops<'js>(
             },
         )?,
     )?;
+    let db_record_dispatch_failure = db.clone();
+    auto_queue_obj.set(
+        "__recordEntryDispatchFailureRaw",
+        Function::new(
+            ctx.clone(),
+            move |entry_id: String, max_retries: i64, source: String| -> String {
+                record_entry_dispatch_failure_raw(
+                    &db_record_dispatch_failure,
+                    &entry_id,
+                    max_retries,
+                    &source,
+                )
+            },
+        )?,
+    )?;
     let bridge_should_defer = bridge.clone();
     auto_queue_obj.set(
         "__shouldDeferActivateRaw",
@@ -207,6 +222,17 @@ pub(super) fn register_auto_queue_ops<'js>(
                         dispatchId,
                         source || "",
                         JSON.stringify(metadata || {})
+                    )
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            agentdesk.autoQueue.recordDispatchFailure = function(entryId, maxRetries, source) {
+                var result = JSON.parse(
+                    agentdesk.autoQueue.__recordEntryDispatchFailureRaw(
+                        entryId,
+                        maxRetries,
+                        source || ""
                     )
                 );
                 if (result.error) throw new Error(result.error);
@@ -443,6 +469,49 @@ fn record_consultation_dispatch_raw(
             "changed": result.entry_status_changed,
             "metadata": serde_json::from_str::<serde_json::Value>(&result.metadata_json)
                 .unwrap_or_else(|_| serde_json::json!({})),
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
+}
+
+fn record_entry_dispatch_failure_raw(
+    db: &Db,
+    entry_id: &str,
+    max_retries: i64,
+    source: &str,
+) -> String {
+    if source.trim().is_empty() {
+        return r#"{"error":"source is required"}"#.to_string();
+    }
+
+    let conn = match db.separate_conn() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("DB: {error}")
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
+        &conn,
+        entry_id,
+        max_retries,
+        source,
+    ) {
+        Ok(result) => serde_json::json!({
+            "ok": true,
+            "changed": result.changed,
+            "from": result.from_status,
+            "to": result.to_status,
+            "run_id": result.run_id,
+            "retryCount": result.retry_count,
+            "retryLimit": result.retry_limit,
         })
         .to_string(),
         Err(error) => serde_json::json!({

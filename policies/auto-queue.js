@@ -93,6 +93,23 @@ function autoQueueLog(level, message, context) {
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
 
+function configuredAutoQueueMaxEntryRetries() {
+  var configured = parseInt(agentdesk.config.get("maxEntryRetries"), 10);
+  if (!configured || configured < 1) return 3;
+  return configured;
+}
+
+function notifyAutoQueueEntryFailure(stuck, failure) {
+  if (!stuck || !failure || failure.to !== "failed" || failure.changed !== true) return;
+  notifyHumanAlert(
+    "⚠️ [Auto Queue] " + loadPhaseGateCardLabel(stuck.kanban_card_id) + "\n" +
+      "entry " + stuck.id + "가 dispatch failure " + failure.retryCount + "/" + failure.retryLimit + "회 누적으로 failed 상태가 되었습니다.\n" +
+      "dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom\n" +
+      "수동 확인이 필요합니다.",
+    "auto-queue"
+  );
+}
+
 // #699 (round 2): mirror of src/dispatch/dispatch_status.rs
 // maybe_inject_phase_gate_verdict. Infers `pass_verdict` for a phase-gate
 // result only when (a) no explicit verdict/decision is present, (b) every
@@ -555,16 +572,17 @@ var autoQueue = {
 
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
-      autoQueueLog("info", "onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom)", {
+      var failure = agentdesk.autoQueue.recordDispatchFailure(
+        stuck.id,
+        configuredAutoQueueMaxEntryRetries(),
+        "tick_recovery"
+      );
+      autoQueueLog("info", "onTick1min: recovered stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom) retry " + failure.retryCount + "/" + failure.retryLimit + " -> " + failure.to, {
         entry_id: stuck.id,
         card_id: stuck.kanban_card_id,
         dispatch_id: stuck.dispatch_id
       });
-      agentdesk.autoQueue.updateEntryStatus(
-        stuck.id,
-        "pending",
-        "tick_recovery"
-      );
+      notifyAutoQueueEntryFailure(stuck, failure);
     }
   }
 };

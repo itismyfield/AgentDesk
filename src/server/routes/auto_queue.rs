@@ -1215,6 +1215,25 @@ fn attempt_restore_dispatch(
     } else {
         return Ok(result);
     };
+    match crate::db::auto_queue::update_entry_status_on_conn(
+        &conn,
+        &entry.entry_id,
+        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+        "restore_run_dispatch_reserve",
+        &crate::db::auto_queue::EntryStatusUpdateOptions {
+            dispatch_id: None,
+            slot_index,
+        },
+    ) {
+        Ok(update) if !update.changed => return Ok(result),
+        Ok(_) => {}
+        Err(error) => {
+            return Err(format!(
+                "{}: eager restore reservation failed: {error}",
+                entry.entry_id
+            ));
+        }
+    }
     drop(conn);
 
     let dispatch_result = run_activate_blocking(|| {
@@ -1243,13 +1262,14 @@ fn attempt_restore_dispatch(
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned),
         Err(error) => {
+            let error_text = error.to_string();
             crate::auto_queue_log!(
                 warn,
                 "restore_run_create_dispatch_failed",
                 entry_log_ctx.clone().maybe_slot_index(slot_index),
                 "[auto-queue] restore_run create_dispatch failed for entry {}: {}",
                 entry.entry_id,
-                error
+                error_text
             );
             let conn = deps.db.separate_conn().map_err(|open_error| {
                 format!(
@@ -1263,21 +1283,28 @@ fn attempt_restore_dispatch(
                     .filter(|state| state.has_active_dispatch())
                     .and_then(|state| state.latest_dispatch_id);
             if recovered_dispatch.is_none() {
-                if let Some(assigned_slot) = slot_index {
-                    crate::db::auto_queue::release_slot_for_group_agent(
-                        &conn,
-                        run_id,
-                        entry.thread_group,
-                        &entry.agent_id,
-                        assigned_slot,
-                    )
-                    .map_err(|release_error| {
-                        format!(
-                            "{}: eager restore slot release failed for slot {}: {}",
-                            entry.entry_id, assigned_slot, release_error
-                        )
-                    })?;
-                }
+                let failure = record_entry_dispatch_failure(
+                    deps,
+                    run_id,
+                    &entry.entry_id,
+                    &entry.card_id,
+                    &entry.agent_id,
+                    entry.thread_group,
+                    slot_index,
+                    "restore_run_create_dispatch_failed",
+                    &error_text,
+                    &entry_log_ctx,
+                )?;
+                crate::auto_queue_log!(
+                    warn,
+                    "restore_run_create_dispatch_retry_scheduled",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
+                    "[auto-queue] restore_run dispatch failure for entry {} scheduled retry {}/{} -> {}",
+                    entry.entry_id,
+                    failure.retry_count,
+                    failure.retry_limit,
+                    failure.to_status
+                );
             }
             recovered_dispatch
         }
@@ -1364,6 +1391,7 @@ fn finalize_restore_run(conn: &rusqlite::Connection, run_id: &str) -> Result<(),
 pub(crate) struct AutoQueueActivateDeps {
     db: crate::db::Db,
     engine: crate::engine::PolicyEngine,
+    config: Arc<crate::config::Config>,
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     guild_id: Option<String>,
 }
@@ -1373,6 +1401,7 @@ impl AutoQueueActivateDeps {
         Self {
             db: state.db.clone(),
             engine: state.engine.clone(),
+            config: state.config.clone(),
             health_registry: state.health_registry.clone(),
             guild_id: state.config.discord.guild_id.clone(),
         }
@@ -1382,6 +1411,7 @@ impl AutoQueueActivateDeps {
         Self {
             db,
             engine,
+            config: Arc::new(crate::config::Config::default()),
             health_registry: None,
             guild_id: None,
         }
@@ -1402,6 +1432,7 @@ enum ActivatePreflightOutcome {
     Continue,
     Dispatched(serde_json::Value),
     Skipped,
+    Deferred,
 }
 
 fn run_activate_blocking<T, F>(operation: F) -> T
@@ -1413,6 +1444,149 @@ where
     } else {
         operation()
     }
+}
+
+fn effective_max_entry_retries(conn: &rusqlite::Connection, deps: &AutoQueueActivateDeps) -> i64 {
+    crate::services::settings::runtime_config_u64(conn, deps.config.as_ref(), "maxEntryRetries")
+        .unwrap_or(3)
+        .max(1)
+        .min(i64::MAX as u64) as i64
+}
+
+fn human_alert_target_on_conn(
+    conn: &rusqlite::Connection,
+    deps: &AutoQueueActivateDeps,
+) -> Option<String> {
+    let channel = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .or_else(|| deps.config.kanban.human_alert_channel_id.clone())?;
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return None;
+    }
+    Some(if channel.starts_with("channel:") {
+        channel.to_string()
+    } else {
+        format!("channel:{channel}")
+    })
+}
+
+fn compact_failure_summary(message: &str) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let truncated: String = chars.by_ref().take(180).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn queue_failed_entry_escalation_on_conn(
+    conn: &rusqlite::Connection,
+    deps: &AutoQueueActivateDeps,
+    run_id: &str,
+    entry_id: &str,
+    card_id: &str,
+    agent_id: &str,
+    thread_group: i64,
+    retry_count: i64,
+    retry_limit: i64,
+    cause: &str,
+) -> rusqlite::Result<bool> {
+    let Some(target) = human_alert_target_on_conn(conn, deps) else {
+        return Ok(false);
+    };
+    let short_run_id = &run_id[..8.min(run_id.len())];
+    let short_entry_id = &entry_id[..8.min(entry_id.len())];
+    let content = format!(
+        "자동큐 entry 실패: run {short_run_id} / entry {short_entry_id} / card {card_id} / agent {agent_id} / G{thread_group} / retry {retry_count}/{retry_limit} / {}",
+        compact_failure_summary(cause)
+    );
+    conn.execute(
+        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+        rusqlite::params![target, content],
+    )?;
+    Ok(true)
+}
+
+fn record_entry_dispatch_failure(
+    deps: &AutoQueueActivateDeps,
+    run_id: &str,
+    entry_id: &str,
+    card_id: &str,
+    agent_id: &str,
+    thread_group: i64,
+    slot_index: Option<i64>,
+    trigger_source: &str,
+    cause: &str,
+    log_ctx: &AutoQueueLogContext<'_>,
+) -> Result<crate::db::auto_queue::EntryDispatchFailureResult, String> {
+    let conn = deps
+        .db
+        .separate_conn()
+        .map_err(|error| format!("{entry_id}: dispatch failure DB open failed: {error}"))?;
+    let retry_limit = effective_max_entry_retries(&conn, deps);
+    let result = crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
+        &conn,
+        entry_id,
+        retry_limit,
+        trigger_source,
+    )
+    .map_err(|error| format!("{entry_id}: dispatch failure state update failed: {error}"))?;
+
+    if result.changed {
+        if let Some(assigned_slot) = slot_index {
+            if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
+                &conn,
+                run_id,
+                thread_group,
+                agent_id,
+                assigned_slot,
+            ) {
+                crate::auto_queue_log!(
+                    warn,
+                    "entry_dispatch_failure_release_slot_failed",
+                    log_ctx.clone().slot_index(assigned_slot),
+                    "[auto-queue] failed to release slot {} for entry {} after dispatch failure: {}",
+                    assigned_slot,
+                    entry_id,
+                    error
+                );
+            }
+        }
+    }
+
+    if result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
+        if let Err(error) = queue_failed_entry_escalation_on_conn(
+            &conn,
+            deps,
+            run_id,
+            entry_id,
+            card_id,
+            agent_id,
+            thread_group,
+            result.retry_count,
+            result.retry_limit,
+            cause,
+        ) {
+            crate::auto_queue_log!(
+                warn,
+                "entry_dispatch_failure_escalation_failed",
+                log_ctx.clone(),
+                "[auto-queue] failed to queue escalation for failed entry {}: {}",
+                entry_id,
+                error
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 fn handle_activate_preflight_metadata(
@@ -1442,6 +1616,45 @@ fn handle_activate_preflight_metadata(
 
     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
         Some("consult_required") => {
+            match deps.db.separate_conn() {
+                Ok(conn) => match crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                    "activate_preflight_consultation_reserve",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                ) {
+                    Ok(result) if !result.changed => {
+                        crate::auto_queue_log!(
+                            info,
+                            "activate_preflight_consultation_reserve_already_claimed",
+                            log_ctx.clone(),
+                            "[auto-queue] consultation entry {entry_id} was already reserved before preflight dispatch creation"
+                        );
+                        return ActivatePreflightOutcome::Deferred;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        crate::auto_queue_log!(
+                            warn,
+                            "activate_preflight_consultation_reserve_failed",
+                            log_ctx.clone(),
+                            "[auto-queue] failed to reserve consultation entry {entry_id} before dispatch creation: {error}"
+                        );
+                        return ActivatePreflightOutcome::Deferred;
+                    }
+                },
+                Err(error) => {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_preflight_consultation_reserve_db_open_failed",
+                        log_ctx.clone(),
+                        "[auto-queue] failed to open DB while reserving consultation entry {entry_id}: {error}"
+                    );
+                    return ActivatePreflightOutcome::Deferred;
+                }
+            }
+
             let consult_agent_id = {
                 match deps.db.separate_conn() {
                     Ok(conn) => {
@@ -1525,20 +1738,43 @@ fn handle_activate_preflight_metadata(
                     &dispatch_context,
                 )
             });
-            if dispatch_result.is_err() {
-                crate::auto_queue_log!(
-                    warn,
-                    "activate_preflight_consultation_dispatch_failed",
-                    log_ctx.clone(),
-                    "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group})"
-                );
-                return ActivatePreflightOutcome::Continue;
-            }
+            let dispatch = match dispatch_result {
+                Ok(dispatch) => dispatch,
+                Err(error) => {
+                    let failure = record_entry_dispatch_failure(
+                        deps,
+                        run_id,
+                        entry_id,
+                        card_id,
+                        agent_id,
+                        group,
+                        None,
+                        "activate_preflight_consultation_dispatch_failed",
+                        &error.to_string(),
+                        &log_ctx,
+                    );
+                    match failure {
+                        Ok(result) => crate::auto_queue_log!(
+                            warn,
+                            "activate_preflight_consultation_dispatch_failed",
+                            log_ctx.clone(),
+                            "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group}); retry {}/{} -> {}",
+                            result.retry_count,
+                            result.retry_limit,
+                            result.to_status
+                        ),
+                        Err(record_error) => crate::auto_queue_log!(
+                            warn,
+                            "activate_preflight_consultation_dispatch_failed",
+                            log_ctx.clone(),
+                            "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group}); failed to persist retry state: {record_error}"
+                        ),
+                    }
+                    return ActivatePreflightOutcome::Deferred;
+                }
+            };
 
-            let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let dispatch_id = dispatch["id"].as_str().unwrap_or("").to_string();
             match deps.db.separate_conn() {
                 Ok(mut conn) => {
                     if let Err(error) = crate::db::auto_queue::record_consultation_dispatch_on_conn(
@@ -3655,6 +3891,7 @@ pub(crate) fn activate_with_deps(
                     continue;
                 }
                 ActivatePreflightOutcome::Skipped => continue,
+                ActivatePreflightOutcome::Deferred => continue,
             }
         }
 
@@ -3778,40 +4015,42 @@ pub(crate) fn activate_with_deps(
                                     &dispatch_context,
                                 )
                             });
-                            if dispatch_result.is_err() {
-                                let conn = deps.db.separate_conn().unwrap();
-                                if let Err(error) =
-                                    crate::db::auto_queue::update_entry_status_on_conn(
-                                        &conn,
+                            let dispatch = match dispatch_result {
+                                Ok(dispatch) => dispatch,
+                                Err(error) => {
+                                    match record_entry_dispatch_failure(
+                                        deps,
+                                        &run_id,
                                         &entry_id,
-                                        crate::db::auto_queue::ENTRY_STATUS_PENDING,
-                                        "activate_consultation_reserve_revert",
-                                        &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-                                    )
-                                {
-                                    crate::auto_queue_log!(
-                                        warn,
-                                        "activate_consultation_reserve_revert_failed",
-                                        entry_log_ctx.clone(),
-                                        "[auto-queue] failed to revert consultation reservation for entry {}: {}",
-                                        entry_id,
-                                        error
-                                    );
+                                        &card_id,
+                                        &agent_id,
+                                        *group,
+                                        None,
+                                        "activate_consultation_dispatch_failed",
+                                        &error.to_string(),
+                                        &entry_log_ctx,
+                                    ) {
+                                        Ok(result) => crate::auto_queue_log!(
+                                            warn,
+                                            "activate_consultation_dispatch_failed",
+                                            entry_log_ctx.clone(),
+                                            "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group}); retry {}/{} -> {}",
+                                            result.retry_count,
+                                            result.retry_limit,
+                                            result.to_status
+                                        ),
+                                        Err(record_error) => crate::auto_queue_log!(
+                                            warn,
+                                            "activate_consultation_dispatch_failed",
+                                            entry_log_ctx.clone(),
+                                            "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group}); failed to persist retry state: {record_error}"
+                                        ),
+                                    }
+                                    continue;
                                 }
-                                drop(conn);
-                                crate::auto_queue_log!(
-                                    warn,
-                                    "activate_consultation_dispatch_failed",
-                                    entry_log_ctx.clone(),
-                                    "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group})"
-                                );
-                                continue;
-                            }
+                            };
 
-                            let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
+                            let dispatch_id = dispatch["id"].as_str().unwrap_or("").to_string();
                             let mut conn = deps.db.separate_conn().unwrap();
                             if let Err(error) =
                                 crate::db::auto_queue::record_consultation_dispatch_on_conn(
@@ -4018,6 +4257,7 @@ pub(crate) fn activate_with_deps(
                 continue;
             }
             ActivatePreflightOutcome::Skipped => continue,
+            ActivatePreflightOutcome::Deferred => continue,
         }
 
         // #628: Re-verify entry is still pending before slot allocation to guard
@@ -4168,117 +4408,104 @@ pub(crate) fn activate_with_deps(
             )
         });
 
-        if dispatch_result.is_err() {
-            let recovered_state = {
-                let conn = deps.db.separate_conn().unwrap();
-                let recovered = load_activate_card_state(&conn, &card_id, &entry_id).ok();
-                drop(conn);
-                recovered
-            };
+        let dispatch = match dispatch_result {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let error_text = error.to_string();
+                let recovered_state = {
+                    let conn = deps.db.separate_conn().unwrap();
+                    let recovered = load_activate_card_state(&conn, &card_id, &entry_id).ok();
+                    drop(conn);
+                    recovered
+                };
 
-            if let Some(dispatch_id) = recovered_state
-                .as_ref()
-                .filter(|state| state.has_active_dispatch())
-                .and_then(|state| state.latest_dispatch_id.clone())
-            {
-                let conn = deps.db.separate_conn().unwrap();
-                match crate::db::auto_queue::update_entry_status_on_conn(
-                    &conn,
-                    &entry_id,
-                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                    "activate_dispatch_error_recover",
-                    &crate::db::auto_queue::EntryStatusUpdateOptions {
-                        dispatch_id: Some(dispatch_id),
-                        slot_index,
-                    },
-                ) {
-                    Ok(_) => {
-                        drop(conn);
-                        continue;
+                if let Some(dispatch_id) = recovered_state
+                    .as_ref()
+                    .filter(|state| state.has_active_dispatch())
+                    .and_then(|state| state.latest_dispatch_id.clone())
+                {
+                    let conn = deps.db.separate_conn().unwrap();
+                    match crate::db::auto_queue::update_entry_status_on_conn(
+                        &conn,
+                        &entry_id,
+                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                        "activate_dispatch_error_recover",
+                        &crate::db::auto_queue::EntryStatusUpdateOptions {
+                            dispatch_id: Some(dispatch_id),
+                            slot_index,
+                        },
+                    ) {
+                        Ok(_) => {
+                            drop(conn);
+                            continue;
+                        }
+                        Err(error) => crate::auto_queue_log!(
+                            warn,
+                            "activate_create_dispatch_recover_failed",
+                            entry_log_ctx.clone().maybe_slot_index(slot_index),
+                            "[auto-queue] failed to recover entry {entry_id} after create_dispatch error: {error}"
+                        ),
                     }
-                    Err(error) => crate::auto_queue_log!(
-                        warn,
-                        "activate_create_dispatch_recover_failed",
-                        entry_log_ctx.clone().maybe_slot_index(slot_index),
-                        "[auto-queue] failed to recover entry {entry_id} after create_dispatch error: {error}"
-                    ),
+                    drop(conn);
                 }
-                drop(conn);
-            }
 
-            let recovered_dispatch_id = recovered_state
-                .as_ref()
-                .and_then(|state| state.latest_dispatch_id.as_deref());
-            if recovered_state.as_ref().is_some_and(|state| {
-                state.latest_dispatch_id.is_some() || state.status != post_walk.status
-            }) {
-                crate::auto_queue_log!(
-                    warn,
-                    "activate_create_dispatch_error_kept_reservation",
-                    entry_log_ctx
-                        .clone()
-                        .maybe_slot_index(slot_index)
-                        .maybe_dispatch(recovered_dispatch_id),
-                    "[auto-queue] create_dispatch errored for entry {entry_id} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
-                    recovered_state
-                        .as_ref()
-                        .map(|state| state.status.as_str())
-                        .unwrap_or("unknown"),
-                    recovered_dispatch_id
-                );
-                continue;
-            }
-
-            let conn = deps.db.separate_conn().unwrap();
-            if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
-                &conn,
-                &entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_PENDING,
-                "activate_dispatch_reserve_revert",
-                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-            ) {
-                crate::auto_queue_log!(
-                    warn,
-                    "activate_dispatch_reserve_revert_failed",
-                    entry_log_ctx.clone().maybe_slot_index(slot_index),
-                    "[auto-queue] failed to revert reservation for entry {} after create_dispatch error: {}",
-                    entry_id,
-                    error
-                );
-            } else if let Some(assigned_slot) = slot_index {
-                if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
-                    &conn,
-                    &run_id,
-                    *group,
-                    &agent_id,
-                    assigned_slot,
-                ) {
+                let recovered_dispatch_id = recovered_state
+                    .as_ref()
+                    .and_then(|state| state.latest_dispatch_id.as_deref());
+                if recovered_state.as_ref().is_some_and(|state| {
+                    state.latest_dispatch_id.is_some() || state.status != post_walk.status
+                }) {
                     crate::auto_queue_log!(
                         warn,
-                        "activate_dispatch_revert_slot_release_failed",
-                        entry_log_ctx.clone().slot_index(assigned_slot),
-                        "[auto-queue] failed to release slot {} for entry {} after create_dispatch error: {}",
-                        assigned_slot,
-                        entry_id,
-                        error
+                        "activate_create_dispatch_error_kept_reservation",
+                        entry_log_ctx
+                            .clone()
+                            .maybe_slot_index(slot_index)
+                            .maybe_dispatch(recovered_dispatch_id),
+                        "[auto-queue] create_dispatch errored for entry {entry_id} after card progressed to status={} latest_dispatch_id={:?}; keeping reservation",
+                        recovered_state
+                            .as_ref()
+                            .map(|state| state.status.as_str())
+                            .unwrap_or("unknown"),
+                        recovered_dispatch_id
                     );
+                    continue;
                 }
+
+                match record_entry_dispatch_failure(
+                    deps,
+                    &run_id,
+                    &entry_id,
+                    &card_id,
+                    &agent_id,
+                    *group,
+                    slot_index,
+                    "activate_dispatch_create_failed",
+                    &error_text,
+                    &entry_log_ctx,
+                ) {
+                    Ok(result) => crate::auto_queue_log!(
+                        error,
+                        "activate_dispatch_create_failed",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] create_dispatch failed for entry {entry_id} (group {group}); retry {}/{} -> {}",
+                        result.retry_count,
+                        result.retry_limit,
+                        result.to_status
+                    ),
+                    Err(record_error) => crate::auto_queue_log!(
+                        error,
+                        "activate_dispatch_create_failed",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] create_dispatch failed for entry {entry_id} (group {group}); failed to persist retry state: {record_error}"
+                    ),
+                }
+                continue;
             }
-            drop(conn);
-            crate::auto_queue_log!(
-                error,
-                "activate_dispatch_create_failed",
-                entry_log_ctx.clone().maybe_slot_index(slot_index),
-                "[auto-queue] create_dispatch failed for entry {entry_id} (group {group}), leaving as pending for retry"
-            );
-            continue;
-        }
+        };
 
         // Mark entry with dispatch_id (#145)
-        let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let dispatch_id = dispatch["id"].as_str().unwrap_or("").to_string();
         let conn = deps.db.separate_conn().unwrap();
         if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
             &conn,

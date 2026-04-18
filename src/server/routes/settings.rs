@@ -785,6 +785,7 @@ mod tests {
         config.automation.strategy = Some("rebase".to_string());
         config.runtime.requested_timeout_min = Some(55);
         config.runtime.dispatch_poll_sec = Some(45);
+        config.runtime.max_entry_retries = Some(6);
 
         seed_config_defaults(&conn, &config);
 
@@ -826,6 +827,7 @@ mod tests {
             .unwrap_or_else(|| json!({}));
         assert_eq!(runtime_config["dispatchPollSec"], json!(45));
         assert_eq!(runtime_config["maxRetries"], json!(7));
+        assert_eq!(runtime_config["maxEntryRetries"], json!(6));
     }
 
     #[test]
@@ -880,6 +882,7 @@ mod tests {
             .unwrap_or_else(|| json!({}));
         assert_eq!(runtime_config["dispatchPollSec"], json!(30));
         assert_eq!(runtime_config["maxRetries"], json!(3));
+        assert_eq!(runtime_config["maxEntryRetries"], json!(3));
     }
 
     #[tokio::test]
@@ -888,6 +891,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.runtime.dispatch_poll_sec = Some(45);
         config.runtime.max_retries = Some(5);
+        config.runtime.max_entry_retries = Some(4);
         let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
@@ -896,6 +900,8 @@ mod tests {
         assert_eq!(body["defaults"]["dispatchPollSec"], json!(45));
         assert_eq!(body["current"]["maxRetries"], json!(5));
         assert_eq!(body["defaults"]["maxRetries"], json!(5));
+        assert_eq!(body["current"]["maxEntryRetries"], json!(4));
+        assert_eq!(body["defaults"]["maxEntryRetries"], json!(4));
     }
 
     #[tokio::test]
@@ -908,6 +914,7 @@ mod tests {
             Json(json!({
                 "dispatchPollSec": 15,
                 "maxRetries": 7,
+                "maxEntryRetries": 4,
                 "rateLimitStaleSec": 900
             })),
         )
@@ -923,6 +930,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stale_sec, "900");
+        let max_entry_retries: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'maxEntryRetries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(max_entry_retries, "4");
     }
 
     #[tokio::test]

@@ -2431,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_queue_on_tick_recovers_orphan_dispatched_entry_to_pending() {
+    fn auto_queue_on_tick_recovery_counts_failures_and_fails_at_retry_limit() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
@@ -2447,6 +2447,11 @@ mod tests {
             )
             .unwrap();
             conn.execute(
+                "INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', 'human-alert')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
                 "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatched_at, created_at) \
                  VALUES ('entry-aq-orphan', 'run-aq-orphan', 'card-aq-orphan', 'agent-1', 'dispatched', 0, datetime('now', '-5 minutes'), datetime('now', '-5 minutes'))",
                 [],
@@ -2454,34 +2459,78 @@ mod tests {
             .unwrap();
         }
 
-        engine
-            .try_fire_hook_by_name("OnTick1min", json!({}))
-            .unwrap();
+        for expected_retry_count in 1..=3 {
+            engine
+                .try_fire_hook_by_name("OnTick1min", json!({}))
+                .unwrap();
 
-        let conn = db.lock().unwrap();
-        let (status, dispatch_id): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-orphan'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        let transition_source: String = conn
-            .query_row(
-                "SELECT trigger_source FROM auto_queue_entry_transitions \
-                 WHERE entry_id = 'entry-aq-orphan' ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "pending");
-        assert!(
-            dispatch_id.is_none(),
-            "orphan recovery must not invent a replacement dispatch id"
-        );
+            let conn = db.lock().unwrap();
+            let (status, retry_count, dispatch_id): (String, i64, Option<String>) = conn
+                .query_row(
+                    "SELECT status, retry_count, dispatch_id
+                     FROM auto_queue_entries
+                     WHERE id = 'entry-aq-orphan'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            let transition_source: String = conn
+                .query_row(
+                    "SELECT trigger_source FROM auto_queue_entry_transitions \
+                     WHERE entry_id = 'entry-aq-orphan' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            drop(conn);
+
+            let expected_status = if expected_retry_count >= 3 {
+                "failed"
+            } else {
+                "pending"
+            };
+            assert_eq!(status, expected_status);
+            assert_eq!(retry_count, expected_retry_count);
+            assert!(
+                dispatch_id.is_none(),
+                "orphan recovery must not invent a replacement dispatch id"
+            );
+            assert_eq!(
+                transition_source, "tick_recovery",
+                "orphan recovery should record the periodic recovery source"
+            );
+
+            if expected_retry_count < 3 {
+                let conn = db.lock().unwrap();
+                crate::db::auto_queue::update_entry_status_on_conn(
+                    &conn,
+                    "entry-aq-orphan",
+                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                    "test_rearm_orphan_dispatch",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE auto_queue_entries
+                     SET dispatched_at = datetime('now', '-5 minutes')
+                     WHERE id = 'entry-aq-orphan'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+
+        let messages = message_outbox_rows(&db);
+        let auto_queue_alerts: Vec<_> = messages
+            .into_iter()
+            .filter(|(target, content)| {
+                target == "channel:human-alert" && content.contains("[Auto Queue]")
+            })
+            .collect();
         assert_eq!(
-            transition_source, "tick_recovery",
-            "orphan recovery should record the periodic recovery source"
+            auto_queue_alerts.len(),
+            1,
+            "terminal tick recovery should emit exactly one auto-queue human alert"
         );
     }
 
