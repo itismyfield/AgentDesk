@@ -858,6 +858,38 @@ impl Default for DataConfig {
     }
 }
 
+const DEFAULT_MEMENTO_MCP_SERVER_NAME: &str = "memento";
+const DEFAULT_MEMENTO_MCP_URL: &str = "http://127.0.0.1:57332/mcp";
+const DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR: &str = "MEMENTO_ACCESS_KEY";
+
+fn env_var_is_present(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
+    env_var_is_present(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR).then(|| {
+        (
+            DEFAULT_MEMENTO_MCP_SERVER_NAME.to_string(),
+            McpServerConfig {
+                url: DEFAULT_MEMENTO_MCP_URL.to_string(),
+                auth: Some(McpServerAuthConfig {
+                    auth_type: McpServerAuthType::Bearer,
+                    token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
+                }),
+            },
+        )
+    })
+}
+
+impl Config {
+    fn apply_runtime_defaults(mut self) -> Self {
+        if let Some((name, server)) = default_memento_mcp_server() {
+            self.mcp_servers.entry(name).or_insert(server);
+        }
+        self
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -877,6 +909,7 @@ impl Default for Config {
             escalation: EscalationConfig::default(),
             memory: None,
         }
+        .apply_runtime_defaults()
     }
 }
 
@@ -896,6 +929,7 @@ pub fn load() -> Result<Config> {
 
     let config: Config = serde_yaml::from_str(&contents)
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
+    let config = config.apply_runtime_defaults();
 
     // Ensure data dir exists
     std::fs::create_dir_all(&config.data.dir)?;
@@ -908,7 +942,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to read config {}", path.display()))?;
     let config = serde_yaml::from_str::<Config>(&contents)
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
-    Ok(config)
+    Ok(config.apply_runtime_defaults())
 }
 
 pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
@@ -1028,7 +1062,7 @@ pub fn load_graceful() -> Config {
 
     let config = match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => cfg.apply_runtime_defaults(),
             Err(e) => {
                 tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
                 Config::default()
@@ -1079,10 +1113,12 @@ pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
 mod tests {
     use super::{
         AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
-        DiscordBotAuthConfig, EscalationConfig, EscalationMode, EscalationScheduleConfig,
-        FileMemoryConfig, KanbanConfig, McpMemoryConfig, McpServerAuthConfig, McpServerAuthType,
-        McpServerConfig, MemoryConfig, ReviewConfig, RuntimeSettingsConfig, load_from_path,
-        resolve_graceful_config_path, runtime_root, save_to_path,
+        DEFAULT_MEMENTO_MCP_SERVER_NAME, DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR,
+        DEFAULT_MEMENTO_MCP_URL, DiscordBotAuthConfig, EscalationConfig, EscalationMode,
+        EscalationScheduleConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig,
+        McpServerAuthConfig, McpServerAuthType, McpServerConfig, MemoryConfig, ReviewConfig,
+        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
+        save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -1523,6 +1559,39 @@ mod tests {
             Some("MEMENTO_API_KEY")
         );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_from_path_injects_default_memento_mcp_when_access_key_is_present() {
+        let _lock = env_lock();
+        let dir = make_temp_dir("memento-default");
+        let path = dir.join("agentdesk.yaml");
+        std::fs::write(
+            &path,
+            "server:\n  port: 9201\n  host: 127.0.0.1\ndiscord:\n  bots: {}\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var_os(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR);
+        unsafe { std::env::set_var(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR, "test-memento-access-key") };
+
+        let loaded = load_from_path(&path).unwrap();
+        assert_eq!(
+            loaded.mcp_servers.get(DEFAULT_MEMENTO_MCP_SERVER_NAME),
+            Some(&McpServerConfig {
+                url: DEFAULT_MEMENTO_MCP_URL.to_string(),
+                auth: Some(McpServerAuthConfig {
+                    auth_type: McpServerAuthType::Bearer,
+                    token_env_var: Some(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR.to_string()),
+                }),
+            })
+        );
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR, value) },
+            None => unsafe { std::env::remove_var(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR) },
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }
