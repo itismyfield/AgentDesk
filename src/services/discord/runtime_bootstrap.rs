@@ -620,6 +620,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 .map(|id| (ChannelId::new(id), model.clone()))
         })
         .collect();
+    let restored_fast_mode_channels: Vec<ChannelId> = bot_settings
+        .channel_fast_modes
+        .iter()
+        .filter_map(|(channel_id, enabled)| {
+            if !*enabled {
+                return None;
+            }
+            channel_id.parse::<u64>().ok().map(ChannelId::new)
+        })
+        .collect();
 
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
@@ -655,9 +665,19 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             }
             map
         },
-        model_session_reset_pending: {
+        fast_mode_channels: {
+            let set = dashmap::DashSet::new();
+            for channel_id in &restored_fast_mode_channels {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        session_reset_pending: {
             let set = dashmap::DashSet::new();
             for (channel_id, _) in &restored_model_overrides {
+                set.insert(*channel_id);
+            }
+            for channel_id in &restored_fast_mode_channels {
                 set.insert(*channel_id);
             }
             set
@@ -687,6 +707,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             tracing::info!(
                 "  [{ts}] 🧩 restored model overrides: {} channel(s)",
                 restored_model_overrides.len()
+            );
+        }
+        if !restored_fast_mode_channels.is_empty() {
+            tracing::info!(
+                "  [{ts}] ⚡ restored fast mode channels: {} channel(s)",
+                restored_fast_mode_channels.len()
             );
         }
     }

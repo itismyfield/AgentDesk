@@ -214,11 +214,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
+    if shared.session_reset_pending.remove(&channel_id).is_none() {
         return;
     }
 
@@ -270,7 +266,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
 
     shared.dispatch_role_overrides.remove(&channel_id);
 
-    shared.model_session_reset_pending.remove(&channel_id);
+    shared.session_reset_pending.remove(&channel_id);
 
     if let Some(token) = cleared.removed_token {
         cancel_active_token(

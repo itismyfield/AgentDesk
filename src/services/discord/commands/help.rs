@@ -7,7 +7,7 @@ pub(in crate::services::discord) async fn cmd_help(ctx: Context<'_>) -> Result<(
     let provider_name = ctx.data().provider.display_name();
     let model_section = match ctx.data().provider {
         ProviderKind::Claude | ProviderKind::Codex => {
-            "\n`/model` — Open the model picker for this channel\n`/fast` — Show fast-mode availability for this channel (does not change model)"
+            "\n`/model` — Open the model picker for this channel\n`/fast` — Toggle native fast mode for this channel"
         }
         _ => "\n`/model` — Open the model picker for this channel",
     };
