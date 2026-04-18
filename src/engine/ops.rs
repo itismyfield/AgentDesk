@@ -17,7 +17,7 @@ mod http_ops;
 mod kanban_ops;
 mod kv_ops;
 mod log_ops;
-mod message_ops;
+pub(crate) mod message_ops;
 mod pipeline_ops;
 mod queue_ops;
 mod review_automation_ops;
@@ -104,7 +104,7 @@ pub fn register_globals_with_supervisor_and_pg(
     review_ops::register_review_ops(ctx, db.clone())?;
 
     // ── agentdesk.reviewAutomation ─────────────────────────────── #743
-    review_automation_ops::register_review_automation_ops(ctx, db.clone())?;
+    review_automation_ops::register_review_automation_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.queue ──────────────────────────────────────────
     queue_ops::register_queue_ops(ctx, db.clone())?;
@@ -125,7 +125,7 @@ pub fn register_globals_with_supervisor_and_pg(
     let db_for_dm_reply = db.clone();
     let pg_for_dm_reply = pg_pool.clone();
     let db_for_agents = db.clone();
-    message_ops::register_message_ops(ctx, db)?;
+    message_ops::register_message_ops(ctx, db, pg_pool.clone())?;
 
     // ── agentdesk.exec ──────────────────────────────────────────
     exec_ops::register_exec_ops(ctx)?;

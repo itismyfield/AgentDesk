@@ -170,7 +170,8 @@ pub fn execute_intents(
                 bot,
                 source,
             } => {
-                if let Err(e) = execute_queue_message(db, &target, &content, &bot, &source) {
+                if let Err(e) = execute_queue_message(db, engine, &target, &content, &bot, &source)
+                {
                     tracing::warn!(target, bot, source, error = %e, "queue-message intent failed");
                     result.errors += 1;
                 }
@@ -440,17 +441,21 @@ fn execute_sql(db: &crate::db::Db, sql: &str, params: &[serde_json::Value]) -> a
 
 fn execute_queue_message(
     db: &crate::db::Db,
+    engine: Option<&crate::engine::PolicyEngine>,
     target: &str,
     content: &str,
     bot: &str,
     source: &str,
 ) -> anyhow::Result<()> {
-    let conn = db.separate_conn()?;
-    conn.execute(
-        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, ?3, ?4)",
-        libsql_rusqlite::params![target, content, bot, source],
-    )?;
-    let id = conn.last_insert_rowid();
+    let id = crate::engine::ops::message_ops::queue_message(
+        db,
+        engine.and_then(|engine| engine.pg_pool()),
+        target,
+        content,
+        bot,
+        source,
+    )
+    .map_err(anyhow::Error::msg)?;
     tracing::info!(
         target,
         bot,

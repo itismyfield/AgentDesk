@@ -1059,12 +1059,12 @@ mod tests {
             "INSERT INTO task_dispatches \
              (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
              VALUES (?1, ?2, 'agent-1', 'create-pr', ?3, 'Test Create PR', ?4, datetime('now'), datetime('now'))",
-            rusqlite::params![dispatch_id, card_id, status, context],
+            libsql_rusqlite::params![dispatch_id, card_id, status, context],
         )
         .unwrap();
         conn.execute(
             "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = ?2",
-            rusqlite::params![dispatch_id, card_id],
+            libsql_rusqlite::params![dispatch_id, card_id],
         )
         .unwrap();
         conn.execute(
@@ -1072,7 +1072,7 @@ mod tests {
              (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, \
               dispatch_generation, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-            rusqlite::params![
+            libsql_rusqlite::params![
                 card_id,
                 repo_id,
                 worktree_path,

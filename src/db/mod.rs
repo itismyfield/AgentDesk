@@ -101,7 +101,9 @@ pub(crate) fn open_read_only_connection(
     Ok(conn)
 }
 
-fn open_write_connection(path: &Path) -> std::result::Result<Connection, libsql_rusqlite::Error> {
+pub(crate) fn open_write_connection(
+    path: &Path,
+) -> std::result::Result<Connection, libsql_rusqlite::Error> {
     let conn = Connection::open_with_flags(
         path,
         libsql_rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE

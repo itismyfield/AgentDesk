@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::config::Config;
 use crate::utils::format::expand_tilde_path;
@@ -233,76 +233,101 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
     let config = load_effective_config()?;
     let need_history_rows = args.archive_dir.is_some() || !args.skip_pg_import;
     let need_live_rows = !args.skip_pg_import;
-    let sqlite_path = config.data.dir.join(&config.data.db_name);
-    let mut sqlite = crate::db::open_read_only_connection(&sqlite_path).map_err(|e| {
-        format!(
-            "open sqlite cutover connection {}: {e}",
-            sqlite_path.display()
-        )
-    })?;
-    let snapshot = load_sqlite_cutover_snapshot(&mut sqlite, need_history_rows, need_live_rows)?;
     let pg_pool = if args.skip_pg_import {
         None
     } else {
         Some(connect_postgres_for_cutover(&config).await?)
     };
-
-    let pg_before = if let Some(pool) = pg_pool.as_ref() {
-        Some(load_pg_cutover_counts(pool).await?)
+    let sqlite_path = config.data.dir.join(&config.data.db_name);
+    let sqlite = if !args.dry_run && !args.skip_pg_import {
+        crate::db::open_write_connection(&sqlite_path)
     } else {
-        None
-    };
-
-    let mut report = PostgresCutoverReport {
-        ok: false,
-        sqlite: snapshot.counts,
-        postgres_before: pg_before,
-        postgres_after: None,
-        archive: None,
-        imported: None,
-        blocker: None,
-    };
-
-    report.blocker = cutover_blocker(&args, &report.sqlite);
-
-    if args.dry_run || report.blocker.is_some() {
-        report.ok = report.blocker.is_none();
-        print_report(&report)?;
-        if let Some(blocker) = report.blocker {
-            return Err(blocker);
-        }
-        return Ok(());
+        crate::db::open_read_only_connection(&sqlite_path)
     }
-
-    if let Some(dir) = args.archive_dir.as_deref() {
-        report.archive = Some(write_archive_files(
-            dir,
-            &snapshot.audit_logs,
-            &snapshot.session_transcripts,
-        )?);
-    }
-
-    if let Some(pool) = pg_pool.as_ref() {
-        let mut import_summary = import_live_state_into_pg(
-            pool,
-            &snapshot.referenced_agents,
-            &snapshot.referenced_cards,
-            &snapshot.task_dispatches,
-            &snapshot.sessions,
-            &snapshot.dispatch_outbox,
+    .map_err(|e| {
+        format!(
+            "open sqlite cutover connection {}: {e}",
+            sqlite_path.display()
         )
-        .await?;
-        let history_summary =
-            import_history_into_pg(pool, &snapshot.audit_logs, &snapshot.session_transcripts)
-                .await?;
-        import_summary.audit_logs_inserted = history_summary.audit_logs_inserted;
-        import_summary.session_transcripts_upserted = history_summary.session_transcripts_upserted;
-        report.imported = Some(import_summary);
-        report.postgres_after = Some(load_pg_cutover_counts(pool).await?);
+    })?;
+    let barrier_active = if !args.dry_run && !args.skip_pg_import {
+        sqlite
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("acquire sqlite cutover write barrier: {e}"))?;
+        true
+    } else {
+        false
+    };
+    let result: Result<PostgresCutoverReport, String> = async {
+        let snapshot = load_sqlite_cutover_snapshot(&sqlite, need_history_rows, need_live_rows)?;
+
+        let pg_before = if let Some(pool) = pg_pool.as_ref() {
+            Some(load_pg_cutover_counts(pool).await?)
+        } else {
+            None
+        };
+
+        let mut report = PostgresCutoverReport {
+            ok: false,
+            sqlite: snapshot.counts,
+            postgres_before: pg_before,
+            postgres_after: None,
+            archive: None,
+            imported: None,
+            blocker: None,
+        };
+
+        report.blocker = cutover_blocker(&args, &report.sqlite);
+
+        if args.dry_run || report.blocker.is_some() {
+            report.ok = report.blocker.is_none();
+            return Ok(report);
+        }
+
+        if let Some(dir) = args.archive_dir.as_deref() {
+            report.archive = Some(write_archive_files(
+                dir,
+                &snapshot.audit_logs,
+                &snapshot.session_transcripts,
+            )?);
+        }
+
+        if let Some(pool) = pg_pool.as_ref() {
+            let mut import_summary = import_live_state_into_pg(
+                pool,
+                &snapshot.referenced_agents,
+                &snapshot.referenced_cards,
+                &snapshot.task_dispatches,
+                &snapshot.sessions,
+                &snapshot.dispatch_outbox,
+            )
+            .await?;
+            let history_summary =
+                import_history_into_pg(pool, &snapshot.audit_logs, &snapshot.session_transcripts)
+                    .await?;
+            import_summary.audit_logs_inserted = history_summary.audit_logs_inserted;
+            import_summary.session_transcripts_upserted =
+                history_summary.session_transcripts_upserted;
+            report.imported = Some(import_summary);
+            report.postgres_after = Some(load_pg_cutover_counts(pool).await?);
+        }
+
+        report.ok = report.blocker.is_none();
+        Ok(report)
+    }
+    .await;
+
+    if barrier_active {
+        sqlite
+            .execute_batch("ROLLBACK")
+            .map_err(|e| format!("release sqlite cutover write barrier: {e}"))?;
     }
 
-    report.ok = report.blocker.is_none();
+    let report = result?;
     print_report(&report)?;
+    if let Some(blocker) = report.blocker {
+        return Err(blocker);
+    }
     Ok(())
 }
 
@@ -317,47 +342,50 @@ fn cutover_blocker(
         );
     }
 
+    if !args.skip_pg_import && sqlite_counts.open_dispatch_outbox > 0 {
+        return Some(
+            "sqlite still has open dispatch_outbox rows; drain outbox before PG cutover to avoid duplicate delivery."
+                .to_string(),
+        );
+    }
+
     None
 }
 
 fn load_sqlite_cutover_snapshot(
-    sqlite: &mut Connection,
+    sqlite: &Connection,
     need_history_rows: bool,
     need_live_rows: bool,
 ) -> Result<SqliteCutoverSnapshot, String> {
-    let tx = sqlite
-        .transaction()
-        .map_err(|e| format!("open sqlite cutover snapshot transaction: {e}"))?;
-
-    let counts = sqlite_cutover_counts(&tx)?;
+    let counts = sqlite_cutover_counts(sqlite)?;
     let audit_logs = if need_history_rows {
-        load_audit_logs(&tx)?
+        load_audit_logs(sqlite)?
     } else {
         Vec::new()
     };
     let session_transcripts = if need_history_rows {
-        load_session_transcripts(&tx)?
+        load_session_transcripts(sqlite)?
     } else {
         Vec::new()
     };
     let task_dispatches = if need_live_rows {
-        load_active_task_dispatches(&tx)?
+        load_active_task_dispatches(sqlite)?
     } else {
         Vec::new()
     };
     let sessions = if need_live_rows {
-        load_live_sessions(&tx)?
+        load_live_sessions(sqlite)?
     } else {
         Vec::new()
     };
     let dispatch_outbox = if need_live_rows {
-        load_open_dispatch_outbox(&tx)?
+        load_open_dispatch_outbox(sqlite)?
     } else {
         Vec::new()
     };
     let referenced_cards = if need_live_rows {
         load_referenced_kanban_cards(
-            &tx,
+            sqlite,
             &referenced_card_ids(&task_dispatches, &dispatch_outbox),
         )?
     } else {
@@ -365,7 +393,7 @@ fn load_sqlite_cutover_snapshot(
     };
     let referenced_agents = if need_live_rows {
         load_referenced_agents(
-            &tx,
+            sqlite,
             &referenced_agent_ids(
                 &task_dispatches,
                 &sessions,
@@ -376,9 +404,6 @@ fn load_sqlite_cutover_snapshot(
     } else {
         Vec::new()
     };
-
-    tx.rollback()
-        .map_err(|e| format!("close sqlite cutover snapshot transaction: {e}"))?;
 
     Ok(SqliteCutoverSnapshot {
         counts,
@@ -1381,16 +1406,7 @@ async fn import_live_state_into_pg(
         upserted_outbox += result.rows_affected() as i64;
     }
 
-    sqlx::query(
-        "SELECT setval(
-            pg_get_serial_sequence('dispatch_outbox', 'id'),
-            COALESCE((SELECT MAX(id) FROM dispatch_outbox), 1),
-            true
-        )",
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("advance dispatch_outbox id sequence: {e}"))?;
+    advance_pg_serial_sequences(&mut tx).await?;
 
     tx.commit()
         .await
@@ -1405,6 +1421,76 @@ async fn import_live_state_into_pg(
         audit_logs_inserted: 0,
         session_transcripts_upserted: 0,
     })
+}
+
+async fn advance_pg_serial_sequences(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    let serial_columns = sqlx::query(
+        "SELECT table_name, column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND data_type IN ('bigint', 'integer')
+           AND (
+                column_default LIKE 'nextval(%'
+                OR is_identity = 'YES'
+           )
+         ORDER BY table_name, ordinal_position",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| format!("list postgres serial columns: {e}"))?;
+
+    for column in serial_columns {
+        let table_name = column
+            .try_get::<String, _>("table_name")
+            .map_err(|e| format!("decode postgres serial table name: {e}"))?;
+        let column_name = column
+            .try_get::<String, _>("column_name")
+            .map_err(|e| format!("decode postgres serial column name: {e}"))?;
+
+        let sequence_name =
+            sqlx::query_scalar::<_, Option<String>>("SELECT pg_get_serial_sequence($1, $2)")
+                .bind(format!("public.{table_name}"))
+                .bind(&column_name)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| {
+                    format!("resolve postgres serial sequence for {table_name}.{column_name}: {e}")
+                })?;
+
+        let Some(sequence_name) = sequence_name else {
+            continue;
+        };
+
+        let quoted_table = quote_ident(&table_name);
+        let quoted_column = quote_ident(&column_name);
+        let max_query = format!(
+            "SELECT COALESCE(MAX({quoted_column}), 0)::BIGINT AS max_id FROM public.{quoted_table}"
+        );
+        let max_id = sqlx::query_scalar::<_, i64>(&max_query)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| format!("load max id for {table_name}.{column_name}: {e}"))?;
+
+        sqlx::query("SELECT setval($1, $2, $3)")
+            .bind(&sequence_name)
+            .bind(if max_id > 0 { max_id } else { 1 })
+            .bind(max_id > 0)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
+                format!(
+                    "advance postgres serial sequence {sequence_name} for {table_name}.{column_name}: {e}"
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+fn quote_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 async fn import_history_into_pg(
@@ -1519,8 +1605,8 @@ async fn import_history_into_pg(
 mod tests {
     use super::{
         AgentRow, AuditLogRow, DispatchOutboxRow, KanbanCardRow, PostgresCutoverArgs, SessionRow,
-        SessionTranscriptRow, SqliteCutoverCounts, TaskDispatchRow, cutover_blocker,
-        import_history_into_pg, import_live_state_into_pg, load_pg_cutover_counts,
+        SessionTranscriptRow, SqliteCutoverCounts, TaskDispatchRow, advance_pg_serial_sequences,
+        cutover_blocker, import_history_into_pg, import_live_state_into_pg, load_pg_cutover_counts,
         load_session_transcripts, load_sqlite_cutover_snapshot, sqlite_cutover_counts,
         write_archive_files,
     };
@@ -1685,8 +1771,24 @@ mod tests {
     }
 
     #[test]
+    fn pg_cutover_blocks_when_dispatch_outbox_is_not_drained() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+        };
+        let counts = SqliteCutoverCounts {
+            open_dispatch_outbox: 1,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts).expect("dispatch_outbox blocker");
+        assert!(blocker.contains("drain outbox"));
+    }
+
+    #[test]
     fn load_sqlite_cutover_snapshot_preserves_live_references() {
-        let mut conn = Connection::open_in_memory().expect("sqlite in memory");
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
         crate::db::schema::migrate(&conn).expect("sqlite migrate");
         conn.execute(
             "INSERT INTO agents (id, name, provider, status) VALUES ('project-agentdesk', 'AgentDesk', 'codex', 'idle')",
@@ -1714,8 +1816,7 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot =
-            load_sqlite_cutover_snapshot(&mut conn, false, true).expect("sqlite snapshot");
+        let snapshot = load_sqlite_cutover_snapshot(&conn, false, true).expect("sqlite snapshot");
         assert_eq!(snapshot.counts.active_dispatches, 1);
         assert_eq!(snapshot.counts.working_sessions, 1);
         assert_eq!(snapshot.counts.open_dispatch_outbox, 1);
@@ -1912,6 +2013,92 @@ mod tests {
         .expect("load imported outbox");
         assert_eq!(outbox_row.get::<String, _>("status"), "pending");
         assert_eq!(outbox_row.get::<i32, _>("retry_count"), 2);
+
+        let next_outbox_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status)
+             VALUES ('dispatch-cutover-next', 'notify', 'pending')
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert next outbox row after sequence advance");
+        assert_eq!(next_outbox_id, 43);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn advance_pg_serial_sequences_updates_all_bigserial_tables() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO message_outbox (id, target, content, bot, source, status)
+             VALUES (41, 'thread-1', 'hello', 'announce', 'test', 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed message_outbox");
+
+        let mut tx = pool.begin().await.expect("begin sequence advance tx");
+        advance_pg_serial_sequences(&mut tx)
+            .await
+            .expect("advance all serial sequences");
+        tx.commit().await.expect("commit sequence advance tx");
+
+        let next_message_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO message_outbox (target, content, bot, source)
+             VALUES ('thread-2', 'world', 'announce', 'test')
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert next message_outbox row");
+        assert_eq!(next_message_id, 42);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cutover_schema_includes_pr_tracking_create_pr_support() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT column_name
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'pr_tracking'
+               AND column_name IN ('dispatch_generation', 'review_round', 'retry_count')
+             ORDER BY column_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load pr_tracking columns");
+        assert_eq!(
+            columns,
+            vec![
+                "dispatch_generation".to_string(),
+                "retry_count".to_string(),
+                "review_round".to_string(),
+            ]
+        );
+
+        let has_index = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND tablename = 'task_dispatches'
+                  AND indexname = 'idx_single_active_create_pr'
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check create-pr partial index");
+        assert!(has_index);
 
         pool.close().await;
         pg_db.drop().await;

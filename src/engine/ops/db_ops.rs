@@ -833,6 +833,112 @@ fn json_to_sqlite(val: &serde_json::Value) -> libsql_rusqlite::types::Value {
 mod tests {
     use super::*;
     use serde_json::json;
+    use sqlx::Row;
+
+    struct TestDatabase {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestDatabase {
+        async fn create() -> Self {
+            let admin_url = admin_database_url();
+            let database_name = format!("agentdesk_db_ops_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url)
+                .await
+                .expect("connect postgres admin db");
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .expect("create postgres test db");
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url)
+                .await
+                .expect("connect postgres test db");
+            crate::db::postgres::migrate(&pool)
+                .await
+                .expect("migrate postgres test db");
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
+                .await
+                .expect("reconnect postgres admin db");
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .expect("terminate postgres test db sessions");
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .expect("drop postgres test db");
+            admin_pool.close().await;
+        }
+    }
+
+    fn base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", base_database_url(), admin_db)
+    }
 
     #[test]
     fn prepare_policy_sql_for_pg_rewrites_insert_or_replace() {
@@ -877,6 +983,58 @@ mod tests {
         let sql = "SELECT ?1, ?2";
         let error = interpolate_policy_sql_params(sql, &[json!(1)]).expect_err("missing param");
         assert!(error.contains("?2"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_db_pg_exec_and_query_support_sqlite_compat_functions() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let execute = db_execute_raw_pg(
+            &pool,
+            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at)
+             VALUES (?1, json_extract(?2, '$.payload.value'), datetime('now', '+' || ?3 || ' seconds'))",
+            &[json!("pg-db-compat"), json!({"payload": {"value": "hello-pg"}}), json!(600)],
+            std::time::Instant::now(),
+        );
+        let execute_json: serde_json::Value =
+            serde_json::from_str(&execute).expect("parse execute json");
+        assert_eq!(execute_json["changes"], 1);
+
+        let rows = db_query_raw_pg(
+            &pool,
+            "SELECT key,
+                    value,
+                    expires_at > datetime('now') AS still_valid,
+                    json_extract(?2, '$.meta.answer') AS extracted_answer
+             FROM kv_meta
+             WHERE key = ?1",
+            &[json!("pg-db-compat"), json!({"meta": {"answer": 42}})],
+            std::time::Instant::now(),
+        );
+        let rows_json: serde_json::Value = serde_json::from_str(&rows).expect("parse query json");
+        let result_rows = rows_json.as_array().expect("query rows array");
+        assert_eq!(result_rows.len(), 1);
+        assert_eq!(result_rows[0]["key"], "pg-db-compat");
+        assert_eq!(result_rows[0]["value"], "hello-pg");
+        assert_eq!(result_rows[0]["still_valid"], true);
+        assert_eq!(result_rows[0]["extracted_answer"], "42");
+
+        let expires_at: chrono::DateTime<chrono::Utc> = sqlx::query(
+            "SELECT expires_at
+             FROM kv_meta
+             WHERE key = $1",
+        )
+        .bind("pg-db-compat")
+        .fetch_one(&pool)
+        .await
+        .expect("fetch kv_meta row")
+        .try_get("expires_at")
+        .expect("decode expires_at");
+        assert!(expires_at > chrono::Utc::now());
+
+        pool.close().await;
+        test_db.drop().await;
     }
 }
 

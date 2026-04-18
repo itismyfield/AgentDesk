@@ -255,16 +255,19 @@ CREATE TABLE IF NOT EXISTS rate_limit_cache (
 );
 
 CREATE TABLE IF NOT EXISTS pr_tracking (
-    card_id       TEXT PRIMARY KEY REFERENCES kanban_cards(id) ON DELETE CASCADE,
-    repo_id       TEXT,
-    worktree_path TEXT,
-    branch        TEXT,
-    pr_number     INTEGER,
-    head_sha      TEXT,
-    state         TEXT NOT NULL DEFAULT 'create-pr',
-    last_error    TEXT,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
+    card_id              TEXT PRIMARY KEY REFERENCES kanban_cards(id) ON DELETE CASCADE,
+    repo_id              TEXT,
+    worktree_path        TEXT,
+    branch               TEXT,
+    pr_number            INTEGER,
+    head_sha             TEXT,
+    state                TEXT NOT NULL DEFAULT 'create-pr',
+    last_error           TEXT,
+    dispatch_generation  TEXT NOT NULL DEFAULT '',
+    review_round         INTEGER NOT NULL DEFAULT 0,
+    retry_count          INTEGER NOT NULL DEFAULT 0,
+    created_at           TIMESTAMPTZ DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS card_review_state (
@@ -587,6 +590,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review
 CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review_decision
     ON task_dispatches (kanban_card_id)
     WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_create_pr
+    ON task_dispatches (kanban_card_id)
+    WHERE dispatch_type = 'create-pr' AND status IN ('pending', 'dispatched');
 
 CREATE INDEX IF NOT EXISTS idx_pr_tracking_state ON pr_tracking(state);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_tracking_repo_pr
