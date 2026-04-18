@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
 import type { UiLanguage } from "../i18n";
 import * as api from "../api/client";
+import { STORAGE_KEYS } from "../lib/storageKeys";
+import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import { useOffice } from "./OfficeContext";
 
 // ── Context value ──
@@ -71,13 +73,17 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
 
   // Apply theme to DOM — handles auto (system preference) and explicit dark/light
   useEffect(() => {
+    const applyTheme = (nextTheme: "dark" | "light") => {
+      document.documentElement.dataset.theme = nextTheme;
+      writeLocalStorageValue(STORAGE_KEYS.theme, nextTheme);
+    };
     if (settings.theme !== "auto") {
-      document.documentElement.dataset.theme = settings.theme;
+      applyTheme(settings.theme);
       return;
     }
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
-      document.documentElement.dataset.theme = mq.matches ? "dark" : "light";
+      applyTheme(mq.matches ? "dark" : "light");
     };
     apply();
     mq.addEventListener("change", apply);

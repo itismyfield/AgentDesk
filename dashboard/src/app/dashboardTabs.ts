@@ -1,42 +1,24 @@
+import { STORAGE_KEYS } from "../lib/storageKeys";
+import {
+  readLocalStorageValue,
+  writeLocalStorageValue,
+} from "../lib/useLocalStorage";
+
 export type DashboardTab = "operations" | "tokens" | "automation" | "achievements" | "meetings";
 
 export const DASHBOARD_TAB_QUERY_KEY = "dashboardTab";
-export const DASHBOARD_TAB_STORAGE_KEY = "agentdesk.dashboard.active-tab";
+export const DASHBOARD_TAB_STORAGE_KEY = STORAGE_KEYS.dashboardActiveTab;
 export const DASHBOARD_TABS: DashboardTab[] = ["operations", "tokens", "automation", "achievements", "meetings"];
 
 export function isDashboardTab(value: string | null | undefined): value is DashboardTab {
   return value != null && DASHBOARD_TABS.includes(value as DashboardTab);
 }
 
-function getDashboardTabStorage(): Storage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 export function readDashboardTabFromStorage(): DashboardTab | null {
-  const storage = getDashboardTabStorage();
-  if (!storage) return null;
-
-  let stored: string | null = null;
-  try {
-    stored = storage.getItem(DASHBOARD_TAB_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-
-  if (stored === null) return null;
-  if (isDashboardTab(stored)) return stored;
-
-  try {
-    storage.removeItem(DASHBOARD_TAB_STORAGE_KEY);
-  } catch {
-    // Ignore storage cleanup failures and fall back to the default tab.
-  }
-  return null;
+  return readLocalStorageValue<DashboardTab | null>(DASHBOARD_TAB_STORAGE_KEY, null, {
+    validate: (value): value is DashboardTab => typeof value === "string" && isDashboardTab(value),
+    legacy: (raw) => (isDashboardTab(raw) ? raw : null),
+  });
 }
 
 export function readDashboardTabFromUrl(): DashboardTab {
@@ -56,14 +38,7 @@ export function syncDashboardTabToUrl(
   const url = new URL(window.location.href);
   const currentTab = url.searchParams.get(DASHBOARD_TAB_QUERY_KEY);
   url.searchParams.set(DASHBOARD_TAB_QUERY_KEY, tab);
-  const storage = getDashboardTabStorage();
-  if (storage) {
-    try {
-      storage.setItem(DASHBOARD_TAB_STORAGE_KEY, tab);
-    } catch {
-      // Ignore storage write failures and keep the URL as the source of truth.
-    }
-  }
+  writeLocalStorageValue(DASHBOARD_TAB_STORAGE_KEY, tab);
   if (currentTab === tab) return;
 
   const nextUrl = `${url.pathname}${url.search}${url.hash}`;

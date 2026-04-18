@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "../../api";
 import { localeName } from "../../i18n";
+import { STORAGE_KEYS } from "../../lib/storageKeys";
+import { useLocalStorage } from "../../lib/useLocalStorage";
 import type {
   Agent,
   PipelineConfigFull,
@@ -47,6 +49,22 @@ interface EditorSnapshot {
   repoStages: PipelineStage[];
 }
 
+interface PersistedFsmDraftEntry {
+  repo: string;
+  level: EditLevel;
+  agentId: string | null;
+  updatedAtMs: number;
+  pipeline: PipelineConfigFull;
+  stageDrafts: StageDraft[];
+  selection: Selection;
+  overrideExtras: Record<string, unknown>;
+}
+
+interface PersistedFsmDraftStore {
+  version: 2;
+  entries: Record<string, PersistedFsmDraftEntry>;
+}
+
 const INPUT_CLASS =
   "w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none";
 const TEXTAREA_CLASS =
@@ -61,8 +79,127 @@ const MUTED_TEXT_STYLE = {
   color: "var(--th-text-muted)",
 } as const;
 
+const EMPTY_FSM_DRAFT_STORE: PersistedFsmDraftStore = {
+  version: 2,
+  entries: {},
+};
+
 function cloneStageDrafts(stages: StageDraft[]) {
   return stages.map((stage) => ({ ...stage }));
+}
+
+function normalizeSelection(selection: unknown): Selection {
+  if (!selection || typeof selection !== "object") {
+    return null;
+  }
+  const parsed = selection as Partial<Exclude<Selection, null>>;
+  if (parsed.kind === "phase_gate") {
+    return { kind: "phase_gate" };
+  }
+  if (parsed.kind === "state" && typeof parsed.stateId === "string") {
+    return { kind: "state", stateId: parsed.stateId };
+  }
+  if (parsed.kind === "transition" && typeof parsed.index === "number") {
+    return { kind: "transition", index: parsed.index };
+  }
+  return null;
+}
+
+function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDraftStore {
+  if (!value || typeof value !== "object") {
+    return EMPTY_FSM_DRAFT_STORE;
+  }
+  const rawEntries =
+    "entries" in value && value.entries && typeof value.entries === "object"
+      ? (value.entries as Record<string, unknown>)
+      : {};
+  const entries: Record<string, PersistedFsmDraftEntry> = {};
+
+  Object.entries(rawEntries).forEach(([scopeKey, entry]) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const parsed = entry as Partial<PersistedFsmDraftEntry>;
+    if (typeof parsed.repo !== "string") {
+      return;
+    }
+    if (parsed.level !== "repo" && parsed.level !== "agent") {
+      return;
+    }
+    if (!parsed.pipeline || typeof parsed.pipeline !== "object") {
+      return;
+    }
+    if (!Array.isArray(parsed.stageDrafts)) {
+      return;
+    }
+
+    entries[scopeKey] = {
+      repo: parsed.repo,
+      level: parsed.level,
+      agentId: typeof parsed.agentId === "string" ? parsed.agentId : null,
+      updatedAtMs: typeof parsed.updatedAtMs === "number" ? parsed.updatedAtMs : 0,
+      pipeline: clonePipelineConfig(parsed.pipeline as PipelineConfigFull),
+      stageDrafts: cloneStageDrafts(parsed.stageDrafts as StageDraft[]),
+      selection: normalizeSelection(parsed.selection),
+      overrideExtras:
+        parsed.overrideExtras && typeof parsed.overrideExtras === "object"
+          ? { ...(parsed.overrideExtras as Record<string, unknown>) }
+          : {},
+    };
+  });
+
+  return {
+    version: 2,
+    entries,
+  };
+}
+
+function buildFsmDraftScopeKey(
+  repo: string,
+  level: EditLevel,
+  selectedAgentId?: string | null,
+) {
+  return `${repo}::${level}::${selectedAgentId ?? "repo"}`;
+}
+
+function removeDraftScope(
+  store: PersistedFsmDraftStore,
+  scopeKey: string,
+): PersistedFsmDraftStore {
+  if (!(scopeKey in store.entries)) {
+    return store;
+  }
+  const nextEntries = { ...store.entries };
+  delete nextEntries[scopeKey];
+  return {
+    version: 2,
+    entries: nextEntries,
+  };
+}
+
+function coerceSelectionForPipeline(
+  pipeline: PipelineConfigFull,
+  selection: Selection,
+): Selection | null {
+  if (!selection) {
+    return null;
+  }
+  if (selection.kind === "phase_gate") {
+    return selection;
+  }
+  if (
+    selection.kind === "state"
+    && pipeline.states.some((state) => state.id === selection.stateId)
+  ) {
+    return selection;
+  }
+  if (
+    selection.kind === "transition"
+    && Boolean(pipeline.transitions[selection.index])
+  ) {
+    return selection;
+  }
+  return null;
 }
 
 function parseCommaSeparated(value: string) {
@@ -161,8 +298,17 @@ export default function PipelineVisualEditor({
   const [reloadKey, setReloadKey] = useState(0);
   const [compactGraph, setCompactGraph] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
+  const [rawPersistedFsmDraftStore, setPersistedFsmDraftStore] = useLocalStorage<PersistedFsmDraftStore>(
+    STORAGE_KEYS.fsmDraft,
+    EMPTY_FSM_DRAFT_STORE,
+  );
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const persistedFsmDraftStore = useMemo(
+    () => normalizePersistedFsmDraftStore(rawPersistedFsmDraftStore),
+    [rawPersistedFsmDraftStore],
+  );
+  const persistedFsmDraftStoreRef = useRef(persistedFsmDraftStore);
   const [dragConnect, setDragConnect] = useState<{
     fromId: string;
     fromCx: number;
@@ -171,6 +317,14 @@ export default function PipelineVisualEditor({
     cursorY: number;
     hoverId: string | null;
   } | null>(null);
+  const fsmDraftScopeKey = useMemo(
+    () => (repo ? buildFsmDraftScopeKey(repo, level, selectedAgentId) : null),
+    [level, repo, selectedAgentId],
+  );
+
+  useEffect(() => {
+    persistedFsmDraftStoreRef.current = persistedFsmDraftStore;
+  }, [persistedFsmDraftStore]);
 
   useEffect(() => {
     const updateLayoutMode = () => {
@@ -219,39 +373,58 @@ export default function PipelineVisualEditor({
     };
   }
 
-  function applySnapshot(snapshot: EditorSnapshot) {
+  function applySnapshot(
+    snapshot: EditorSnapshot,
+    persistedDraft: PersistedFsmDraftEntry | null = null,
+  ) {
     const visibleStages = filterVisibleStages(snapshot.repoStages, selectedAgentId).map(
       stageDraftFromApi,
     );
+    const draftPipeline = persistedDraft
+      ? clonePipelineConfig(persistedDraft.pipeline)
+      : snapshot.pipeline;
+    const draftStageDrafts = persistedDraft
+      ? cloneStageDrafts(persistedDraft.stageDrafts)
+      : cloneStageDrafts(visibleStages);
+    const persistedSelection = persistedDraft
+      ? coerceSelectionForPipeline(draftPipeline, persistedDraft.selection)
+      : null;
 
-    setPipelineDraft(snapshot.pipeline);
+    setPipelineDraft(draftPipeline);
     setSavedPipeline(clonePipelineConfig(snapshot.pipeline));
     setLayers(snapshot.layers);
-    setOverrideExtras(extractOverrideExtras(snapshot.rawOverride));
+    setOverrideExtras(
+      persistedDraft
+        ? { ...persistedDraft.overrideExtras }
+        : extractOverrideExtras(snapshot.rawOverride),
+    );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
     setAllRepoStages(snapshot.repoStages);
-    setStageDrafts(cloneStageDrafts(visibleStages));
+    setStageDrafts(draftStageDrafts);
     setSavedStageDrafts(cloneStageDrafts(visibleStages));
     setSelection((current) => {
+      if (persistedSelection) {
+        return persistedSelection;
+      }
       if (current?.kind === "state") {
-        return snapshot.pipeline.states.some((state) => state.id === current.stateId)
+        return draftPipeline.states.some((state) => state.id === current.stateId)
           ? current
-          : snapshot.pipeline.states[0]
-            ? { kind: "state", stateId: snapshot.pipeline.states[0].id }
+          : draftPipeline.states[0]
+            ? { kind: "state", stateId: draftPipeline.states[0].id }
             : { kind: "phase_gate" };
       }
       if (current?.kind === "transition") {
-        return snapshot.pipeline.transitions[current.index]
+        return draftPipeline.transitions[current.index]
           ? current
-          : snapshot.pipeline.states[0]
-            ? { kind: "state", stateId: snapshot.pipeline.states[0].id }
+          : draftPipeline.states[0]
+            ? { kind: "state", stateId: draftPipeline.states[0].id }
             : { kind: "phase_gate" };
       }
       if (current?.kind === "phase_gate") {
         return current;
       }
-      return snapshot.pipeline.states[0]
-        ? { kind: "state", stateId: snapshot.pipeline.states[0].id }
+      return draftPipeline.states[0]
+        ? { kind: "state", stateId: draftPipeline.states[0].id }
         : { kind: "phase_gate" };
     });
   }
@@ -276,7 +449,10 @@ export default function PipelineVisualEditor({
         if (cancelled) {
           return;
         }
-        applySnapshot(snapshot);
+        const persistedDraft = fsmDraftScopeKey
+          ? persistedFsmDraftStoreRef.current.entries[fsmDraftScopeKey] ?? null
+          : null;
+        applySnapshot(snapshot, persistedDraft);
       } catch (cause) {
         if (!cancelled) {
           setError(
@@ -295,11 +471,7 @@ export default function PipelineVisualEditor({
     return () => {
       cancelled = true;
     };
-  }, [level, reloadKey, repo, selectedAgentId]);
-
-  if (!repo) {
-    return null;
-  }
+  }, [fsmDraftScopeKey, level, reloadKey, repo, selectedAgentId]);
 
   const selectedAgentName = selectedAgentLabel(agents, locale, selectedAgentId);
   const graph = useMemo(
@@ -342,6 +514,68 @@ export default function PipelineVisualEditor({
     layers.agent ? "agent" : null,
   ].filter(Boolean) as string[];
   const preservedKeys = Object.keys(overrideExtras);
+
+  useEffect(() => {
+    if (!repo || !fsmDraftScopeKey) {
+      return;
+    }
+
+    if (!pipelineDraft || loading) {
+      return;
+    }
+
+    if (!pipelineChanged && !stagesChanged) {
+      setPersistedFsmDraftStore((currentStore) =>
+        removeDraftScope(normalizePersistedFsmDraftStore(currentStore), fsmDraftScopeKey),
+      );
+      return;
+    }
+
+    const nextEntry: PersistedFsmDraftEntry = {
+      repo,
+      level,
+      agentId: selectedAgentId ?? null,
+      updatedAtMs: Date.now(),
+      pipeline: clonePipelineConfig(pipelineDraft),
+      stageDrafts: cloneStageDrafts(stageDrafts),
+      selection,
+      overrideExtras: { ...overrideExtras },
+    };
+
+    setPersistedFsmDraftStore((currentStore) => {
+      const normalizedStore = normalizePersistedFsmDraftStore(currentStore);
+      const currentEntry = normalizedStore.entries[fsmDraftScopeKey];
+      const currentSignature = currentEntry ? JSON.stringify(currentEntry) : null;
+      const nextSignature = JSON.stringify(nextEntry);
+      if (currentSignature === nextSignature) {
+        return normalizedStore;
+      }
+      return {
+        version: 2,
+        entries: {
+          ...normalizedStore.entries,
+          [fsmDraftScopeKey]: nextEntry,
+        },
+      };
+    });
+  }, [
+    fsmDraftScopeKey,
+    level,
+    loading,
+    overrideExtras,
+    pipelineChanged,
+    pipelineDraft,
+    repo,
+    selectedAgentId,
+    selection,
+    setPersistedFsmDraftStore,
+    stageDrafts,
+    stagesChanged,
+  ]);
+
+  if (!repo) {
+    return null;
+  }
 
   function updateStage(index: number, patch: Partial<StageDraft>) {
     setStageDrafts((current) =>
