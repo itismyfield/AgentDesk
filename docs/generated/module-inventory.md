@@ -68,10 +68,10 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `db::turns` | `src/db/turns.rs` | 451 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 4026 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 4443 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1610 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 706 |  |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1762 | giant-file |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 719 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 608 |  |
 | `engine` | `src/engine/mod.rs` | 1646 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
@@ -225,7 +225,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 13 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1085 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3508 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 3776 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1346 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
