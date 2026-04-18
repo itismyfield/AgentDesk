@@ -338,7 +338,12 @@ fn create_dispatch_core_internal(
     );
 
     if let Err(e) = attach_result {
-        if matches!(dispatch_type, "review" | "review-decision")
+        // #743: include "create-pr" in the UNIQUE-race dedup recovery path.
+        // The commit 1 partial unique index idx_single_active_create_pr makes
+        // parallel create-pr inserts race the same way review/review-decision
+        // already does — the loser should reuse the winner's dispatch rather
+        // than surface a hard error.
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
             && e.to_string()
                 .contains("concurrent race prevented by DB constraint")
         {
@@ -657,7 +662,11 @@ pub(crate) fn apply_dispatch_attached_intents_on_conn(
             chain_depth
         ],
     ) {
-        if matches!(dispatch_type, "review" | "review-decision")
+        // #743: create-pr also has a partial unique index (kanban_card_id
+        // filtered to status IN (pending, dispatched)) so its UNIQUE
+        // violation needs the same soft-error path — the caller's dedup
+        // retry will reuse the winner's dispatch.
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
             && is_single_active_dispatch_violation(&e)
         {
             return Err(anyhow::anyhow!(
