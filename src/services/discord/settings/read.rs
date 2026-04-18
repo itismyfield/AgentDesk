@@ -8,6 +8,7 @@ struct LegacyBotSettingsEntry {
     allowed_channel_ids: Vec<u64>,
     require_mention_channel_ids: Vec<u64>,
     channel_model_overrides: std::collections::HashMap<String, String>,
+    channel_fast_modes: std::collections::HashMap<String, bool>,
     owner_user_id: Option<u64>,
     allowed_user_ids: Vec<u64>,
     allow_all_users: Option<bool>,
@@ -64,6 +65,19 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
                 .collect()
         })
         .unwrap_or_default();
+    let channel_fast_modes = entry
+        .get("channel_fast_modes")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(channel_id, enabled)| {
+                    enabled
+                        .as_bool()
+                        .map(|enabled| (channel_id.clone(), enabled))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let owner_user_id = entry.get("owner_user_id").and_then(json_u64);
     let allowed_user_ids = entry
         .get("allowed_user_ids")
@@ -91,6 +105,7 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
         allowed_channel_ids,
         require_mention_channel_ids,
         channel_model_overrides,
+        channel_fast_modes,
         owner_user_id,
         allowed_user_ids,
         allow_all_users,
@@ -237,6 +252,7 @@ pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
             "require_mention_channel_ids",
         ),
         channel_model_overrides: legacy.channel_model_overrides,
+        channel_fast_modes: legacy.channel_fast_modes,
         owner_user_id: fallback_legacy_option(
             configured.as_ref().and_then(|bot| bot.owner_id),
             legacy.owner_user_id,

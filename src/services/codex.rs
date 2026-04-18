@@ -79,6 +79,27 @@ fn build_tmux_launch_env_lines(
     env_lines
 }
 
+fn append_fast_mode_args(args: &mut Vec<String>, fast_mode_override: Option<bool>) {
+    let Some(enabled) = fast_mode_override else {
+        return;
+    };
+
+    args.push(if enabled {
+        "--enable".to_string()
+    } else {
+        "--disable".to_string()
+    });
+    args.push("fast_mode".to_string());
+}
+
+fn render_fast_mode_wrapper_arg(fast_mode_override: Option<bool>) -> String {
+    match fast_mode_override {
+        Some(true) => " \\\n  --fast-mode-state enabled".to_string(),
+        Some(false) => " \\\n  --fast-mode-state disabled".to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
@@ -111,7 +132,7 @@ pub fn execute_command_simple_cancellable(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt, None, false);
+    let args = base_exec_args(None, prompt, None, false, None);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut command = Command::new(&codex_bin);
@@ -196,6 +217,7 @@ pub fn execute_command_streaming(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model: Option<&str>,
+    fast_mode_enabled: Option<bool>,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
@@ -217,6 +239,7 @@ pub fn execute_command_streaming(
                     profile,
                     &prompt,
                     model,
+                    fast_mode_enabled,
                     working_dir,
                     sender,
                     cancel_token,
@@ -231,6 +254,7 @@ pub fn execute_command_streaming(
             session_id,
             &prompt,
             model,
+            fast_mode_enabled,
             working_dir,
             sender,
             cancel_token,
@@ -243,6 +267,7 @@ pub fn execute_command_streaming(
             return execute_streaming_local_tmux(
                 &prompt,
                 model,
+                fast_mode_enabled,
                 session_id,
                 working_dir,
                 sender,
@@ -257,6 +282,7 @@ pub fn execute_command_streaming(
         return execute_streaming_local_process_codex(
             &prompt,
             model,
+            fast_mode_enabled,
             session_id,
             working_dir,
             sender,
@@ -270,6 +296,7 @@ pub fn execute_command_streaming(
         &prompt,
         session_id,
         model,
+        fast_mode_enabled,
         working_dir,
         sender,
         cancel_token,
@@ -292,6 +319,7 @@ fn execute_streaming_direct(
     prompt: &str,
     session_id: Option<&str>,
     model: Option<&str>,
+    fast_mode_enabled: Option<bool>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -305,7 +333,7 @@ fn execute_streaming_direct(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let mut args = base_exec_args(session_id, prompt, model, readonly_mode);
+    let mut args = base_exec_args(session_id, prompt, model, readonly_mode, fast_mode_enabled);
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
         // Insert -c config before the "exec" subcommand.
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
@@ -411,6 +439,7 @@ fn execute_streaming_remote_direct(
     _session_id: Option<&str>,
     _prompt: &str,
     _model: Option<&str>,
+    _fast_mode_enabled: Option<bool>,
     _working_dir: &str,
     _sender: Sender<StreamMessage>,
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -423,6 +452,7 @@ fn execute_streaming_remote_tmux(
     _profile: &RemoteProfile,
     _prompt: &str,
     _model: Option<&str>,
+    _fast_mode_enabled: Option<bool>,
     _working_dir: &str,
     _sender: Sender<StreamMessage>,
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -437,6 +467,7 @@ fn execute_streaming_remote_tmux(
 fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
+    fast_mode_enabled: Option<bool>,
     session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
@@ -536,7 +567,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{model_arg}{effort_arg}{resume_arg}{compact_arg}\n",
+        --codex-bin {codex_bin}{model_arg}{effort_arg}{resume_arg}{compact_arg}{fast_mode_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -563,6 +594,7 @@ fn execute_streaming_local_tmux(
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
             .unwrap_or_default(),
+        fast_mode_arg = render_fast_mode_wrapper_arg(fast_mode_enabled),
     );
 
     std::fs::write(&script_path, &script_content)
@@ -758,6 +790,7 @@ fn send_followup_to_tmux(
 fn execute_streaming_local_process_codex(
     prompt: &str,
     model: Option<&str>,
+    fast_mode_enabled: Option<bool>,
     session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
@@ -862,6 +895,14 @@ fn execute_streaming_local_process_codex(
                 args.push("--compact-token-limit".to_string());
                 args.push(limit.to_string());
             }
+            if let Some(enabled) = fast_mode_enabled {
+                args.push("--fast-mode-state".to_string());
+                args.push(if enabled {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                });
+            }
             args
         },
         env_vars: resolution
@@ -914,6 +955,7 @@ fn base_exec_args(
     prompt: &str,
     model: Option<&str>,
     readonly_mode: bool,
+    fast_mode_enabled: Option<bool>,
 ) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
@@ -922,6 +964,7 @@ fn base_exec_args(
         args.push("-m".to_string());
         args.push(model.to_string());
     }
+    append_fast_mode_args(&mut args, fast_mode_enabled);
     args.push("exec".to_string());
     if let Some(existing_thread_id) = session_id {
         args.push("resume".to_string());
@@ -1445,12 +1488,20 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_model_before_exec() {
-        let args = base_exec_args(None, "- starts like option", Some("gpt-5-codex"), false);
+        let args = base_exec_args(
+            None,
+            "- starts like option",
+            Some("gpt-5-codex"),
+            false,
+            Some(true),
+        );
         assert!(args.starts_with(&[
             "-c".to_string(),
             r#"model_reasoning_effort="high""#.to_string(),
             "-m".to_string(),
-            "gpt-5-codex".to_string()
+            "gpt-5-codex".to_string(),
+            "--enable".to_string(),
+            "fast_mode".to_string(),
         ]));
         assert!(args.iter().any(|arg| arg == "exec"));
         let separator_index = args
@@ -1471,10 +1522,12 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_resume_before_flags() {
-        let args = base_exec_args(Some("thread-123"), "hello", None, false);
+        let args = base_exec_args(Some("thread-123"), "hello", None, false, Some(false));
         assert_eq!(
             args,
             vec![
+                "--disable".to_string(),
+                "fast_mode".to_string(),
                 "exec".to_string(),
                 "resume".to_string(),
                 "thread-123".to_string(),
@@ -1489,16 +1542,29 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_uses_readonly_sandbox_when_requested() {
-        let args = base_exec_args(None, "readonly", None, true);
+        let args = base_exec_args(None, "readonly", None, true, Some(false));
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--sandbox", "read-only"])
         );
+        assert!(args.starts_with(&["--disable".to_string(), "fast_mode".to_string()]));
         assert!(
             !args
                 .iter()
                 .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
         );
+    }
+
+    #[test]
+    fn test_base_exec_args_leaves_fast_mode_unset_when_not_overridden() {
+        let args = base_exec_args(None, "hello", None, false, None);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--enable" || arg == "--disable")
+        );
+        assert!(!args.iter().any(|arg| arg == "fast_mode"));
+        assert!(args.starts_with(&["exec".to_string()]));
     }
 
     // ========== FollowupResult tests ==========

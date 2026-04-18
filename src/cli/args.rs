@@ -208,6 +208,9 @@ pub(crate) enum Commands {
         /// Optional resume session id for the first turn
         #[arg(long)]
         resume_session_id: Option<String>,
+        /// Override Codex native fast mode for every turn in this wrapper session
+        #[arg(long, value_enum)]
+        fast_mode_state: Option<FastModeStateArg>,
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
@@ -517,6 +520,13 @@ pub(crate) enum ReportProvider {
 pub(crate) enum InputModeArg {
     Fifo,
     Pipe,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+#[cfg(unix)]
+pub(crate) enum FastModeStateArg {
+    Enabled,
+    Disabled,
 }
 
 pub(crate) enum ParseOutcome {
