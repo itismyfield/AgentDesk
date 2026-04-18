@@ -62,28 +62,19 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
 /// Discord side-effect reads the latest dispatch status from `task_dispatches`.
 /// Once an older row is already `done` or `failed`, a later transition should
 /// enqueue a fresh row.
+///
+/// #750: announce bot no longer writes lifecycle emoji reactions — the
+/// command bot's turn-lifecycle emojis are the single source of truth. The
+/// enqueue is preserved as a no-op sink so schema/test harness assumptions
+/// about outbox row counts continue to hold, but no new status_reaction rows
+/// are created. Existing rows in the wild are drained by the outbox worker's
+/// no-op handler.
+#[allow(dead_code)]
 pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
-    conn: &rusqlite::Connection,
-    dispatch_id: &str,
+    _conn: &rusqlite::Connection,
+    _dispatch_id: &str,
 ) -> rusqlite::Result<bool> {
-    let exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM dispatch_outbox
-         WHERE dispatch_id = ?1
-           AND action = 'status_reaction'
-           AND status IN ('pending', 'processing')",
-        [dispatch_id],
-        |row| row.get(0),
-    )?;
-    if exists {
-        return Ok(false);
-    }
-
-    conn.execute(
-        "INSERT INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'status_reaction')",
-        [dispatch_id],
-    )?;
-    Ok(true)
+    Ok(false)
 }
 
 pub(crate) fn record_dispatch_status_event_on_conn(
@@ -208,12 +199,10 @@ pub(crate) fn set_dispatch_status_on_conn(
                 result,
             )?;
 
-            if matches!(
-                to_status,
-                "dispatched" | "completed" | "failed" | "cancelled"
-            ) {
-                ensure_dispatch_status_reaction_outbox_on_conn(conn, dispatch_id)?;
-            }
+            // #750: status_reaction outbox enqueue removed — announce bot no
+            // longer writes dispatch-lifecycle emoji reactions. The outbox
+            // handler itself is a no-op for pre-existing rows (see
+            // src/server/routes/dispatches/outbox.rs).
         }
         Ok(changed)
     })();

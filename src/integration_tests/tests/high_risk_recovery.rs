@@ -384,9 +384,6 @@ mod outbox_boundary {
         Followup {
             dispatch_id: String,
         },
-        StatusReaction {
-            dispatch_id: String,
-        },
     }
 
     impl MockNotifier {
@@ -435,18 +432,6 @@ mod outbox_boundary {
                 .lock()
                 .unwrap()
                 .push(MockCall::Followup { dispatch_id });
-            Ok(())
-        }
-
-        async fn sync_status_reaction(
-            &self,
-            _db: crate::db::Db,
-            dispatch_id: String,
-        ) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(MockCall::StatusReaction { dispatch_id });
             Ok(())
         }
     }
@@ -545,14 +530,15 @@ mod outbox_boundary {
             }]
         );
 
-        // Verify notify row is done and a follow-up status sync row is queued.
+        // #750: announce bot reaction writer retired — notify success no
+        // longer chain-enqueues a follow-up status_reaction outbox row.
         assert_eq!(
             outbox_status_for_action(&db, "d-160-1", "notify"),
             vec!["done"]
         );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160-1", "status_reaction"),
-            vec!["pending"]
+        assert!(
+            outbox_status_for_action(&db, "d-160-1", "status_reaction").is_empty(),
+            "#750: notify success must NOT chain-enqueue a status_reaction row"
         );
         assert_eq!(
             get_dispatch_status(&db, "d-160-1"),
@@ -560,31 +546,17 @@ mod outbox_boundary {
             "successful notify must transition pending dispatch to dispatched"
         );
 
-        // Second batch drains the queued status reaction.
+        // Second batch: nothing pending, no additional notifier calls.
         let processed2 = process_outbox_batch(&db, &mock).await;
         assert_eq!(
-            processed2, 1,
-            "status reaction should be processed on next drain"
+            processed2, 0,
+            "#750: no pending entries after single notify drain (no status_reaction chained)"
         );
         assert_eq!(
             mock.notify_count(),
             1,
             "No additional notify calls after dispatch"
         );
-        assert!(
-            mock.call_log().contains(&MockCall::StatusReaction {
-                dispatch_id: "d-160-1".into(),
-            }),
-            "status reaction must be queued after notify success"
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160-1", "status_reaction"),
-            vec!["done"]
-        );
-
-        // Third batch should truly be empty after notify + status_reaction drain.
-        let processed3 = process_outbox_batch(&db, &mock).await;
-        assert_eq!(processed3, 0, "No pending entries after full drain");
     }
 
     /// Scenario 160-2: Recovery API failure → DB fallback completes dispatch
@@ -696,31 +668,15 @@ mod outbox_boundary {
             "Order reversal detected — outbox must process in id ASC (FIFO)"
         );
 
-        // Notify rows are done and each dispatch gets a queued status sync.
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-a", "notify"),
-            vec!["done"]
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-a", "status_reaction"),
-            vec!["pending"]
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-b", "notify"),
-            vec!["done"]
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-b", "status_reaction"),
-            vec!["pending"]
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-c", "notify"),
-            vec!["done"]
-        );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160o-c", "status_reaction"),
-            vec!["pending"]
-        );
+        // #750: notify rows are done; no status_reaction chain row is
+        // enqueued since the announce-bot reaction writer is retired.
+        for id in ["d-160o-a", "d-160o-b", "d-160o-c"] {
+            assert_eq!(outbox_status_for_action(&db, id, "notify"), vec!["done"]);
+            assert!(
+                outbox_status_for_action(&db, id, "status_reaction").is_empty(),
+                "#750: notify success must not chain a status_reaction row"
+            );
+        }
         assert_eq!(get_dispatch_status(&db, "d-160o-a"), "dispatched");
         assert_eq!(get_dispatch_status(&db, "d-160o-b"), "dispatched");
         assert_eq!(get_dispatch_status(&db, "d-160o-c"), "dispatched");
@@ -771,14 +727,14 @@ mod outbox_boundary {
             "deduplicated notify rows must call the notifier only once"
         );
 
-        // The retained notify row is done; dispatch transition queues a single status sync.
+        // #750: the retained notify row is done; no status_reaction chain.
         assert_eq!(
             outbox_status_for_action(&db, "d-160d", "notify"),
             vec!["done"]
         );
-        assert_eq!(
-            outbox_status_for_action(&db, "d-160d", "status_reaction"),
-            vec!["pending"]
+        assert!(
+            outbox_status_for_action(&db, "d-160d", "status_reaction").is_empty(),
+            "#750: no status_reaction row chained after notify"
         );
     }
 

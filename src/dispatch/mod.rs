@@ -2077,8 +2077,14 @@ mod tests {
         );
     }
 
+    /// #750: announce bot no longer writes dispatch-lifecycle emoji
+    /// reactions. set_dispatch_status_on_conn previously enqueued a
+    /// status_reaction outbox row on every pending→dispatched / terminal
+    /// transition; that enqueue was removed because the only consumer
+    /// (announce-bot reaction writer) is disabled. Verify the transitions
+    /// still succeed but NO status_reaction row is created.
     #[test]
-    fn dispatch_status_transitions_enqueue_status_reaction_outbox_entries() {
+    fn dispatch_status_transitions_do_not_enqueue_status_reaction_outbox_entries() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_card(&db, "card-reaction-outbox", "ready");
@@ -2110,15 +2116,7 @@ mod tests {
         }
 
         let conn = db.separate_conn().unwrap();
-        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 1);
-
-        conn.execute(
-            "UPDATE dispatch_outbox
-             SET status = 'done', processed_at = datetime('now')
-             WHERE dispatch_id = ?1 AND action = 'status_reaction'",
-            [&dispatch_id],
-        )
-        .unwrap();
+        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 0);
 
         set_dispatch_status_on_conn(
             &conn,
@@ -2131,23 +2129,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(count_status_reaction_outbox(&conn, &dispatch_id), 2);
-
-        set_dispatch_status_on_conn(
-            &conn,
-            &dispatch_id,
-            "completed",
-            Some(&json!({"completion_source":"test_complete"})),
-            "test_complete_duplicate",
-            Some(&["completed"]),
-            true,
-        )
-        .unwrap();
-
         assert_eq!(
             count_status_reaction_outbox(&conn, &dispatch_id),
-            2,
-            "duplicate terminal transition must not enqueue extra status sync work"
+            0,
+            "#750: terminal transitions must not enqueue status_reaction rows"
         );
     }
 
