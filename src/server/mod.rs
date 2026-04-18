@@ -13,7 +13,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::{PgPool, Postgres, Row};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -423,6 +423,9 @@ pub async fn run(
 
     let broadcast_tx = ws::new_broadcast();
     let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
+    let dashboard_service = ServeDir::new(&dashboard_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(dashboard_dir.join("index.html")));
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
@@ -438,7 +441,7 @@ pub async fn run(
                 pg_pool,
             ),
         )
-        .fallback_service(ServeDir::new(&dashboard_dir).append_index_html_on_directories(true));
+        .fallback_service(dashboard_service);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
