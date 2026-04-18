@@ -338,7 +338,12 @@ fn create_dispatch_core_internal(
     );
 
     if let Err(e) = attach_result {
-        if matches!(dispatch_type, "review" | "review-decision")
+        // #743: include "create-pr" in the UNIQUE-race dedup recovery path.
+        // The commit 1 partial unique index idx_single_active_create_pr makes
+        // parallel create-pr inserts race the same way review/review-decision
+        // already does — the loser should reuse the winner's dispatch rather
+        // than surface a hard error.
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
             && e.to_string()
                 .contains("concurrent race prevented by DB constraint")
         {
@@ -525,7 +530,61 @@ pub fn create_dispatch_with_options(
     Ok(dispatch)
 }
 
+/// Transaction-owning wrapper. Opens BEGIN/COMMIT around the on-conn variant.
+///
+/// Use this when the caller does not have an outer transaction. Callers that
+/// need to compose dispatch creation into their own transaction (e.g.
+/// `handoffCreatePr` in #743) should call
+/// [`apply_dispatch_attached_intents_on_conn`] directly instead.
 fn apply_dispatch_attached_intents(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_id: &str,
+    dispatch_type: &str,
+    is_review_type: bool,
+    old_status: &str,
+    effective: &crate::pipeline::PipelineConfig,
+    title: &str,
+    context_str: &str,
+    parent_dispatch_id: Option<&str>,
+    chain_depth: i64,
+    options: DispatchCreateOptions,
+) -> Result<()> {
+    conn.execute_batch("BEGIN")?;
+    let result = apply_dispatch_attached_intents_on_conn(
+        conn,
+        card_id,
+        to_agent_id,
+        dispatch_id,
+        dispatch_type,
+        is_review_type,
+        old_status,
+        effective,
+        title,
+        context_str,
+        parent_dispatch_id,
+        chain_depth,
+        options,
+    );
+    match &result {
+        Ok(_) => {
+            conn.execute_batch("COMMIT")?;
+        }
+        Err(_) => {
+            conn.execute_batch("ROLLBACK").ok();
+        }
+    }
+    result
+}
+
+/// Connection-local variant: does NOT manage its own transaction. Caller must
+/// have an open transaction on `conn` and commit/rollback after this returns.
+///
+/// This variant exists so bridge ops like `handoffCreatePr` (#743) can compose
+/// dispatch creation with surrounding pr_tracking/kanban_cards updates in a
+/// single atomic transaction.
+pub(crate) fn apply_dispatch_attached_intents_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
@@ -584,57 +643,53 @@ fn apply_dispatch_attached_intents(
         return Err(anyhow::anyhow!("{}", reason));
     }
 
-    conn.execute_batch("BEGIN")?;
-    let exec_result = (|| -> anyhow::Result<()> {
-        if let Err(e) = conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
-                parent_dispatch_id, chain_depth, created_at, updated_at
-            )
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-            rusqlite::params![
-                dispatch_id,
-                card_id,
-                to_agent_id,
-                dispatch_type,
-                title,
-                context_str,
-                parent_dispatch_id,
-                chain_depth
-            ],
-        ) {
-            if matches!(dispatch_type, "review" | "review-decision")
-                && is_single_active_dispatch_violation(&e)
-            {
-                return Err(anyhow::anyhow!(
-                    "{} already exists for card {} (concurrent race prevented by DB constraint)",
-                    dispatch_type,
-                    card_id
-                ));
-            }
-            return Err(e.into());
-        }
-        record_dispatch_status_event_on_conn(
-            conn,
+    // Caller owns the transaction. See the wrapper `apply_dispatch_attached_intents`
+    // for the BEGIN/COMMIT-owning variant.
+    if let Err(e) = conn.execute(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+            parent_dispatch_id, chain_depth, created_at, updated_at
+        )
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
+        rusqlite::params![
             dispatch_id,
-            None,
-            "pending",
-            "create_dispatch",
-            None,
-        )?;
-        if !options.skip_outbox {
-            ensure_dispatch_notify_outbox_on_conn(conn, dispatch_id, to_agent_id, card_id, title)?;
+            card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context_str,
+            parent_dispatch_id,
+            chain_depth
+        ],
+    ) {
+        // #743: create-pr also has a partial unique index (kanban_card_id
+        // filtered to status IN (pending, dispatched)) so its UNIQUE
+        // violation needs the same soft-error path — the caller's dedup
+        // retry will reuse the winner's dispatch.
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
+            && is_single_active_dispatch_violation(&e)
+        {
+            return Err(anyhow::anyhow!(
+                "{} already exists for card {} (concurrent race prevented by DB constraint)",
+                dispatch_type,
+                card_id
+            ));
         }
-        for intent in &decision.intents {
-            transition::execute_intent_on_conn(conn, intent)?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = exec_result {
-        conn.execute_batch("ROLLBACK").ok();
-        return Err(e);
+        return Err(e.into());
     }
-    conn.execute_batch("COMMIT")?;
-
+    record_dispatch_status_event_on_conn(
+        conn,
+        dispatch_id,
+        None,
+        "pending",
+        "create_dispatch",
+        None,
+    )?;
+    if !options.skip_outbox {
+        ensure_dispatch_notify_outbox_on_conn(conn, dispatch_id, to_agent_id, card_id, title)?;
+    }
+    for intent in &decision.intents {
+        transition::execute_intent_on_conn(conn, intent)?;
+    }
     Ok(())
 }

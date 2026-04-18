@@ -26,7 +26,8 @@
 
   function loadPrTrackingCanonical(cardId) {
     var rows = agentdesk.db.query(
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
+      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
+      "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking WHERE card_id = ?",
       [cardId]
     );
@@ -123,7 +124,8 @@
 
   function findByRepoPr(repoId, prNumber, options) {
     var rows = agentdesk.db.query(
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
+      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
+      "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
       [repoId, prNumber]
     );
@@ -132,7 +134,8 @@
     var fallbackState = options && options.fallback_state ? options.fallback_state : null;
     importLegacyPrTrackingOnce(fallbackState);
     rows = agentdesk.db.query(
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
+      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
+      "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
       [repoId, prNumber]
     );
@@ -144,7 +147,8 @@
     importLegacyPrTrackingOnce(fallbackState);
 
     var query =
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
+      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
+      "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking";
     if (whereClause) query += " WHERE " + whereClause;
     return agentdesk.db.query(query, params || []);

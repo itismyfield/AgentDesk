@@ -53,19 +53,69 @@ var mergeAutomation = {
       "SELECT blocked_reason FROM kanban_cards WHERE id = ?",
       [cardId]
     );
+    var tracking = loadTrackedPrForCard(cardId);
+
+    // #743 (C6 degraded path): a pr:create_failed card with NO pr_tracking
+    // row has nowhere for processTrackedMergeQueue to pick up the retry —
+    // the row got wiped (schema reset, manual cleanup) or was never seeded
+    // (pre-handoff crash). Escalate to manual intervention rather than
+    // silently stranding the card. The prefix defer below covers the
+    // normal case and already-escalated marker.
     if (cardRow.length > 0 && cardRow[0].blocked_reason
         && cardRow[0].blocked_reason.indexOf("pr:create_failed") === 0) {
+      if (!tracking && cardRow[0].blocked_reason.indexOf("pr:create_failed_escalated:") !== 0) {
+        // escalateToManualIntervention sets blocked_reason to its reason arg,
+        // so pass the escalated marker directly — no separate UPDATE needed.
+        try {
+          escalateToManualIntervention(cardId, "pr:create_failed_escalated:no_tracking");
+        } catch (e) {
+          agentdesk.log.warn("[merge] escalate failed for card " + cardId + ": " + e);
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed_escalated:no_tracking', " +
+            "updated_at = datetime('now') WHERE id = ?",
+            [cardId]
+          );
+        }
+        return;
+      }
       agentdesk.log.info(
         "[merge] Card " + cardId + " terminal with pr:create_failed marker — deferring to processTrackedMergeQueue retry (skip direct-merge)"
       );
       return;
     }
 
-    var tracking = loadTrackedPrForCard(cardId);
-
-    // #701: Same defer if pr_tracking is still in the create-pr state
-    // (the retry loop owns it). Would otherwise trigger direct-merge.
+    // #701/#743: Defer cards still owned by the create-pr retry loop. Before
+    // deferring, detect stale pr_tracking (generation mismatch or head_sha
+    // divergence) and reseed so the retry loop runs against the current
+    // candidate rather than a superseded one.
     if (tracking && tracking.state === "create-pr") {
+      var activeGen = loadActiveCreatePrGeneration(cardId);
+      if (tracking.dispatch_generation && activeGen
+          && tracking.dispatch_generation !== activeGen) {
+        agentdesk.log.info(
+          "[merge] Card " + cardId + " pr_tracking generation=" + tracking.dispatch_generation +
+          " != active dispatch generation=" + activeGen + " — reseeding"
+        );
+        try {
+          agentdesk.reviewAutomation.reseedPrTracking(cardId);
+        } catch (e) {
+          agentdesk.log.warn("[merge] reseedPrTracking failed for card " + cardId + ": " + e);
+        }
+        return;
+      }
+      var latestHead = loadLatestWorkHeadSha(cardId);
+      if (tracking.head_sha && latestHead && tracking.head_sha !== latestHead) {
+        agentdesk.log.info(
+          "[merge] Card " + cardId + " pr_tracking head_sha=" + tracking.head_sha +
+          " != latest work head_sha=" + latestHead + " — reseeding"
+        );
+        try {
+          agentdesk.reviewAutomation.reseedPrTracking(cardId);
+        } catch (e) {
+          agentdesk.log.warn("[merge] reseedPrTracking failed for card " + cardId + ": " + e);
+        }
+        return;
+      }
       agentdesk.log.info(
         "[merge] Card " + cardId + " terminal with pr_tracking state='create-pr' — deferring to processTrackedMergeQueue retry (skip direct-merge)"
       );
@@ -193,6 +243,31 @@ function loadCardContext(cardId) {
 
 function loadTrackedPrForCard(cardId) {
   return prTracking.load(cardId);
+}
+
+// #743: Return the dispatch_generation stamp on the currently-active
+// create-pr dispatch (pending or dispatched), or null when none exists.
+// Used by onCardTerminal to detect stale pr_tracking rows.
+function loadActiveCreatePrGeneration(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT json_extract(context, '$.dispatch_generation') AS gen " +
+    "FROM task_dispatches " +
+    "WHERE kanban_card_id = ? AND dispatch_type = 'create-pr' " +
+    "AND status IN ('pending', 'dispatched') " +
+    "ORDER BY rowid DESC LIMIT 1",
+    [cardId]
+  );
+  if (rows.length === 0) return null;
+  var gen = rows[0].gen;
+  return gen ? String(gen) : null;
+}
+
+// #743: Return the head_sha of the latest completed implementation/rework
+// dispatch, or null. Used to detect head_sha divergence between
+// pr_tracking and the candidate commit.
+function loadLatestWorkHeadSha(cardId) {
+  var target = loadLatestCompletedWorkTarget(cardId);
+  return target && target.head_sha ? String(target.head_sha) : null;
 }
 
 function loadTrackedPrForRepoPr(repoId, prNumber) {

@@ -248,7 +248,7 @@ var reviewAutomation = {
   // ── Dispatch Completed — review/decision verdict ──────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
-      "SELECT id, kanban_card_id, dispatch_type, result FROM task_dispatches WHERE id = ?",
+      "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches WHERE id = ?",
       [payload.dispatch_id]
     );
     if (dispatches.length === 0) return;
@@ -256,11 +256,42 @@ var reviewAutomation = {
 
     // #198/#211: create-pr dispatch completed — canonicalize PR tracking, then wait for CI
     if (dispatch.dispatch_type === "create-pr") {
+      // #743: Stale guard. Every create-pr dispatch carries a
+      // dispatch_generation stamp in its context. Compare with the current
+      // generation on pr_tracking. Mismatch = this completion belongs to a
+      // prior lifecycle (card was reopened, reseeded, etc.) — noop.
+      var stampCtx = parseJsonObject(dispatch.context);
+      var stampGen = stampCtx.dispatch_generation;
+      if (!stampGen) {
+        // #743: Missing stamp means this dispatch was created before the
+        // generation-stamp contract (pre-v8 rollout). The zero-inflight gate
+        // in deploy scripts should make this impossible, but if we observe
+        // one, reseed the tracking row so the retry loop can start fresh.
+        agentdesk.log.warn(
+          "[review] create-pr completion for card " + dispatch.kanban_card_id +
+          " has no dispatch_generation stamp — reseeding (legacy recovery)"
+        );
+        try {
+          agentdesk.reviewAutomation.reseedPrTracking(dispatch.kanban_card_id);
+        } catch (e) {
+          agentdesk.log.error("[review] reseedPrTracking failed: " + e);
+        }
+        return;
+      }
       var cardMeta = agentdesk.db.query(
         "SELECT repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
         [dispatch.kanban_card_id]
       );
       var tracking = loadPrTracking(dispatch.kanban_card_id);
+      if (!tracking || tracking.dispatch_generation !== stampGen) {
+        agentdesk.log.info(
+          "[review] stale create-pr completion for card " + dispatch.kanban_card_id +
+          " (stamp=" + stampGen +
+          ", current=" + (tracking ? tracking.dispatch_generation : "<no tracking>") +
+          ") — noop"
+        );
+        return;
+      }
       var latestWork = loadLatestCompletedWorkTarget(dispatch.kanban_card_id);
       var repoId = (tracking && tracking.repo_id)
         || (cardMeta.length > 0 ? (cardMeta[0].repo_id || extractRepoFromIssueUrl(cardMeta[0].github_issue_url)) : null);
@@ -295,7 +326,7 @@ var reviewAutomation = {
         );
         agentdesk.log.warn("[review] Create-PR completed but canonical tracking is incomplete for card " + dispatch.kanban_card_id);
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
-          markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking");
+          markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
         } else {
           agentdesk.log.info(
             "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
@@ -322,7 +353,7 @@ var reviewAutomation = {
         );
         agentdesk.log.warn("[review] Create-PR completed but no open PR was found for card " + dispatch.kanban_card_id + " branch " + branch);
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
-          markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found");
+          markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
         } else {
           agentdesk.log.info(
             "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
@@ -779,45 +810,31 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
     return { status: "error", reason: "missing_branch" };
   }
 
-  upsertPrTracking(
-    cardId,
-    repoId,
-    latestWorkTarget.worktree_path,
-    latestWorkTarget.branch,
-    null,
-    latestWorkTarget.head_sha,
-    "create-pr",
-    null
-  );
-
   var issueNum = prCardInfo[0].github_issue_number || "?";
   try {
-    agentdesk.dispatch.create(
-      cardId,
-      agentId,
-      "create-pr",
-      "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
-      {
-        sidecar_dispatch: true,
-        worktree_path: latestWorkTarget.worktree_path,
-        worktree_branch: latestWorkTarget.branch,
-        branch: latestWorkTarget.branch
-      }
+    // #743: Atomic handoff — seeds pr_tracking (with fresh dispatch_generation
+    // stamp), inserts stamped dispatch, and sets blocked_reason='pr:creating'
+    // in a single transaction. Idempotent-reuses an existing active dispatch
+    // per the C5 dedupe contract.
+    var handoff = agentdesk.reviewAutomation.handoffCreatePr(cardId, {
+      repo_id: repoId,
+      worktree_path: latestWorkTarget.worktree_path,
+      branch: latestWorkTarget.branch,
+      head_sha: latestWorkTarget.head_sha,
+      agent_id: agentId,
+      title: "[PR 생성] #" + issueNum + " " + prCardInfo[0].title
+    });
+    agentdesk.log.info(
+      "[review] Create-PR handoff for card " + cardId +
+      " gen=" + handoff.generation +
+      (handoff.reused ? " (reused existing dispatch)" : "")
     );
-    agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
-    return { status: "dispatched" };
+    return { status: "dispatched", generation: handoff.generation, reused: !!handoff.reused };
   } catch (e) {
-    upsertPrTracking(
-      cardId,
-      repoId,
-      latestWorkTarget.worktree_path,
-      latestWorkTarget.branch,
-      null,
-      latestWorkTarget.head_sha,
-      "create-pr",
-      String(e)
-    );
-    agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — card marked pr:create_failed");
+    // handoff threw before any stamp was committed — the JS catch path
+    // calls markPrCreateFailed(null stampGen) which seeds a retry row via
+    // recordPrCreateFailure's INSERT-if-missing branch.
+    agentdesk.log.warn("[review] handoffCreatePr failed for card " + cardId + ": " + e);
     return { status: "error", reason: "dispatch_failed: " + String(e) };
   }
 }
@@ -877,16 +894,74 @@ function isCardEligibleForPrFailureTerminalize(cardId) {
 // create-pr completion path elsewhere in this file which already documents
 // this same requirement — writing blocked_reason before setStatus would
 // see the marker get wiped immediately).
-function markPrCreateFailed(cardId, reason) {
-  var blockedReason = "pr:create_failed:" + (reason || "unknown");
+// #743: JS orchestration (C4 literal). Order is:
+//   1. recordPrCreateFailure — stale-guards via stampGen (or skips guard on
+//      null stamp); seeds retry row if the handoff tx rolled back; increments
+//      retry_count and flips state='escalated' at >= 3.
+//   2. setStatus(terminal, force=true) — terminal transitions clear
+//      blocked_reason, which is why step 3 must follow.
+//   3. setBlockedReason — different marker for escalated vs normal failure.
+//   4. escalateToManualIntervention on escalate (C7).
+//
+// stampGen can be null/undefined for pre-handoff failures (e.g. the handoff
+// bridge op threw); recordPrCreateFailure handles that by skipping the stale
+// guard and INSERTing a retry row when missing.
+function markPrCreateFailed(cardId, reason, stampGen) {
   var cfg = agentdesk.pipeline.resolveForCard(cardId);
   var terminalState = agentdesk.pipeline.terminalState(cfg);
+  var errorMsg = reason || "unknown";
+
+  // 1. Record failure — atomic retry_count++ and escalate decision.
+  var result = null;
+  try {
+    result = agentdesk.reviewAutomation.recordPrCreateFailure(cardId, errorMsg, stampGen || "");
+  } catch (e) {
+    agentdesk.log.error("[review] recordPrCreateFailure threw for card " + cardId + ": " + e);
+  }
+
+  // Stale generation — the card has moved on, do not terminalize.
+  if (result && result.noop) {
+    agentdesk.log.info(
+      "[review] markPrCreateFailed noop for card " + cardId +
+      " — stale generation (stamp=" + (stampGen || "") + ")"
+    );
+    return;
+  }
+
+  // 2. Terminalize.
   agentdesk.kanban.setStatus(cardId, terminalState, true);
-  agentdesk.db.execute(
-    "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
-    [blockedReason, cardId]
-  );
-  agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " and moved to " + terminalState + " so merge-automation retry can pick it up");
+
+  // 3. Stamp blocked_reason AFTER setStatus (setStatus clears blocked_reason).
+  if (result && result.escalated) {
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed_escalated:max_retries', " +
+      "updated_at = datetime('now') WHERE id = ?",
+      [cardId]
+    );
+    agentdesk.log.warn(
+      "[review] Card " + cardId + " escalated after " + result.retry_count +
+      " create-pr failures (last error: " + errorMsg + ")"
+    );
+    // 4. Human notification via the existing JS escalation surface.
+    try {
+      escalateToManualIntervention(
+        cardId,
+        "create-pr escalated after " + result.retry_count + " failures: " + errorMsg
+      );
+    } catch (e) {
+      agentdesk.log.warn("[review] escalateToManualIntervention failed: " + e);
+    }
+  } else {
+    var blockedReason = "pr:create_failed:" + errorMsg;
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+      [blockedReason, cardId]
+    );
+    agentdesk.log.warn(
+      "[review] Card " + cardId + " marked " + blockedReason + " and moved to " + terminalState +
+      " (retry_count=" + (result ? result.retry_count : "?") + ")"
+    );
+  }
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
@@ -1371,11 +1446,13 @@ agentdesk.registerPolicy(reviewAutomation);
 // Returns the structured { status, reason? } object from
 // attemptCreatePrDispatchForReviewPass. Callers MUST distinguish
 // "dispatched" / "noop" / "error" — see the helper's docstring.
-agentdesk.reviewAutomation = {
-  attemptCreatePr: function(cardId) {
-    return attemptCreatePrDispatchForReviewPass(cardId, false);
-  },
-  markPrCreateFailed: function(cardId, reason) {
-    markPrCreateFailed(cardId, reason);
-  }
+// #743: Rust ops (handoffCreatePr, recordPrCreateFailure, reseedPrTracking)
+// are registered onto agentdesk.reviewAutomation before policies load. Merge
+// the JS helpers onto the same object rather than overwriting it.
+agentdesk.reviewAutomation = agentdesk.reviewAutomation || {};
+agentdesk.reviewAutomation.attemptCreatePr = function(cardId) {
+  return attemptCreatePrDispatchForReviewPass(cardId, false);
+};
+agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason) {
+  markPrCreateFailed(cardId, reason);
 };
