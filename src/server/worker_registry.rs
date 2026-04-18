@@ -363,7 +363,15 @@ impl SupervisedWorkerRegistry {
                 Ok(None)
             }
             ServerWorkerId::PolicyTick => {
-                let tick_engine = self.engine.clone();
+                // #747: build a dedicated tick engine so a stuck tick hook
+                // cannot back up the main engine's actor queue and starve
+                // HTTP/Discord hook paths. The two engines share the same
+                // policies directory (each with its own hot-reload watcher)
+                // and the same SQLite DB.
+                let tick_engine = PolicyEngine::new_for_tick(&self.config, self.db.clone())
+                    .map_err(|e| {
+                        anyhow!("failed to initialize dedicated policy tick engine: {e}")
+                    })?;
                 let tick_db = self.db.clone();
                 self.register_thread(spec, "policy-tick", move || {
                     let rt = tokio::runtime::Builder::new_current_thread()

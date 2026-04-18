@@ -64,7 +64,7 @@
 | `db::cron_history` | `src/db/cron_history.rs` | 74 |  |
 | `db::kanban` | `src/db/kanban.rs` | 162 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::schema` | `src/db/schema.rs` | 3055 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 3068 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 788 |  |
 | `db::turns` | `src/db/turns.rs` | 451 |  |
@@ -73,7 +73,7 @@
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1533 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 695 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 608 |  |
-| `engine` | `src/engine/mod.rs` | 1555 | giant-file |
+| `engine` | `src/engine/mod.rs` | 1646 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 812 |  |
 | `engine::loader` | `src/engine/loader.rs` | 281 |  |
@@ -118,7 +118,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 2175 | giant-file |
+| `server` | `src/server/mod.rs` | 2636 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 141 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 71 |  |
@@ -176,7 +176,7 @@
 | `server::routes::stats` | `src/server/routes/stats.rs` | 428 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 117 |  |
 | `server::tick` | `src/server/tick.rs` | 230 |  |
-| `server::worker_registry` | `src/server/worker_registry.rs` | 542 |  |
+| `server::worker_registry` | `src/server/worker_registry.rs` | 550 |  |
 | `server::ws` | `src/server/ws.rs` | 141 |  |
 | `services` | `src/services/mod.rs` | 38 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 160 |  |

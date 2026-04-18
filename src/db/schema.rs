@@ -1068,6 +1068,19 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "deploy_phases",
         "ALTER TABLE auto_queue_runs ADD COLUMN deploy_phases TEXT;",
     )?;
+    // #747 round-2: phase-gate grace window. Set by OnCardTerminal at the
+    // start of its continuation work; read by the tick-fired
+    // `finalizeRunWithoutPhaseGate` path so a tiered tick on the dedicated
+    // tick engine cannot race ahead and complete a run while the main engine
+    // is still preparing phase-gate dispatches. Value is an ISO-8601 UTC
+    // timestamp (string) representing the moment *after* which finalization
+    // is allowed to proceed again. NULL means no grace window is active.
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "phase_gate_grace_until",
+        "ALTER TABLE auto_queue_runs ADD COLUMN phase_gate_grace_until TEXT;",
+    )?;
     ensure_auto_queue_column(
         conn,
         "auto_queue_entries",
