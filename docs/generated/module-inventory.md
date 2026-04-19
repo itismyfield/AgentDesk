@@ -108,7 +108,7 @@
 | `github::sync` | `src/github/sync.rs` | 1167 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 319 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1191 | giant-file |
-| `kanban` | `src/kanban.rs` | 2975 | giant-file |
+| `kanban` | `src/kanban.rs` | 2974 | giant-file |
 | `launch` | `src/launch.rs` | 39 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 67 |  |
@@ -130,7 +130,7 @@
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1081 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1184 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 92 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10526 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10579 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 134 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 317 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 164 |  |
