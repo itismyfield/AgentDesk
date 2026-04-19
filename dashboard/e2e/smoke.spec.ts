@@ -106,12 +106,22 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     const bottomNav = page.getByTestId("app-mobile-tabbar");
+    const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
     await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-office")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
+
+    const tabbarZIndex = await bottomNav.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+    const topbarZIndex = await topbar.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+    expect(tabbarZIndex).toBeLessThan(50);
+    expect(topbarZIndex).toBeLessThan(50);
 
     await page.getByTestId("app-mobile-more-button").click();
 
@@ -122,6 +132,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /업적|Achievements/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /설정|Settings/ })).toBeVisible();
+
+    const moreMenuBackdropZIndex = await moreMenu.evaluate((element) =>
+      Number(window.getComputedStyle(element.parentElement as HTMLElement).zIndex),
+    );
+    expect(moreMenuBackdropZIndex).toBeGreaterThan(tabbarZIndex);
 
     const shellStyles = await page.getByTestId("app-main-scroll").evaluate((element) => ({
       marginBottom: (element as HTMLElement).style.marginBottom,

@@ -112,6 +112,14 @@ const MOBILE_MORE_ROUTE_IDS: AppRouteId[] = [
   "achievements",
   "settings",
 ];
+// Keep persistent shell chrome below route-level backdrops and modals.
+const ROUTE_OVERLAY_BASE_Z_INDEX = 50;
+const SHELL_HEADER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 30;
+const SHELL_POPOVER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 10;
+const SHELL_TABBAR_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 20;
+const SHELL_BOTTOM_SHEET_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 5;
+const SHELL_TOAST_Z_INDEX = 95;
+const SHELL_MODAL_Z_INDEX = 100;
 
 const THEME_OPTIONS: Array<{
   id: ThemePreference;
@@ -562,8 +570,9 @@ export default function AppShell({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header
           data-testid="topbar"
-          className="relative z-[60] shrink-0 border-b px-4 py-3 sm:px-5"
+          className="relative shrink-0 border-b px-4 py-3 sm:px-5"
           style={{
+            zIndex: SHELL_HEADER_Z_INDEX,
             borderColor: "var(--th-border-subtle)",
             background:
               "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 94%, transparent) 100%)",
@@ -651,8 +660,9 @@ export default function AppShell({
 
                 {showNotificationPanel && (
                   <div
-                    className="absolute right-0 top-12 z-[90] w-[min(22rem,calc(100vw-2rem))] rounded-3xl border p-3 shadow-2xl"
+                    className="absolute right-0 top-12 w-[min(22rem,calc(100vw-2rem))] rounded-3xl border p-3 shadow-2xl"
                     style={{
+                      zIndex: SHELL_POPOVER_Z_INDEX,
                       borderColor: "var(--th-border-subtle)",
                       background:
                         "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
@@ -1151,9 +1161,10 @@ export default function AppShell({
         <>
           <nav
             data-testid="app-mobile-tabbar"
-            className="fixed bottom-0 left-0 right-0 z-[70] flex items-start justify-around border-t"
+            className="fixed bottom-0 left-0 right-0 flex items-start justify-around border-t"
             style={{
               height: MOBILE_TABBAR_SAFE_AREA_HEIGHT,
+              zIndex: SHELL_TABBAR_Z_INDEX,
               borderColor: "var(--th-border-subtle)",
               background:
                 "linear-gradient(180deg, color-mix(in srgb, var(--th-nav-bg) 98%, black 2%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
@@ -1209,7 +1220,8 @@ export default function AppShell({
 
           {showMobileMoreMenu && (
             <div
-              className="fixed inset-0 z-[90] flex items-end justify-center"
+              className="fixed inset-0 flex items-end justify-center"
+              style={{ zIndex: SHELL_BOTTOM_SHEET_Z_INDEX }}
               onClick={() => setShowMobileMoreMenu(false)}
             >
               <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
@@ -1366,7 +1378,10 @@ export default function AppShell({
       )}
 
       {!wsConnected && (
-        <div className="pointer-events-none fixed left-4 right-4 top-4 z-[95] flex justify-center md:left-auto md:right-6">
+        <div
+          className="pointer-events-none fixed left-4 right-4 top-4 flex justify-center md:left-auto md:right-6"
+          style={{ zIndex: SHELL_TOAST_Z_INDEX }}
+        >
           <div className="flex items-center gap-2 rounded-full border border-red-500/30 bg-red-500/15 px-4 py-2 text-xs text-red-300 shadow-lg">
             <WifiOff size={12} />
             <span>
@@ -1745,7 +1760,11 @@ function ShortcutHelpModal({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center px-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 flex items-center justify-center px-4"
+      style={{ zIndex: SHELL_MODAL_Z_INDEX }}
+      onClick={onClose}
+    >
       <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
       <div
         role="dialog"
