@@ -400,21 +400,21 @@ pub(in crate::services::discord) async fn start_headless_turn(
         .insert(channel_id, std::time::Instant::now());
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
-        RecallResponse::default()
-    } else {
-        memory_backend
-            .recall(RecallRequest {
-                provider: provider.clone(),
-                role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
-                dispatch_profile,
-                user_text: prompt.to_string(),
-            })
-            .await
-    };
-    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
+    let recall_mode = recall_mode_for_turn(&memory_settings, memento_context_loaded);
+    let memory_recall = memory_backend
+        .recall(RecallRequest {
+            mode: recall_mode,
+            provider: provider.clone(),
+            role_id: resolve_memory_role_id(role_binding.as_ref()),
+            channel_id: channel_id.get(),
+            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+            dispatch_profile,
+            user_text: prompt.to_string(),
+        })
+        .await;
+    if memory_settings.backend == settings::MemoryBackendKind::Memento
+        && recall_mode == RecallMode::Bootstrap
+    {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.note_memento_context_loaded();
@@ -897,6 +897,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
             adk_session_info: Some(adk_session_info),
             adk_cwd: Some(current_path),
             dispatch_id: None,
+            dispatch_profile,
             memory_recall_usage: memory_recall.token_usage,
             current_msg_id: placeholder_msg_id,
             response_sent_offset: 0,
@@ -2427,8 +2428,6 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     let model_for_turn =
         super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
-    let native_fast_mode_enabled = matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && shared.fast_mode_channels.contains(&channel_id);
     // Fetch context compact percent from ADK settings (provider-specific)
     let ctx_thresholds = super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);

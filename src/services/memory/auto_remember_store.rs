@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use libsql_rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutoRememberMemoryStatus {
@@ -140,7 +140,7 @@ impl AutoRememberStore {
 
     fn with_conn<T>(
         &self,
-        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+        f: impl FnOnce(&Connection) -> libsql_rusqlite::Result<T>,
     ) -> Result<T, String> {
         let conn = Connection::open(&self.path)
             .map_err(|err| format!("failed to open auto-remember sidecar: {err}"))?;
