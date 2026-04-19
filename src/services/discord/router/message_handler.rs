@@ -1041,6 +1041,68 @@ fn parse_dispatch_context_hints(
     }
 }
 
+fn normalize_memento_phase(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "planning" | "debugging" | "verification" | "completed" | "retrospective" | "runtime" => {
+            Some(normalized)
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_type_to_memory_phase(dispatch_type: Option<&str>) -> Option<String> {
+    let normalized = dispatch_type?.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "review" | "review-decision" => Some("verification".to_string()),
+        _ if normalized.ends_with("-gate") => Some("verification".to_string()),
+        _ => None,
+    }
+}
+
+fn derive_dispatch_memory_hints(
+    dispatch_info: Option<&super::thread_binding::DispatchInfo>,
+) -> DispatchMemoryHints {
+    let Some(dispatch_info) = dispatch_info else {
+        return DispatchMemoryHints::default();
+    };
+
+    let case_id = dispatch_info
+        .github_issue_number
+        .filter(|value| *value > 0)
+        .map(|value| format!("issue-{value}"))
+        .or_else(|| {
+            dispatch_info
+                .card_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+
+    let explicit_phase = dispatch_info
+        .context
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .as_ref()
+        .and_then(|value| value.get("phase"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_memento_phase);
+    let phase = explicit_phase
+        .or_else(|| dispatch_type_to_memory_phase(dispatch_info.dispatch_type.as_deref()));
+    let resolution_status = if case_id.is_some() || phase.is_some() {
+        Some("open".to_string())
+    } else {
+        None
+    };
+
+    DispatchMemoryHints {
+        case_id,
+        phase,
+        resolution_status,
+    }
+}
+
 /// #762: Resolve a bootstrap fallback path for a dispatch without a usable
 /// `worktree_path`. When the context pins an external `target_repo`, the
 /// dispatch must land in that repo's configured directory rather than the
@@ -4515,6 +4577,54 @@ mod tests {
             Some("review"),
         );
         assert!(hints.target_repo.is_none());
+    }
+
+    #[test]
+    fn derive_dispatch_memory_hints_prefers_issue_case_and_review_phase() {
+        let dispatch_info = crate::services::discord::router::thread_binding::DispatchInfo {
+            card_id: Some("card-418".to_string()),
+            github_issue_number: Some(418),
+            dispatch_type: Some("review".to_string()),
+            ..Default::default()
+        };
+
+        let hints = derive_dispatch_memory_hints(Some(&dispatch_info));
+
+        assert_eq!(hints.case_id.as_deref(), Some("issue-418"));
+        assert_eq!(hints.phase.as_deref(), Some("verification"));
+        assert_eq!(hints.resolution_status.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn derive_dispatch_memory_hints_uses_explicit_context_phase_when_supported() {
+        let dispatch_info = crate::services::discord::router::thread_binding::DispatchInfo {
+            card_id: Some("card-runtime".to_string()),
+            dispatch_type: Some("implementation".to_string()),
+            context: Some(r#"{"phase":"debugging"}"#.to_string()),
+            ..Default::default()
+        };
+
+        let hints = derive_dispatch_memory_hints(Some(&dispatch_info));
+
+        assert_eq!(hints.case_id.as_deref(), Some("card-runtime"));
+        assert_eq!(hints.phase.as_deref(), Some("debugging"));
+        assert_eq!(hints.resolution_status.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn derive_dispatch_memory_hints_ignores_unknown_context_phase() {
+        let dispatch_info = crate::services::discord::router::thread_binding::DispatchInfo {
+            card_id: Some("card-raw".to_string()),
+            dispatch_type: Some("implementation".to_string()),
+            context: Some(r#"{"phase":"implementation"}"#.to_string()),
+            ..Default::default()
+        };
+
+        let hints = derive_dispatch_memory_hints(Some(&dispatch_info));
+
+        assert_eq!(hints.case_id.as_deref(), Some("card-raw"));
+        assert_eq!(hints.phase, None);
+        assert_eq!(hints.resolution_status.as_deref(), Some("open"));
     }
 
     /// #762 (B): when the dispatch context pins an external `target_repo` but
