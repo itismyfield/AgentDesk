@@ -191,11 +191,28 @@ def trusted_root_python_bin() -> Path:
 
 
 def path_is_root_owned_and_locked(path: Path) -> bool:
-    try:
-        st = path.stat()
-    except OSError:
-        return False
-    return st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    current = path.expanduser()
+    seen: set[Path] = set()
+
+    while True:
+        if current in seen:
+            return False
+        seen.add(current)
+
+        try:
+            if current.is_symlink():
+                return False
+            st = current.stat()
+        except OSError:
+            return False
+
+        if st.st_uid != 0 or (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            return False
+
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
 
 
 def path_is_executable(path: Path) -> bool:

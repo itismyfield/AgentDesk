@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -227,6 +228,32 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                 Path("/usr/bin/python3"),
                 Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
             )
+
+    def test_path_is_root_owned_and_locked_rejects_group_writable_parent(self) -> None:
+        target = Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py")
+        stats = {
+            target: SimpleNamespace(st_uid=0, st_mode=0o100755),
+            target.parent: SimpleNamespace(st_uid=0, st_mode=0o040755),
+            target.parent.parent: SimpleNamespace(st_uid=0, st_mode=0o040755),
+            target.parent.parent.parent: SimpleNamespace(st_uid=0, st_mode=0o040775),
+            Path("/usr"): SimpleNamespace(st_uid=0, st_mode=0o040755),
+            Path("/"): SimpleNamespace(st_uid=0, st_mode=0o040755),
+        }
+        path_type = type(Path("/"))
+
+        with mock.patch.object(
+            path_type,
+            "is_symlink",
+            autospec=True,
+            side_effect=lambda self: False,
+        ):
+            with mock.patch.object(
+                path_type,
+                "stat",
+                autospec=True,
+                side_effect=lambda self: stats[Path(str(self))],
+            ):
+                self.assertFalse(MODULE.path_is_root_owned_and_locked(target))
 
     def test_resolve_job_artifacts_prefers_existing_skills_root(self) -> None:
         spec = MODULE.JOB_SPECS["memory-dream"]
