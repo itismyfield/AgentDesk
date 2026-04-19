@@ -73,7 +73,7 @@
 | `db::turns` | `src/db/turns.rs` | 451 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 4628 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1756 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1926 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 719 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 624 |  |
 | `engine` | `src/engine/mod.rs` | 1708 | giant-file |
@@ -108,7 +108,7 @@
 | `github::sync` | `src/github/sync.rs` | 1167 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 319 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1191 | giant-file |
-| `kanban` | `src/kanban.rs` | 2737 | giant-file |
+| `kanban` | `src/kanban.rs` | 2975 | giant-file |
 | `launch` | `src/launch.rs` | 39 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 67 |  |
