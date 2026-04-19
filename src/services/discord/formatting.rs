@@ -43,6 +43,18 @@ pub(super) const ALL_TOOLS: &[(&str, &str, bool)] = &[
     ("TaskUpdate", "Update task status or details", false),
     ("TaskList", "List all tasks and their status", false),
     (
+        "Monitor",
+        "Stream events from a background task or shell",
+        false,
+    ),
+    (
+        "BashOutput",
+        "Read incremental output from a background shell",
+        false,
+    ),
+    ("KillBash", "Terminate a running background shell", true),
+    ("SlashCommand", "Invoke a Claude Code slash command", false),
+    (
         "AskUserQuestion",
         "Ask the user a question (interactive)",
         false,

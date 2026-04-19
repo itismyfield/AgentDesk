@@ -1,7 +1,12 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Default allowed tools for CLI-backed providers.
+/// Reference list of known Claude Code tools.
+///
+/// No longer used for CLI gating — the Claude CLI is invoked without `--allowed-tools`
+/// so that newly released tools (e.g. `Monitor`) are exposed automatically. This list
+/// remains as the baseline for session-level defaults and legacy migration fallbacks.
+/// Update when Anthropic ships new tools so user-facing configuration stays accurate.
 pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Bash",
     "Read",
@@ -20,6 +25,13 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "TaskGet",
     "TaskUpdate",
     "TaskList",
+    "Monitor",
+    "BashOutput",
+    "KillBash",
+    "SlashCommand",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
 ];
 
 /// Streaming message types for provider responses consumed by Discord orchestration.

@@ -32,7 +32,7 @@ Send a file/photo — Upload to session directory
 Any other message is sent to {}.
 AI can read, edit, and run commands in your session.
 
-**Tool Management**
+**Tool Management** (Qwen only — Claude exposes all tools by default)
 `/allowedtools` — Show currently allowed tools
 `/allowed +name` — Add tool (e.g. `/allowed +Bash`)
 `/allowed -name` — Remove tool

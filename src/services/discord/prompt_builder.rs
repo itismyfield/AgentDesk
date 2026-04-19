@@ -554,7 +554,6 @@ pub(super) fn build_system_prompt(
     current_path: &str,
     channel_id: ChannelId,
     token: &str,
-    disabled_notice: &str,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
     profile: DispatchProfile,
@@ -583,12 +582,11 @@ pub(super) fn build_system_prompt(
          This Discord channel does not support interactive prompts. Do NOT call AskUserQuestion, EnterPlanMode, or ExitPlanMode. \
          Ask in plain text if you need clarification.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
-         not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.{}",
+         not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.",
         discord_context,
         current_path,
         channel_id.get(),
         discord_token_hash(token),
-        disabled_notice
     );
     system_prompt_owned.push_str("\n\n");
     system_prompt_owned.push_str(tool_output_efficiency_guidance());
@@ -748,7 +746,6 @@ mod tests {
         current_path: &str,
         channel_id: u64,
         token: &str,
-        disabled_notice: &str,
         memento_mcp_available: bool,
     ) -> String {
         build_system_prompt(
@@ -756,7 +753,6 @@ mod tests {
             current_path,
             ChannelId::new(channel_id),
             token,
-            disabled_notice,
             None,  // role_binding
             false, // queued_turn
             DispatchProfile::Full,
@@ -776,7 +772,6 @@ mod tests {
             "/tmp/work",
             123456789,
             "fake-token",
-            "",
             false,
         );
         assert!(
@@ -787,7 +782,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_cwd() {
-        let output = call_build("ctx", "/home/user/projects", 1, "tok", "", false);
+        let output = call_build("ctx", "/home/user/projects", 1, "tok", false);
         assert!(
             output.contains("Current working directory: /home/user/projects"),
             "System prompt should contain the current working directory"
@@ -796,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_file_send_command() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
+        let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(
             output.contains("agentdesk discord-sendfile"),
             "System prompt should contain the agentdesk discord-sendfile command"
@@ -805,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_disables_interactive_tools() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
+        let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(
             output.contains("does not support interactive prompts"),
             "System prompt should warn that interactive tools are disabled"
@@ -818,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_context_compression_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
+        let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(output.contains("[Context Compression]"));
         assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
         assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
@@ -826,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_tool_output_efficiency_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
+        let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(output.contains("[Tool Output Efficiency]"));
         assert!(output.contains("Large tool results persist in context"));
         assert!(output.contains("Use LIMIT clauses for SQL"));
@@ -836,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_includes_api_friction_guidance() {
-        let output = call_build("ctx", "/tmp", 1, "tok", "", false);
+        let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(output.contains("[ADK API Usage]"));
         assert!(output.contains("GET /api/docs/{category}"));
         assert!(output.contains("API_FRICTION:"));
@@ -882,7 +877,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::Full,
@@ -906,7 +900,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -930,7 +923,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -963,7 +955,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -979,7 +970,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -1018,7 +1008,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1488022491992424448),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1052,7 +1041,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1075,7 +1063,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::Full,
@@ -1113,7 +1100,6 @@ mod tests {
             "/Users/test/.adk/release/workspaces/agentdesk",
             ChannelId::new(1),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::Full,
@@ -1150,7 +1136,6 @@ mod tests {
             "/Users/test/.adk/release/workspaces/agentdesk",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::Full,
@@ -1177,7 +1162,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -1212,7 +1196,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             true,
             DispatchProfile::Full,
@@ -1271,7 +1254,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -1331,7 +1313,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
@@ -1366,7 +1347,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::Full,
@@ -1396,7 +1376,6 @@ mod tests {
             "/tmp",
             ChannelId::new(1),
             "tok",
-            "",
             None,
             false,
             DispatchProfile::Full,
