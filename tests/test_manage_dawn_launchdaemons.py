@@ -125,6 +125,49 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
             ],
         )
 
+    def test_run_via_sudo_prefers_managed_entrypoint_when_present(self) -> None:
+        args = argparse.Namespace(
+            action="install",
+            job=["memory-dream"],
+            hour=None,
+            minute=None,
+            python_bin="/opt/homebrew/bin/python3",
+            sudoers_user="agentdesk-runtime",
+            skills_root=None,
+            as_root=False,
+        )
+
+        run_result = subprocess.CompletedProcess(["sudo"], 0, stdout="", stderr="")
+        with mock.patch.object(MODULE, "trusted_root_python_bin", return_value=Path("/usr/bin/python3")):
+            with mock.patch.object(
+                MODULE,
+                "privileged_reexec_script_path",
+                return_value=Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+            ):
+                with mock.patch.object(MODULE, "candidate_skills_roots", return_value=[]):
+                    with mock.patch.object(MODULE, "run_command", return_value=run_result) as run_command:
+                        MODULE.run_via_sudo(args)
+
+        command = run_command.call_args.args[0]
+        self.assertEqual(command[:6], [
+            "sudo",
+            "-n",
+            "/usr/bin/python3",
+            "/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py",
+            "--as-root",
+            "install",
+        ])
+
+    def test_install_managed_entrypoint_copies_script_to_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "libexec/agentdesk/manage_dawn_launchdaemons.py"
+
+            with mock.patch.object(MODULE, "managed_entrypoint_target", return_value=target):
+                installed = MODULE.install_managed_entrypoint(SCRIPT_PATH)
+                self.assertEqual(installed, target)
+                self.assertTrue(target.exists())
+                self.assertEqual(target.read_text(encoding="utf-8"), SCRIPT_PATH.read_text(encoding="utf-8"))
+
     def test_status_as_root_is_treated_as_privileged_probe(self) -> None:
         args = argparse.Namespace(action="status", as_root=False)
 
@@ -199,9 +242,14 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         )
         seen: dict[str, Path] = {}
 
-        def fake_validate(job: MODULE.ResolvedDawnJob, python_bin: Path) -> None:
+        def fake_validate(
+            job: MODULE.ResolvedDawnJob,
+            python_bin: Path,
+            script_path: Path | None = None,
+        ) -> None:
             self.assertEqual(job, resolved)
             seen["python_bin"] = python_bin
+            seen["script_path"] = script_path
 
         def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
             if command == ["/opt/homebrew/bin/python3", "--version"]:
@@ -226,6 +274,7 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                                         )
 
         self.assertEqual(seen["python_bin"], Path("/usr/bin/python3"))
+        self.assertIsNone(seen["script_path"])
 
 
 if __name__ == "__main__":
