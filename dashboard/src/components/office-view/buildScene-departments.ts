@@ -2,6 +2,7 @@ import type { MutableRefObject } from "react";
 import { Container, Graphics, Text, TextStyle, type Application, type Texture } from "pixi.js";
 import type { Agent, Department, SubAgent, Task } from "../../types";
 import { localeName } from "../../i18n";
+import { FONT_STACK_MONO, getFontFamilyForText } from "../../lib/fonts";
 import type { CallbackSnapshot, AnimItem, SubCloneAnimItem } from "./buildScene-types";
 import {
   COLS_PER_ROW,
@@ -124,13 +125,14 @@ export function buildDepartmentRooms({
     signBg.cursor = "pointer";
     signBg.on("pointerup", () => cbRef.current.onSelectDepartment(dept));
     room.addChild(signBg);
+    const signLabel = `${dept.icon || "🏢"} ${localeName(activeLocale, dept)}`;
     const signTxt = new Text({
-      text: `${dept.icon || "🏢"} ${localeName(activeLocale, dept)}`,
+      text: signLabel,
       style: new TextStyle({
         fontSize: 9,
         fill: 0xffffff,
         fontWeight: "bold",
-        fontFamily: "system-ui, sans-serif",
+        fontFamily: getFontFamilyForText(signLabel, "pixel"),
         dropShadow: { alpha: 0.2, distance: 1, color: 0x000000 },
       }),
     });
@@ -157,7 +159,7 @@ export function buildDepartmentRooms({
       room.addChild(barG);
       const ratioTxt = new Text({
         text: `${workingCount}/${totalCount}`,
-        style: new TextStyle({ fontSize: 6, fill: 0xffffff, fontFamily: "monospace", dropShadow: { alpha: 0.3, distance: 1, color: 0x000000 } }),
+        style: new TextStyle({ fontSize: 6, fill: 0xffffff, fontFamily: FONT_STACK_MONO, dropShadow: { alpha: 0.3, distance: 1, color: 0x000000 } }),
       });
       ratioTxt.anchor.set(0.5, 0);
       ratioTxt.position.set(rx + roomW / 2, barY + barH + 1);
@@ -178,9 +180,10 @@ export function buildDepartmentRooms({
     }
 
     if (deptAgents.length === 0) {
+      const emptyLabel = pickLocale(activeLocale, LOCALE_TEXT.noAssignedAgent);
       const emptyText = new Text({
-        text: pickLocale(activeLocale, LOCALE_TEXT.noAssignedAgent),
-        style: new TextStyle({ fontSize: 10, fill: 0x9a8a7a, fontFamily: "system-ui, sans-serif" }),
+        text: emptyLabel,
+        style: new TextStyle({ fontSize: 10, fill: 0x9a8a7a, fontFamily: getFontFamilyForText(emptyLabel, "pixel") }),
       });
       emptyText.anchor.set(0.5, 0.5);
       emptyText.position.set(rx + roomW / 2, ry + roomH / 2);
@@ -293,13 +296,14 @@ function renderAgentHeader(
   unread: Set<string> | undefined,
   activeLocale: SupportedLocale,
 ): void {
+  const label = localeName(activeLocale, agent);
   const nameText = new Text({
-    text: localeName(activeLocale, agent),
+    text: label,
     style: new TextStyle({
       fontSize: 7,
       fill: 0x3a3a4a,
       fontWeight: "bold",
-      fontFamily: "system-ui, sans-serif",
+      fontFamily: getFontFamilyForText(label, "pixel"),
     }),
   });
   nameText.anchor.set(0.5, 0);
@@ -318,7 +322,7 @@ function renderAgentHeader(
     room.addChild(bangBg);
     const bangTxt = new Text({
       text: "!",
-      style: new TextStyle({ fontSize: 8, fill: 0xffffff, fontWeight: "bold", fontFamily: "monospace" }),
+      style: new TextStyle({ fontSize: 8, fill: 0xffffff, fontWeight: "bold", fontFamily: FONT_STACK_MONO }),
     });
     bangTxt.anchor.set(0.5, 0.5);
     bangTxt.position.set(bangX, nameY + 6);
@@ -338,13 +342,14 @@ function drawBreakAwayTag(
   drawDesk(room, ax - DESK_W / 2, deskY, false);
   const awayTagY = charFeetY - TARGET_CHAR_H / 2;
   const awayTagBgColor = blendColor(accent, 0x101826, 0.78);
+  const awayLabel = pickLocale(activeLocale, LOCALE_TEXT.breakRoom);
   const awayTag = new Text({
-    text: pickLocale(activeLocale, LOCALE_TEXT.breakRoom),
+    text: awayLabel,
     style: new TextStyle({
       fontSize: 8,
       fill: contrastTextColor(awayTagBgColor),
       fontWeight: "bold",
-      fontFamily: "system-ui, sans-serif",
+      fontFamily: getFontFamilyForText(awayLabel, "pixel"),
     }),
   });
   awayTag.anchor.set(0.5, 0.5);

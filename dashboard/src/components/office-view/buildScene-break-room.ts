@@ -2,6 +2,7 @@ import type { MutableRefObject } from "react";
 import { Container, Graphics, Sprite, Text, TextStyle, type Application, type Texture } from "pixi.js";
 import type { Agent } from "../../types";
 import { localeName } from "../../i18n";
+import { getFontFamilyForText } from "../../lib/fonts";
 import type { CallbackSnapshot, BreakAnimItem } from "./buildScene-types";
 import { BREAK_ROOM_H, TARGET_CHAR_H, type RoomTheme, type WallClockVisual } from "./model";
 import { BREAK_CHAT_MESSAGES, BREAK_SPOTS, LOCALE_TEXT, type SupportedLocale, pickLocale } from "./themes-locale";
@@ -118,13 +119,14 @@ export function buildBreakRoom({
   brSignBg.roundRect(brx + brw / 2 - brSignW / 2, bry - 4, brSignW, 18, 4).fill(breakTheme.accent);
   breakRoom.addChild(brSignBg);
   const breakSignTextColor = isDark ? 0xffffff : contrastTextColor(breakTheme.accent);
+  const breakRoomLabel = pickLocale(activeLocale, LOCALE_TEXT.breakRoom);
   const brSignTxt = new Text({
-    text: pickLocale(activeLocale, LOCALE_TEXT.breakRoom),
+    text: breakRoomLabel,
     style: new TextStyle({
       fontSize: 9,
       fill: breakSignTextColor,
       fontWeight: "bold",
-      fontFamily: "system-ui, sans-serif",
+      fontFamily: getFontFamilyForText(breakRoomLabel, "pixel"),
       dropShadow: isDark ? { alpha: 0.6, blur: 2, distance: 1, color: 0x000000 } : undefined,
     }),
   });
@@ -201,9 +203,10 @@ export function buildBreakRoom({
     coffeeEmoji.position.set(spotX + 14, spotY - 10);
     breakRoom.addChild(coffeeEmoji);
 
+    const nameLabel = localeName(activeLocale, agent);
     const nameTag = new Text({
-      text: localeName(activeLocale, agent),
-      style: new TextStyle({ fontSize: 6, fill: 0x4a3a2a, fontFamily: "system-ui, sans-serif" }),
+      text: nameLabel,
+      style: new TextStyle({ fontSize: 6, fill: 0x4a3a2a, fontFamily: getFontFamilyForText(nameLabel, "pixel") }),
     });
     nameTag.anchor.set(0.5, 0);
     const ntW = nameTag.width + 4;
@@ -227,7 +230,7 @@ export function buildBreakRoom({
       const msg = chatPool[(seed + phase) % chatPool.length];
       const bubbleText = new Text({
         text: msg,
-        style: new TextStyle({ fontSize: 7, fill: 0x333333, fontFamily: "system-ui, sans-serif" }),
+        style: new TextStyle({ fontSize: 7, fill: 0x333333, fontFamily: getFontFamilyForText(msg, "pixel") }),
       });
       bubbleText.anchor.set(0.5, 1);
       const bw = bubbleText.width + 10;

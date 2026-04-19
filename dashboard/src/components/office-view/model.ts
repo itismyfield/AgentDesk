@@ -9,6 +9,7 @@ import type {
   CrossDeptDelivery,
   CeoOfficeCall,
 } from "../../types";
+import { getFontFamilyForText } from "../../lib/fonts";
 
 interface OfficeViewProps {
   departments: Department[];
@@ -214,7 +215,7 @@ function emitSubCloneSmokeBurst(
       fontSize: 7,
       fill: mode === "spawn" ? 0xeff4ff : 0xdde4f5,
       fontWeight: "bold",
-      fontFamily: "system-ui, sans-serif",
+      fontFamily: getFontFamilyForText("펑", "pixel"),
       stroke: { color: 0x1f2838, width: 2 },
     }),
   });

@@ -6,6 +6,7 @@ import {
   readLocalStorageValue,
   writeLocalStorageValue,
 } from "../../lib/useLocalStorage";
+import { getFontFamilyForText } from "../../lib/fonts";
 import type { TFunction } from "./model";
 import AgentAvatar from "../AgentAvatar";
 import { cx, dashboardBadge, dashboardCard } from "./ui";
@@ -941,12 +942,22 @@ export function AchievementWidget({ t, agents }: AchievementWidgetProps) {
       className={dashboardCard.accentStandard}
       style={{ borderColor: "var(--th-border)", background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 90%, #eab308 10%), var(--th-surface))" }}
     >
-      <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--th-text)" }}>
+      <h3
+        className="font-pixel mb-3 text-sm font-semibold"
+        style={{
+          color: "var(--th-text)",
+          fontFamily: getFontFamilyForText(
+            t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" }),
+            "pixel",
+          ),
+        }}
+      >
         🏆 {t({ ko: "업적", en: "Achievements", ja: "実績", zh: "成就" })}
       </h3>
       <div className="space-y-1.5 max-h-48 overflow-y-auto">
         {achievements.slice(0, 15).map((ach) => {
           const agent = agentMap.get(ach.agent_id) ?? fallbackAgentFromAchievement(ach);
+          const agentLabel = ach.agent_name_ko || ach.agent_name;
           return (
             <div
               key={ach.id}
@@ -963,10 +974,22 @@ export function AchievementWidget({ t, agents }: AchievementWidgetProps) {
                 </span>
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
-                  {ach.agent_name_ko || ach.agent_name}
+                <div
+                  className="font-pixel truncate text-xs font-medium"
+                  style={{
+                    color: "var(--th-text)",
+                    fontFamily: getFontFamilyForText(agentLabel, "pixel"),
+                  }}
+                >
+                  {agentLabel}
                 </div>
-                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                <div
+                  className="font-pixel text-xs"
+                  style={{
+                    color: "var(--th-text-muted)",
+                    fontFamily: getFontFamilyForText(ach.name, "pixel"),
+                  }}
+                >
                   {ach.name} — {ach.description}
                 </div>
               </div>

@@ -2,6 +2,8 @@ import { useState, useEffect, type ReactNode } from "react";
 import type { Notification } from "../NotificationCenter";
 import type { Agent, AuditLogEntry, KanbanCard } from "../../types";
 import { getAgentWarnings } from "../../agent-insights";
+import { getFontFamilyForText } from "../../lib/fonts";
+import AgentAvatar from "../AgentAvatar";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -424,8 +426,20 @@ function WarningList({
                 className="p-3"
                 trailing={<span className="text-xs" style={{ color: "var(--th-accent-warn)" }}>⚠</span>}
               >
-                <div className="text-xs font-medium" style={{ color: "var(--th-text)" }}>
-                  {agent.avatar_emoji} {agent.alias || agent.name_ko || agent.name}
+                <div className="flex items-center gap-2">
+                  <AgentAvatar agent={agent} size={22} rounded="xl" />
+                  <div
+                    className="font-pixel min-w-0 truncate text-xs font-medium"
+                    style={{
+                      color: "var(--th-text)",
+                      fontFamily: getFontFamilyForText(
+                        agent.alias || agent.name_ko || agent.name,
+                        "pixel",
+                      ),
+                    }}
+                  >
+                    {agent.alias || agent.name_ko || agent.name}
+                  </div>
                 </div>
                 <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
                   {(isKo ? warnings.map((warning) => warning.ko) : warnings.map((warning) => warning.en)).join(", ")}

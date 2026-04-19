@@ -14,6 +14,7 @@ import type {
   SkillCatalogEntry,
   TaskDispatch,
 } from "../types";
+import { resolveAvatarSeed } from "../lib/pixel-avatar";
 
 export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsResponse } from "../types";
 
@@ -162,6 +163,7 @@ function normalizeAgent(agent: Agent): Agent {
     ...agent,
     name_ko: agent.name_ko ?? agent.name,
     avatar_emoji: agent.avatar_emoji ?? "",
+    avatar_seed: resolveAvatarSeed(agent),
     department_name: agent.department_name ?? null,
     department_name_ko: agent.department_name_ko ?? agent.department_name ?? null,
   };
@@ -1166,6 +1168,7 @@ export interface Achievement {
   agent_name: string;
   agent_name_ko: string;
   avatar_emoji: string;
+  avatar_seed?: number | null;
 }
 
 export async function getAchievements(

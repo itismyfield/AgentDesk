@@ -2,6 +2,7 @@ import type { MutableRefObject } from "react";
 import { Container, Graphics, Sprite, Text, TextStyle, type Application, type Texture } from "pixi.js";
 import type { Agent, RoundTableMeeting } from "../../types";
 import { localeName } from "../../i18n";
+import { FONT_STACK_MONO, getFontFamilyForText } from "../../lib/fonts";
 import type { CallbackSnapshot } from "./buildScene-types";
 import { MEETING_ROOM_H, TARGET_CHAR_H, type RoomTheme, type WallClockVisual } from "./model";
 import { LOCALE_TEXT, type SupportedLocale, pickLocale } from "./themes-locale";
@@ -144,7 +145,7 @@ export function buildMeetingRoom({
       fontSize: 9,
       fill: signTextColor,
       fontWeight: "bold",
-      fontFamily: "system-ui, sans-serif",
+      fontFamily: getFontFamilyForText(signLabel, "pixel"),
       dropShadow: isDark ? { alpha: 0.6, blur: 2, distance: 1, color: 0x000000 } : undefined,
     }),
   });
@@ -240,9 +241,10 @@ export function buildMeetingRoom({
     agentPosRef.current.set(agent.id, { x: sx, y: sy - 6 });
 
     // Name tag
+    const nameLabel = localeName(activeLocale, agent);
     const nameTag = new Text({
-      text: localeName(activeLocale, agent),
-      style: new TextStyle({ fontSize: 5.5, fill: isDark ? 0xd0d8e8 : 0x4a3a2a, fontFamily: "system-ui, sans-serif" }),
+      text: nameLabel,
+      style: new TextStyle({ fontSize: 5.5, fill: isDark ? 0xd0d8e8 : 0x4a3a2a, fontFamily: getFontFamilyForText(nameLabel, "pixel") }),
     });
     nameTag.anchor.set(0.5, 0);
     const ntW = nameTag.width + 4;
@@ -287,7 +289,7 @@ export function buildMeetingRoom({
           fontSize: 7,
           fill: isDark ? 0xc8d0e0 : 0x4a5568,
           fontWeight: "bold",
-          fontFamily: "monospace",
+          fontFamily: FONT_STACK_MONO,
         }),
       });
       roundTxt.anchor.set(0.5, 0);
@@ -306,7 +308,7 @@ export function buildMeetingRoom({
       style: new TextStyle({
         fontSize: 6,
         fill: isDark ? 0x8899aa : 0x6b7c94,
-        fontFamily: "system-ui, sans-serif",
+        fontFamily: getFontFamilyForText(agendaText, "pixel"),
         wordWrap: true,
         wordWrapWidth: rw * 0.6,
       }),

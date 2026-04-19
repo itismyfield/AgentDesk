@@ -23,6 +23,9 @@
 
 :root {
   --color-primary: #6ef2a3;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Silkscreen", "Press Start 2P", "Inter", "Segoe UI", sans-serif;
 }
 
 /* ── CE Theme Variables (dark) ── */
@@ -114,11 +117,15 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   background: var(--th-bg-primary);
   color: var(--th-text-primary);
   overflow: hidden;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.font-pixel {
+  font-family: var(--font-pixel);
 }
 
 @media (max-width: 639px) {

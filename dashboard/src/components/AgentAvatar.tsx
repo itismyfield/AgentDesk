@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import type { CSSProperties } from "react";
 import type { Agent } from "../types";
+import { resolveAvatarSeed } from "../lib/pixel-avatar";
+import PixelAvatar from "./PixelAvatar";
 
 /** Map agent IDs to sprite numbers (stable order, same as OfficeView) */
 export function buildSpriteMap(agents: Agent[]): Map<string, number> {
@@ -28,23 +30,6 @@ export function getSpriteNum(agents: Agent[], agentId: string): number | undefin
   return buildSpriteMap(agents).get(agentId);
 }
 
-function hashIdToSprite(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) {
-    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  }
-  return (hash % 12) + 1;
-}
-
-function resolveSpriteNum(agent: Agent | undefined, spriteMap: Map<string, number>): number | undefined {
-  if (!agent) return undefined;
-  if (agent.sprite_number != null && agent.sprite_number > 0) return agent.sprite_number;
-  const mapped = spriteMap.get(agent.id);
-  if (mapped != null && mapped > 0) return mapped;
-  if (agent.name === "DORO") return 13;
-  return hashIdToSprite(agent.id);
-}
-
 interface AgentAvatarProps {
   agent: Agent | undefined;
   agents?: Agent[];
@@ -56,7 +41,7 @@ interface AgentAvatarProps {
   imagePosition?: CSSProperties["objectPosition"];
 }
 
-/** Sprite-based avatar — pass either `agents` or `spriteMap` */
+/** Procedural 8x8 avatar — sprite maps remain reserved for the Pixi office scene. */
 export default function AgentAvatar({
   agent,
   agents,
@@ -67,34 +52,17 @@ export default function AgentAvatar({
   imageFit = "cover",
   imagePosition = "center",
 }: AgentAvatarProps) {
-  const map = spriteMap ?? (agents ? buildSpriteMap(agents) : new Map());
-  const spriteNum = resolveSpriteNum(agent, map);
-
-  const roundedClass = rounded === "full" ? "rounded-full" : rounded === "xl" ? "rounded-xl" : "rounded-2xl";
-
-  if (spriteNum) {
-    return (
-      <div
-        className={`${roundedClass} overflow-hidden bg-th-bg-surface flex-shrink-0 ${className}`}
-        style={{ width: size, height: size }}
-      >
-        <img
-          src={`/sprites/${spriteNum}-D-1.png`}
-          alt={agent?.name ?? ""}
-          className={`w-full h-full ${imageFit === "contain" ? "object-contain" : "object-cover"}`}
-          draggable={false}
-          onDragStart={(e) => e.preventDefault()}
-          style={{ imageRendering: "pixelated", objectPosition: imagePosition, userSelect: "none" }}
-        />
-      </div>
-    );
-  }
+  void agents;
+  void spriteMap;
+  void imageFit;
+  void imagePosition;
   return (
-    <div
-      className={`${roundedClass} bg-th-bg-surface flex items-center justify-center flex-shrink-0 ${className}`}
-      style={{ width: size, height: size, fontSize: size * 0.6 }}
-    >
-      {agent?.avatar_emoji ?? "🤖"}
-    </div>
+    <PixelAvatar
+      seed={resolveAvatarSeed(agent)}
+      size={size}
+      className={className}
+      rounded={rounded}
+      label={agent?.name ?? "Agent"}
+    />
   );
 }

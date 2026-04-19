@@ -1,5 +1,6 @@
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import { getFontFamilyForText } from "../../lib/fonts";
 import AgentAvatar from "../AgentAvatar";
 import { SurfaceActionButton, SurfaceCard } from "../common/SurfacePrimitives";
 import { STATUS_DOT } from "./constants";
@@ -36,6 +37,7 @@ export default function AgentCard({
 }: AgentCardProps) {
   const isDeleting = confirmDeleteId === agent.id;
   const dept = departments.find((d) => d.id === agent.department_id);
+  const primaryLabel = localeName(locale, agent);
 
   return (
     <SurfaceCard
@@ -60,12 +62,18 @@ export default function AgentCard({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-sm truncate" style={{ color: "var(--th-text-heading)" }}>
-              {localeName(locale, agent)}
+            <span
+              className="font-pixel truncate text-sm font-semibold"
+              style={{
+                color: "var(--th-text-heading)",
+                fontFamily: getFontFamilyForText(primaryLabel, "pixel"),
+              }}
+            >
+              {primaryLabel}
             </span>
             <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
               {(() => {
-                const primary = localeName(locale, agent);
+                const primary = primaryLabel;
                 const sub = locale === "en" ? agent.name_ko || "" : agent.name;
                 return primary !== sub ? sub : "";
               })()}
