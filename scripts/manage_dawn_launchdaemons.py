@@ -30,6 +30,7 @@ REPO_ROOT = SCRIPT_PATH.parents[1]
 SUDOERS_TARGET = Path("/etc/sudoers.d/agentdesk-dawn-manager")
 MANAGED_ENTRYPOINT_DIR = Path("/usr/local/libexec/agentdesk")
 MANAGED_ENTRYPOINT = MANAGED_ENTRYPOINT_DIR / SCRIPT_PATH.name
+MANAGED_SKILLS_DIR = MANAGED_ENTRYPOINT_DIR / "skills"
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,69 @@ def privileged_reexec_script_path() -> Path:
     return target if target.exists() else SCRIPT_PATH
 
 
+def managed_skill_root(spec: DawnJobSpec) -> Path:
+    return MANAGED_SKILLS_DIR / spec.skill_name
+
+
+def resolve_managed_job_artifacts(job_name: str, spec: DawnJobSpec) -> ResolvedDawnJob:
+    skill_root = managed_skill_root(spec)
+    manager_script = skill_root / spec.manager_relpath
+    daemon_plist = skill_root / spec.daemon_plist_relpath
+    missing: list[str] = []
+    if not manager_script.exists():
+        missing.append(str(manager_script))
+    if not daemon_plist.exists():
+        missing.append(str(daemon_plist))
+    if missing:
+        raise FileNotFoundError(
+            f"managed artifacts for `{job_name}` are missing: {', '.join(missing)}; "
+            "run `sudo ... manage_dawn_launchdaemons.py bootstrap` to install trusted copies"
+        )
+    return ResolvedDawnJob(
+        name=job_name,
+        skill_root=skill_root,
+        manager_script=manager_script,
+        daemon_plist=daemon_plist,
+    )
+
+
+def copy_locked_file(source: Path, target: Path, *, mode: int) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(target.parent, 0o755)
+    tmp = tempfile.NamedTemporaryFile(prefix=f"{target.name}-", dir=target.parent, delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    try:
+        shutil.copyfile(source, tmp_path)
+        os.chmod(tmp_path, mode)
+        tmp_path.replace(target)
+        os.chmod(target, mode)
+        return target
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def install_managed_job_artifacts(source_job: ResolvedDawnJob, spec: DawnJobSpec) -> ResolvedDawnJob:
+    skill_root = managed_skill_root(spec)
+    manager_script = copy_locked_file(
+        source_job.manager_script,
+        skill_root / spec.manager_relpath,
+        mode=0o755,
+    )
+    daemon_plist = copy_locked_file(
+        source_job.daemon_plist,
+        skill_root / spec.daemon_plist_relpath,
+        mode=0o644,
+    )
+    return ResolvedDawnJob(
+        name=source_job.name,
+        skill_root=skill_root,
+        manager_script=manager_script,
+        daemon_plist=daemon_plist,
+    )
+
+
 def install_managed_entrypoint(source_path: Path = SCRIPT_PATH) -> Path:
     target = managed_entrypoint_target()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -258,7 +322,6 @@ def validate_privileged_job_artifacts(
 ) -> None:
     validate_privileged_entrypoint(python_bin, script_path)
     for label, path in (
-        ("skill_root", job.skill_root),
         ("manager_script", job.manager_script),
         ("daemon_plist", job.daemon_plist),
     ):
@@ -291,7 +354,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "  status     inspect configured jobs without requiring root by default\n"
             "  uninstall  remove installed LaunchDaemon plists\n"
             "  preflight  verify python path, skill roots, plist validity, and sudo readiness\n"
-            "  sudoers    print the managed-entrypoint sudoers drop-in for manual review"
+            "  sudoers    print the post-bootstrap managed-entrypoint sudoers drop-in for manual review"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -476,7 +539,11 @@ def render_batch_summary(args: argparse.Namespace, jobs: Sequence[tuple[str, Daw
 
     for index, (job_name, spec) in enumerate(jobs):
         try:
-            resolved = resolve_job_artifacts(job_name, spec, skills_roots=skills_roots)
+            resolved = (
+                resolve_managed_job_artifacts(job_name, spec)
+                if privileged_root_requested(args)
+                else resolve_job_artifacts(job_name, spec, skills_roots=skills_roots)
+            )
         except FileNotFoundError as exc:
             all_ok = False
             summary_lines.extend(summarize_resolution_error(job_name, exc))
@@ -604,6 +671,9 @@ def sudoers_text(
         lines.append(
             "# First-time setup still requires `sudo ... manage_dawn_launchdaemons.py bootstrap`"
         )
+        lines.append(
+            "# This sudoers stanza targets the managed root-owned entrypoint installed by bootstrap."
+        )
     lines.extend(
         [
             "",
@@ -706,7 +776,11 @@ def render_preflight(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJob
     all_ok = path_is_executable(python_bin)
     for job_name, spec in jobs:
         try:
-            resolved = resolve_job_artifacts(job_name, spec, skills_roots=skills_roots)
+            resolved = (
+                resolve_managed_job_artifacts(job_name, spec)
+                if privileged_root_requested(args)
+                else resolve_job_artifacts(job_name, spec, skills_roots=skills_roots)
+            )
         except FileNotFoundError as exc:
             lines.extend(
                 [
@@ -802,7 +876,11 @@ def run_bootstrap(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJobSpe
     try:
         managed_script_path = install_managed_entrypoint()
         validate_privileged_entrypoint(python_bin, managed_script_path)
-    except (OSError, PermissionError) as exc:
+        source_roots = candidate_skills_roots(args)
+        for job_name, spec in jobs:
+            source_job = resolve_job_artifacts(job_name, spec, skills_roots=source_roots)
+            install_managed_job_artifacts(source_job, spec)
+    except (OSError, PermissionError, FileNotFoundError) as exc:
         print(
             "\n".join(
                 [
