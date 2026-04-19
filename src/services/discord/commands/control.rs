@@ -25,6 +25,12 @@ enum ManagedSessionResetBehavior {
     Noop,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSessionResetPlan {
+    reset_source: &'static str,
+    recreate_tmux: bool,
+}
+
 fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClearBehavior {
     match provider {
         ProviderKind::Claude => ManagedSessionClearBehavior::NativeProviderClear,
@@ -43,6 +49,33 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
         }
         ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
     }
+}
+
+fn pending_session_reset_plan(
+    provider: &ProviderKind,
+    fast_mode_reset_pending: bool,
+    model_reset_pending: bool,
+    legacy_session_reset_pending: bool,
+) -> Option<PendingSessionResetPlan> {
+    if fast_mode_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "fast mode reset pending",
+            recreate_tmux: matches!(provider, ProviderKind::Claude),
+        });
+    }
+    if model_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "model session reset pending",
+            recreate_tmux: false,
+        });
+    }
+    if legacy_session_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "session reset pending",
+            recreate_tmux: false,
+        });
+    }
+    None
 }
 
 pub(in crate::services::discord) fn reset_managed_process_session(session_name: &str) -> bool {
@@ -214,21 +247,34 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) {
-    if shared.session_reset_pending.remove(&channel_id).is_none() {
+    let legacy_session_reset_pending = shared.session_reset_pending.remove(&channel_id).is_some();
+    let fast_mode_reset_pending = shared
+        .fast_mode_session_reset_pending
+        .remove(&channel_id)
+        .is_some();
+    let model_reset_pending = shared
+        .model_session_reset_pending
+        .remove(&channel_id)
+        .is_some();
+
+    let Some(plan) = pending_session_reset_plan(
+        provider,
+        fast_mode_reset_pending,
+        model_reset_pending,
+        legacy_session_reset_pending,
+    ) else {
         return;
-    }
-    shared.fast_mode_session_reset_pending.remove(&channel_id);
-    shared.model_session_reset_pending.remove(&channel_id);
+    };
 
     let _ = reset_channel_provider_state(
         http,
         shared,
         provider,
         channel_id,
-        "model session reset pending",
+        plan.reset_source,
         true,
         false,
-        false,
+        plan.recreate_tmux,
     )
     .await;
 }
@@ -471,9 +517,9 @@ pub(in crate::services::discord) async fn cmd_down(
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedSessionClearBehavior, ManagedSessionResetBehavior,
+        ManagedSessionClearBehavior, ManagedSessionResetBehavior, PendingSessionResetPlan,
         build_fallback_session_key_for_clear, fallback_channel_name_for_clear,
-        managed_session_clear_behavior, managed_session_reset_behavior,
+        managed_session_clear_behavior, managed_session_reset_behavior, pending_session_reset_plan,
     };
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::ChannelId;
@@ -515,6 +561,46 @@ mod tests {
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Gemini),
             ManagedSessionResetBehavior::Noop
+        );
+    }
+
+    #[test]
+    fn pending_session_reset_plan_recreates_claude_tmux_for_fast_mode() {
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Claude, true, false, false),
+            Some(PendingSessionResetPlan {
+                reset_source: "fast mode reset pending",
+                recreate_tmux: true,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Codex, true, false, false),
+            Some(PendingSessionResetPlan {
+                reset_source: "fast mode reset pending",
+                recreate_tmux: false,
+            })
+        );
+    }
+
+    #[test]
+    fn pending_session_reset_plan_prefers_specific_flags_and_keeps_legacy_fallback() {
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Claude, false, true, true),
+            Some(PendingSessionResetPlan {
+                reset_source: "model session reset pending",
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Gemini, false, false, true),
+            Some(PendingSessionResetPlan {
+                reset_source: "session reset pending",
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Gemini, false, false, false),
+            None
         );
     }
 

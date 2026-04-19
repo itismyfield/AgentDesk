@@ -763,10 +763,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_cc(),
         commands::cmd_metrics(),
         commands::cmd_model(),
+        commands::cmd_fast(),
     ];
-    if matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
-        slash_commands.push(commands::cmd_fast());
-    }
     slash_commands.extend([
         commands::cmd_queue(),
         commands::cmd_health(),
