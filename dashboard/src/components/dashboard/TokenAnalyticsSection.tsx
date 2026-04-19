@@ -13,6 +13,7 @@ import type { TFunction } from "./model";
 import { cx, dashboardBadge, dashboardButton, dashboardCard } from "./ui";
 import TooltipLabel from "../common/TooltipLabel";
 import { buildAgentRoiRows } from "./dashboardInsights";
+import { getProviderSeries } from "../../app/providerTheme";
 
 type Period = "7d" | "30d" | "90d";
 
@@ -70,13 +71,6 @@ const analyticsCache = new Map<Period, CachedAnalyticsEntry>();
 const ANALYTICS_CACHE_TTL = 5 * 60_000;
 const PERIOD_OPTIONS: Period[] = ["7d", "30d", "90d"];
 const TREND_PLOT_HEIGHT_PX = 144;
-const MODEL_PALETTES: Record<string, string[]> = {
-  Claude: ["#f59e0b", "#fbbf24", "#fb7185", "#f97316"],
-  Codex: ["#22c55e", "#14b8a6", "#06b6d4", "#0ea5e9"],
-  Gemini: ["#60a5fa", "#818cf8", "#a855f7", "#38bdf8"],
-  Qwen: ["#8b5cf6", "#a78bfa", "#c084fc", "#7c3aed"],
-  default: ["#94a3b8", "#c084fc", "#fb7185", "#2dd4bf"],
-};
 const HEATMAP_COLORS = [
   "rgba(148,163,184,0.08)",
   "rgba(14,165,233,0.24)",
@@ -186,7 +180,7 @@ export function normalizeModelProviderLabel(provider: string): string {
 }
 
 function modelColor(provider: string, index: number): string {
-  const palette = MODEL_PALETTES[normalizeModelProviderLabel(provider)] ?? MODEL_PALETTES.default;
+  const palette = getProviderSeries(provider);
   return palette[index % palette.length];
 }
 
