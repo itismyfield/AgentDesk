@@ -53,9 +53,9 @@ intended action into one of four categories:
 
 | Category | Examples | Rule |
 |---|---|---|
-| **safe-auto** | additional polling, prepping the next pipeline step, attempting a rebase that reverts cleanly on conflict | Auto-progress; do **not** wait for user confirmation. Each step must still notify via the notify bot. |
+| **safe-auto** | additional polling, prepping the next pipeline step (no branch/history mutation), pure analysis follow-ups | Auto-progress; do **not** wait for user confirmation. Each step must still notify via the notify bot. |
 | **read-only** | `git status`, `gh run view`, log inspection, additional analysis | Auto-progress; output goes to notify bot. |
-| **needs-confirm** | force-push to a non-feature branch, PR merge, auto-queue reset, branch protection edits | Stop, post a notify message describing the proposed action, wait for explicit user reply. |
+| **needs-confirm** | force-push to a non-feature branch, PR merge, auto-queue reset, branch protection edits, **any rebase or other branch/history mutation** | Stop, post a notify message describing the proposed action, wait for explicit user reply. |
 | **destructive** | `rm`, `git branch -D`, DB writes, secret rotation, `kill -9` on user processes | Always require user confirmation, even in clearly safe-looking contexts. Default to **stop** if uncertain. |
 
 **Conservative default**: when in doubt, classify down (e.g. `safe-auto` →
