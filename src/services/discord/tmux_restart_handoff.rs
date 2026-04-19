@@ -45,11 +45,12 @@ pub(super) fn resolve_restart_handoff_scope(
     }
 }
 
-pub(super) fn resolve_dispatched_thread_dispatch_from_conn(
-    conn: &libsql_rusqlite::Connection,
+fn resolve_dispatched_thread_dispatch(
+    db: &crate::db::Db,
     thread_channel_id: u64,
 ) -> Option<String> {
     let thread_channel_id = thread_channel_id.to_string();
+    let conn = db.read_conn().ok()?;
 
     conn.query_row(
         "SELECT id FROM task_dispatches
@@ -79,9 +80,7 @@ pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     db: Option<&crate::db::Db>,
     thread_channel_id: u64,
 ) -> Option<String> {
-    let db = db?;
-    let conn = db.separate_conn().ok()?;
-    resolve_dispatched_thread_dispatch_from_conn(&conn, thread_channel_id)
+    resolve_dispatched_thread_dispatch(db?, thread_channel_id)
 }
 
 pub(super) async fn start_restart_handoff_from_state(
@@ -264,10 +263,8 @@ pub(super) async fn resume_aborted_restart_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RestartHandoffScope, resolve_dispatched_thread_dispatch_from_conn,
-        resolve_restart_handoff_scope,
-    };
+    use super::{RestartHandoffScope, resolve_restart_handoff_scope};
+    use crate::config::Config;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
 
@@ -286,6 +283,15 @@ mod tests {
             None,
             0,
         )
+    }
+
+    fn fresh_restart_handoff_db() -> (tempfile::TempDir, crate::db::Db) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.data.dir = temp.path().to_path_buf();
+        config.data.db_name = "restart-handoff.sqlite".to_string();
+        let db = crate::db::init(&config).unwrap();
+        (temp, db)
     }
 
     #[test]
@@ -312,9 +318,12 @@ mod tests {
 
     #[test]
     fn watcher_dispatch_db_fallback_prefers_dispatched_thread_row() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let (_temp, db) = fresh_restart_handoff_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
+            DROP TABLE IF EXISTS task_dispatches;
+            DROP TABLE IF EXISTS sessions;
             CREATE TABLE task_dispatches (
                 id TEXT PRIMARY KEY,
                 status TEXT,
@@ -338,17 +347,21 @@ mod tests {
             ",
         )
         .unwrap();
+        drop(conn);
 
         let resolved =
-            resolve_dispatched_thread_dispatch_from_conn(&conn, 1_492_091_375_422_930_966);
+            super::resolve_dispatched_thread_dispatch_from_db(Some(&db), 1_492_091_375_422_930_966);
         assert_eq!(resolved.as_deref(), Some("latest-dispatch"));
     }
 
     #[test]
     fn watcher_dispatch_db_fallback_uses_session_when_thread_row_missing() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let (_temp, db) = fresh_restart_handoff_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
+            DROP TABLE IF EXISTS task_dispatches;
+            DROP TABLE IF EXISTS sessions;
             CREATE TABLE task_dispatches (
                 id TEXT PRIMARY KEY,
                 status TEXT,
@@ -368,9 +381,10 @@ mod tests {
             ",
         )
         .unwrap();
+        drop(conn);
 
         let resolved =
-            resolve_dispatched_thread_dispatch_from_conn(&conn, 1_492_091_380_045_189_131);
+            super::resolve_dispatched_thread_dispatch_from_db(Some(&db), 1_492_091_380_045_189_131);
         assert_eq!(resolved.as_deref(), Some("session-dispatch"));
     }
 }

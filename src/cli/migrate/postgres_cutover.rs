@@ -858,6 +858,9 @@ struct DeferredHookRow {
     created_at: Option<String>,
 }
 
+#[deprecated(
+    note = "production cutover complete on 2026-04-19; reuse only for hypothetical re-cutover scenarios. See ARCHITECTURE.md or epic #834."
+)]
 pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(), String> {
     if !args.dry_run && args.skip_pg_import && args.archive_dir.is_none() {
         return Err(

@@ -243,7 +243,7 @@ fn persist_report(db: &Db, report: &ConfigAuditReport) {
     };
     let _ = conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![CONFIG_AUDIT_KV_KEY, rendered],
+        [CONFIG_AUDIT_KV_KEY, rendered.as_str()],
     );
 }
 

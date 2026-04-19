@@ -253,7 +253,7 @@ fn persist_turn_analytics_row_prefers_output_jsonl_usage_from_turn_start_offset(
 
 fn fetch_persisted_turn_usage(db: &crate::db::Db) -> Option<(Option<String>, i64, i64, i64, i64)> {
     let conn = db.read_conn().unwrap();
-    match conn.query_row(
+    conn.query_row(
         "SELECT session_id, input_tokens, cache_create_tokens, cache_read_tokens, output_tokens
          FROM turns
          WHERE turn_id = 'discord:1486333430516945008:1487795113240559788'",
@@ -267,11 +267,8 @@ fn fetch_persisted_turn_usage(db: &crate::db::Db) -> Option<(Option<String>, i64
                 row.get::<_, i64>(4)?,
             ))
         },
-    ) {
-        Ok(row) => Some(row),
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => panic!("failed to fetch persisted turn usage: {error}"),
-    }
+    )
+    .ok()
 }
 
 #[test]

@@ -1867,10 +1867,7 @@ mod tests {
     use super::*;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
+        crate::db::test_db()
     }
 
     #[test]
