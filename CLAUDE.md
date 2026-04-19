@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is AgentDesk
 
-AgentDesk is a single-binary AI agent orchestration platform written in Rust. It manages multiple AI agents (Claude, Codex) through Discord, orchestrates task dispatch via a Kanban board, and uses hot-reloadable JavaScript policies for business logic. All state lives in a single SQLite database.
+AgentDesk is a single-binary AI agent orchestration platform written in Rust. It manages multiple AI agents (Claude, Codex) through Discord, orchestrates task dispatch via a Kanban board, and uses hot-reloadable JavaScript policies for business logic. Release runtime state is canonical in PostgreSQL; remaining SQLite code is transitional compatibility work under epic #834.
 
 ## Documentation
 
@@ -45,6 +45,8 @@ scripts/deploy-dashboard.sh release           # build + deploy to ~/.adk/release
 
 After the 2026-04-19 PostgreSQL cutover (#461), AgentDesk runtime state is canonical in PostgreSQL. Ongoing SQLite retirement work is tracked in epic #834. `~/.adk/release/data/agentdesk.sqlite` may still exist as a pre-cutover backup, but the release runtime does not read it.
 
+**Phase C split status**: the smaller Phase C cleanup landed transcript-search `tsvector` migration, dead `cron_history` removal, and docs cleanup first. `AppState.db` removal, `dispatch.create` PostgreSQL porting, `DbPool` retirement, and startup SQLite-init removal are intentionally deferred to follow-up issues rather than mixed into an oversized PR.
+
 **Signing guidance**: local operators may use ad-hoc signing during release promotion when Developer ID signing is unavailable, and should clear `com.apple.quarantine` on promoted macOS artifacts when needed. Keep signing policy in deploy scripts and operator docs, not hardcoded in Rust source.
 
 ## CLI Subcommands
@@ -74,7 +76,7 @@ Default (no subcommand) starts the full HTTP server + policy engine + Discord ga
 
 - **`main.rs`** — Entry point. CLI dispatch, then tokio runtime for the server.
 - **`config.rs`** — Parses `agentdesk.yaml` (YAML config).
-- **`db/`** — SQLite via rusqlite. Schema migrations in `schema.rs`. Shared as `Arc<Mutex<Connection>>`.
+- **`db/`** — PostgreSQL runtime schema/migrations plus transitional SQLite compatibility helpers that have not been removed yet.
 - **`server/`** — Axum HTTP server + WebSocket broadcast (`ws.rs`). 30+ route modules under `routes/`.
   - `/ws` WebSocket endpoint is mounted at top-level (not under `/api/`).
   - All other API endpoints are nested under `/api/`.
@@ -113,8 +115,8 @@ React 19 + TypeScript + Vite + Tailwind. Uses Pixi.js for the office visualizati
 
 ## Key Patterns
 
-- **AppState** — Struct with fields `db`, `engine`, `broadcast_tx`, `batch_buffer`, `health_registry`, passed to all Axum route handlers via `.with_state()`. Defined at `server/routes/mod.rs`.
-- **Db** — `Arc<Mutex<rusqlite::Connection>>` — lock before any query.
+- **AppState** — Struct with fields `db`, `engine`, `broadcast_tx`, `batch_buffer`, `health_registry`, passed to all Axum route handlers via `.with_state()`. Defined at `server/routes/mod.rs`. This still carries a transitional SQLite compatibility handle; do not treat it as the runtime source of truth.
+- **Db** — transitional SQLite compatibility wrapper used by legacy routes/tests. PostgreSQL is the runtime authority.
 - **PolicyEngine** — Thread-safe wrapper around QuickJS. Call hooks via `engine.fire_hook(hook, payload)`.
 - **3-Tier Tick** — Dedicated OS thread runs tiered hooks: `OnTick30s` (30s), `OnTick1min` (1m), `OnTick5min` (5m), `OnTick` (5m legacy). See `server/mod.rs` `policy_tick_loop()`.
 - **SessionKey** — Format: `"hostname:session-name"` — uniquely identifies agent sessions.

@@ -20,22 +20,6 @@ pub enum SessionTranscriptEventKind {
     System,
 }
 
-impl SessionTranscriptEventKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Assistant => "assistant",
-            Self::Thinking => "thinking",
-            Self::ToolUse => "tool_use",
-            Self::ToolResult => "tool_result",
-            Self::Result => "result",
-            Self::Error => "error",
-            Self::Task => "task",
-            Self::System => "system",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptEvent {
     pub kind: SessionTranscriptEventKind,
@@ -49,31 +33,6 @@ pub struct SessionTranscriptEvent {
     pub status: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-}
-
-impl SessionTranscriptEvent {
-    fn search_text(&self) -> String {
-        let mut parts = Vec::new();
-        parts.push(self.kind.label().to_string());
-        if let Some(tool_name) = self.tool_name.as_deref().map(str::trim)
-            && !tool_name.is_empty()
-        {
-            parts.push(tool_name.to_string());
-        }
-        if let Some(summary) = self.summary.as_deref().map(str::trim)
-            && !summary.is_empty()
-        {
-            parts.push(summary.to_string());
-        }
-        let content = self.content.trim();
-        if !content.is_empty() {
-            parts.push(content.to_string());
-        }
-        if self.is_error {
-            parts.push("error".to_string());
-        }
-        parts.join("\n")
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +96,6 @@ struct PreparedSessionTranscript {
     dispatch_id: Option<String>,
     user_message: String,
     assistant_message: String,
-    events: Vec<SessionTranscriptEvent>,
     events_json: String,
     duration_ms: Option<i64>,
 }
@@ -179,11 +137,6 @@ pub fn persist_turn_on_conn(
     let Some(prepared) = prepare_persist_entry(conn, entry)? else {
         return Ok(false);
     };
-    let search_document = build_search_document(
-        &prepared.user_message,
-        &prepared.assistant_message,
-        &prepared.events,
-    );
 
     let tx = conn.transaction()?;
     tx.execute(
@@ -221,22 +174,6 @@ pub fn persist_turn_on_conn(
             prepared.events_json,
             prepared.duration_ms,
         ],
-    )?;
-
-    let row_id: i64 = tx.query_row(
-        "SELECT id FROM session_transcripts WHERE turn_id = ?1",
-        [&prepared.turn_id],
-        |row| row.get(0),
-    )?;
-
-    tx.execute(
-        "DELETE FROM session_transcripts_fts WHERE session_transcript_id = ?1",
-        [row_id],
-    )?;
-    tx.execute(
-        "INSERT INTO session_transcripts_fts (session_transcript_id, content)
-         VALUES (?1, ?2)",
-        params![row_id, search_document],
     )?;
     tx.commit()?;
 
@@ -323,7 +260,6 @@ fn prepare_persist_entry(
         dispatch_id,
         user_message: user_message.to_string(),
         assistant_message: assistant_message.to_string(),
-        events,
         events_json,
         duration_ms: entry.duration_ms,
     }))
@@ -668,17 +604,20 @@ where
 }
 
 #[cfg(test)]
-pub fn search_transcripts(
-    conn: &Connection,
+pub async fn search_transcripts_pg(
+    pool: &PgPool,
     raw_query: &str,
     limit: usize,
 ) -> Result<(String, Vec<SessionTranscriptSearchHit>)> {
-    let match_query = build_match_query(raw_query)
+    let search_query = normalize_search_query(raw_query)
         .ok_or_else(|| anyhow!("query must contain a searchable term"))?;
     let limit = limit.clamp(1, 50) as i64;
 
-    let mut stmt = conn.prepare(
-        "SELECT st.id,
+    let rows = sqlx::query(
+        "WITH search AS (
+            SELECT websearch_to_tsquery('simple', $1) AS query
+         )
+         SELECT st.id,
                 st.turn_id,
                 st.session_key,
                 st.channel_id,
@@ -687,71 +626,96 @@ pub fn search_transcripts(
                 st.dispatch_id,
                 st.user_message,
                 st.assistant_message,
-                st.created_at,
-                snippet(session_transcripts_fts, 1, '<mark>', '</mark>', '…', 18) AS snippet,
-                bm25(session_transcripts_fts) AS score
-         FROM session_transcripts_fts
-         JOIN session_transcripts st
-           ON st.id = session_transcripts_fts.session_transcript_id
-         WHERE session_transcripts_fts MATCH ?1
-         ORDER BY score ASC, st.created_at DESC
-         LIMIT ?2",
-    )?;
+                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+                COALESCE(
+                    NULLIF(
+                        ts_headline(
+                            'simple',
+                            concat_ws(
+                                E'\\n\\n',
+                                NULLIF(st.user_message, ''),
+                                NULLIF(st.assistant_message, '')
+                            ),
+                            search.query,
+                            'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=18, MinWords=5, ShortWord=1, FragmentDelimiter=…'
+                        ),
+                        ''
+                    ),
+                    concat_ws(
+                        E'\\n\\n',
+                        NULLIF(st.user_message, ''),
+                        NULLIF(st.assistant_message, '')
+                    )
+                ) AS snippet,
+                ts_rank_cd(st.search_tsv, search.query)::float8 AS score
+         FROM session_transcripts st
+         CROSS JOIN search
+         WHERE st.search_tsv @@ search.query
+         ORDER BY score DESC, st.created_at DESC
+         LIMIT $2",
+    )
+    .bind(&search_query)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| anyhow!("query transcript search failed: {e}"))?;
 
-    let rows = stmt.query_map(params![match_query.as_str(), limit], |row| {
-        Ok(SessionTranscriptSearchHit {
-            id: row.get(0)?,
-            turn_id: row.get(1)?,
-            session_key: row.get(2)?,
-            channel_id: row.get(3)?,
-            agent_id: row.get(4)?,
-            provider: row.get(5)?,
-            dispatch_id: row.get(6)?,
-            user_message: row.get(7)?,
-            assistant_message: row.get(8)?,
-            created_at: row.get(9)?,
-            snippet: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-            score: row.get::<_, Option<f64>>(11)?.unwrap_or_default(),
+    let hits = rows
+        .into_iter()
+        .map(|row| {
+            Ok(SessionTranscriptSearchHit {
+                id: row
+                    .try_get("id")
+                    .map_err(|e| anyhow!("read transcript search id: {e}"))?,
+                turn_id: row
+                    .try_get("turn_id")
+                    .map_err(|e| anyhow!("read transcript search turn_id: {e}"))?,
+                session_key: row
+                    .try_get("session_key")
+                    .map_err(|e| anyhow!("read transcript search session_key: {e}"))?,
+                channel_id: row
+                    .try_get("channel_id")
+                    .map_err(|e| anyhow!("read transcript search channel_id: {e}"))?,
+                agent_id: row
+                    .try_get("agent_id")
+                    .map_err(|e| anyhow!("read transcript search agent_id: {e}"))?,
+                provider: row
+                    .try_get("provider")
+                    .map_err(|e| anyhow!("read transcript search provider: {e}"))?,
+                dispatch_id: row
+                    .try_get("dispatch_id")
+                    .map_err(|e| anyhow!("read transcript search dispatch_id: {e}"))?,
+                user_message: row
+                    .try_get("user_message")
+                    .map_err(|e| anyhow!("read transcript search user_message: {e}"))?,
+                assistant_message: row
+                    .try_get("assistant_message")
+                    .map_err(|e| anyhow!("read transcript search assistant_message: {e}"))?,
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(|e| anyhow!("read transcript search created_at: {e}"))?,
+                snippet: row
+                    .try_get::<Option<String>, _>("snippet")
+                    .map_err(|e| anyhow!("read transcript search snippet: {e}"))?
+                    .unwrap_or_default(),
+                score: row
+                    .try_get::<f64, _>("score")
+                    .map_err(|e| anyhow!("read transcript search score: {e}"))?,
+            })
         })
-    })?;
+        .collect::<Result<Vec<_>>>()?;
 
-    let hits = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    Ok((match_query, hits))
+    Ok((search_query, hits))
 }
 
 #[cfg(test)]
-pub fn build_match_query(raw_query: &str) -> Option<String> {
-    let terms: Vec<String> = sanitize_match_terms(raw_query)
-        .into_iter()
-        .map(|term| format!("{term}*"))
-        .collect();
-
-    if !terms.is_empty() {
-        return Some(terms.join(" AND "));
+fn normalize_search_query(raw_query: &str) -> Option<String> {
+    let normalized = raw_query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
     }
-
-    None
-}
-
-fn build_search_document(
-    user_message: &str,
-    assistant_message: &str,
-    events: &[SessionTranscriptEvent],
-) -> String {
-    let mut sections = Vec::new();
-    if !user_message.is_empty() {
-        sections.push(format!("user:\n{user_message}"));
-    }
-    if !assistant_message.is_empty() {
-        sections.push(format!("assistant:\n{assistant_message}"));
-    }
-    for event in events {
-        let text = event.search_text();
-        if !text.trim().is_empty() {
-            sections.push(text);
-        }
-    }
-    sections.join("\n\n")
 }
 
 fn parse_events_json(raw: Option<&str>) -> Vec<SessionTranscriptEvent> {
@@ -811,26 +775,6 @@ fn normalize_events(events: &[SessionTranscriptEvent]) -> Vec<SessionTranscriptE
         .collect()
 }
 
-#[cfg(test)]
-fn sanitize_match_terms(raw: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut current = String::new();
-
-    for ch in raw.chars() {
-        if ch.is_alphanumeric() || ch == '_' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            terms.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() {
-        terms.push(current);
-    }
-
-    terms
-}
-
 fn normalized_opt(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -842,19 +786,138 @@ fn normalized_opt(value: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Option<Self> {
+            let admin_url = postgres_admin_url();
+            let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres transcript test: admin connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!("skipping postgres transcript test: create database failed: {error}");
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+
+            Some(Self {
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn migrate(&self) -> Option<PgPool> {
+            let pool = match sqlx::PgPool::connect(&self.database_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres transcript test: db connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("skipping postgres transcript test: migrate failed: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(pool)
+        }
+
+        async fn drop(self) {
+            let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await else {
+                return;
+            };
+            let _ = sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+            None => format!("postgres://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_url() -> String {
+        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        format!("{}/postgres", postgres_base_database_url())
+    }
+
     #[test]
-    fn build_match_query_sanitizes_symbols() {
+    fn normalize_search_query_trims_and_collapses_whitespace() {
         assert_eq!(
-            build_match_query("FTS5 #239 session-search"),
-            Some("FTS5* AND 239* AND session* AND search*".to_string())
+            normalize_search_query("  FTS5   #239  session-search  "),
+            Some("FTS5 #239 session-search".to_string())
         );
     }
 
     #[test]
-    fn build_match_query_supports_korean_terms() {
+    fn normalize_search_query_supports_korean_terms() {
         assert_eq!(
-            build_match_query("세션 검색"),
-            Some("세션* AND 검색*".to_string())
+            normalize_search_query("세션 검색"),
+            Some("세션 검색".to_string())
         );
     }
 
@@ -927,53 +990,59 @@ mod tests {
         assert_eq!(duration_ms, Some(3210));
     }
 
-    #[test]
-    fn search_transcripts_returns_matching_turns() {
+    #[tokio::test]
+    async fn session_transcripts_search_uses_tsvector() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
         let db = crate::db::test_db();
         {
-            let mut conn = db.lock().unwrap();
+            let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO agents (id, name) VALUES ('agent-2', 'Agent 2')",
+                "INSERT INTO agents (id, name) VALUES ('agent-2', 'Agent Two')",
                 [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
-                 VALUES ('host:tmux-2', 'agent-2', 'claude', 'idle', datetime('now'))",
-                [],
-            )
-            .unwrap();
-            let events = vec![SessionTranscriptEvent {
-                kind: SessionTranscriptEventKind::Thinking,
-                tool_name: None,
-                summary: Some("FTS5 검색 설계".to_string()),
-                content: "검색 전략을 정리합니다.".to_string(),
-                status: Some("info".to_string()),
-                is_error: false,
-            }];
-            persist_turn_on_conn(
-                &mut conn,
-                PersistSessionTranscript {
-                    turn_id: "discord:2:3",
-                    session_key: Some("host:tmux-2"),
-                    channel_id: Some("2"),
-                    agent_id: None,
-                    provider: Some("claude"),
-                    dispatch_id: Some("dispatch-2"),
-                    user_message: "FTS5 검색 구현 상태 알려줘",
-                    assistant_message: "session transcript 검색 API를 추가했습니다.",
-                    events: &events,
-                    duration_ms: Some(9000),
-                },
             )
             .unwrap();
         }
+        let events = vec![SessionTranscriptEvent {
+            kind: SessionTranscriptEventKind::Thinking,
+            tool_name: None,
+            summary: Some("FTS5 검색 설계".to_string()),
+            content: "검색 전략을 정리합니다.".to_string(),
+            status: Some("info".to_string()),
+            is_error: false,
+        }];
+        persist_turn_db(
+            &db,
+            Some(&pool),
+            PersistSessionTranscript {
+                turn_id: "discord:2:3",
+                session_key: Some("host:tmux-2"),
+                channel_id: Some("2"),
+                agent_id: Some("agent-2"),
+                provider: Some("claude"),
+                dispatch_id: Some("dispatch-2"),
+                user_message: "FTS5 검색 구현 상태 알려줘",
+                assistant_message: "session transcript 검색 API를 추가했습니다.",
+                events: &events,
+                duration_ms: Some(9000),
+            },
+        )
+        .await
+        .unwrap();
 
-        let conn = db.read_conn().unwrap();
-        let (_match_query, hits) = search_transcripts(&conn, "FTS5 검색", 10).unwrap();
+        let (_search_query, hits) = search_transcripts_pg(&pool, "FTS5 검색", 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].agent_id.as_deref(), Some("agent-2"));
         assert!(hits[0].snippet.contains("FTS5") || hits[0].snippet.contains("검색"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
