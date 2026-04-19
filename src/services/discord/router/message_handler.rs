@@ -448,28 +448,6 @@ pub(in crate::services::discord) async fn start_headless_turn(
     context_chunks.push(ai_screen::sanitize_user_input(prompt));
     let context_prompt = context_chunks.join("\n\n");
 
-    let default_tools: std::collections::HashSet<&str> =
-        DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
-    let allowed_set: std::collections::HashSet<&str> =
-        allowed_tools.iter().map(|tool| tool.as_str()).collect();
-    let disabled: Vec<&&str> = default_tools
-        .iter()
-        .filter(|tool| !allowed_set.contains(**tool))
-        .collect();
-    let disabled_notice = if disabled.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = disabled.iter().map(|tool| **tool).collect();
-        format!(
-            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
-             You MUST NOT attempt to use these tools. \
-             If a user's request requires a disabled tool, do NOT proceed with the task. \
-             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
-             Suggest they re-enable it with: /allowed +ToolName",
-            names.join(", ")
-        )
-    };
-
     let discord_context = match channel_name.as_deref() {
         Some(name) => {
             let cat_part = category_name
@@ -501,7 +479,6 @@ pub(in crate::services::discord) async fn start_headless_turn(
         &current_path,
         channel_id,
         token,
-        &disabled_notice,
         role_binding.as_ref(),
         false,
         dispatch_profile,
