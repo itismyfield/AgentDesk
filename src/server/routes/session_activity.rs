@@ -19,6 +19,7 @@ pub struct EffectiveSessionState {
 pub struct SessionActivityResolver {
     local_host_aliases: Option<HashSet<String>>,
     tmux_live_cache: HashMap<String, bool>,
+    tmux_ready_cache: HashMap<String, bool>,
 }
 
 impl SessionActivityResolver {
@@ -35,17 +36,29 @@ impl SessionActivityResolver {
     ) -> EffectiveSessionState {
         let local_host_aliases = self.local_host_aliases().clone();
         let now = Utc::now();
-        let cache = &mut self.tmux_live_cache;
-        let mut probe_tmux = |tmux_name: &str| {
-            if let Some(cached) = cache.get(tmux_name) {
+        let live_cache = &mut self.tmux_live_cache;
+        let ready_cache = &mut self.tmux_ready_cache;
+        let mut probe_tmux_live = |tmux_name: &str| {
+            if let Some(cached) = live_cache.get(tmux_name) {
                 return *cached;
             }
             #[cfg(unix)]
             let live = tmux_session_has_live_pane(tmux_name);
             #[cfg(not(unix))]
             let live = false; // tmux not available on Windows
-            cache.insert(tmux_name.to_string(), live);
+            live_cache.insert(tmux_name.to_string(), live);
             live
+        };
+        let mut probe_tmux_ready = |tmux_name: &str| {
+            if let Some(cached) = ready_cache.get(tmux_name) {
+                return *cached;
+            }
+            #[cfg(unix)]
+            let ready = crate::services::provider::tmux_session_ready_for_input(tmux_name);
+            #[cfg(not(unix))]
+            let ready = false; // tmux not available on Windows
+            ready_cache.insert(tmux_name.to_string(), ready);
+            ready
         };
 
         resolve_effective_state_with(
@@ -55,7 +68,8 @@ impl SessionActivityResolver {
             active_dispatch_id,
             last_heartbeat,
             now,
-            &mut probe_tmux,
+            &mut probe_tmux_live,
+            &mut probe_tmux_ready,
         )
     }
 
@@ -87,17 +101,19 @@ fn load_local_host_aliases() -> HashSet<String> {
     aliases
 }
 
-fn resolve_effective_state_with<F>(
+fn resolve_effective_state_with<LiveProbe, ReadyProbe>(
     local_host_aliases: &HashSet<String>,
     session_key: Option<&str>,
     raw_status: Option<&str>,
     active_dispatch_id: Option<&str>,
     last_heartbeat: Option<&str>,
     now: DateTime<Utc>,
-    probe_tmux: &mut F,
+    probe_tmux_live: &mut LiveProbe,
+    probe_tmux_ready: &mut ReadyProbe,
 ) -> EffectiveSessionState
 where
-    F: FnMut(&str) -> bool,
+    LiveProbe: FnMut(&str) -> bool,
+    ReadyProbe: FnMut(&str) -> bool,
 {
     let status = raw_status.unwrap_or("idle").trim();
     if status.eq_ignore_ascii_case("disconnected") {
@@ -111,7 +127,11 @@ where
     let has_work_signal = status.eq_ignore_ascii_case("working") || active_dispatch_id.is_some();
     let is_live = if has_work_signal {
         match session_key.and_then(parse_session_key) {
-            Some((host, tmux_name)) if local_host_aliases.contains(&host) => probe_tmux(&tmux_name),
+            Some((host, tmux_name)) if local_host_aliases.contains(&host) => {
+                let tmux_live = probe_tmux_live(&tmux_name);
+                let tmux_ready = tmux_live && probe_tmux_ready(&tmux_name);
+                tmux_live && !tmux_ready
+            }
             Some(_) => heartbeat_is_recent(last_heartbeat, now),
             None => heartbeat_is_recent(last_heartbeat, now),
         }
@@ -186,7 +206,8 @@ mod tests {
     #[test]
     fn local_dead_tmux_session_becomes_idle() {
         let now = Utc::now();
-        let mut probe = |_name: &str| false;
+        let mut probe_live = |_name: &str| false;
+        let mut probe_ready = |_name: &str| false;
         let state = resolve_effective_state_with(
             &local_aliases(),
             Some("mac-mini:AgentDesk-claude-ad"),
@@ -198,7 +219,8 @@ mod tests {
                     .to_string(),
             ),
             now,
-            &mut probe,
+            &mut probe_live,
+            &mut probe_ready,
         );
 
         assert_eq!(state.status, "idle");
@@ -212,7 +234,8 @@ mod tests {
         let heartbeat = (now - Duration::seconds(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        let mut probe = |_name: &str| false;
+        let mut probe_live = |_name: &str| false;
+        let mut probe_ready = |_name: &str| false;
         let state = resolve_effective_state_with(
             &local_aliases(),
             Some("remote-host:AgentDesk-codex-adk-cdx"),
@@ -220,11 +243,62 @@ mod tests {
             Some("dispatch-2"),
             Some(&heartbeat),
             now,
-            &mut probe,
+            &mut probe_live,
+            &mut probe_ready,
         );
 
         assert_eq!(state.status, "working");
         assert_eq!(state.active_dispatch_id.as_deref(), Some("dispatch-2"));
+        assert!(state.is_working);
+    }
+
+    #[test]
+    fn local_ready_for_input_tmux_session_becomes_idle() {
+        let now = Utc::now();
+        let mut probe_live = |_name: &str| true;
+        let mut probe_ready = |_name: &str| true;
+        let state = resolve_effective_state_with(
+            &local_aliases(),
+            Some("mac-mini:AgentDesk-codex-adk-dash-cdx"),
+            Some("working"),
+            Some("dispatch-3"),
+            Some(
+                &(now - Duration::seconds(5))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            ),
+            now,
+            &mut probe_live,
+            &mut probe_ready,
+        );
+
+        assert_eq!(state.status, "idle");
+        assert_eq!(state.active_dispatch_id, None);
+        assert!(!state.is_working);
+    }
+
+    #[test]
+    fn local_live_tmux_without_ready_prompt_stays_working() {
+        let now = Utc::now();
+        let mut probe_live = |_name: &str| true;
+        let mut probe_ready = |_name: &str| false;
+        let state = resolve_effective_state_with(
+            &local_aliases(),
+            Some("mac-mini:AgentDesk-codex-adk-dash-cdx"),
+            Some("working"),
+            Some("dispatch-4"),
+            Some(
+                &(now - Duration::seconds(5))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            ),
+            now,
+            &mut probe_live,
+            &mut probe_ready,
+        );
+
+        assert_eq!(state.status, "working");
+        assert_eq!(state.active_dispatch_id.as_deref(), Some("dispatch-4"));
         assert!(state.is_working);
     }
 }
