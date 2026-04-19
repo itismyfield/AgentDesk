@@ -1,6 +1,7 @@
 use anyhow::Result;
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
+use sqlx::PgPool;
 
 use crate::db::Db;
 use crate::db::agents::load_agent_channel_bindings;
@@ -1479,6 +1480,246 @@ pub(super) fn build_review_context(
     Ok(serde_json::to_string(&ctx_val)?)
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// #847 (Phase B+): PG-native (sqlx) variants of dispatch-context helpers.
+//
+// Additive only — the rusqlite originals above remain in use until #850 lands
+// the final swap. Routing from `create_dispatch_core_internal` is deferred:
+// `Db` does not currently carry an `Option<PgPool>`, and threading `&PgPool`
+// through every dispatch entry point would touch >15 caller files (the
+// documented stop condition in this issue). Tracked under #850 / #843. See PR
+// body for the full rationale.
+//
+// ## TargetRepoSource preservation (#762, #847)
+//
+// `resolve_card_target_repo_ref_pg` returns the same value the rusqlite
+// variant would for any given `(card_id, context)` input. The
+// `TargetRepoSource` provenance flag is computed independently in
+// `create_dispatch_core_internal` from the *raw caller-supplied context*
+// BEFORE either resolver runs (`dispatch_create.rs:236-240`), so the choice
+// of backend never affects provenance. Tests below pin this invariant.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+struct CardDispatchInfoPg {
+    issue_number: Option<i64>,
+    repo_id: Option<String>,
+}
+
+async fn load_card_dispatch_info_pg(pool: &PgPool, card_id: &str) -> Option<CardDispatchInfoPg> {
+    // PG schema: kanban_cards.github_issue_number is INTEGER (INT4). Read as
+    // i32 then widen to i64 for parity with the rusqlite signature.
+    let row = sqlx::query_as::<_, (Option<i32>, Option<String>)>(
+        "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(CardDispatchInfoPg {
+        issue_number: row.0.map(i64::from),
+        repo_id: row.1,
+    })
+}
+
+async fn load_card_issue_repo_pg(
+    pool: &PgPool,
+    card_id: &str,
+) -> Option<(Option<i64>, Option<String>)> {
+    load_card_dispatch_info_pg(pool, card_id)
+        .await
+        .map(|info| (info.issue_number, info.repo_id))
+}
+
+async fn load_card_pr_number_pg(pool: &PgPool, card_id: &str) -> Option<i64> {
+    // PG schema: pr_tracking.pr_number is INTEGER (INT4). Widen to i64 for
+    // parity with the rusqlite signature.
+    sqlx::query_as::<_, (Option<i32>,)>("SELECT pr_number FROM pr_tracking WHERE card_id = $1")
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.0)
+        .map(i64::from)
+}
+
+/// PG-native variant of [`resolve_parent_dispatch_context`].
+///
+/// Returns `(parent_dispatch_id, chain_depth)` after validating that the
+/// referenced parent dispatch exists and belongs to the same card.
+#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
+pub(super) async fn resolve_parent_dispatch_context_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: &serde_json::Value,
+) -> Result<(Option<String>, i64)> {
+    let Some(parent_dispatch_id) =
+        json_string_field(context, "parent_dispatch_id").filter(|value| !value.is_empty())
+    else {
+        return Ok((None, 0));
+    };
+
+    // PG schema: task_dispatches.chain_depth is INTEGER (INT4). Widen to
+    // i64 for parity with the rusqlite return type.
+    let row = sqlx::query_as::<_, (Option<String>, Option<i32>)>(
+        "SELECT kanban_card_id, COALESCE(chain_depth, 0)
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(parent_dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot create dispatch for card {}: lookup parent_dispatch_id '{}' failed: {}",
+            card_id,
+            parent_dispatch_id,
+            e
+        )
+    })?;
+
+    let Some((parent_card_id, parent_chain_depth)) = row else {
+        anyhow::bail!(
+            "Cannot create dispatch for card {}: parent_dispatch_id '{}' not found",
+            card_id,
+            parent_dispatch_id
+        );
+    };
+
+    if parent_card_id.as_deref() != Some(card_id) {
+        anyhow::bail!(
+            "Cannot create dispatch for card {}: parent_dispatch_id '{}' belongs to a different card",
+            card_id,
+            parent_dispatch_id
+        );
+    }
+
+    Ok((
+        Some(parent_dispatch_id.to_string()),
+        i64::from(parent_chain_depth.unwrap_or(0)) + 1,
+    ))
+}
+
+/// PG-native variant of [`resolve_card_target_repo_ref`].
+///
+/// Returns the same value the rusqlite variant would for the same input.
+/// **Do NOT compute provenance here** — see the module-level note above.
+#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
+pub(super) async fn resolve_card_target_repo_ref_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(context) = context {
+        if let Some(target_repo) = json_string_field(context, "target_repo") {
+            return Some(target_repo.to_string());
+        }
+        if let Some(worktree_path) = json_string_field(context, "worktree_path") {
+            if let Some(path) =
+                crate::services::platform::shell::resolve_repo_dir_for_target(Some(worktree_path))
+                    .ok()
+                    .flatten()
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    let info = load_card_dispatch_info_pg(pool, card_id).await?;
+    info.repo_id
+}
+
+#[allow(dead_code)] // Used by resolve_card_worktree_pg.
+async fn resolve_card_repo_dir_with_context_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+    purpose: &str,
+) -> Result<Option<String>> {
+    let target_repo = resolve_card_target_repo_ref_pg(pool, card_id, context).await;
+    crate::services::platform::shell::resolve_repo_dir_for_target(target_repo.as_deref())
+        .map_err(|e| anyhow::anyhow!("Cannot {purpose} for card {}: {}", card_id, e))
+}
+
+/// PG-native variant of [`resolve_card_worktree`].
+///
+/// Returns `(worktree_path, worktree_branch, head_commit)` derived from the
+/// card's `github_issue_number` + resolved repo dir.
+#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
+pub(crate) async fn resolve_card_worktree_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<Option<(String, String, String)>> {
+    let Some((issue_number, _repo_id)) = load_card_issue_repo_pg(pool, card_id).await else {
+        return Ok(None);
+    };
+    let Some(issue_number) = issue_number else {
+        return Ok(None);
+    };
+    let Some(repo_dir) =
+        resolve_card_repo_dir_with_context_pg(pool, card_id, context, "resolve worktree repo")
+            .await?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
+            .map(|wt| (wt.path, wt.branch, wt.commit)),
+    )
+}
+
+/// PG-native variant of [`inject_review_dispatch_identifiers`].
+///
+/// Mutates `obj` to add review-target identifiers (repo, issue/PR numbers,
+/// verdict/decision endpoints).
+#[allow(dead_code)] // Wired into create_dispatch_core_internal / build_review_context under #850.
+pub(crate) async fn inject_review_dispatch_identifiers_pg(
+    pool: &PgPool,
+    card_id: &str,
+    dispatch_type: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let snapshot = serde_json::Value::Object(obj.clone());
+    let repo = match json_string_field(&snapshot, "repo")
+        .or_else(|| json_string_field(&snapshot, "target_repo"))
+        .map(str::to_string)
+    {
+        Some(value) => Some(value),
+        None => resolve_card_target_repo_ref_pg(pool, card_id, Some(&snapshot)).await,
+    };
+    if let Some(repo) = repo {
+        obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
+    }
+
+    if let Some(issue_number) = load_card_issue_repo_pg(pool, card_id)
+        .await
+        .and_then(|(issue, _)| issue)
+    {
+        obj.entry("issue_number".to_string())
+            .or_insert_with(|| json!(issue_number));
+    }
+
+    if let Some(pr_number) = load_card_pr_number_pg(pool, card_id).await {
+        obj.entry("pr_number".to_string())
+            .or_insert_with(|| json!(pr_number));
+    }
+
+    match dispatch_type {
+        "review" => {
+            obj.entry("verdict_endpoint".to_string())
+                .or_insert_with(|| json!("POST /api/review-verdict"));
+        }
+        "review-decision" => {
+            obj.entry("decision_endpoint".to_string())
+                .or_insert_with(|| json!("POST /api/review-decision"));
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1922,5 +2163,495 @@ mod tests {
             Some(stale_path_str.as_str()),
             "stale worktree_path must not be reused even when commit recovery succeeds"
         );
+    }
+
+    // ── #847 PG-native helper tests ─────────────────────────────────────────
+    //
+    // Each PG test no-ops when a local PostgreSQL is unavailable
+    // (`TestPostgresDb::create` returns `None` on connect failure) so the
+    // suite stays green on workstations without a running PG. Pattern mirrors
+    // `src/db/session_transcripts.rs::tests`.
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Option<Self> {
+            let admin_url = postgres_admin_url();
+            let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!(
+                        "skipping postgres dispatch_context test: admin connect failed: {error}"
+                    );
+                    return None;
+                }
+            };
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!(
+                    "skipping postgres dispatch_context test: create database failed: {error}"
+                );
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+            Some(Self {
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn migrate(&self) -> Option<sqlx::PgPool> {
+            let pool = match sqlx::PgPool::connect(&self.database_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!(
+                        "skipping postgres dispatch_context test: db connect failed: {error}"
+                    );
+                    return None;
+                }
+            };
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("skipping postgres dispatch_context test: migrate failed: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(pool)
+        }
+
+        async fn drop(self) {
+            let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await else {
+                return;
+            };
+            let _ = sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+            None => format!("postgres://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_url() -> String {
+        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        format!("{}/postgres", postgres_base_database_url())
+    }
+
+    async fn pg_seed_card(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+        issue_number: Option<i64>,
+        repo_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, github_issue_number, repo_id)
+             VALUES ($1, 'Test Card', 'ready', $2, $3)
+             ON CONFLICT (id) DO UPDATE
+             SET github_issue_number = EXCLUDED.github_issue_number,
+                 repo_id = EXCLUDED.repo_id",
+        )
+        .bind(card_id)
+        .bind(issue_number)
+        .bind(repo_id)
+        .execute(pool)
+        .await
+        .expect("seed kanban_cards");
+    }
+
+    async fn pg_seed_dispatch(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        chain_depth: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, chain_depth
+             ) VALUES ($1, $2, NULL, 'implementation', 'completed', 'parent', $3)
+             ON CONFLICT (id) DO UPDATE
+             SET kanban_card_id = EXCLUDED.kanban_card_id,
+                 chain_depth = EXCLUDED.chain_depth",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(chain_depth)
+        .execute(pool)
+        .await
+        .expect("seed task_dispatches");
+    }
+
+    // ── resolve_parent_dispatch_context_pg ────────────────────────────────
+
+    #[tokio::test]
+    async fn pg_resolve_parent_dispatch_context_returns_chain_depth_plus_one() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(&pool, "card-pg-parent-happy", Some(847), None).await;
+        pg_seed_dispatch(&pool, "dispatch-pg-parent-happy", "card-pg-parent-happy", 2).await;
+
+        let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-happy" });
+        let (parent_id, depth) =
+            resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-happy", &context)
+                .await
+                .expect("happy-path parent context");
+
+        assert_eq!(parent_id.as_deref(), Some("dispatch-pg-parent-happy"));
+        assert_eq!(depth, 3);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_resolve_parent_dispatch_context_rejects_cross_card_parent() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(&pool, "card-pg-parent-a", Some(8470), None).await;
+        pg_seed_card(&pool, "card-pg-parent-b", Some(8471), None).await;
+        pg_seed_dispatch(&pool, "dispatch-pg-parent-cross", "card-pg-parent-b", 0).await;
+
+        let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-cross" });
+        let err = resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &context)
+            .await
+            .expect_err("must reject parent that belongs to another card");
+        assert!(
+            err.to_string().contains("belongs to a different card"),
+            "unexpected error message: {err}"
+        );
+
+        // missing parent → bail
+        let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-missing" });
+        let err = resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &context)
+            .await
+            .expect_err("must reject unknown parent_dispatch_id");
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected error message: {err}"
+        );
+
+        // empty / missing parent → (None, 0)
+        let (parent_id, depth) =
+            resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &json!({}))
+                .await
+                .unwrap();
+        assert!(parent_id.is_none());
+        assert_eq!(depth, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // ── resolve_card_target_repo_ref_pg ───────────────────────────────────
+
+    #[tokio::test]
+    async fn pg_resolve_card_target_repo_ref_prefers_caller_supplied_value() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(
+            &pool,
+            "card-pg-tr-happy",
+            Some(847),
+            Some("itismyfield/AgentDesk"),
+        )
+        .await;
+
+        let context = json!({ "target_repo": "external/repo" });
+        let value =
+            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-happy", Some(&context)).await;
+        assert_eq!(value.as_deref(), Some("external/repo"));
+
+        let value = resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-happy", None).await;
+        assert_eq!(value.as_deref(), Some("itismyfield/AgentDesk"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_resolve_card_target_repo_ref_returns_none_for_unknown_card() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let value = resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-missing", None).await;
+        assert!(value.is_none());
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #847: TargetRepoSource provenance regression.
+    ///
+    /// `create_dispatch_core_internal` derives `TargetRepoSource` from the
+    /// raw caller context (`json_string_field(context, "target_repo")`)
+    /// BEFORE either resolver runs. Both Caller-Supplied and
+    /// Card-Scope-Default cases must round-trip identically through the PG
+    /// helper so the downstream `external_target_repo_unrecoverable` filter
+    /// in `build_review_context` keeps fail-closed semantics.
+    #[tokio::test]
+    async fn pg_resolve_card_target_repo_ref_preserves_provenance() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(&pool, "card-pg-tr-prov", Some(847), Some("card/scope-repo")).await;
+
+        // Case 1: Caller-Supplied. Provenance is computed from the raw
+        // context BEFORE resolution; the helper returns the supplied value.
+        let caller_ctx = json!({ "target_repo": "caller/explicit-repo" });
+        let provenance_caller = if json_string_field(&caller_ctx, "target_repo").is_some() {
+            TargetRepoSource::CallerSupplied
+        } else {
+            TargetRepoSource::CardScopeDefault
+        };
+        assert_eq!(provenance_caller, TargetRepoSource::CallerSupplied);
+        let resolved =
+            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&caller_ctx)).await;
+        assert_eq!(resolved.as_deref(), Some("caller/explicit-repo"));
+
+        // Case 2: Card-Scope-Default. No caller pin → CardScopeDefault and
+        // helper falls back to card.repo_id.
+        let card_ctx = json!({ "title": "no target_repo here" });
+        let provenance_card = if json_string_field(&card_ctx, "target_repo").is_some() {
+            TargetRepoSource::CallerSupplied
+        } else {
+            TargetRepoSource::CardScopeDefault
+        };
+        assert_eq!(provenance_card, TargetRepoSource::CardScopeDefault);
+        let resolved =
+            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&card_ctx)).await;
+        assert_eq!(resolved.as_deref(), Some("card/scope-repo"));
+
+        // Case 3: empty context → still CardScopeDefault, still card-scope value.
+        let empty_ctx = json!({});
+        let provenance_empty = if json_string_field(&empty_ctx, "target_repo").is_some() {
+            TargetRepoSource::CallerSupplied
+        } else {
+            TargetRepoSource::CardScopeDefault
+        };
+        assert_eq!(provenance_empty, TargetRepoSource::CardScopeDefault);
+        let resolved =
+            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&empty_ctx)).await;
+        assert_eq!(resolved.as_deref(), Some("card/scope-repo"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // ── resolve_card_worktree_pg ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pg_resolve_card_worktree_returns_none_when_no_issue_number() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(&pool, "card-pg-wt-no-issue", None, None).await;
+        let resolved = resolve_card_worktree_pg(&pool, "card-pg-wt-no-issue", None)
+            .await
+            .expect("no-issue card returns Ok(None)");
+        assert!(resolved.is_none());
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_resolve_card_worktree_happy_path_finds_active_worktree() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let _env_lock = crate::services::discord::runtime_store::lock_test_env();
+        let repo = init_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let wt_dir = repo.path().join("wt-pg-847");
+        let wt_path = wt_dir.to_str().unwrap();
+        run_git(repo_dir, &["worktree", "add", "-b", "wt/pg-847", wt_path]);
+        let _wt_commit = git_commit(wt_path, "fix: pg helper worktree (#847)");
+
+        pg_seed_card(&pool, "card-pg-wt-happy", Some(847), None).await;
+        let context = json!({ "target_repo": repo_dir });
+        let resolved = resolve_card_worktree_pg(&pool, "card-pg-wt-happy", Some(&context))
+            .await
+            .expect("happy-path worktree resolution");
+        let (path, branch, _commit) = resolved.expect("worktree should be discoverable for issue");
+        assert_eq!(canonicalize_path(&path), canonicalize_path(wt_path));
+        assert_eq!(branch, "wt/pg-847");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // ── inject_review_dispatch_identifiers_pg ─────────────────────────────
+
+    #[tokio::test]
+    async fn pg_inject_review_dispatch_identifiers_happy_path() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_card(
+            &pool,
+            "card-pg-ids-happy",
+            Some(847),
+            Some("itismyfield/AgentDesk"),
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, repo_id, branch, pr_number, head_sha, state)
+             VALUES ($1, 'itismyfield/AgentDesk', 'wt/pg-847', 9001, 'deadbeef', 'review')",
+        )
+        .bind("card-pg-ids-happy")
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        let mut obj = serde_json::Map::new();
+        inject_review_dispatch_identifiers_pg(&pool, "card-pg-ids-happy", "review", &mut obj).await;
+
+        assert_eq!(
+            obj.get("repo").and_then(|v| v.as_str()),
+            Some("itismyfield/AgentDesk")
+        );
+        assert_eq!(obj.get("issue_number").and_then(|v| v.as_i64()), Some(847));
+        assert_eq!(obj.get("pr_number").and_then(|v| v.as_i64()), Some(9001));
+        assert_eq!(
+            obj.get("verdict_endpoint").and_then(|v| v.as_str()),
+            Some("POST /api/review-verdict")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_inject_review_dispatch_identifiers_skips_unknown_pr_and_issue() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        // Card without issue number, no PR row, no caller-supplied repo.
+        pg_seed_card(&pool, "card-pg-ids-empty", None, None).await;
+
+        let mut obj = serde_json::Map::new();
+        inject_review_dispatch_identifiers_pg(
+            &pool,
+            "card-pg-ids-empty",
+            "review-decision",
+            &mut obj,
+        )
+        .await;
+
+        assert!(obj.get("repo").is_none(), "repo must remain unset");
+        assert!(obj.get("issue_number").is_none());
+        assert!(obj.get("pr_number").is_none());
+        assert_eq!(
+            obj.get("decision_endpoint").and_then(|v| v.as_str()),
+            Some("POST /api/review-decision")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
