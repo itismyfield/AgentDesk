@@ -1,3 +1,10 @@
+import { STORAGE_KEYS } from "../lib/storageKeys";
+import {
+  readLocalStorageValue,
+  removeLocalStorageValue,
+  writeLocalStorageValue,
+} from "../lib/useLocalStorage";
+
 export interface BotInfo {
   valid: boolean;
   bot_id?: string;
@@ -160,7 +167,7 @@ export interface ServerOnboardingDraftResponse {
   };
 }
 
-export const ONBOARDING_DRAFT_STORAGE_KEY = "agentdesk.onboarding.draft.v1";
+export const ONBOARDING_DRAFT_STORAGE_KEY = STORAGE_KEYS.onboardingDraft;
 
 function normalizeBotInfo(parsed: ServerOnboardingDraftBotInfo | BotInfo | null | undefined): BotInfo | null {
   if (!parsed) return null;
@@ -231,25 +238,17 @@ export function isMeaningfulOnboardingDraft(draft: OnboardingDraft | null | unde
 }
 
 export function readOnboardingDraft(): OnboardingDraft | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(ONBOARDING_DRAFT_STORAGE_KEY);
-    if (!raw) return null;
-    const draft = normalizeOnboardingDraft(JSON.parse(raw) as Partial<OnboardingDraft>);
-    return isMeaningfulOnboardingDraft(draft) ? draft : null;
-  } catch {
-    return null;
-  }
+  const parsed = readLocalStorageValue<Partial<OnboardingDraft> | null>(ONBOARDING_DRAFT_STORAGE_KEY, null);
+  const draft = normalizeOnboardingDraft(parsed ?? undefined);
+  return isMeaningfulOnboardingDraft(draft) ? draft : null;
 }
 
 export function writeOnboardingDraft(draft: OnboardingDraft): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(ONBOARDING_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  writeLocalStorageValue(ONBOARDING_DRAFT_STORAGE_KEY, draft);
 }
 
 export function clearOnboardingDraft(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(ONBOARDING_DRAFT_STORAGE_KEY);
+  removeLocalStorageValue(ONBOARDING_DRAFT_STORAGE_KEY);
 }
 
 export function serverDraftToLocalDraft(serverDraft: ServerOnboardingDraft | null | undefined): OnboardingDraft | null {

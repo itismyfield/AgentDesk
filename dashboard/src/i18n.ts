@@ -1,9 +1,11 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { STORAGE_KEYS } from "./lib/storageKeys";
+import { readLocalStorageValue } from "./lib/useLocalStorage";
 
 export type UiLanguage = "ko" | "en" | "ja" | "zh";
-export const LANGUAGE_STORAGE_KEY = "climpire.language";
-export const LANGUAGE_USER_SET_STORAGE_KEY = "climpire.language.user_set";
+export const LANGUAGE_STORAGE_KEY = STORAGE_KEYS.language;
+export const LANGUAGE_USER_SET_STORAGE_KEY = STORAGE_KEYS.languageUserSet;
 
 export type LangText = {
   ko: string;
@@ -51,16 +53,11 @@ export function detectBrowserLanguage(): UiLanguage {
 }
 
 function detectRuntimeLanguage(): UiLanguage {
-  if (typeof window === "undefined") return "en";
-  let storedLanguage: string | null = null;
-  try {
-    const storage = window.localStorage as { getItem?: (key: string) => string | null } | undefined;
-    if (storage && typeof storage.getItem === "function") {
-      storedLanguage = storage.getItem(LANGUAGE_STORAGE_KEY);
-    }
-  } catch {
-    storedLanguage = null;
-  }
+  const storedLanguage = readLocalStorageValue<string | null>(LANGUAGE_STORAGE_KEY, null, {
+    validate: (value): value is string => typeof value === "string",
+    legacy: (raw) => raw,
+    warnOnInvalid: false,
+  });
   return parseLanguage(storedLanguage) ?? detectBrowserLanguage();
 }
 

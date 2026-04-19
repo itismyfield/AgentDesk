@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
+import { STORAGE_KEYS } from "../../lib/storageKeys";
+import { useLocalStorage } from "../../lib/useLocalStorage";
 import AutoQueuePanel from "./AutoQueuePanel";
 import PipelineVisualEditor from "./PipelineVisualEditor";
 import CardTimeline from "./CardTimeline";
@@ -183,7 +185,7 @@ export default function KanbanTab({
   const [signalStatusFilter, setSignalStatusFilter] = useState<"all" | "review" | "blocked" | "requested" | "stalled">("all");
   const [search, setSearch] = useState("");
   const [showClosed, setShowClosed] = useState(false);
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [storedSelectedCardId, setSelectedCardId] = useLocalStorage<string | null>(STORAGE_KEYS.kanbanDrawerLastId, null);
   const [editor, setEditor] = useState<EditorState>(EMPTY_EDITOR);
   const [assignIssue, setAssignIssue] = useState<GitHubIssue | null>(null);
   const [assignAssigneeId, setAssignAssigneeId] = useState("");
@@ -261,6 +263,7 @@ export default function KanbanTab({
     };
   }, [agents]);
 
+  const selectedCardId = typeof storedSelectedCardId === "string" ? storedSelectedCardId : null;
   const selectedCard = selectedCardId ? cardsById.get(selectedCardId) ?? null : null;
   const invalidateCardActivity = (cardId: string) => {
     ghCommentsCache.current.delete(cardId);
