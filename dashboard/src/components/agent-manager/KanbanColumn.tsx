@@ -4,6 +4,7 @@ import type {
   KanbanCard,
   KanbanCardStatus,
 } from "../../types";
+import { getProviderMeta } from "../../app/providerTheme";
 import {
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
@@ -34,6 +35,9 @@ export interface KanbanColumnProps {
   closingIssueNumber: number | null;
   assigningIssue: boolean;
   getAgentLabel: (agentId: string | null | undefined) => string;
+  getAgentProvider: (
+    agentId: string | null | undefined,
+  ) => Agent["cli_provider"] | null | undefined;
   resolveAgentFromLabels: (labels: Array<{ name: string; color: string }>) => Agent | null;
   onCardClick: (cardId: string) => void;
   onBacklogIssueClick: (issue: GitHubIssue) => void;
@@ -56,6 +60,7 @@ export default function KanbanColumn({
   closingIssueNumber,
   assigningIssue,
   getAgentLabel,
+  getAgentProvider,
   resolveAgentFromLabels,
   onCardClick,
   onBacklogIssueClick,
@@ -131,6 +136,7 @@ export default function KanbanColumn({
             key={card.id}
             card={card}
             tr={tr}
+            getAgentProvider={getAgentProvider}
             onCardClick={onCardClick}
             onUpdateCardStatus={onUpdateCardStatus}
             onSetActionError={onSetActionError}
@@ -238,6 +244,9 @@ function BacklogIssueCard({
 interface KanbanCardArticleProps {
   card: KanbanCard;
   tr: (ko: string, en: string) => string;
+  getAgentProvider: (
+    agentId: string | null | undefined,
+  ) => Agent["cli_provider"] | null | undefined;
   onCardClick: (cardId: string) => void;
   onUpdateCardStatus: (cardId: string, targetStatus: KanbanCardStatus) => void;
   onSetActionError: (error: string | null) => void;
@@ -246,10 +255,14 @@ interface KanbanCardArticleProps {
 function KanbanCardArticle({
   card,
   tr,
+  getAgentProvider,
   onCardClick,
   onUpdateCardStatus,
   onSetActionError,
 }: KanbanCardArticleProps) {
+  const provider = getAgentProvider(card.assignee_agent_id);
+  const providerMeta = provider ? getProviderMeta(provider) : null;
+
   return (
     <article
       onClick={() => onCardClick(card.id)}
@@ -257,19 +270,35 @@ function KanbanCardArticle({
       style={{
         borderColor: "rgba(148,163,184,0.2)",
         background: isReviewCard(card)
-          ? "linear-gradient(180deg, color-mix(in srgb, rgba(16,185,129,0.16) 78%, var(--th-card-bg) 22%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
+          ? "linear-gradient(180deg, color-mix(in oklch, var(--ok) 14%, var(--th-card-bg) 86%) 0%, color-mix(in oklch, var(--th-bg-surface) 96%, transparent) 100%)"
           : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-        borderLeft: isReviewCard(card) ? "3px solid rgba(16,185,129,0.6)" : undefined,
+        borderLeft: isReviewCard(card)
+          ? "3px solid color-mix(in oklch, var(--ok) 62%, transparent)"
+          : undefined,
       }}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <span
-            className="rounded-full px-2 py-0.5 text-xs bg-surface-medium"
-            style={{ color: "var(--th-text-secondary)" }}
-          >
-            {card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`}
-          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              className="rounded-full px-2 py-0.5 text-xs bg-surface-medium"
+              style={{ color: "var(--th-text-secondary)" }}
+            >
+              {card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`}
+            </span>
+            {providerMeta ? (
+              <span
+                className="rounded-full border px-2 py-0.5 text-[11px] font-semibold"
+                style={{
+                  color: providerMeta.color,
+                  background: providerMeta.bg,
+                  borderColor: providerMeta.border,
+                }}
+              >
+                {providerMeta.label}
+              </span>
+            ) : null}
+          </div>
           <h4 className="mt-2 text-sm font-semibold leading-snug" style={{ color: "var(--th-text-heading)" }}>
             {card.title}
           </h4>
@@ -280,7 +309,7 @@ function KanbanCardArticle({
             target="_blank"
             rel="noreferrer"
             className="text-xs hover:underline"
-            style={{ color: "#93c5fd" }}
+            style={{ color: "var(--info)" }}
             onClick={(event) => event.stopPropagation()}
           >
             GH

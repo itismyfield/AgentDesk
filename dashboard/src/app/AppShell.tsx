@@ -9,11 +9,9 @@ import {
   Home,
   LayoutDashboard,
   Menu,
-  Moon,
   Search,
   Settings,
   Sparkles,
-  SunMedium,
   Trophy,
   Users,
   Wifi,
@@ -59,6 +57,19 @@ import {
   type AppRouteId,
 } from "./routes";
 import type { DashboardTab } from "./dashboardTabs";
+import {
+  DEFAULT_ACCENT_PRESET,
+  THEME_STORAGE_KEY,
+  applyThemeAccentDataset,
+  persistAccentPreset,
+  persistThemePreference,
+  readStoredAccentPreset,
+  readStoredThemePreference,
+  readThemePreferenceFromPatch,
+  resolveThemePreference,
+  type AccentPreset,
+  type ThemePreference,
+} from "./themePreferences";
 
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const DashboardPageView = lazy(() => import("../components/DashboardPageView"));
@@ -86,6 +97,29 @@ type AgentsPageTab = "agents" | "departments" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "agentdesk.sidebar.collapsed";
+
+const THEME_OPTIONS: Array<{
+  id: ThemePreference;
+  labelKo: string;
+  labelEn: string;
+}> = [
+  { id: "auto", labelKo: "자동", labelEn: "Auto" },
+  { id: "dark", labelKo: "다크", labelEn: "Dark" },
+  { id: "light", labelKo: "라이트", labelEn: "Light" },
+];
+
+const ACCENT_OPTIONS: Array<{
+  id: AccentPreset;
+  label: string;
+  token: string;
+}> = [
+  { id: "indigo", label: "Indigo", token: "--accent-indigo" },
+  { id: "violet", label: "Violet", token: "--accent-violet" },
+  { id: "amber", label: "Amber", token: "--accent-amber" },
+  { id: "rose", label: "Rose", token: "--accent-rose" },
+  { id: "cyan", label: "Cyan", token: "--accent-cyan" },
+  { id: "lime", label: "Lime", token: "--accent-lime" },
+];
 
 export default function AppShell({
   wsConnected,
@@ -141,6 +175,15 @@ export default function AppShell({
       window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true"
     );
   });
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
+    readStoredThemePreference(window.localStorage, settings.theme),
+  );
+  const [accentPreset, setAccentPreset] = useState<AccentPreset>(() =>
+    readStoredAccentPreset(window.localStorage, DEFAULT_ACCENT_PRESET),
+  );
+  const [prefersDarkScheme, setPrefersDarkScheme] = useState(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
 
   const spriteMap = useSpriteMap(agents);
   const unresolvedMeetingsCount = roundTableMeetings.filter(
@@ -150,7 +193,10 @@ export default function AppShell({
     (notification) => Date.now() - notification.ts < 60_000,
   ).length;
   const notificationBadgeCount = unresolvedMeetingsCount + unreadCount;
-  const resolvedTheme = getResolvedTheme(settings.theme);
+  const resolvedTheme = useMemo(
+    () => resolveThemePreference(themePreference, prefersDarkScheme),
+    [prefersDarkScheme, themePreference],
+  );
   const recentNotifications = notifications.slice(0, 6);
 
   useEffect(() => {
@@ -159,6 +205,38 @@ export default function AppShell({
       String(sidebarCollapsed),
     );
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = (matches: boolean) => setPrefersDarkScheme(matches);
+
+    sync(query.matches);
+
+    const listener = (event: MediaQueryListEvent) => sync(event.matches);
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", listener);
+      return () => query.removeEventListener("change", listener);
+    }
+
+    query.addListener(listener);
+    return () => query.removeListener(listener);
+  }, []);
+
+  useEffect(() => {
+    if (window.localStorage.getItem(THEME_STORAGE_KEY) == null) {
+      setThemePreference(settings.theme);
+    }
+  }, [settings.theme]);
+
+  useEffect(() => {
+    persistThemePreference(window.localStorage, themePreference);
+    persistAccentPreset(window.localStorage, accentPreset);
+    applyThemeAccentDataset(
+      document.documentElement,
+      resolvedTheme,
+      accentPreset,
+    );
+  }, [accentPreset, resolvedTheme, themePreference]);
 
   useEffect(() => {
     setMobileSidebarOpen(false);
@@ -198,21 +276,16 @@ export default function AppShell({
     [navigate],
   );
 
-  const toggleTheme = useCallback(async () => {
-    const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
-    try {
-      await persistSettingsPatch({ theme: nextTheme });
-      pushNotification(
-        tr("테마가 변경되었습니다.", "Theme updated."),
-        "success",
-      );
-    } catch {
-      pushNotification(
-        tr("테마를 저장하지 못했습니다.", "Failed to save theme."),
-        "error",
-      );
-    }
-  }, [persistSettingsPatch, pushNotification, resolvedTheme, tr]);
+  const handleSettingsSave = useCallback(
+    async (patch: Record<string, unknown>) => {
+      const requestedThemePreference = readThemePreferenceFromPatch(patch);
+      await persistSettingsPatch(patch);
+      if (requestedThemePreference) {
+        setThemePreference(requestedThemePreference);
+      }
+    },
+    [persistSettingsPatch],
+  );
 
   const handleOfficeChanged = useCallback(() => {
     refreshOffices();
@@ -530,21 +603,6 @@ export default function AppShell({
             </label>
 
             <div className="ml-auto flex items-center gap-2 sm:ml-0">
-              <button
-                type="button"
-                onClick={() => void toggleTheme()}
-                className="flex h-10 w-10 items-center justify-center rounded-xl border transition-colors hover:bg-white/5"
-                style={{ borderColor: "var(--th-border-subtle)" }}
-                aria-label={tr("테마 전환", "Toggle theme")}
-                title={tr("테마 전환", "Toggle theme")}
-              >
-                {resolvedTheme === "dark" ? (
-                  <SunMedium size={18} />
-                ) : (
-                  <Moon size={18} />
-                )}
-              </button>
-
               <div className="relative">
                 <button
                   type="button"
@@ -699,6 +757,101 @@ export default function AppShell({
               >
                 <Settings size={18} />
               </button>
+            </div>
+          </div>
+
+          <div
+            className="mt-3 flex flex-col gap-3 rounded-2xl border px-3 py-3 xl:flex-row xl:items-center xl:justify-between"
+            style={{
+              borderColor: "var(--th-border-subtle)",
+              background:
+                "linear-gradient(180deg, color-mix(in oklch, var(--bg-1) 94%, transparent) 0%, color-mix(in oklch, var(--bg-2) 98%, transparent) 100%)",
+            }}
+          >
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span
+                className="font-display text-[11px] font-semibold uppercase tracking-[0.18em]"
+                style={{ color: "var(--fg-faint)" }}
+              >
+                Theme
+              </span>
+              <div
+                className="flex items-center gap-1 rounded-full p-1"
+                style={{
+                  background:
+                    "color-mix(in oklch, var(--bg-3) 72%, transparent)",
+                }}
+              >
+                {THEME_OPTIONS.map((option) => {
+                  const active = themePreference === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => setThemePreference(option.id)}
+                      aria-pressed={active}
+                      className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
+                      style={
+                        active
+                          ? {
+                              background: "var(--accent-soft)",
+                              color: "var(--accent)",
+                            }
+                          : { color: "var(--fg-muted)" }
+                      }
+                    >
+                      {isKo ? option.labelKo : option.labelEn}
+                    </button>
+                  );
+                })}
+              </div>
+              <span
+                className="rounded-full px-2 py-1 text-[11px]"
+                style={{
+                  background: "var(--th-overlay-medium)",
+                  color: "var(--fg-muted)",
+                }}
+              >
+                {isKo ? `현재 ${resolvedTheme}` : `Live ${resolvedTheme}`}
+              </span>
+            </div>
+
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span
+                className="font-display text-[11px] font-semibold uppercase tracking-[0.18em]"
+                style={{ color: "var(--fg-faint)" }}
+              >
+                Accent
+              </span>
+              <div className="flex items-center gap-1.5">
+                {ACCENT_OPTIONS.map((option) => {
+                  const active = accentPreset === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      title={option.label}
+                      aria-label={option.label}
+                      aria-pressed={active}
+                      onClick={() => setAccentPreset(option.id)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full transition-transform"
+                      style={{
+                        border: active
+                          ? "2px solid var(--fg)"
+                          : "1px solid color-mix(in oklch, var(--line) 74%, transparent)",
+                        background:
+                          "color-mix(in oklch, var(--bg-2) 92%, transparent)",
+                        transform: active ? "translateY(-1px)" : undefined,
+                      }}
+                    >
+                      <span
+                        className="h-4 w-4 rounded-full"
+                        style={{ background: `var(${option.token})` }}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </header>
@@ -940,7 +1093,7 @@ export default function AppShell({
                 element={
                   <SettingsView
                     settings={settings}
-                    onSave={persistSettingsPatch}
+                    onSave={handleSettingsSave}
                     isKo={isKo}
                   />
                 }
@@ -1489,14 +1642,6 @@ function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const pending = Math.max(totalIssues - created - failed - discarded, 0);
 
   return pending > 0 || failed > 0;
-}
-
-function getResolvedTheme(theme: CompanySettings["theme"]): "dark" | "light" {
-  if (theme !== "auto") return theme;
-  if (typeof window === "undefined") return "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
 }
 
 function notificationColor(type: Notification["type"]): string {

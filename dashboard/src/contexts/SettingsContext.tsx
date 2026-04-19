@@ -2,8 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
 import type { UiLanguage } from "../i18n";
 import * as api from "../api/client";
-import { STORAGE_KEYS } from "../lib/storageKeys";
-import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import { useOffice } from "./OfficeContext";
 
 // ── Context value ──
@@ -70,25 +68,6 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
     window.addEventListener("pcd-ws-event", handleWs);
     return () => window.removeEventListener("pcd-ws-event", handleWs);
   }, [refreshStats]);
-
-  // Apply theme to DOM — handles auto (system preference) and explicit dark/light
-  useEffect(() => {
-    const applyTheme = (nextTheme: "dark" | "light") => {
-      document.documentElement.dataset.theme = nextTheme;
-      writeLocalStorageValue(STORAGE_KEYS.theme, nextTheme);
-    };
-    if (settings.theme !== "auto") {
-      applyTheme(settings.theme);
-      return;
-    }
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => {
-      applyTheme(mq.matches ? "dark" : "light");
-    };
-    apply();
-    mq.addEventListener("change", apply);
-    return () => mq.removeEventListener("change", apply);
-  }, [settings.theme]);
 
   const isKo = settings.language === "ko";
   const locale = settings.language;

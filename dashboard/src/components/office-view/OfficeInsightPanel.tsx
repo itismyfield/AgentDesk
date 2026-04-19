@@ -5,6 +5,10 @@ import { getAgentWarnings } from "../../agent-insights";
 import { getFontFamilyForText } from "../../lib/fonts";
 import AgentAvatar from "../AgentAvatar";
 import {
+  getProviderLevelColors,
+  getProviderMeta,
+} from "../../app/providerTheme";
+import {
   SurfaceActionButton,
   SurfaceCard,
   SurfaceListItem,
@@ -33,6 +37,19 @@ function timeAgo(ts: number, isKo: boolean): string {
   if (hrs < 24) return isKo ? `${hrs}시간 전` : `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   return isKo ? `${days}일 전` : `${days}d ago`;
+}
+
+function eventAccent(type: Notification["type"]): string {
+  switch (type) {
+    case "success":
+      return "var(--ok)";
+    case "warning":
+      return "var(--warn)";
+    case "error":
+      return "var(--err)";
+    default:
+      return "var(--info)";
+  }
 }
 
 export default function OfficeInsightPanel({
@@ -216,15 +233,7 @@ export default function OfficeInsightPanel({
                       title={item.message}
                       ts={item.ts}
                       isKo={isKo}
-                      accent={
-                        item.type === "success"
-                          ? "#34d399"
-                          : item.type === "warning"
-                            ? "#fbbf24"
-                            : item.type === "error"
-                              ? "#f87171"
-                              : "#60a5fa"
-                      }
+                      accent={eventAccent(item.type)}
                     />
                   ))}
                 </div>
@@ -244,7 +253,7 @@ export default function OfficeInsightPanel({
                       title={item.summary}
                       ts={item.created_at}
                       isKo={isKo}
-                      accent="#f59e0b"
+                      accent="var(--warn)"
                       subtitle={`${item.entity_type}:${item.entity_id}`}
                     />
                   ))}
@@ -292,15 +301,7 @@ export default function OfficeInsightPanel({
                   title={item.message}
                   ts={item.ts}
                   isKo={isKo}
-                  accent={
-                    item.type === "success"
-                      ? "#34d399"
-                      : item.type === "warning"
-                        ? "#fbbf24"
-                        : item.type === "error"
-                          ? "#f87171"
-                          : "#60a5fa"
-                  }
+                  accent={eventAccent(item.type)}
                 />
               ))}
             </div>
@@ -320,7 +321,7 @@ export default function OfficeInsightPanel({
                   title={item.summary}
                   ts={item.created_at}
                   isKo={isKo}
-                  accent="#f59e0b"
+                  accent="var(--warn)"
                   subtitle={`${item.entity_type}:${item.entity_id}`}
                 />
               ))}
@@ -636,16 +637,6 @@ export function transformRLProviders(raw: RawRLProvider[]): RLProvider[] {
     }));
 }
 
-const RL_COLORS: Record<string, { normal: string; warning: string; danger: string; accent: string }> = {
-  Claude: { accent: "#f59e0b", normal: "#f59e0b", warning: "#ea580c", danger: "#ef4444" },
-  Codex: { accent: "#34d399", normal: "#34d399", warning: "#fbbf24", danger: "#f87171" },
-  Gemini: { accent: "#3b82f6", normal: "#3b82f6", warning: "#f59e0b", danger: "#ef4444" },
-  Qwen: { accent: "#8b5cf6", normal: "#8b5cf6", warning: "#f59e0b", danger: "#ef4444" },
-  OpenCode: { accent: "#06b6d4", normal: "#06b6d4", warning: "#f59e0b", danger: "#ef4444" },
-  Copilot: { accent: "#10b981", normal: "#10b981", warning: "#f59e0b", danger: "#ef4444" },
-  Antigravity: { accent: "#f97316", normal: "#f97316", warning: "#f59e0b", danger: "#ef4444" },
-  API: { accent: "#94a3b8", normal: "#94a3b8", warning: "#f59e0b", danger: "#ef4444" },
-};
 const RL_ICONS: Record<string, string> = {
   Claude: "🤖",
   Codex: "⚡",
@@ -656,13 +647,6 @@ const RL_ICONS: Record<string, string> = {
   Antigravity: "🌀",
   API: "🔌",
 };
-
-function barColor(provider: string, level: string) {
-  const p = RL_COLORS[provider] || RL_COLORS.Codex;
-  if (level === "danger") return p.danger;
-  if (level === "warning") return p.warning;
-  return p.normal;
-}
 
 function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
   const [providers, setProviders] = useState<RLProvider[]>([]);
@@ -687,19 +671,28 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
   return (
     <div className="mt-2 space-y-1">
       {providers.map((p) => {
-        const accent = (RL_COLORS[p.provider] || RL_COLORS.Codex).accent;
+        const providerMeta = getProviderMeta(p.provider);
         const visible = p.buckets;
         return (
           <div key={p.provider} className="flex items-center gap-0">
             {/* Fixed-width left: provider + stale placeholder */}
             <div className="flex items-center gap-1 shrink-0" style={{ width: 96 }}>
-              <span className="text-xs font-bold uppercase truncate" style={{ color: accent }}>
+              <span
+                className="text-xs font-bold uppercase truncate"
+                style={{ color: providerMeta.color }}
+              >
                 {(RL_ICONS[p.provider] ?? "•")} {p.provider}
               </span>
               {p.stale ? (
                 <span
                   className="rounded px-0.5 text-[7px] font-medium shrink-0"
-                  style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)" }}
+                  style={{
+                    color: "var(--warn)",
+                    background:
+                      "color-mix(in oklch, var(--warn) 14%, var(--bg-2) 86%)",
+                    border:
+                      "1px solid color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
+                  }}
                 >
                   {isKo ? "지연" : "STALE"}
                 </span>
@@ -711,9 +704,11 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
                   <span
                     className="rounded px-1.5 py-0.5 text-[9px] font-semibold shrink-0"
                     style={{
-                      color: "#cbd5f5",
-                      background: "rgba(148,163,184,0.12)",
-                      border: "1px solid rgba(148,163,184,0.2)",
+                      color: "var(--fg-dim)",
+                      background:
+                        "color-mix(in oklch, var(--fg-faint) 10%, var(--bg-2) 90%)",
+                      border:
+                        "1px solid color-mix(in oklch, var(--fg-faint) 20%, var(--line) 80%)",
                     }}
                   >
                     {p.unsupported ? "N/A" : (isKo ? "비어있음" : "EMPTY")}
@@ -729,17 +724,25 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
               <div className="flex-1 grid grid-cols-2 gap-x-2">
                 {visible.map((b) => (
                   <div key={b.id} className="flex items-center gap-1">
-                    <span className="text-xs font-bold shrink-0 w-[14px]" style={{ color: barColor(p.provider, b.level) }}>
+                    <span
+                      className="text-xs font-bold shrink-0 w-[14px]"
+                      style={{ color: getProviderLevelColors(p.provider, b.level).text }}
+                    >
                       {b.label}
                     </span>
                     <div className="flex-1 min-w-0">
-                      <div className="relative h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+                      <div
+                        className="relative h-[3px] rounded-full overflow-hidden"
+                        style={{ background: "var(--line-soft)" }}
+                      >
                         <div
                           className="absolute inset-y-0 left-0 rounded-full"
                           style={{
                             width: b.utilization === null ? "0%" : `${Math.min(b.utilization, 100)}%`,
                             background:
-                              b.utilization === null ? "transparent" : barColor(p.provider, b.level),
+                              b.utilization === null
+                                ? "transparent"
+                                : getProviderLevelColors(p.provider, b.level).bar,
                           }}
                         />
                       </div>
@@ -750,7 +753,7 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
                         color:
                           b.utilization === null
                             ? "var(--th-text-muted)"
-                            : barColor(p.provider, b.level),
+                            : getProviderLevelColors(p.provider, b.level).text,
                       }}
                     >
                       {b.utilization === null ? "N/A" : `${b.utilization}%`}
