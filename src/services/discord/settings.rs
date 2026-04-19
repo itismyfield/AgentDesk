@@ -74,11 +74,16 @@ pub(crate) fn discord_token_hash(token: &str) -> String {
 }
 
 fn default_allowed_tools_for_provider(provider: &ProviderKind) -> Vec<String> {
-    let _ = provider;
-    DEFAULT_ALLOWED_TOOLS
-        .iter()
-        .map(|tool| (*tool).to_string())
-        .collect()
+    // Qwen validates `allowed_tools` against its own QWEN_SUPPORTED_ALLOWED_TOOLS list at
+    // session start and errors on unknown entries. The shared DEFAULT_ALLOWED_TOOLS now
+    // includes Claude-only tools (Monitor, BashOutput, KillBash, SlashCommand) that Qwen
+    // does not recognize, so a Qwen bot with an omitted `allowed_tools` field would fail
+    // to launch. Hand Qwen its own supported list instead.
+    let source: &[&str] = match provider {
+        ProviderKind::Qwen => crate::services::qwen::QWEN_SUPPORTED_ALLOWED_TOOLS,
+        _ => DEFAULT_ALLOWED_TOOLS,
+    };
+    source.iter().map(|tool| (*tool).to_string()).collect()
 }
 
 fn find_bot_settings_entry<'a>(
@@ -780,7 +785,6 @@ memory:
                         "/tmp",
                         ChannelId::new(1),
                         "tok",
-                        "",
                         None,
                         false,
                         super::super::prompt_builder::DispatchProfile::Full,
@@ -862,7 +866,7 @@ memory:
     }
 
     #[test]
-    fn test_load_bot_settings_uses_default_allowed_tools_for_qwen_when_omitted() {
+    fn test_load_bot_settings_uses_qwen_supported_tools_for_qwen_when_omitted() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
             fs::create_dir_all(&settings_dir).unwrap();
@@ -884,7 +888,7 @@ memory:
             assert_eq!(settings.provider, ProviderKind::Qwen);
             assert_eq!(
                 settings.allowed_tools,
-                DEFAULT_ALLOWED_TOOLS
+                crate::services::qwen::QWEN_SUPPORTED_ALLOWED_TOOLS
                     .iter()
                     .map(|tool| (*tool).to_string())
                     .collect::<Vec<_>>()
