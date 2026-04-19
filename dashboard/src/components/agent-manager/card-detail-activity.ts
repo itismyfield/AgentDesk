@@ -8,6 +8,8 @@ export interface ActivityTextPresentation {
   tone: "default" | "warn" | "danger";
 }
 
+type ActivityTone = ActivityTextPresentation["tone"];
+
 const KNOWN_KANBAN_STATUSES = new Set<KanbanCardStatus>([
   "backlog",
   "ready",
@@ -130,43 +132,160 @@ function humanizeVerdictLabel(verdict: string, tr: Translator): string | null {
   }
 }
 
-function toneForText(text: string): ActivityTextPresentation["tone"] {
-  const lowered = text.toLowerCase();
-  if (
-    lowered.startsWith("blocked:")
-    || lowered.includes("failed")
-    || lowered.includes("error")
-  ) {
+function mergeToneHints(...tones: Array<ActivityTone | null | undefined>): ActivityTone | null {
+  let resolved: ActivityTone | null = null;
+  for (const tone of tones) {
+    if (tone === "danger") return "danger";
+    if (tone === "warn") resolved = "warn";
+    else if (tone === "default" && !resolved) resolved = "default";
+  }
+  return resolved;
+}
+
+function normalizedCode(value: string | null | undefined): string | null {
+  const text = cleanText(value);
+  return text ? text.toLowerCase() : null;
+}
+
+function toneForDecision(decision: string | null | undefined): ActivityTone | null {
+  switch (normalizedCode(decision)) {
+    case "accept":
+      return "default";
+    case "reject":
+    case "dispute":
+    case "dismiss":
+    case "rework":
+    case "cancel":
+      return "warn";
+    default:
+      return null;
+  }
+}
+
+function toneForPmDecision(decision: string | null | undefined): ActivityTone | null {
+  switch (normalizedCode(decision)) {
+    case "accept":
+      return "default";
+    case "rework":
+    case "cancel":
+      return "warn";
+    default:
+      return null;
+  }
+}
+
+function toneForStatusCode(status: string | null | undefined): ActivityTone | null {
+  const normalized = normalizedCode(status);
+  if (!normalized) return null;
+
+  switch (normalized) {
+    case "ok":
+    case "pass":
+    case "passed":
+    case "approved":
+    case "success":
+    case "succeeded":
+    case "completed":
+    case "phase_gate_passed":
+      return "default";
+    case "cancel":
+    case "cancelled":
+    case "canceled":
+      return "warn";
+    case "blocked":
+    case "fail":
+    case "failed":
+    case "error":
+      return "danger";
+    default:
+      break;
+  }
+
+  if (normalized.startsWith("blocked:") || normalized.startsWith("blocked.")) {
     return "danger";
   }
-  if (
-    lowered.includes("cancel")
-    || lowered.includes("rework")
-    || lowered.includes("force")
-    || lowered.includes("dispute")
-    || lowered.includes("reject")
-  ) {
+  if (/(^|.*_)(pass|passed|approved|success|succeeded)$/.test(normalized)) {
+    return "default";
+  }
+  if (/(^|.*_)(cancel|cancelled|canceled)$/.test(normalized)) {
     return "warn";
   }
-  return "default";
+  if (/(^|.*_)(fail|failed|error)$/.test(normalized)) {
+    return "danger";
+  }
+  return null;
+}
+
+function toneForVerdict(verdict: string | null | undefined): ActivityTone | null {
+  switch (normalizedCode(verdict)) {
+    case "pass":
+    case "approved":
+      return "default";
+    case "improve":
+    case "rework":
+    case "reject":
+      return "warn";
+    default:
+      return toneForStatusCode(verdict);
+  }
+}
+
+function toneForReasonCode(reason: string | null | undefined): ActivityTone | null {
+  const normalized = normalizedCode(reason);
+  if (!normalized) return null;
+
+  switch (normalized) {
+    case "auto_cancelled_on_terminal_card":
+      return "warn";
+    case "manual reopen":
+      return "default";
+    default:
+      break;
+  }
+
+  if (/^force-transition to [a-z_]+$/.test(normalized)) {
+    return "warn";
+  }
+  if (normalized.startsWith("blocked:") || normalized.startsWith("blocked.")) {
+    return "danger";
+  }
+  return null;
+}
+
+function toneForPlainResult(result: string): ActivityTone | null {
+  const normalized = normalizedCode(result);
+  if (!normalized) return null;
+
+  switch (normalized) {
+    case "ok (force)":
+      return "warn";
+    case "review passed":
+      return "default";
+    default:
+      return mergeToneHints(
+        toneForReasonCode(normalized),
+        toneForVerdict(normalized),
+        toneForStatusCode(normalized),
+      );
+  }
 }
 
 function buildPresentation(
   headline: string | null,
   detail: string | null,
-  toneHint: ActivityTextPresentation["tone"] | null = null,
+  toneHint: ActivityTone | null = null,
 ): ActivityTextPresentation | null {
   if (headline && detail && detail !== headline) {
     return {
       text: `${headline}: ${detail}`,
-      tone: toneHint ?? toneForText(`${headline} ${detail}`),
+      tone: toneHint ?? "default",
     };
   }
   if (headline) {
-    return { text: headline, tone: toneHint ?? toneForText(headline) };
+    return { text: headline, tone: toneHint ?? "default" };
   }
   if (detail) {
-    return { text: detail, tone: toneHint ?? toneForText(detail) };
+    return { text: detail, tone: toneHint ?? "default" };
   }
   return null;
 }
@@ -175,6 +294,8 @@ function presentationFromRecord(record: Record<string, unknown>, tr: Translator)
   const decision = firstStringField(record, ["decision"]);
   const pmDecision = firstStringField(record, ["pm_decision"]);
   const verdict = firstStringField(record, ["verdict"]);
+  const status = firstStringField(record, ["status"]);
+  const reasonCode = firstStringField(record, ["reason", "noop_reason"]);
   const detail = firstStringField(record, [
     "comment",
     "reason",
@@ -194,8 +315,12 @@ function presentationFromRecord(record: Record<string, unknown>, tr: Translator)
     || null;
 
   const normalizedDetail = detail ? humanizeReasonText(detail, tr) : null;
-  const toneHint = toneForText(
-    [pmDecision, decision, verdict, detail].filter(Boolean).join(" "),
+  const toneHint = mergeToneHints(
+    toneForPmDecision(pmDecision),
+    toneForDecision(decision),
+    toneForVerdict(verdict),
+    toneForStatusCode(status),
+    toneForReasonCode(reasonCode),
   );
   const presentation = buildPresentation(headline, normalizedDetail, toneHint);
   if (presentation) return presentation;
@@ -204,7 +329,12 @@ function presentationFromRecord(record: Record<string, unknown>, tr: Translator)
     const nested = record[key];
     if (typeof nested === "string") {
       const nestedText = cleanText(nested);
-      if (nestedText) return { text: humanizeReasonText(nestedText, tr), tone: toneForText(nestedText) };
+      if (nestedText) {
+        return {
+          text: humanizeReasonText(nestedText, tr),
+          tone: toneForPlainResult(nestedText) ?? "default",
+        };
+      }
     }
     if (isRecord(nested)) {
       const nestedPresentation = presentationFromRecord(nested, tr);
@@ -267,5 +397,5 @@ export function formatAuditResult(
   }
 
   const text = humanizePlainResult(normalized, tr);
-  return { text, tone: toneForText(normalized) };
+  return { text, tone: toneForPlainResult(normalized) ?? "default" };
 }

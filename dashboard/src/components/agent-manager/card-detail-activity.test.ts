@@ -27,6 +27,18 @@ describe("card-detail-activity helpers", () => {
     });
   });
 
+  it("ignores freeform comment keywords when semantic fields are non-warning", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({ decision: "accept", comment: "error keyword should not drive tone" }),
+        tr,
+      ),
+    ).toEqual({
+      text: "Accepted review feedback: error keyword should not drive tone",
+      tone: "default",
+    });
+  });
+
   it("formats PM rework reasons from audit JSON", () => {
     expect(
       formatAuditResult(
@@ -51,6 +63,18 @@ describe("card-detail-activity helpers", () => {
     });
   });
 
+  it("defaults detail-only audit JSON to neutral tone", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({ comment: "error keyword should stay neutral without structured fields" }),
+        tr,
+      ),
+    ).toEqual({
+      text: "error keyword should stay neutral without structured fields",
+      tone: "default",
+    });
+  });
+
   it("humanizes cancellation reason codes", () => {
     expect(
       formatAuditResult(
@@ -67,6 +91,13 @@ describe("card-detail-activity helpers", () => {
     expect(formatAuditResult("OK (force)", tr)).toEqual({
       text: "Forced transition",
       tone: "warn",
+    });
+  });
+
+  it("keeps blocked machine markers as danger", () => {
+    expect(formatAuditResult("BLOCKED: waiting for reviewer", tr)).toEqual({
+      text: "Blocked: waiting for reviewer",
+      tone: "danger",
     });
   });
 
