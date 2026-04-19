@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Args;
 use libsql_rusqlite::{Connection, OptionalExtension};
@@ -19,7 +21,12 @@ pub struct PostgresCutoverArgs {
     /// Optional directory for JSONL archive snapshots
     #[arg(long = "archive-dir", value_name = "PATH")]
     pub archive_dir: Option<String>,
-    /// Skip PostgreSQL import and only report/export the SQLite history
+    /// Skip PostgreSQL import and only report/export the SQLite history.
+    ///
+    /// This path skips the `BEGIN IMMEDIATE` write barrier on SQLite, so it
+    /// MUST run with dcserver stopped to guarantee a consistent snapshot. The
+    /// CLI will refuse to proceed when a live dcserver is detected unless
+    /// `--allow-runtime-active` is set.
     #[arg(long)]
     pub skip_pg_import: bool,
     /// Acknowledge and proceed even when SQLite still has unsent message_outbox
@@ -28,6 +35,13 @@ pub struct PostgresCutoverArgs {
     /// stale and will not need to be re-delivered.
     #[arg(long = "allow-unsent-messages")]
     pub allow_unsent_messages: bool,
+    /// Override the runtime-active safety check for archive-only cutover.
+    ///
+    /// Use only when you know the workload is frozen (e.g. dcserver paused at
+    /// OS level, snapshot taken from an offline copy). Detection still runs
+    /// and is reflected in the report; this flag downgrades it to a warning.
+    #[arg(long = "allow-runtime-active")]
+    pub allow_runtime_active: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -88,7 +102,53 @@ struct PostgresCutoverReport {
     postgres_after: Option<PgCutoverCounts>,
     archive: Option<ArchiveOutput>,
     imported: Option<ImportSummary>,
+    runtime_active: Option<RuntimeActiveStatus>,
     blocker: Option<String>,
+}
+
+/// Outcome of the dcserver runtime-active check performed before archive-only
+/// cutover. A `Some` value is included in the cutover report whenever the
+/// archive-only path is exercised (full PG import already holds a write
+/// barrier, so the check is informational only there).
+#[derive(Debug, Clone, Default, Serialize)]
+struct RuntimeActiveStatus {
+    /// True when at least one signal flagged dcserver as currently running.
+    active: bool,
+    /// Pid file probe outcome; absent when no pid file path could be derived.
+    pid_file: Option<PidFileSignal>,
+    /// TCP probe outcome; absent when host/port could not be resolved.
+    tcp: Option<TcpSignal>,
+    /// True when the operator passed `--allow-runtime-active` to bypass the
+    /// blocker. The detection result is preserved either way.
+    overridden: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct PidFileSignal {
+    path: String,
+    /// True when the file existed at probe time.
+    exists: bool,
+    /// PID parsed from the file when the file exists and is well-formed.
+    pid: Option<u32>,
+    /// True when the recorded pid responds to `kill -0` (i.e. the process is
+    /// alive). False when the file is stale.
+    process_alive: bool,
+    /// Detection error (e.g. parse failure). Populated only when something
+    /// unexpected happened — the cutover treats unexpected probe errors as a
+    /// false positive (active=true) to keep the safety bias conservative.
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TcpSignal {
+    host: String,
+    port: u16,
+    /// True when a TCP connection to the configured server address succeeded.
+    listening: bool,
+    /// Detection error, populated only when probing failed unexpectedly (e.g.
+    /// hostname resolution failed). A simple "connection refused" is reported
+    /// as `listening: false` with no error.
+    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -245,6 +305,21 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
     }
 
     let config = load_effective_config()?;
+    // Archive-only cutover does not hold a SQLite write barrier, so a live
+    // dcserver could mutate audit_logs/session_transcripts mid-export. Probe
+    // the runtime *before* opening the SQLite connection so we can refuse fast
+    // and avoid even the read-only connection on a hot DB.
+    let runtime_active = if args.skip_pg_import {
+        Some(detect_runtime_active(
+            crate::config::runtime_root().as_deref(),
+            &config.server.host,
+            config.server.port,
+            args.allow_runtime_active,
+        ))
+    } else {
+        None
+    };
+
     let need_history_rows = args.archive_dir.is_some() || !args.skip_pg_import;
     let need_live_rows = !args.skip_pg_import;
     let pg_pool = if args.skip_pg_import {
@@ -288,10 +363,11 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
             postgres_after: None,
             archive: None,
             imported: None,
+            runtime_active: runtime_active.clone(),
             blocker: None,
         };
 
-        report.blocker = cutover_blocker(&args, &report.sqlite);
+        report.blocker = cutover_blocker(&args, &report.sqlite, runtime_active.as_ref());
 
         if args.dry_run || report.blocker.is_some() {
             report.ok = report.blocker.is_none();
@@ -348,12 +424,28 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
 fn cutover_blocker(
     args: &PostgresCutoverArgs,
     sqlite_counts: &SqliteCutoverCounts,
+    runtime_active: Option<&RuntimeActiveStatus>,
 ) -> Option<String> {
-    if args.skip_pg_import && sqlite_counts.has_live_state() {
-        return Some(
-            "sqlite still has in-flight dispatch/session/outbox/message state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
-                .to_string(),
-        );
+    if args.skip_pg_import {
+        if let Some(status) = runtime_active
+            && status.active
+            && !status.overridden
+        {
+            return Some(format!(
+                "dcserver runtime appears active ({}); archive-only cutover skips the SQLite write \
+                 barrier and would race against live audit_logs/session_transcripts writes. Stop \
+                 dcserver first (e.g. `launchctl bootout gui/$(id -u)/com.agentdesk.release`) or \
+                 pass `--allow-runtime-active` if the workload is provably frozen.",
+                describe_runtime_active(status)
+            ));
+        }
+
+        if sqlite_counts.has_live_state() {
+            return Some(
+                "sqlite still has in-flight dispatch/session/outbox/message state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
+                    .to_string(),
+            );
+        }
     }
 
     if !args.skip_pg_import && sqlite_counts.open_dispatch_outbox > 0 {
@@ -376,6 +468,205 @@ after confirming the rows are stale and safe to drop.",
     }
 
     None
+}
+
+fn describe_runtime_active(status: &RuntimeActiveStatus) -> String {
+    let mut signals: Vec<String> = Vec::new();
+    if let Some(pid) = status.pid_file.as_ref() {
+        if pid.process_alive {
+            match pid.pid {
+                Some(value) => signals.push(format!("pid {value} alive at {}", pid.path)),
+                None => signals.push(format!("pid file alive at {}", pid.path)),
+            }
+        } else if let Some(error) = pid.error.as_ref() {
+            signals.push(format!("pid probe error: {error}"));
+        }
+    }
+    if let Some(tcp) = status.tcp.as_ref() {
+        if tcp.listening {
+            signals.push(format!(
+                "TCP {host}:{port} accepting connections",
+                host = tcp.host,
+                port = tcp.port
+            ));
+        } else if let Some(error) = tcp.error.as_ref() {
+            signals.push(format!(
+                "TCP probe error ({}:{}): {error}",
+                tcp.host, tcp.port
+            ));
+        }
+    }
+    if signals.is_empty() {
+        "no specific signals captured".to_string()
+    } else {
+        signals.join("; ")
+    }
+}
+
+/// Default TCP probe timeout for the dcserver runtime check. Kept short so the
+/// archive-only preflight does not stall when the configured host is firewalled.
+const RUNTIME_TCP_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Probe whether dcserver is currently running. Two signals are checked and
+/// merged: (1) the canonical `runtime/dcserver.pid` file at the runtime root,
+/// and (2) a TCP connect to the configured server `host:port`. Either signal
+/// firing is enough to declare the runtime active. Detection failures (any
+/// non-empty `error` on either probe) are also promoted to `active=true` so
+/// the safety bias is genuinely conservative — operator can still pass
+/// `--allow-runtime-active` to override after manual verification.
+fn detect_runtime_active(
+    runtime_root: Option<&Path>,
+    host: &str,
+    port: u16,
+    allow_override: bool,
+) -> RuntimeActiveStatus {
+    let pid_signal = runtime_root.map(probe_pid_file);
+    let tcp_signal = probe_server_tcp(host, port, RUNTIME_TCP_PROBE_TIMEOUT);
+    // Direct positive signals — either probe successfully observed the runtime.
+    let pid_alive = pid_signal.as_ref().is_some_and(|p| p.process_alive);
+    let tcp_listening = tcp_signal.as_ref().is_some_and(|t| t.listening);
+    // Fail-closed: a probe that errored (unreadable pid, garbage pid, DNS
+    // failure, unexpected TCP error, slow-to-respond TCP connect) leaves us
+    // uncertain — promote uncertainty to active so we never skip the safety
+    // gate when we cannot positively rule out a running dcserver.
+    let pid_uncertain = pid_signal.as_ref().is_some_and(|p| p.error.is_some());
+    let tcp_uncertain = tcp_signal.as_ref().is_some_and(|t| t.error.is_some());
+    RuntimeActiveStatus {
+        active: pid_alive || tcp_listening || pid_uncertain || tcp_uncertain,
+        pid_file: pid_signal,
+        tcp: tcp_signal,
+        overridden: allow_override,
+    }
+}
+
+fn probe_pid_file(runtime_root: &Path) -> PidFileSignal {
+    let path = runtime_root.join("runtime").join("dcserver.pid");
+    let exists = path.exists();
+    let display = path.display().to_string();
+    if !exists {
+        return PidFileSignal {
+            path: display,
+            exists: false,
+            ..Default::default()
+        };
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            return PidFileSignal {
+                path: display,
+                exists: true,
+                error: Some(format!("read pid file: {error}")),
+                ..Default::default()
+            };
+        }
+    };
+    let pid = match raw.trim().parse::<u32>() {
+        Ok(value) => value,
+        Err(error) => {
+            return PidFileSignal {
+                path: display,
+                exists: true,
+                error: Some(format!("parse pid '{}': {error}", raw.trim())),
+                ..Default::default()
+            };
+        }
+    };
+    PidFileSignal {
+        path: display,
+        exists: true,
+        pid: Some(pid),
+        process_alive: process_is_alive(pid),
+        error: None,
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // SAFETY: kill(pid, 0) is the canonical liveness probe — it sends no
+    // signal but still reports ESRCH/EPERM via errno. We only read errno via
+    // io::Error so there is no UB risk.
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        // EPERM means the process exists but we lack signal rights — still
+        // alive for our purposes (don't false-negative).
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Conservative fallback: assume alive when we cannot verify. Archive-only
+    // cutover on non-unix is not a supported deployment but we still bias
+    // toward refusing rather than producing an inconsistent snapshot.
+    true
+}
+
+fn probe_server_tcp(host: &str, port: u16, timeout: Duration) -> Option<TcpSignal> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized =
+        if trimmed == "0.0.0.0" || trimmed == "::" || trimmed.eq_ignore_ascii_case("[::]") {
+            // Bound on all interfaces; connect to loopback to verify liveness.
+            "127.0.0.1".to_string()
+        } else {
+            trimmed.to_string()
+        };
+    let addrs: Vec<SocketAddr> = match (normalized.as_str(), port).to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(error) => {
+            return Some(TcpSignal {
+                host: normalized,
+                port,
+                listening: false,
+                error: Some(format!("resolve socket: {error}")),
+            });
+        }
+    };
+    if addrs.is_empty() {
+        return Some(TcpSignal {
+            host: normalized,
+            port,
+            listening: false,
+            error: Some("no socket addresses resolved".to_string()),
+        });
+    }
+    // ConnectionRefused on a loopback / configured host means "no listener" — a
+    // clean negative signal. Other errors (TimedOut, AddrNotAvailable, OS-level
+    // failure) leave us uncertain about runtime state, so we surface the last
+    // such error and let `detect_runtime_active` promote it to `active=true`.
+    let mut last_uncertain_error: Option<String> = None;
+    for addr in addrs {
+        match std::net::TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Some(TcpSignal {
+                    host: normalized,
+                    port,
+                    listening: true,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                    continue;
+                }
+                last_uncertain_error = Some(format!("tcp connect {addr}: {error}"));
+                continue;
+            }
+        }
+    }
+    Some(TcpSignal {
+        host: normalized,
+        port,
+        listening: false,
+        error: last_uncertain_error,
+    })
 }
 
 fn load_sqlite_cutover_snapshot(
@@ -1649,16 +1940,57 @@ async fn import_history_into_pg(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentRow, AuditLogRow, DispatchOutboxRow, KanbanCardRow, PostgresCutoverArgs, SessionRow,
-        SessionTranscriptRow, SqliteCutoverCounts, TaskDispatchRow, advance_pg_serial_sequences,
-        cutover_blocker, import_history_into_pg, import_live_state_into_pg, load_pg_cutover_counts,
-        load_session_transcripts, load_sqlite_cutover_snapshot, sqlite_cutover_counts,
-        write_archive_files,
+        AgentRow, AuditLogRow, DispatchOutboxRow, KanbanCardRow, PidFileSignal,
+        PostgresCutoverArgs, RuntimeActiveStatus, SessionRow, SessionTranscriptRow,
+        SqliteCutoverCounts, TaskDispatchRow, TcpSignal, advance_pg_serial_sequences,
+        cutover_blocker, detect_runtime_active, import_history_into_pg, import_live_state_into_pg,
+        load_pg_cutover_counts, load_session_transcripts, load_sqlite_cutover_snapshot,
+        probe_pid_file, probe_server_tcp, sqlite_cutover_counts, write_archive_files,
     };
     use libsql_rusqlite::Connection;
     use sqlx::{PgPool, Row};
+    use std::net::TcpListener;
     use std::path::Path;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    fn idle_runtime_status() -> RuntimeActiveStatus {
+        RuntimeActiveStatus {
+            active: false,
+            pid_file: Some(PidFileSignal {
+                path: "/nonexistent/runtime/dcserver.pid".to_string(),
+                exists: false,
+                ..Default::default()
+            }),
+            tcp: Some(TcpSignal {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                listening: false,
+                error: None,
+            }),
+            overridden: false,
+        }
+    }
+
+    fn active_runtime_status() -> RuntimeActiveStatus {
+        RuntimeActiveStatus {
+            active: true,
+            pid_file: Some(PidFileSignal {
+                path: "/tmp/runtime/dcserver.pid".to_string(),
+                exists: true,
+                pid: Some(std::process::id()),
+                process_alive: true,
+                error: None,
+            }),
+            tcp: Some(TcpSignal {
+                host: "127.0.0.1".to_string(),
+                port: 65535,
+                listening: false,
+                error: None,
+            }),
+            overridden: false,
+        }
+    }
 
     struct TestPostgresDb {
         admin_url: String,
@@ -1813,13 +2145,15 @@ mod tests {
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             active_dispatches: 1,
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("live state blocker");
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("live state blocker");
         assert!(blocker.contains("archive-only cutover would lose it"));
     }
 
@@ -1830,9 +2164,17 @@ mod tests {
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
 
-        assert!(cutover_blocker(&args, &SqliteCutoverCounts::default()).is_none());
+        assert!(
+            cutover_blocker(
+                &args,
+                &SqliteCutoverCounts::default(),
+                Some(&idle_runtime_status())
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1842,13 +2184,15 @@ mod tests {
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             pending_message_outbox: 3,
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("message_outbox blocker");
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("message_outbox blocker");
         assert!(blocker.contains("archive-only cutover would lose it"));
     }
 
@@ -1859,13 +2203,14 @@ mod tests {
             archive_dir: None,
             skip_pg_import: false,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             open_dispatch_outbox: 1,
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("dispatch_outbox blocker");
+        let blocker = cutover_blocker(&args, &counts, None).expect("dispatch_outbox blocker");
         assert!(blocker.contains("drain outbox"));
     }
 
@@ -1876,13 +2221,14 @@ mod tests {
             archive_dir: None,
             skip_pg_import: false,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             pending_message_outbox: 4,
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("message_outbox blocker");
+        let blocker = cutover_blocker(&args, &counts, None).expect("message_outbox blocker");
         assert!(
             blocker.contains("4 pending message_outbox row(s)"),
             "operator-facing blocker should surface the pending count, got: {blocker}"
@@ -1902,6 +2248,7 @@ mod tests {
             archive_dir: None,
             skip_pg_import: false,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         let real_args = PostgresCutoverArgs {
             dry_run: false,
@@ -1912,8 +2259,8 @@ mod tests {
             ..Default::default()
         };
 
-        let dry_blocker = cutover_blocker(&dry_args, &counts).expect("dry-run blocker");
-        let real_blocker = cutover_blocker(&real_args, &counts).expect("real-run blocker");
+        let dry_blocker = cutover_blocker(&dry_args, &counts, None).expect("dry-run blocker");
+        let real_blocker = cutover_blocker(&real_args, &counts, None).expect("real-run blocker");
         assert_eq!(dry_blocker, real_blocker);
     }
 
@@ -1924,6 +2271,7 @@ mod tests {
             archive_dir: None,
             skip_pg_import: false,
             allow_unsent_messages: true,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             pending_message_outbox: 7,
@@ -1931,7 +2279,7 @@ mod tests {
         };
 
         assert!(
-            cutover_blocker(&args, &counts).is_none(),
+            cutover_blocker(&args, &counts, None).is_none(),
             "--allow-unsent-messages must release the message_outbox blocker"
         );
     }
@@ -1946,14 +2294,308 @@ mod tests {
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
             allow_unsent_messages: true,
+            allow_runtime_active: false,
         };
         let counts = SqliteCutoverCounts {
             pending_message_outbox: 1,
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("archive-only ignores the override");
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("archive-only ignores the override");
         assert!(blocker.contains("archive-only cutover would lose it"));
+    }
+
+    #[test]
+    fn archive_only_cutover_blocks_when_runtime_active_without_override() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts::default();
+        let runtime = active_runtime_status();
+
+        let blocker =
+            cutover_blocker(&args, &counts, Some(&runtime)).expect("runtime-active blocker");
+        assert!(
+            blocker.contains("dcserver runtime appears active"),
+            "expected runtime-active blocker, got: {blocker}"
+        );
+        assert!(
+            blocker.contains("--allow-runtime-active"),
+            "expected blocker to mention override flag, got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn archive_only_cutover_allows_runtime_active_when_override_set() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: true,
+        };
+        let counts = SqliteCutoverCounts::default();
+        let mut runtime = active_runtime_status();
+        runtime.overridden = true;
+
+        assert!(cutover_blocker(&args, &counts, Some(&runtime)).is_none());
+    }
+
+    #[test]
+    fn archive_only_cutover_proceeds_when_runtime_idle() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts::default();
+        let runtime = idle_runtime_status();
+
+        assert!(cutover_blocker(&args, &counts, Some(&runtime)).is_none());
+    }
+
+    #[test]
+    fn full_pg_cutover_ignores_runtime_active_signal() {
+        // The full PG import path holds a BEGIN IMMEDIATE write barrier on
+        // SQLite, so runtime-active state is not a blocker — only the outbox
+        // drain rule applies. The runtime check is informational for that
+        // path and is therefore not even computed by the caller.
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts::default();
+
+        assert!(cutover_blocker(&args, &counts, Some(&active_runtime_status())).is_none());
+    }
+
+    #[test]
+    fn detect_runtime_active_flags_alive_pid_file() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        let pid_path = runtime_dir.join("dcserver.pid");
+        // Use the current process pid so kill(pid, 0) succeeds reliably.
+        std::fs::write(&pid_path, std::process::id().to_string()).expect("write pid file");
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 0, false);
+        assert!(status.active, "expected active=true with live pid");
+        let pid = status.pid_file.as_ref().expect("pid signal");
+        assert!(pid.exists);
+        assert!(pid.process_alive);
+        assert_eq!(pid.pid, Some(std::process::id()));
+        assert!(!status.overridden);
+    }
+
+    #[test]
+    fn detect_runtime_active_ignores_missing_pid_file() {
+        let temp = TempDir::new().expect("tempdir");
+        // Pick a definitely-closed port so TCP probe fails fast.
+        let probe = TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
+        let port = probe.local_addr().expect("addr").port();
+        drop(probe);
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", port, false);
+        assert!(
+            !status.active,
+            "expected active=false when nothing is running"
+        );
+        let pid = status.pid_file.as_ref().expect("pid signal");
+        assert!(!pid.exists);
+        assert!(!pid.process_alive);
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(!tcp.listening);
+    }
+
+    #[test]
+    fn detect_runtime_active_flags_listening_tcp_port() {
+        let temp = TempDir::new().expect("tempdir");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+        let port = listener.local_addr().expect("addr").port();
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", port, false);
+        assert!(status.active, "expected active=true while port is open");
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(tcp.listening);
+        assert_eq!(tcp.port, port);
+
+        drop(listener);
+    }
+
+    #[test]
+    fn detect_runtime_active_records_override_flag() {
+        let temp = TempDir::new().expect("tempdir");
+        // No pid file, no listener — purely an idle situation, but the
+        // override flag should still be reflected in the status payload.
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, true);
+        assert!(status.overridden);
+    }
+
+    #[test]
+    fn probe_pid_file_handles_stale_pid() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        // PID 1 is init/launchd; on a developer machine this will not match
+        // dcserver, but it is alive — so to test the *stale* path we instead
+        // pick an extreme value that will not exist.
+        std::fs::write(runtime_dir.join("dcserver.pid"), "4194303").expect("write pid file");
+
+        let signal = probe_pid_file(temp.path());
+        assert!(signal.exists);
+        assert_eq!(signal.pid, Some(4_194_303));
+        assert!(
+            !signal.process_alive,
+            "expected stale pid to be reported as not alive"
+        );
+        assert!(signal.error.is_none());
+    }
+
+    #[test]
+    fn probe_pid_file_handles_garbage_contents() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::write(runtime_dir.join("dcserver.pid"), "not-a-pid\n").expect("write pid file");
+
+        let signal = probe_pid_file(temp.path());
+        assert!(signal.exists);
+        assert!(signal.pid.is_none());
+        assert!(!signal.process_alive);
+        assert!(
+            signal.error.as_deref().unwrap_or("").contains("parse pid"),
+            "expected parse error, got {:?}",
+            signal.error
+        );
+    }
+
+    #[test]
+    fn probe_server_tcp_returns_none_for_empty_host() {
+        assert!(probe_server_tcp("", 8791, Duration::from_millis(10)).is_none());
+        assert!(probe_server_tcp("   ", 8791, Duration::from_millis(10)).is_none());
+    }
+
+    #[test]
+    fn probe_server_tcp_normalizes_wildcard_hosts() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = listener.local_addr().expect("addr").port();
+
+        let signal = probe_server_tcp("0.0.0.0", port, Duration::from_millis(400)).expect("signal");
+        assert_eq!(signal.host, "127.0.0.1");
+        assert!(
+            signal.listening,
+            "wildcard host should connect via loopback"
+        );
+
+        drop(listener);
+    }
+
+    // #768 fail-closed regression: probe failures must not silently allow
+    // archive-only cutover to proceed. Each test covers one of the uncertainty
+    // signals (garbage pid file, unresolvable host) and asserts that
+    // detect_runtime_active promotes them to `active=true`.
+
+    #[test]
+    fn detect_runtime_active_promotes_garbage_pid_file_to_active() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::write(runtime_dir.join("dcserver.pid"), "not-a-pid\n").expect("write pid");
+
+        // Use a host:port that cannot succeed (loopback + port that should be
+        // closed). The TCP probe will return ConnectionRefused → no error,
+        // listening=false. The only uncertainty here is the garbage pid file.
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, false);
+
+        assert!(
+            status.active,
+            "garbage pid file leaves runtime state uncertain — must be active=true"
+        );
+        let pid = status.pid_file.as_ref().expect("pid signal");
+        assert!(pid.error.is_some(), "pid probe must record the parse error");
+    }
+
+    #[test]
+    fn detect_runtime_active_promotes_unresolvable_host_to_active() {
+        let temp = TempDir::new().expect("tempdir");
+        // No pid file — pid signal stays clean (exists=false, no error).
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+        // Hostname that cannot resolve — TCP probe returns Some(error).
+        let status = detect_runtime_active(
+            Some(temp.path()),
+            "this-host-must-not-exist.invalid",
+            8791,
+            false,
+        );
+
+        assert!(
+            status.active,
+            "DNS failure on TCP probe leaves state uncertain — must be active=true"
+        );
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(
+            tcp.error.is_some(),
+            "tcp probe must record the resolve error"
+        );
+    }
+
+    #[test]
+    fn detect_runtime_active_stays_idle_on_clean_negatives() {
+        // Clean negative scenario: no pid file at all, TCP probe gets a clean
+        // ConnectionRefused (loopback to a port that nobody is bound to).
+        // detect_runtime_active must report active=false here — otherwise the
+        // gate would block every cutover even when dcserver is properly down.
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, false);
+
+        assert!(
+            !status.active,
+            "clean ConnectionRefused on loopback + no pid file should be inactive"
+        );
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(!tcp.listening);
+        assert!(
+            tcp.error.is_none(),
+            "ConnectionRefused must not be recorded as an uncertainty"
+        );
+    }
+
+    #[test]
+    fn cutover_blocker_payload_describes_runtime_active_when_archive_only() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts::default();
+        let runtime = active_runtime_status();
+        let blocker = cutover_blocker(&args, &counts, Some(&runtime))
+            .expect("active runtime + archive-only must produce a blocker");
+        assert!(
+            blocker.contains("dcserver runtime appears active"),
+            "blocker text must mention dcserver runtime, got: {blocker}"
+        );
+        assert!(
+            blocker.contains("--allow-runtime-active"),
+            "blocker text must guide operator to the override flag, got: {blocker}"
+        );
     }
 
     #[test]
@@ -2398,10 +3040,12 @@ mod tests {
             archive_dir: None,
             skip_pg_import: false,
             allow_unsent_messages: false,
+            allow_runtime_active: false,
         };
         assert!(args.dry_run);
         assert!(!args.skip_pg_import);
         assert!(!args.allow_unsent_messages);
+        assert!(!args.allow_runtime_active);
     }
 
     #[test]

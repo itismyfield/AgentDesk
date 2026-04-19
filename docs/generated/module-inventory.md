@@ -42,7 +42,7 @@
 | --- | --- | ---: | --- |
 | `bootstrap` | `src/bootstrap.rs` | 57 |  |
 | `cli` | `src/cli/mod.rs` | 18 |  |
-| `cli::args` | `src/cli/args.rs` | 679 |  |
+| `cli::args` | `src/cli/args.rs` | 710 |  |
 | `cli::client` | `src/cli/client.rs` | 1498 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1477 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1465 | giant-file |
@@ -52,7 +52,7 @@
 | `cli::migrate` | `src/cli/migrate.rs` | 321 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
-| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 2440 | giant-file |
+| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 2981 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::run` | `src/cli/run.rs` | 389 |  |
 | `cli::utils` | `src/cli/utils.rs` | 271 |  |
