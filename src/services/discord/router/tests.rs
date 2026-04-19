@@ -5,7 +5,9 @@ use super::intake_gate::{
     is_model_picker_component_custom_id, should_process_turn_message,
     should_skip_for_missing_required_mention,
 };
-use super::message_handler::{TextStopLookup, lookup_text_stop_token};
+use super::message_handler::{
+    TextStopLookup, TurnKind, classify_turn_kind_from_author, lookup_text_stop_token,
+};
 use crate::services::discord::DiscordBotSettings;
 use crate::services::provider::CancelToken;
 use poise::serenity_prelude::ChannelId;
@@ -419,4 +421,54 @@ fn model_picker_close_response_acknowledges_component_close() {
 
     assert_eq!(payload["type"], json!(6));
     assert_eq!(payload["data"], json!(null));
+}
+
+// ── #796 regression ────────────────────────────────────────────────────
+//
+// The race handler in `handle_text_message` historically deleted the new
+// turn's placeholder whenever it lost the start-turn race to an in-flight
+// turn. For background-task notifications (e.g. a `Bash run_in_background`
+// completion relayed through the notify bot), that placeholder is the only
+// user-visible record of the event — deleting it silently destroys
+// information. The tests below pin the classification helper that drives
+// the new "preserve placeholder for background-trigger turns" branch.
+
+#[test]
+fn turn_kind_classifies_notify_bot_authored_message_as_background_trigger() {
+    let notify_bot_id = 9_999_001u64;
+    let kind = classify_turn_kind_from_author(notify_bot_id, Some(notify_bot_id));
+    assert_eq!(kind, TurnKind::BackgroundTrigger);
+    assert!(kind.is_background_trigger());
+}
+
+#[test]
+fn turn_kind_classifies_human_user_message_as_foreground() {
+    let notify_bot_id = 9_999_001u64;
+    let human_user_id = 1_234_567u64;
+    let kind = classify_turn_kind_from_author(human_user_id, Some(notify_bot_id));
+    assert_eq!(kind, TurnKind::Foreground);
+    assert!(!kind.is_background_trigger());
+}
+
+#[test]
+fn turn_kind_defaults_to_foreground_when_notify_bot_id_unresolved() {
+    // If the notify bot lookup fails (registry missing or token unconfigured),
+    // we must conservatively treat the turn as foreground — the legacy
+    // race-handler delete behavior is the safe default for unknown senders.
+    let kind = classify_turn_kind_from_author(42, None);
+    assert_eq!(kind, TurnKind::Foreground);
+    assert!(!kind.is_background_trigger());
+}
+
+#[test]
+fn turn_kind_does_not_misclassify_announce_bot_as_background_trigger() {
+    // Announce-bot messages today flow through the legacy turn path
+    // (DISPATCH: prefix etc.) and must NOT be silently exempt from
+    // race-handler delete — that would regress the existing protection.
+    // Only the dedicated notify bot id triggers the BackgroundTrigger
+    // classification.
+    let notify_bot_id = 9_999_001u64;
+    let announce_bot_id = 9_999_002u64;
+    let kind = classify_turn_kind_from_author(announce_bot_id, Some(notify_bot_id));
+    assert_eq!(kind, TurnKind::Foreground);
 }

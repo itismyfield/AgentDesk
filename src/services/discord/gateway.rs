@@ -5,6 +5,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
+use super::router;
 use super::router::handle_text_message;
 use super::turn_bridge::auto_retry_with_history;
 use super::{
@@ -239,6 +240,9 @@ impl TurnGateway for DiscordGateway {
                 intervention.reply_context.clone(),
                 intervention.has_reply_boundary,
                 None,
+                // Queued turn kickoff: the prior turn already finished, so
+                // this dispatch is not racing the placeholder-delete path.
+                router::TurnKind::Foreground,
             )
             .await
             .map_err(|e| e.to_string())

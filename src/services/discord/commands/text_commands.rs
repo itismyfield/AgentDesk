@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-use super::super::router::handle_text_message;
+use super::super::router::{TurnKind, handle_text_message};
 use super::super::*;
 use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
@@ -1166,6 +1166,7 @@ Any other message is sent to {p}.
                 None,
                 false,
                 None,
+                TurnKind::Foreground,
             )
             .await?;
             return Ok(true);

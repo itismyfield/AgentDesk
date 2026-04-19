@@ -12,6 +12,7 @@ When modifying code or investigating issues, refer to these documents first:
 
 - **`ARCHITECTURE.md`** — Code navigation guide. Directory structure, call chains for common scenarios ("message not processing" → which files), API endpoint list, session lifecycle, DB schema.
 - **`FEATURES.md`** — Feature specification. Kanban state flow, auto-queue, review automation, timeout rules, dispatch system, Discord commands, policy engine hooks and bridge functions.
+- **`docs/background-task-pattern.md`** — Notify-bot delivery convention for `Bash run_in_background` results plus the safe / read-only / needs-confirm / destructive action classification (#796). Read this before adding any auto-progression logic that fires off another action after a background task completes.
 
 ## Build & Run
 
