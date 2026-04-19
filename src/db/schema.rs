@@ -1882,12 +1882,7 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
             ON session_transcripts (agent_id);
         CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
-            ON session_transcripts (created_at DESC);
-        CREATE VIRTUAL TABLE IF NOT EXISTS session_transcripts_fts USING fts5(
-            session_transcript_id UNINDEXED,
-            content,
-            tokenize = 'unicode61'
-        );",
+            ON session_transcripts (created_at DESC);",
     )?;
     let _ = conn.execute_batch(
         "ALTER TABLE session_transcripts ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]';",
@@ -2245,8 +2240,7 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
     }
 
     conn.execute_batch(
-        "DROP TABLE IF EXISTS session_transcripts_fts;
-         ALTER TABLE session_transcripts RENAME TO session_transcripts_legacy;
+        "ALTER TABLE session_transcripts RENAME TO session_transcripts_legacy;
          CREATE TABLE session_transcripts (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             turn_id           TEXT NOT NULL UNIQUE,
@@ -2293,28 +2287,9 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
          CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
             ON session_transcripts (session_key);
          CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
-            ON session_transcripts (agent_id);
+         ON session_transcripts (agent_id);
          CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
-            ON session_transcripts (created_at DESC);
-         CREATE VIRTUAL TABLE session_transcripts_fts USING fts5(
-            session_transcript_id UNINDEXED,
-            content,
-            tokenize = 'unicode61'
-         );
-         INSERT INTO session_transcripts_fts (session_transcript_id, content)
-         SELECT
-            id,
-            CASE
-                WHEN TRIM(user_message) <> '' AND TRIM(assistant_message) <> ''
-                    THEN 'user:' || char(10) || user_message || char(10) || char(10)
-                        || 'assistant:' || char(10) || assistant_message
-                WHEN TRIM(user_message) <> ''
-                    THEN 'user:' || char(10) || user_message
-                WHEN TRIM(assistant_message) <> ''
-                    THEN 'assistant:' || char(10) || assistant_message
-                ELSE ''
-            END
-         FROM session_transcripts;",
+            ON session_transcripts (created_at DESC);",
     )?;
 
     Ok(())
@@ -2523,13 +2498,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(events_json, "[]");
-
-        let fts_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM session_transcripts_fts", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(fts_count, 1);
     }
 
     #[test]
