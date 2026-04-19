@@ -149,6 +149,10 @@ pub(super) async fn start_restart_handoff_from_state(
             None,
             false,
             None,
+            // Watcher death handoff: synthetic system-initiated turn that
+            // owns its own placeholder; race-handler delete behavior
+            // matches the legacy foreground path.
+            super::router::TurnKind::Foreground,
         )
         .await
         {

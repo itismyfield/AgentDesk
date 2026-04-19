@@ -1060,6 +1060,19 @@ pub(in crate::services::discord) async fn handle_event(
                 .last_message_ids
                 .insert(channel_id, new_message.id.get());
 
+            // #796: classify the originating sender so the race handler in
+            // `handle_text_message` knows whether it's safe to delete the
+            // placeholder when the new turn loses to an in-flight one. Notify-
+            // bot deliveries are background-task notifications whose
+            // placeholder content is the only visible record of the event;
+            // foreground (human) messages keep the legacy delete-on-loss
+            // behavior.
+            let notify_bot_id = super::super::resolve_notify_bot_user_id(&data.shared).await;
+            let turn_kind = super::message_handler::classify_turn_kind_from_author(
+                user_id.get(),
+                notify_bot_id,
+            );
+
             super::message_handler::handle_text_message(
                 ctx,
                 channel_id,
@@ -1076,6 +1089,7 @@ pub(in crate::services::discord) async fn handle_event(
                 reply_context,
                 has_reply_boundary,
                 Some(is_dm),
+                turn_kind,
             )
             .await?;
         }
