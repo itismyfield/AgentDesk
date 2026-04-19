@@ -60,7 +60,7 @@ fn pending_session_reset_plan(
     if fast_mode_reset_pending {
         return Some(PendingSessionResetPlan {
             reset_source: "fast mode reset pending",
-            recreate_tmux: matches!(provider, ProviderKind::Claude),
+            recreate_tmux: matches!(provider, ProviderKind::Claude | ProviderKind::Codex),
         });
     }
     if model_reset_pending {
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_session_reset_plan_recreates_claude_tmux_for_fast_mode() {
+    fn pending_session_reset_plan_recreates_claude_and_codex_tmux_for_fast_mode() {
         assert_eq!(
             pending_session_reset_plan(&ProviderKind::Claude, true, false, false),
             Some(PendingSessionResetPlan {
@@ -577,7 +577,7 @@ mod tests {
             pending_session_reset_plan(&ProviderKind::Codex, true, false, false),
             Some(PendingSessionResetPlan {
                 reset_source: "fast mode reset pending",
-                recreate_tmux: false,
+                recreate_tmux: true,
             })
         );
     }
