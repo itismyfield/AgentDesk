@@ -47,7 +47,7 @@ pub(crate) const QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY: u32 = 2;
 pub(crate) const QWEN_MAX_SESSION_RETRIES: usize = 1;
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const QWEN_CODE_SYSTEM_SETTINGS_ENV: &str = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
-const QWEN_SUPPORTED_ALLOWED_TOOLS: &[&str] = &[
+pub(crate) const QWEN_SUPPORTED_ALLOWED_TOOLS: &[&str] = &[
     "Bash",
     "Read",
     "Edit",

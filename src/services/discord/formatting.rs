@@ -52,7 +52,7 @@ pub(super) const ALL_TOOLS: &[(&str, &str, bool)] = &[
         "Read incremental output from a background shell",
         false,
     ),
-    ("KillShell", "Terminate a running background shell", true),
+    ("KillBash", "Terminate a running background shell", true),
     ("SlashCommand", "Invoke a Claude Code slash command", false),
     (
         "AskUserQuestion",

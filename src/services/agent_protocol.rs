@@ -27,7 +27,7 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "TaskList",
     "Monitor",
     "BashOutput",
-    "KillShell",
+    "KillBash",
     "SlashCommand",
     "AskUserQuestion",
     "EnterPlanMode",
