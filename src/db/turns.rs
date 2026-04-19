@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, params};
+use libsql_rusqlite::{Connection, params}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use serde::{Deserialize, Serialize};
 
 use crate::db::Db;

@@ -110,7 +110,7 @@ fn db_query_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str) 
         return db_query_raw_pg(&pg_pool, sql, &params, started);
     }
 
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
+    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 
     // Use a separate read-only connection to avoid blocking the write Mutex.
     // This prevents deadlock when onTick (holding engine lock) queries DB
@@ -142,15 +142,15 @@ fn db_query_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str) 
         .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
         .collect();
 
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
+        .map(|v| v as &dyn libsql_rusqlite::types::ToSql) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         .collect();
 
     let rows = match stmt.query_map(params_ref.as_slice(), |row| {
         let mut map = serde_json::Map::new();
         for (i, col_name) in col_names.iter().enumerate() {
-            let val: libsql_rusqlite::types::Value = row.get(i)?;
+            let val: libsql_rusqlite::types::Value = row.get(i)?; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             let jv = sqlite_to_json(&val);
             map.insert(col_name.clone(), jv);
         }
@@ -267,7 +267,7 @@ fn db_execute_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str
         return db_execute_raw_pg(&pg_pool, sql, &params, started);
     }
 
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
+    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 
     // Use a separate read-write connection to avoid holding the main
     // Rust Mutex that request handlers need. SQLite WAL serializes
@@ -283,9 +283,9 @@ fn db_execute_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str
         }
     };
 
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
+        .map(|v| v as &dyn libsql_rusqlite::types::ToSql) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         .collect();
 
     let changes = match conn.execute(sql, params_ref.as_slice()) {
@@ -810,22 +810,23 @@ where
 }
 
 fn json_to_sqlite(val: &serde_json::Value) -> libsql_rusqlite::types::Value {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     match val {
-        serde_json::Value::Null => libsql_rusqlite::types::Value::Null,
+        serde_json::Value::Null => libsql_rusqlite::types::Value::Null, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         serde_json::Value::Bool(b) => {
-            libsql_rusqlite::types::Value::Integer(if *b { 1 } else { 0 })
+            libsql_rusqlite::types::Value::Integer(if *b { 1 } else { 0 }) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                libsql_rusqlite::types::Value::Integer(i)
+                libsql_rusqlite::types::Value::Integer(i) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             } else if let Some(f) = n.as_f64() {
-                libsql_rusqlite::types::Value::Real(f)
+                libsql_rusqlite::types::Value::Real(f) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             } else {
-                libsql_rusqlite::types::Value::Null
+                libsql_rusqlite::types::Value::Null // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             }
         }
-        serde_json::Value::String(s) => libsql_rusqlite::types::Value::Text(s.clone()),
-        _ => libsql_rusqlite::types::Value::Text(val.to_string()),
+        serde_json::Value::String(s) => libsql_rusqlite::types::Value::Text(s.clone()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        _ => libsql_rusqlite::types::Value::Text(val.to_string()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     }
 }
 
@@ -1039,12 +1040,14 @@ mod tests {
 }
 
 fn sqlite_to_json(val: &libsql_rusqlite::types::Value) -> serde_json::Value {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     match val {
-        libsql_rusqlite::types::Value::Null => serde_json::Value::Null,
-        libsql_rusqlite::types::Value::Integer(i) => serde_json::json!(*i),
-        libsql_rusqlite::types::Value::Real(f) => serde_json::json!(*f),
-        libsql_rusqlite::types::Value::Text(s) => serde_json::Value::String(s.clone()),
+        libsql_rusqlite::types::Value::Null => serde_json::Value::Null, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::types::Value::Integer(i) => serde_json::json!(*i), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::types::Value::Real(f) => serde_json::json!(*f), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::types::Value::Text(s) => serde_json::Value::String(s.clone()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         libsql_rusqlite::types::Value::Blob(b) => {
+            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
             serde_json::Value::String(encoded)
         }

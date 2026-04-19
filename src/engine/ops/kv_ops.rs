@@ -1,5 +1,7 @@
 use crate::db::Db;
+use libsql_rusqlite::params; // TODO(#839): drop sqlite fallback once policy-engine tests move to PG fixtures.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use sqlx::PgPool;
 
 // ── KV ops (#126) ─────────────────────────────────────────────────
 //
@@ -7,17 +9,25 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 // agentdesk.kv.get(key) → value or null (filters expired)
 // agentdesk.kv.delete(key) — delete a key
 
-pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+pub(super) fn register_kv_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Db,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kv_obj = Object::new(ctx.clone())?;
 
     // __kvSetRaw(key, value, ttlSeconds) — Rust raw impl, always 3 args
     let db_set = db.clone();
+    let pg_set = pg_pool.clone();
     kv_obj.set(
         "__setRaw",
         Function::new(
             ctx.clone(),
             move |key: String, value: String, ttl_seconds: i64| -> String {
+                if let Some(pool) = pg_set.as_ref() {
+                    return kv_set_raw_pg(pool, &key, &value, ttl_seconds);
+                }
                 let conn = match db_set.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -28,12 +38,12 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                             "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{} seconds'))",
                             ttl_seconds
                         ),
-                        libsql_rusqlite::params![key, value],
+                        params![key, value],
                     )
                 } else {
                     conn.execute(
                         "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
-                        libsql_rusqlite::params![key, value],
+                        params![key, value],
                     )
                 };
                 match result {
@@ -46,9 +56,13 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     // __kvGetRaw(key) → JSON: {"found":true,"value":"..."} or {"found":false}
     let db_get = db.clone();
+    let pg_get = pg_pool.clone();
     kv_obj.set(
         "__getRaw",
         Function::new(ctx.clone(), move |key: String| -> String {
+            if let Some(pool) = pg_get.as_ref() {
+                return kv_get_raw_pg(pool, &key);
+            }
             let conn = match db_get.separate_conn() {
                 Ok(c) => c,
                 Err(_) => return r#"{"found":false}"#.to_string(),
@@ -66,9 +80,13 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     // kv.delete(key)
     let db_del = db.clone();
+    let pg_del = pg_pool;
     kv_obj.set(
         "delete",
         Function::new(ctx.clone(), move |key: String| -> String {
+            if let Some(pool) = pg_del.as_ref() {
+                return kv_delete_raw_pg(pool, &key);
+            }
             let conn = match db_del.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -139,4 +157,94 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     }
 
     Ok(())
+}
+
+fn kv_set_raw_pg(pool: &PgPool, key: &str, value: &str, ttl_seconds: i64) -> String {
+    let key = key.to_string();
+    let value = value.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let rows_affected = if ttl_seconds > 0 {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value, expires_at)
+                     VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))
+                     ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+                )
+                .bind(&key)
+                .bind(&value)
+                .bind(ttl_seconds)
+                .execute(&bridge_pool)
+                .await
+            } else {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value, expires_at)
+                     VALUES ($1, $2, NULL)
+                     ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+                )
+                .bind(&key)
+                .bind(&value)
+                .execute(&bridge_pool)
+                .await
+            }
+            .map_err(|error| format!("upsert postgres kv_meta {key}: {error}"))?
+            .rows_affected();
+            let _ = rows_affected;
+            Ok(r#"{"ok":true}"#.to_string())
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(result) => result,
+        Err(error_json) => error_json,
+    }
+}
+
+fn kv_get_raw_pg(pool: &PgPool, key: &str) -> String {
+    let key = key.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let value = sqlx::query_scalar::<_, String>(
+                "SELECT value
+                 FROM kv_meta
+                 WHERE key = $1
+                   AND (expires_at IS NULL OR expires_at > NOW())",
+            )
+            .bind(&key)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|error| format!("load postgres kv_meta {key}: {error}"))?;
+            Ok(match value {
+                Some(value) => format!(r#"{{"found":true,"value":{}}}"#, serde_json::json!(value)),
+                None => r#"{"found":false}"#.to_string(),
+            })
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(result) => result,
+        Err(error_json) => error_json,
+    }
+}
+
+fn kv_delete_raw_pg(pool: &PgPool, key: &str) -> String {
+    let key = key.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                .bind(&key)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| format!("delete postgres kv_meta {key}: {error}"))?;
+            Ok(r#"{"ok":true}"#.to_string())
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(result) => result,
+        Err(error_json) => error_json,
+    }
 }

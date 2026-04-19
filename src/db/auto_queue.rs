@@ -1,4 +1,4 @@
-use libsql_rusqlite::{Connection, OptionalExtension, types::ToSql};
+use libsql_rusqlite::{Connection, OptionalExtension, types::ToSql}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
@@ -35,7 +35,7 @@ pub enum EntryStatusUpdateError {
         to_status: String,
     },
     #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub enum EntryDispatchFailureError {
     #[error(transparent)]
     EntryStatus(#[from] EntryStatusUpdateError),
     #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub enum ConsultationDispatchRecordError {
     #[error(transparent)]
     EntryStatus(#[from] EntryStatusUpdateError),
     #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
@@ -90,7 +90,7 @@ pub enum SlotAllocationError {
         attempts: usize,
     },
     #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error),
+    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +152,7 @@ pub fn reactivate_done_entry_on_conn(
 
     conn.execute_batch("SAVEPOINT auto_queue_entry_done_reactivate")?;
     let restore_result = (|| -> libsql_rusqlite::Result<usize> {
+        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         let rows_affected = conn.execute(
             "UPDATE auto_queue_entries
                  SET status = 'dispatched',
@@ -161,7 +162,7 @@ pub fn reactivate_done_entry_on_conn(
                      completed_at = NULL
                  WHERE id = ?3
                    AND status = 'done'",
-            libsql_rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,],
+            libsql_rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         )?;
 
         if rows_affected == 0 {
@@ -284,7 +285,7 @@ pub fn record_entry_dispatch_failure_on_conn(
                  WHERE id = ?2
                    AND status = 'dispatched'
                    AND retry_count = ?3",
-                    libsql_rusqlite::params![retry_limit, entry_id, current.retry_count],
+                    libsql_rusqlite::params![retry_limit, entry_id, current.retry_count], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?;
 
                 if rows_affected == 0 {
@@ -340,6 +341,113 @@ pub fn record_entry_dispatch_failure_on_conn(
                 return Err(error);
             }
         }
+    }
+}
+
+pub async fn record_entry_dispatch_failure_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    max_retries: i64,
+    trigger_source: &str,
+) -> Result<EntryDispatchFailureResult, String> {
+    let retry_limit = max_retries.max(1);
+    loop {
+        let current = load_entry_status_row_pg(pool, entry_id).await?;
+        if current.status != ENTRY_STATUS_DISPATCHED {
+            return Ok(EntryDispatchFailureResult {
+                run_id: current.run_id,
+                from_status: current.status.clone(),
+                to_status: current.status,
+                retry_count: current.retry_count,
+                retry_limit,
+                changed: false,
+            });
+        }
+
+        let retry_count = current.retry_count.saturating_add(1);
+        let target_status = if retry_count >= retry_limit {
+            ENTRY_STATUS_FAILED
+        } else {
+            ENTRY_STATUS_PENDING
+        };
+
+        let mut tx = pool.begin().await.map_err(|error| {
+            format!("begin postgres auto-queue dispatch failure transaction: {error}")
+        })?;
+
+        let rows_affected = sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = CASE
+                     WHEN retry_count + 1 >= $1 THEN 'failed'
+                     ELSE 'pending'
+                 END,
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = CASE
+                     WHEN retry_count + 1 >= $1 THEN NOW()
+                     ELSE NULL
+                 END,
+                 retry_count = retry_count + 1
+             WHERE id = $2
+               AND status = 'dispatched'
+               AND retry_count = $3",
+        )
+        .bind(retry_limit)
+        .bind(entry_id)
+        .bind(current.retry_count)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!("update postgres auto-queue dispatch failure {entry_id}: {error}")
+        })?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            tx.rollback().await.map_err(|error| {
+                format!("rollback stale postgres auto-queue dispatch failure {entry_id}: {error}")
+            })?;
+
+            let latest = load_entry_status_row_pg(pool, entry_id).await?;
+            if latest.status != ENTRY_STATUS_DISPATCHED {
+                return Ok(EntryDispatchFailureResult {
+                    run_id: latest.run_id,
+                    from_status: latest.status.clone(),
+                    to_status: latest.status,
+                    retry_count: latest.retry_count,
+                    retry_limit,
+                    changed: false,
+                });
+            }
+            continue;
+        }
+
+        record_entry_transition_on_pg(
+            &mut tx,
+            entry_id,
+            ENTRY_STATUS_DISPATCHED,
+            target_status,
+            trigger_source,
+        )
+        .await?;
+
+        if target_status == ENTRY_STATUS_FAILED {
+            maybe_finalize_run_after_terminal_entry_pg(&mut tx, &current.run_id, target_status)
+                .await?;
+        }
+
+        tx.commit().await.map_err(|error| {
+            format!("commit postgres auto-queue dispatch failure {entry_id}: {error}")
+        })?;
+
+        return Ok(EntryDispatchFailureResult {
+            run_id: current.run_id,
+            from_status: ENTRY_STATUS_DISPATCHED.to_string(),
+            to_status: target_status.to_string(),
+            retry_count,
+            retry_limit,
+            changed: true,
+        });
     }
 }
 
@@ -670,6 +778,7 @@ fn update_entry_status_with_current_on_conn(
 
         conn.execute_batch("SAVEPOINT auto_queue_entry_status_transition")?;
         let transition_result = (|| -> libsql_rusqlite::Result<usize> {
+            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             let rows_affected = match normalized {
                 ENTRY_STATUS_PENDING => conn.execute(
                     "UPDATE auto_queue_entries
@@ -684,7 +793,7 @@ fn update_entry_status_with_current_on_conn(
                              END
                          WHERE id = ?1
                            AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status, current.status],
+                    libsql_rusqlite::params![entry_id, current.status, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?,
                 ENTRY_STATUS_DISPATCHED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -696,6 +805,7 @@ fn update_entry_status_with_current_on_conn(
                          WHERE id = ?3
                            AND status = ?4",
                     libsql_rusqlite::params![
+                        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                         effective_dispatch_id,
                         effective_slot_index,
                         entry_id,
@@ -708,7 +818,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?,
                 ENTRY_STATUS_SKIPPED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -719,7 +829,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?,
                 ENTRY_STATUS_FAILED => conn.execute(
                     "UPDATE auto_queue_entries
@@ -730,7 +840,7 @@ fn update_entry_status_with_current_on_conn(
                              completed_at = datetime('now')
                          WHERE id = ?1
                            AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status],
+                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?,
                 _ => unreachable!(),
             };
@@ -855,11 +965,12 @@ fn record_entry_dispatch_history_on_conn(
     dispatch_id: &str,
     trigger_source: &str,
 ) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.execute(
         "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
             entry_id, dispatch_id, trigger_source
         ) VALUES (?1, ?2, ?3)",
-        libsql_rusqlite::params![entry_id, dispatch_id, trigger_source],
+        libsql_rusqlite::params![entry_id, dispatch_id, trigger_source], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     Ok(())
 }
@@ -892,6 +1003,7 @@ pub fn list_entry_dispatch_history(
     conn: &Connection,
     entry_id: &str,
 ) -> libsql_rusqlite::Result<Vec<String>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut stmt = conn.prepare(
         "SELECT dispatch_id
          FROM auto_queue_entry_dispatch_history
@@ -928,6 +1040,7 @@ pub fn rebind_slot_for_group_agent(
     agent_id: &str,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     ensure_agent_slot_rows(conn, run_id, agent_id)?;
 
     let slot_updated = conn.execute(
@@ -938,7 +1051,7 @@ pub fn rebind_slot_for_group_agent(
          WHERE agent_id = ?3
            AND slot_index = ?4
            AND (assigned_run_id IS NULL OR assigned_run_id = ?1)",
-        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
+        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     if slot_updated == 0 {
         return Ok(0);
@@ -954,6 +1067,7 @@ fn bind_slot_index_for_group_entries(
     thread_group: i64,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.execute(
         "UPDATE auto_queue_entries
          SET slot_index = ?1
@@ -962,7 +1076,7 @@ fn bind_slot_index_for_group_entries(
            AND COALESCE(thread_group, 0) = ?4
            AND status IN ('pending', 'dispatched')
            AND (slot_index IS NULL OR slot_index != ?1)",
-        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group],
+        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )
 }
 
@@ -973,6 +1087,7 @@ pub fn release_slot_for_group_agent(
     agent_id: &str,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.execute(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -982,7 +1097,7 @@ pub fn release_slot_for_group_agent(
            AND slot_index = ?2
            AND assigned_run_id = ?3
            AND COALESCE(assigned_thread_group, 0) = ?4",
-        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group],
+        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )
 }
 
@@ -1075,6 +1190,7 @@ pub fn find_latest_run_id(
     conn: &Connection,
     filter: &StatusFilter,
 ) -> libsql_rusqlite::Result<Option<String>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut run_filter = "1=1".to_string();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -1129,6 +1245,7 @@ pub fn get_run(
     conn: &Connection,
     run_id: &str,
 ) -> libsql_rusqlite::Result<Option<AutoQueueRunRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.query_row(
         "SELECT id, repo, agent_id, status, timeout_minutes,
                 ai_model, ai_rationale,
@@ -1194,6 +1311,7 @@ pub fn get_status_entry(
     conn: &Connection,
     entry_id: &str,
 ) -> libsql_rusqlite::Result<Option<StatusEntryRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.query_row(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
                 COALESCE(e.retry_count, 0),
@@ -1261,6 +1379,7 @@ pub fn list_status_entries(
     run_id: &str,
     filter: &StatusFilter,
 ) -> libsql_rusqlite::Result<Vec<StatusEntryRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut sql = String::from(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
                 COALESCE(e.retry_count, 0),
@@ -1352,6 +1471,7 @@ pub fn list_run_history(
     filter: &StatusFilter,
     limit: usize,
 ) -> libsql_rusqlite::Result<Vec<AutoQueueRunHistoryRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut sql = String::from(
         "SELECT r.id, r.repo, r.agent_id, r.status,
                 CAST(strftime('%s', r.created_at) AS INTEGER) * 1000,
@@ -1457,6 +1577,7 @@ pub fn list_backlog_cards(
     conn: &Connection,
     filter: &GenerateCardFilter,
 ) -> libsql_rusqlite::Result<Vec<BacklogCardRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut conditions = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
     append_card_filters("kc", filter, &mut conditions, &mut params);
@@ -1485,6 +1606,7 @@ pub fn list_generate_candidates(
     filter: &GenerateCardFilter,
     enqueueable_states: &[String],
 ) -> libsql_rusqlite::Result<Vec<GenerateCandidateRecord>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut conditions = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -1539,6 +1661,7 @@ pub fn count_cards_by_status(
     agent_id: Option<&str>,
     status: &str,
 ) -> libsql_rusqlite::Result<i64> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut sql = "SELECT COUNT(*) FROM kanban_cards WHERE status = ?1".to_string();
     let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(status.to_string())];
 
@@ -1606,11 +1729,12 @@ pub fn ensure_agent_slot_pool_rows(
     agent_id: &str,
     slot_pool_size: i64,
 ) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     for slot_index in 0..slot_pool_size.clamp(1, 32) {
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
              VALUES (?1, ?2, '{}')",
-            libsql_rusqlite::params![agent_id, slot_index],
+            libsql_rusqlite::params![agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         )?;
     }
     Ok(())
@@ -1667,6 +1791,7 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
 }
 
 pub fn release_run_slots(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.execute(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -1787,7 +1912,7 @@ pub fn record_consultation_dispatch_on_conn(
          SET metadata = ?1,
              updated_at = datetime('now')
          WHERE id = ?2",
-        libsql_rusqlite::params![&metadata_json, card_id],
+        libsql_rusqlite::params![&metadata_json, card_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     if updated == 0 {
         return Err(ConsultationDispatchRecordError::CardNotFound {
@@ -1956,6 +2081,7 @@ fn valid_phase_gate_dispatch_ids(
     conn: &Connection,
     dispatch_ids: &[String],
 ) -> libsql_rusqlite::Result<Vec<String>> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     if dispatch_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1968,7 +2094,7 @@ fn valid_phase_gate_dispatch_ids(
         placeholders
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params = libsql_rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str));
+    let params = libsql_rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str)); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut rows = stmt.query(params)?;
     let mut valid = std::collections::HashSet::new();
     while let Some(row) = rows.next()? {
@@ -1983,16 +2109,43 @@ fn valid_phase_gate_dispatch_ids(
         .collect())
 }
 
+async fn valid_phase_gate_dispatch_ids_pg(
+    pool: &PgPool,
+    dispatch_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if dispatch_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query("SELECT id FROM task_dispatches WHERE id = ANY($1)")
+        .bind(dispatch_ids.to_vec())
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres phase-gate dispatch ids: {error}"))?;
+
+    let valid: std::collections::HashSet<String> = rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("id").ok())
+        .collect();
+
+    Ok(dispatch_ids
+        .iter()
+        .filter(|dispatch_id| valid.contains(dispatch_id.as_str()))
+        .cloned()
+        .collect())
+}
+
 fn delete_stale_phase_gate_rows(
     conn: &Connection,
     run_id: &str,
     phase: i64,
     dispatch_ids: &[String],
 ) -> libsql_rusqlite::Result<usize> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     if dispatch_ids.is_empty() {
         return conn.execute(
             "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-            libsql_rusqlite::params![run_id, phase],
+            libsql_rusqlite::params![run_id, phase], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         );
     }
 
@@ -2006,15 +2159,55 @@ fn delete_stale_phase_gate_rows(
            AND (dispatch_id IS NULL OR dispatch_id NOT IN ({}))",
         placeholders
     );
-    let mut values = vec![libsql_rusqlite::types::Value::from(run_id.to_string())];
-    values.push(libsql_rusqlite::types::Value::from(phase));
+    let mut values = vec![libsql_rusqlite::types::Value::from(run_id.to_string())]; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    values.push(libsql_rusqlite::types::Value::from(phase)); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     values.extend(
         dispatch_ids
             .iter()
             .cloned()
-            .map(libsql_rusqlite::types::Value::from),
+            .map(libsql_rusqlite::types::Value::from), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     );
-    conn.execute(&sql, libsql_rusqlite::params_from_iter(values))
+    conn.execute(&sql, libsql_rusqlite::params_from_iter(values)) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+}
+
+async fn delete_stale_phase_gate_rows_pg(
+    pool: &PgPool,
+    run_id: &str,
+    phase: i64,
+    dispatch_ids: &[String],
+) -> Result<usize, String> {
+    let rows_affected = if dispatch_ids.is_empty() {
+        sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = $2")
+            .bind(run_id)
+            .bind(phase)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}"
+                )
+            })?
+            .rows_affected()
+    } else {
+        sqlx::query(
+            "DELETE FROM auto_queue_phase_gates
+             WHERE run_id = $1
+               AND phase = $2
+               AND (dispatch_id IS NULL OR NOT (dispatch_id = ANY($3)))",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .bind(dispatch_ids.to_vec())
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}")
+        })?
+        .rows_affected()
+    };
+
+    usize::try_from(rows_affected)
+        .map_err(|error| format!("convert postgres phase-gate delete count for {run_id}: {error}"))
 }
 
 pub fn save_phase_gate_state_on_conn(
@@ -2023,6 +2216,7 @@ pub fn save_phase_gate_state_on_conn(
     phase: i64,
     state: &PhaseGateStateWrite,
 ) -> libsql_rusqlite::Result<PhaseGateSaveResult> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let dispatch_ids =
         valid_phase_gate_dispatch_ids(conn, &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids))?;
     let removed_stale_rows = delete_stale_phase_gate_rows(conn, run_id, phase, &dispatch_ids)?;
@@ -2043,6 +2237,7 @@ pub fn save_phase_gate_state_on_conn(
                 COALESCE(?10, CURRENT_TIMESTAMP), datetime('now')
              )",
             libsql_rusqlite::params![
+                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 run_id,
                 phase,
                 status,
@@ -2077,6 +2272,7 @@ pub fn save_phase_gate_state_on_conn(
                     failure_reason = excluded.failure_reason,
                     updated_at = datetime('now')",
                 libsql_rusqlite::params![
+                    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                     run_id,
                     phase,
                     status,
@@ -2099,15 +2295,128 @@ pub fn save_phase_gate_state_on_conn(
     })
 }
 
+pub async fn save_phase_gate_state_on_pg(
+    pool: &PgPool,
+    run_id: &str,
+    phase: i64,
+    state: &PhaseGateStateWrite,
+) -> Result<PhaseGateSaveResult, String> {
+    let dispatch_ids = valid_phase_gate_dispatch_ids_pg(
+        pool,
+        &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids),
+    )
+    .await?;
+    let removed_stale_rows =
+        delete_stale_phase_gate_rows_pg(pool, run_id, phase, &dispatch_ids).await?;
+    let status = normalize_phase_gate_status(&state.status);
+    let verdict = normalize_optional_text(state.verdict.as_deref());
+    let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
+    let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
+    let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
+    let created_at = normalize_optional_text(state.created_at.as_deref());
+
+    if dispatch_ids.is_empty() {
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
+                final_phase, anchor_card_id, failure_reason, created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9,
+                COALESCE($10::timestamptz, NOW()), NOW()
+             )",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .bind(&status)
+        .bind(verdict.as_deref())
+        .bind(&pass_verdict)
+        .bind(state.next_phase)
+        .bind(state.final_phase)
+        .bind(anchor_card_id.as_deref())
+        .bind(failure_reason.as_deref())
+        .bind(created_at.as_deref())
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!("insert postgres phase-gate row for run {run_id} phase {phase}: {error}")
+        })?;
+    } else {
+        for dispatch_id in &dispatch_ids {
+            sqlx::query(
+                "INSERT INTO auto_queue_phase_gates (
+                    run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
+                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    COALESCE($11::timestamptz, NOW()), NOW()
+                 )
+                 ON CONFLICT(dispatch_id) DO UPDATE SET
+                    run_id = EXCLUDED.run_id,
+                    phase = EXCLUDED.phase,
+                    status = EXCLUDED.status,
+                    verdict = EXCLUDED.verdict,
+                    pass_verdict = EXCLUDED.pass_verdict,
+                    next_phase = EXCLUDED.next_phase,
+                    final_phase = EXCLUDED.final_phase,
+                    anchor_card_id = EXCLUDED.anchor_card_id,
+                    failure_reason = EXCLUDED.failure_reason,
+                    updated_at = NOW()",
+            )
+            .bind(run_id)
+            .bind(phase)
+            .bind(&status)
+            .bind(verdict.as_deref())
+            .bind(dispatch_id)
+            .bind(&pass_verdict)
+            .bind(state.next_phase)
+            .bind(state.final_phase)
+            .bind(anchor_card_id.as_deref())
+            .bind(failure_reason.as_deref())
+            .bind(created_at.as_deref())
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "upsert postgres phase-gate row for run {run_id} phase {phase} dispatch {dispatch_id}: {error}"
+                )
+            })?;
+        }
+    }
+
+    Ok(PhaseGateSaveResult {
+        persisted_dispatch_ids: dispatch_ids,
+        removed_stale_rows,
+    })
+}
+
 pub fn clear_phase_gate_state_on_conn(
     conn: &Connection,
     run_id: &str,
     phase: i64,
 ) -> libsql_rusqlite::Result<bool> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let deleted = conn.execute(
         "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-        libsql_rusqlite::params![run_id, phase],
+        libsql_rusqlite::params![run_id, phase], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
+    Ok(deleted > 0)
+}
+
+pub async fn clear_phase_gate_state_on_pg(
+    pool: &PgPool,
+    run_id: &str,
+    phase: i64,
+) -> Result<bool, String> {
+    let deleted =
+        sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = $2")
+            .bind(run_id)
+            .bind(phase)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("clear postgres phase-gate rows for run {run_id} phase {phase}: {error}")
+            })?
+            .rows_affected();
     Ok(deleted > 0)
 }
 
@@ -2129,6 +2438,7 @@ pub fn group_has_pending_entries(
         Err(_) => return false,
     };
     stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
+        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         row.get::<_, i64>(0)
     })
     .ok()
@@ -2179,6 +2489,7 @@ pub fn first_pending_entry_for_group(
         )
         .ok()?;
     stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
+        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -2369,7 +2680,7 @@ pub fn allocate_slot_for_group_agent(
                    AND assigned_run_id = ?2
                    AND COALESCE(assigned_thread_group, 0) = ?3
                  LIMIT 1",
-                libsql_rusqlite::params![agent_id, run_id, thread_group],
+                libsql_rusqlite::params![agent_id, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 |row| row.get(0),
             )
             .optional()
@@ -2417,7 +2728,7 @@ pub fn allocate_slot_for_group_agent(
                    )
                  ORDER BY s.slot_index ASC
                  LIMIT 1",
-                libsql_rusqlite::params![agent_id, run_id, thread_group],
+                libsql_rusqlite::params![agent_id, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 |row| row.get(0),
             )
             .optional()
@@ -2448,7 +2759,7 @@ pub fn allocate_slot_for_group_agent(
                              AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
                              AND e.status IN ('pending', 'dispatched')
                        )",
-                    libsql_rusqlite::params![thread_group, agent_id, slot_index, run_id],
+                    libsql_rusqlite::params![thread_group, agent_id, slot_index, run_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )
                 .map_err(|error| {
                     crate::auto_queue_log!(
@@ -2528,7 +2839,7 @@ pub fn allocate_slot_for_group_agent(
                  WHERE agent_id = ?3
                    AND slot_index = ?4
                    AND assigned_run_id IS NULL",
-                libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
+                libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             )
             .map_err(|error| {
                 crate::auto_queue_log!(
@@ -2843,7 +3154,7 @@ pub fn slot_has_active_dispatch_excluding(
                AND slot_index = ?2
                AND status = 'dispatched'
                AND COALESCE(dispatch_id, '') != ?3",
-            libsql_rusqlite::params![agent_id, slot_index, exclude_id],
+            libsql_rusqlite::params![agent_id, slot_index, exclude_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             |row| row.get(0),
         )
         .unwrap_or(false);
@@ -2859,13 +3170,14 @@ pub fn slot_has_active_dispatch_excluding(
            AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
            AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL
            AND id != ?3",
-        libsql_rusqlite::params![agent_id, slot_index, exclude_id],
+        libsql_rusqlite::params![agent_id, slot_index, exclude_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         |row| row.get(0),
     )
     .unwrap_or(false)
 }
 
 pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let thread_group_count: i64 = conn
         .query_row(
             "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
@@ -2882,7 +3194,7 @@ pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqli
          SET thread_group_count = ?1,
              max_concurrent_threads = ?1
          WHERE id = ?2",
-        libsql_rusqlite::params![thread_group_count, run_id],
+        libsql_rusqlite::params![thread_group_count, run_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     Ok(())
 }
@@ -3055,6 +3367,7 @@ fn maybe_finalize_run_after_terminal_entry(
     run_id: &str,
     new_status: &str,
 ) -> libsql_rusqlite::Result<bool> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     // `done` completion is finalized by the policy-side OnCardTerminal flow so it
     // can always create or pass through a phase gate, even for single-phase runs.
     if new_status == ENTRY_STATUS_DONE {
@@ -3148,6 +3461,7 @@ async fn maybe_finalize_run_after_terminal_entry_pg(
 }
 
 pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'paused',
@@ -3161,7 +3475,46 @@ pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Re
     Ok(updated > 0)
 }
 
+pub async fn pause_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres pause auto-queue run {run_id}: {error}"))?;
+    let updated = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'paused',
+             completed_at = NULL
+         WHERE id = $1
+           AND status = 'active'",
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("pause postgres auto-queue run {run_id}: {error}"))?
+    .rows_affected();
+    if updated > 0 {
+        sqlx::query(
+            "UPDATE auto_queue_slots
+             SET assigned_run_id = NULL,
+                 assigned_thread_group = NULL,
+                 updated_at = NOW()
+             WHERE assigned_run_id = $1",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!("release postgres auto-queue slots for paused run {run_id}: {error}")
+        })?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres pause auto-queue run {run_id}: {error}"))?;
+    Ok(updated > 0)
+}
+
 pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'active',
@@ -3172,7 +3525,24 @@ pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::R
     Ok(updated > 0)
 }
 
+pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+    let updated = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'active',
+             completed_at = NULL
+         WHERE id = $1
+           AND status = 'paused'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("resume postgres auto-queue run {run_id}: {error}"))?
+    .rows_affected();
+    Ok(updated > 0)
+}
+
 pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let updated = conn.execute(
         "UPDATE auto_queue_runs
          SET status = 'completed',
@@ -3198,10 +3568,42 @@ pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite:
     Ok(true)
 }
 
+pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres complete auto-queue run {run_id}: {error}"))?;
+    let updated = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = NOW()
+         WHERE id = $1
+           AND status IN ('active', 'paused', 'generated', 'pending')",
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("complete postgres auto-queue run {run_id}: {error}"))?
+    .rows_affected();
+    if updated == 0 {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres complete auto-queue run {run_id}: {error}")
+        })?;
+        return Ok(false);
+    }
+
+    queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
+    Ok(true)
+}
+
 fn queue_run_completion_notify_on_conn(
     conn: &Connection,
     run_id: &str,
 ) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let (repo, agent_id): (Option<String>, Option<String>) = conn.query_row(
         "SELECT repo, agent_id FROM auto_queue_runs WHERE id = ?1",
         [run_id],
@@ -3230,7 +3632,7 @@ fn queue_run_completion_notify_on_conn(
     for channel_id in targets {
         conn.execute(
             "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-            libsql_rusqlite::params![format!("channel:{channel_id}"), &content],
+            libsql_rusqlite::params![format!("channel:{channel_id}"), &content], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         )?;
     }
 
@@ -3393,6 +3795,7 @@ fn record_entry_transition_on_conn(
     to_status: &str,
     trigger_source: &str,
 ) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     ensure_entry_transition_audit_schema(conn)?;
     conn.execute(
         "INSERT INTO auto_queue_entry_transitions (
@@ -3402,7 +3805,7 @@ fn record_entry_transition_on_conn(
              trigger_source
          )
          VALUES (?1, ?2, ?3, ?4)",
-        libsql_rusqlite::params![entry_id, from_status, to_status, trigger_source],
+        libsql_rusqlite::params![entry_id, from_status, to_status, trigger_source], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     Ok(())
 }
@@ -3434,6 +3837,7 @@ async fn record_entry_transition_on_pg(
 }
 
 fn ensure_entry_transition_audit_schema(conn: &Connection) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3451,8 +3855,9 @@ fn ensure_entry_transition_audit_schema(conn: &Connection) -> libsql_rusqlite::R
 }
 
 fn map_status_entry_row(
-    row: &libsql_rusqlite::Row<'_>,
+    row: &libsql_rusqlite::Row<'_>, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 ) -> libsql_rusqlite::Result<StatusEntryRecord> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     Ok(StatusEntryRecord {
         id: row.get(0)?,
         agent_id: row.get(1)?,
@@ -3546,6 +3951,7 @@ fn ensure_agent_slot_rows(
     run_id: &str,
     agent_id: &str,
 ) -> libsql_rusqlite::Result<()> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
 }
 
@@ -3598,7 +4004,7 @@ mod tests {
         reactivate_done_entry_on_conn, record_consultation_dispatch_on_conn, release_run_slots,
         release_slot_for_group_agent, save_phase_gate_state_on_conn, update_entry_status_on_conn,
     };
-    use libsql_rusqlite::{Connection, OpenFlags};
+    use libsql_rusqlite::{Connection, OpenFlags}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     use std::sync::{Arc, Barrier};
 
     fn setup_conn() -> Connection {
@@ -4683,6 +5089,7 @@ mod tests {
             "INSERT INTO task_dispatches (id, to_agent_id, status, context)
              VALUES (?1, ?2, 'dispatched', ?3)",
             libsql_rusqlite::params![
+                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 "dispatch-sidecar",
                 "agent-1",
                 serde_json::json!({
@@ -4706,6 +5113,7 @@ mod tests {
             "INSERT INTO task_dispatches (id, to_agent_id, status, context)
              VALUES (?1, ?2, 'dispatched', ?3)",
             libsql_rusqlite::params![
+                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 "dispatch-primary",
                 "agent-1",
                 serde_json::json!({
@@ -4867,6 +5275,7 @@ mod tests {
             .unwrap();
         let rows = stmt
             .query_map(libsql_rusqlite::params!["run-1", 2], |row| {
+                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
@@ -4912,14 +5321,14 @@ mod tests {
         let phase_two_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                libsql_rusqlite::params!["run-1", 2],
+                libsql_rusqlite::params!["run-1", 2], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 |row| row.get(0),
             )
             .unwrap();
         let phase_three_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                libsql_rusqlite::params!["run-1", 3],
+                libsql_rusqlite::params!["run-1", 3], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 |row| row.get(0),
             )
             .unwrap();

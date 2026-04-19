@@ -201,7 +201,7 @@ fn dm_reply_consume_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -> Stri
          WHERE user_id = ?1 AND status = 'pending' \
          AND (expires_at IS NULL OR expires_at > datetime('now')) \
          ORDER BY created_at ASC LIMIT 1",
-        libsql_rusqlite::params![user_id],
+        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     );
     match result {
@@ -210,7 +210,7 @@ fn dm_reply_consume_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -> Stri
             let updated = conn.execute(
                 "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now') \
                  WHERE id = ?1 AND status = 'pending'",
-                libsql_rusqlite::params![id],
+                libsql_rusqlite::params![id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             );
             match updated {
                 Ok(0) => {
@@ -242,6 +242,7 @@ fn dm_reply_consume_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -> Stri
             serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
         }
         Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
+            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             r#"{"ok":false,"reason":"no_pending"}"#.to_string()
         }
         Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
@@ -270,7 +271,7 @@ fn dm_reply_pending_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -> Stri
          WHERE user_id = ?1 AND status = 'pending' \
          AND (expires_at IS NULL OR expires_at > datetime('now')) \
          ORDER BY created_at ASC LIMIT 1",
-        libsql_rusqlite::params![user_id],
+        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     );
     match result {
@@ -288,7 +289,7 @@ fn dm_reply_pending_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -> Stri
             }
             serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
         }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
     }
 }
@@ -314,7 +315,7 @@ fn dm_reply_read_consumed_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -
         "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
          WHERE user_id = ?1 AND status = 'consumed' \
          ORDER BY consumed_at DESC LIMIT 1",
-        libsql_rusqlite::params![user_id],
+        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     );
     match result {
@@ -332,7 +333,7 @@ fn dm_reply_read_consumed_raw(db: &Db, pg_pool: Option<PgPool>, user_id: &str) -
             }
             serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
         }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
+        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
     }
 }

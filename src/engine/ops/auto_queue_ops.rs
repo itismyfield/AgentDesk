@@ -41,53 +41,76 @@ pub(super) fn register_auto_queue_ops<'js>(
         })?,
     )?;
     let db_pause_run = db.clone();
+    let pg_pause_run = pg_pool.clone();
     auto_queue_obj.set(
         "__pauseRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                pause_run_raw(&db_pause_run, &run_id, &source)
+                pause_run_raw(&db_pause_run, pg_pause_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
     let db_resume_run = db.clone();
+    let pg_resume_run = pg_pool.clone();
     auto_queue_obj.set(
         "__resumeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                resume_run_raw(&db_resume_run, &run_id, &source)
+                resume_run_raw(&db_resume_run, pg_resume_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
     let db_complete_run = db.clone();
+    let pg_complete_run = pg_pool.clone();
     auto_queue_obj.set(
         "__completeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String, opts_json: String| -> String {
-                complete_run_raw(&db_complete_run, &run_id, &source, &opts_json)
+                complete_run_raw(
+                    &db_complete_run,
+                    pg_complete_run.as_ref(),
+                    &run_id,
+                    &source,
+                    &opts_json,
+                )
             },
         )?,
     )?;
     let db_save_phase_gate = db.clone();
+    let pg_save_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__savePhaseGateStateRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, phase: i64, state_json: String| -> String {
-                save_phase_gate_state_raw(&db_save_phase_gate, &run_id, phase, &state_json)
+                save_phase_gate_state_raw(
+                    &db_save_phase_gate,
+                    pg_save_phase_gate.as_ref(),
+                    &run_id,
+                    phase,
+                    &state_json,
+                )
             },
         )?,
     )?;
     let db_clear_phase_gate = db.clone();
+    let pg_clear_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__clearPhaseGateStateRaw",
         Function::new(ctx.clone(), move |run_id: String, phase: i64| -> String {
-            clear_phase_gate_state_raw(&db_clear_phase_gate, &run_id, phase)
+            clear_phase_gate_state_raw(
+                &db_clear_phase_gate,
+                pg_clear_phase_gate.as_ref(),
+                &run_id,
+                phase,
+            )
         })?,
     )?;
     let db_record_consultation = db.clone();
+    let pg_record_consultation = pg_pool.clone();
     auto_queue_obj.set(
         "__recordConsultationDispatchRaw",
         Function::new(
@@ -100,6 +123,7 @@ pub(super) fn register_auto_queue_ops<'js>(
                   -> String {
                 record_consultation_dispatch_raw(
                     &db_record_consultation,
+                    pg_record_consultation.as_ref(),
                     &entry_id,
                     &card_id,
                     &dispatch_id,
@@ -110,6 +134,7 @@ pub(super) fn register_auto_queue_ops<'js>(
         )?,
     )?;
     let db_record_dispatch_failure = db.clone();
+    let pg_record_dispatch_failure = pg_pool.clone();
     auto_queue_obj.set(
         "__recordEntryDispatchFailureRaw",
         Function::new(
@@ -117,6 +142,7 @@ pub(super) fn register_auto_queue_ops<'js>(
             move |entry_id: String, max_retries: i64, source: String| -> String {
                 record_entry_dispatch_failure_raw(
                     &db_record_dispatch_failure,
+                    pg_record_dispatch_failure.as_ref(),
                     &entry_id,
                     max_retries,
                     &source,
@@ -290,19 +316,85 @@ fn should_defer_activate(bridge: &BridgeHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn pause_run_raw(db: &Db, run_id: &str, source: &str) -> String {
-    update_run_status_raw(db, source, |conn| {
-        crate::db::auto_queue::pause_run_on_conn(conn, run_id)
-    })
+fn pause_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+    if source.trim().is_empty() {
+        return r#"{"error":"source is required"}"#.to_string();
+    }
+
+    let result = if let Some(pool) = pg_pool {
+        let run_id = run_id.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::pause_run_on_pg(&pool, &run_id).await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+        crate::db::auto_queue::pause_run_on_conn(&conn, run_id).map_err(|error| error.to_string())
+    };
+
+    match result {
+        Ok(changed) => serde_json::json!({
+            "ok": true,
+            "changed": changed,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
 }
 
-fn resume_run_raw(db: &Db, run_id: &str, source: &str) -> String {
-    update_run_status_raw(db, source, |conn| {
-        crate::db::auto_queue::resume_run_on_conn(conn, run_id)
-    })
+fn resume_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+    if source.trim().is_empty() {
+        return r#"{"error":"source is required"}"#.to_string();
+    }
+
+    let result = if let Some(pool) = pg_pool {
+        let run_id = run_id.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::resume_run_on_pg(&pool, &run_id).await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+        crate::db::auto_queue::resume_run_on_conn(&conn, run_id).map_err(|error| error.to_string())
+    };
+
+    match result {
+        Ok(changed) => serde_json::json!({
+            "ok": true,
+            "changed": changed,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
 }
 
-fn complete_run_raw(db: &Db, run_id: &str, source: &str, opts_json: &str) -> String {
+fn complete_run_raw(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    run_id: &str,
+    source: &str,
+    opts_json: &str,
+) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
@@ -321,26 +413,40 @@ fn complete_run_raw(db: &Db, run_id: &str, source: &str, opts_json: &str) -> Str
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
 
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
-            })
-            .to_string();
-        }
-    };
+    let result = if let Some(pool) = pg_pool {
+        let run_id = run_id.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            if release_slots {
+                crate::db::auto_queue::release_run_slots_pg(&pool, &run_id)
+                    .await
+                    .map_err(|error| format!("release postgres auto-queue slots: {error}"))?;
+            }
+            crate::db::auto_queue::complete_run_on_pg(&pool, &run_id).await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
 
-    if release_slots {
-        if let Err(error) = crate::db::auto_queue::release_run_slots(&conn, run_id) {
+        if release_slots && let Err(error) = crate::db::auto_queue::release_run_slots(&conn, run_id)
+        {
             return serde_json::json!({
                 "error": format!("release auto-queue slots: {error}")
             })
             .to_string();
         }
-    }
 
-    match crate::db::auto_queue::complete_run_on_conn(&conn, run_id) {
+        crate::db::auto_queue::complete_run_on_conn(&conn, run_id)
+            .map_err(|error| error.to_string())
+    };
+
+    match result {
         Ok(changed) => serde_json::json!({
             "ok": true,
             "changed": changed,
@@ -375,22 +481,18 @@ struct PhaseGateStatePayload {
     created_at: Option<String>,
 }
 
-fn save_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64, state_json: &str) -> String {
+fn save_phase_gate_state_raw(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    run_id: &str,
+    phase: i64,
+    state_json: &str,
+) -> String {
     let payload: PhaseGateStatePayload = match serde_json::from_str(state_json) {
         Ok(value) => value,
         Err(error) => {
             return serde_json::json!({
                 "error": format!("invalid phase gate state JSON: {error}")
-            })
-            .to_string();
-        }
-    };
-
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
             })
             .to_string();
         }
@@ -410,7 +512,26 @@ fn save_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64, state_json: &str
         created_at: payload.created_at,
     };
 
-    match crate::db::auto_queue::save_phase_gate_state_on_conn(&conn, run_id, phase, &write) {
+    let result = if let Some(pool) = pg_pool {
+        let run_id = run_id.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::save_phase_gate_state_on_pg(&pool, &run_id, phase, &write).await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+        crate::db::auto_queue::save_phase_gate_state_on_conn(&conn, run_id, phase, &write)
+            .map_err(|error| error.to_string())
+    };
+
+    match result {
         Ok(result) => serde_json::json!({
             "ok": true,
             "dispatch_ids": result.persisted_dispatch_ids,
@@ -424,18 +545,32 @@ fn save_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64, state_json: &str
     }
 }
 
-fn clear_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64) -> String {
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
-            })
-            .to_string();
-        }
+fn clear_phase_gate_state_raw(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    run_id: &str,
+    phase: i64,
+) -> String {
+    let result = if let Some(pool) = pg_pool {
+        let run_id = run_id.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::clear_phase_gate_state_on_pg(&pool, &run_id, phase).await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+        crate::db::auto_queue::clear_phase_gate_state_on_conn(&conn, run_id, phase)
+            .map_err(|error| error.to_string())
     };
 
-    match crate::db::auto_queue::clear_phase_gate_state_on_conn(&conn, run_id, phase) {
+    match result {
         Ok(changed) => serde_json::json!({
             "ok": true,
             "changed": changed,
@@ -450,30 +585,53 @@ fn clear_phase_gate_state_raw(db: &Db, run_id: &str, phase: i64) -> String {
 
 fn record_consultation_dispatch_raw(
     db: &Db,
+    pg_pool: Option<&PgPool>,
     entry_id: &str,
     card_id: &str,
     dispatch_id: &str,
     source: &str,
     metadata_json: &str,
 ) -> String {
-    let mut conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
-            })
-            .to_string();
-        }
+    let result = if let Some(pool) = pg_pool {
+        let entry_id = entry_id.to_string();
+        let card_id = card_id.to_string();
+        let dispatch_id = dispatch_id.to_string();
+        let source = source.to_string();
+        let metadata_json = metadata_json.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::record_consultation_dispatch_on_pg(
+                &pool,
+                &entry_id,
+                &card_id,
+                &dispatch_id,
+                &source,
+                &metadata_json,
+            )
+            .await
+        })
+    } else {
+        let mut conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+
+        crate::db::auto_queue::record_consultation_dispatch_on_conn(
+            &mut conn,
+            entry_id,
+            card_id,
+            dispatch_id,
+            source,
+            metadata_json,
+        )
+        .map_err(|error| error.to_string())
     };
 
-    match crate::db::auto_queue::record_consultation_dispatch_on_conn(
-        &mut conn,
-        entry_id,
-        card_id,
-        dispatch_id,
-        source,
-        metadata_json,
-    ) {
+    match result {
         Ok(result) => serde_json::json!({
             "ok": true,
             "changed": result.entry_status_changed,
@@ -490,6 +648,7 @@ fn record_consultation_dispatch_raw(
 
 fn record_entry_dispatch_failure_raw(
     db: &Db,
+    pg_pool: Option<&PgPool>,
     entry_id: &str,
     max_retries: i64,
     source: &str,
@@ -498,22 +657,39 @@ fn record_entry_dispatch_failure_raw(
         return r#"{"error":"source is required"}"#.to_string();
     }
 
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
-            })
-            .to_string();
-        }
+    let result = if let Some(pool) = pg_pool {
+        let entry_id = entry_id.to_string();
+        let source = source.to_string();
+        run_async_bridge_pg(pool, move |pool| async move {
+            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+                &pool,
+                &entry_id,
+                max_retries,
+                &source,
+            )
+            .await
+        })
+    } else {
+        let conn = match db.separate_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("DB: {error}")
+                })
+                .to_string();
+            }
+        };
+
+        crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
+            &conn,
+            entry_id,
+            max_retries,
+            source,
+        )
+        .map_err(|error| error.to_string())
     };
 
-    match crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
-        &conn,
-        entry_id,
-        max_retries,
-        source,
-    ) {
+    match result {
         Ok(result) => serde_json::json!({
             "ok": true,
             "changed": result.changed,
@@ -522,37 +698,6 @@ fn record_entry_dispatch_failure_raw(
             "run_id": result.run_id,
             "retryCount": result.retry_count,
             "retryLimit": result.retry_limit,
-        })
-        .to_string(),
-        Err(error) => serde_json::json!({
-            "error": error.to_string()
-        })
-        .to_string(),
-    }
-}
-
-fn update_run_status_raw<F>(db: &Db, source: &str, update: F) -> String
-where
-    F: FnOnce(&libsql_rusqlite::Connection) -> libsql_rusqlite::Result<bool>,
-{
-    if source.trim().is_empty() {
-        return r#"{"error":"source is required"}"#.to_string();
-    }
-
-    let conn = match db.separate_conn() {
-        Ok(conn) => conn,
-        Err(error) => {
-            return serde_json::json!({
-                "error": format!("DB: {error}")
-            })
-            .to_string();
-        }
-    };
-
-    match update(&conn) {
-        Ok(changed) => serde_json::json!({
-            "ok": true,
-            "changed": changed,
         })
         .to_string(),
         Err(error) => serde_json::json!({
