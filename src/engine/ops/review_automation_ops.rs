@@ -151,7 +151,7 @@ fn handoff_create_pr_raw(db: &Db, pg_pool: Option<&PgPool>, payload_json: &str) 
     }
 }
 
-async fn upsert_pg_pr_tracking_handoff_state(
+async fn seed_pg_pr_tracking_handoff_state(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payload: &HandoffPayload,
     generation: &str,
@@ -196,6 +196,41 @@ async fn upsert_pg_pr_tracking_handoff_state(
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("upsert postgres pr_tracking for {}: {e}", payload.card_id))?;
+
+    Ok(())
+}
+
+async fn refresh_pg_pr_tracking_reuse_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    payload: &HandoffPayload,
+    generation: &str,
+    current_round: i64,
+) -> Result<(), String> {
+    let updated = sqlx::query(
+        "UPDATE pr_tracking
+         SET state = 'create-pr',
+             last_error = NULL,
+             dispatch_generation = $1,
+             review_round = $2,
+             retry_count = 0,
+             updated_at = NOW()
+         WHERE card_id = $3",
+    )
+    .bind(generation)
+    .bind(current_round)
+    .bind(&payload.card_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        format!(
+            "refresh postgres reused pr_tracking for {}: {e}",
+            payload.card_id
+        )
+    })?;
+
+    if updated.rows_affected() == 0 {
+        seed_pg_pr_tracking_handoff_state(tx, payload, generation, current_round).await?;
+    }
 
     Ok(())
 }
@@ -246,7 +281,7 @@ async fn handoff_create_pr_pg(
         let generation = existing
             .try_get::<String, _>("dispatch_generation")
             .map_err(|e| format!("decode active postgres create-pr generation: {e}"))?;
-        upsert_pg_pr_tracking_handoff_state(&mut tx, payload, &generation, current_round).await?;
+        refresh_pg_pr_tracking_reuse_state(&mut tx, payload, &generation, current_round).await?;
         sqlx::query(
             "UPDATE kanban_cards
              SET blocked_reason = 'pr:creating',
@@ -294,7 +329,7 @@ async fn handoff_create_pr_pg(
     let generation = Uuid::new_v4().to_string();
     let dispatch_id = Uuid::new_v4().to_string();
 
-    upsert_pg_pr_tracking_handoff_state(&mut tx, payload, &generation, current_round).await?;
+    seed_pg_pr_tracking_handoff_state(&mut tx, payload, &generation, current_round).await?;
 
     let context = json!({
         "dispatch_generation": generation,
@@ -415,7 +450,7 @@ async fn handoff_create_pr_pg(
 fn lookup_active_create_pr_dispatch(
     conn: &libsql_rusqlite::Transaction<'_>,
     card_id: &str,
-) -> Option<(String, String)> {
+) -> anyhow::Result<Option<(String, String)>> {
     conn.query_row(
         "SELECT td.id,
                 COALESCE(json_extract(COALESCE(td.context, '{}'), '$.dispatch_generation'), '')
@@ -427,10 +462,11 @@ fn lookup_active_create_pr_dispatch(
         [card_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
-    .ok()
+    .optional()
+    .map_err(|e| anyhow::anyhow!("lookup active create-pr dispatch for {card_id}: {e}"))
 }
 
-fn upsert_pr_tracking_handoff_state(
+fn seed_pr_tracking_handoff_state(
     tx: &libsql_rusqlite::Transaction<'_>,
     payload: &HandoffPayload,
     generation: &str,
@@ -466,6 +502,31 @@ fn upsert_pr_tracking_handoff_state(
     Ok(())
 }
 
+fn refresh_pr_tracking_reuse_state(
+    tx: &libsql_rusqlite::Transaction<'_>,
+    payload: &HandoffPayload,
+    generation: &str,
+    current_round: i64,
+) -> anyhow::Result<()> {
+    let updated = tx.execute(
+        "UPDATE pr_tracking SET \
+           state = 'create-pr', \
+           last_error = NULL, \
+           dispatch_generation = ?1, \
+           review_round = ?2, \
+           retry_count = 0, \
+           updated_at = CURRENT_TIMESTAMP \
+         WHERE card_id = ?3",
+        libsql_rusqlite::params![generation, current_round, payload.card_id],
+    )?;
+
+    if updated == 0 {
+        seed_pr_tracking_handoff_state(tx, payload, generation, current_round)?;
+    }
+
+    Ok(())
+}
+
 fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<serde_json::Value> {
     let mut conn = db
         .separate_conn()
@@ -484,9 +545,10 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
 
     // 2. Idempotent reuse — refresh pr_tracking to the active dispatch stamp so
     //    stale generations do not leak into retry logic.
-    if let Some((dispatch_id, generation)) = lookup_active_create_pr_dispatch(&tx, &payload.card_id)
+    if let Some((dispatch_id, generation)) =
+        lookup_active_create_pr_dispatch(&tx, &payload.card_id)?
     {
-        upsert_pr_tracking_handoff_state(&tx, payload, &generation, current_round)?;
+        refresh_pr_tracking_reuse_state(&tx, payload, &generation, current_round)?;
         tx.execute(
             "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') \
              WHERE id = ?1",
@@ -520,7 +582,7 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
     let dispatch_id = Uuid::new_v4().to_string();
 
     // 6. pr_tracking upsert with stamp.
-    upsert_pr_tracking_handoff_state(&tx, payload, &generation, current_round)?;
+    seed_pr_tracking_handoff_state(&tx, payload, &generation, current_round)?;
 
     // 7. Build dispatch context with stamps.
     let context = json!({
@@ -1140,6 +1202,129 @@ mod tests {
         format!("{}/{}", base_database_url(), admin_db)
     }
 
+    #[test]
+    fn sqlite_lookup_active_create_pr_dispatch_surfaces_query_errors() {
+        let mut conn =
+            libsql_rusqlite::Connection::open_in_memory().expect("open sqlite memory db");
+        let tx = conn.transaction().expect("open sqlite transaction");
+
+        let err = lookup_active_create_pr_dispatch(&tx, "card-sqlite-missing-table")
+            .expect_err("missing task_dispatches table should error");
+        assert!(
+            err.to_string().contains("lookup active create-pr dispatch"),
+            "unexpected lookup error: {err}"
+        );
+    }
+
+    #[test]
+    fn sqlite_reuse_refresh_preserves_existing_tracking_target_fields() {
+        let mut conn =
+            libsql_rusqlite::Connection::open_in_memory().expect("open sqlite memory db");
+        conn.execute_batch(
+            "CREATE TABLE pr_tracking (
+                card_id TEXT PRIMARY KEY,
+                repo_id TEXT,
+                worktree_path TEXT,
+                branch TEXT,
+                head_sha TEXT,
+                state TEXT,
+                last_error TEXT,
+                dispatch_generation TEXT,
+                review_round INTEGER,
+                retry_count INTEGER,
+                created_at TEXT,
+                updated_at TEXT
+            );",
+        )
+        .expect("create pr_tracking table");
+
+        let tx = conn.transaction().expect("open sqlite transaction");
+        tx.execute(
+            "INSERT INTO pr_tracking (
+                card_id,
+                repo_id,
+                worktree_path,
+                branch,
+                head_sha,
+                state,
+                last_error,
+                dispatch_generation,
+                review_round,
+                retry_count,
+                created_at,
+                updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, 'escalated', 'stale error', ?6, ?7, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+             )",
+            libsql_rusqlite::params![
+                "card-sqlite-reuse",
+                "repo-tracked",
+                "/tracked/worktree",
+                "tracked/branch",
+                "tracked-head",
+                "generation-old",
+                4_i64,
+            ],
+        )
+        .expect("seed tracked row");
+
+        let payload = HandoffPayload {
+            card_id: "card-sqlite-reuse".to_string(),
+            repo_id: "repo-new".to_string(),
+            worktree_path: Some("/new/worktree".to_string()),
+            branch: "new/branch".to_string(),
+            head_sha: Some("new-head".to_string()),
+            agent_id: "agent-reviewer".to_string(),
+            title: "Create PR".to_string(),
+        };
+
+        refresh_pr_tracking_reuse_state(&tx, &payload, "generation-new", 9)
+            .expect("refresh reused tracking row");
+
+        let tracked = tx
+            .query_row(
+                "SELECT
+                    repo_id,
+                    worktree_path,
+                    branch,
+                    head_sha,
+                    state,
+                    last_error,
+                    dispatch_generation,
+                    review_round,
+                    retry_count
+                 FROM pr_tracking
+                 WHERE card_id = ?1",
+                [&payload.card_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .expect("query refreshed tracking row")
+            .expect("tracking row should exist");
+
+        assert_eq!(tracked.0.as_deref(), Some("repo-tracked"));
+        assert_eq!(tracked.1.as_deref(), Some("/tracked/worktree"));
+        assert_eq!(tracked.2.as_deref(), Some("tracked/branch"));
+        assert_eq!(tracked.3.as_deref(), Some("tracked-head"));
+        assert_eq!(tracked.4.as_deref(), Some("create-pr"));
+        assert_eq!(tracked.5, None);
+        assert_eq!(tracked.6.as_deref(), Some("generation-new"));
+        assert_eq!(tracked.7, 9);
+        assert_eq!(tracked.8, 0);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn review_automation_pg_handoff_failure_and_reseed_round_trip() {
         let test_db = TestDatabase::create().await;
@@ -1313,7 +1498,15 @@ mod tests {
         .await
         .expect("clear blocked reason before reuse");
 
-        let second_handoff = handoff_create_pr_pg(&pool, &payload)
+        let reused_payload = HandoffPayload {
+            repo_id: "repo-reused-override".to_string(),
+            worktree_path: Some("/tmp/worktree/reused-override".to_string()),
+            branch: "feature/reused-override".to_string(),
+            head_sha: Some("override-head-456".to_string()),
+            ..payload.clone()
+        };
+
+        let second_handoff = handoff_create_pr_pg(&pool, &reused_payload)
             .await
             .expect("second handoff create pr");
         assert_eq!(second_handoff["ok"], true);
@@ -1322,7 +1515,12 @@ mod tests {
         assert_eq!(second_handoff["generation"], generation);
 
         let reused_tracking = sqlx::query(
-            "SELECT dispatch_generation, blocked_reason
+            "SELECT pt.repo_id,
+                    pt.worktree_path,
+                    pt.branch,
+                    pt.head_sha,
+                    pt.dispatch_generation,
+                    kc.blocked_reason
              FROM pr_tracking pt
              JOIN kanban_cards kc ON kc.id = pt.card_id
              WHERE pt.card_id = $1",
@@ -1331,6 +1529,32 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load refreshed postgres reuse state");
+        assert_eq!(
+            reused_tracking
+                .try_get::<String, _>("repo_id")
+                .expect("decode refreshed postgres repo_id"),
+            payload.repo_id
+        );
+        assert_eq!(
+            reused_tracking
+                .try_get::<Option<String>, _>("worktree_path")
+                .expect("decode refreshed postgres worktree_path")
+                .as_deref(),
+            payload.worktree_path.as_deref()
+        );
+        assert_eq!(
+            reused_tracking
+                .try_get::<String, _>("branch")
+                .expect("decode refreshed postgres branch"),
+            payload.branch
+        );
+        assert_eq!(
+            reused_tracking
+                .try_get::<Option<String>, _>("head_sha")
+                .expect("decode refreshed postgres head_sha")
+                .as_deref(),
+            payload.head_sha.as_deref()
+        );
         assert_eq!(
             reused_tracking
                 .try_get::<String, _>("dispatch_generation")
