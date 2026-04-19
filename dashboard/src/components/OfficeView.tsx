@@ -6,6 +6,7 @@ import type { UiLanguage } from "../i18n";
 import { buildSpriteMap } from "./AgentAvatar";
 import { buildOfficeScene } from "./office-view/buildScene";
 import type { Notification } from "./NotificationCenter";
+import { MOBILE_LAYOUT_MEDIA_QUERY } from "../app/breakpoints";
 import type {
   AnimItem,
   BreakAnimItem,
@@ -104,11 +105,11 @@ export default function OfficeView({
 }: OfficeViewProps) {
   const [isMobileLite, setIsMobileLite] = useState(() => {
     if (typeof window === "undefined") return false;
-    return window.matchMedia("(max-width: 639px)").matches;
+    return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 639px)");
+    const media = window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY);
     const sync = () => setIsMobileLite(media.matches);
     sync();
     media.addEventListener("change", sync);

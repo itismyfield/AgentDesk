@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const ROUTES = [
   { path: "/home", label: /홈|Home/ },
@@ -11,6 +11,18 @@ const ROUTES = [
   { path: "/achievements", label: /업적|Achievements/ },
   { path: "/settings", label: /설정|Settings/ },
 ];
+
+async function expectNoHorizontalOverflow(page: Page) {
+  const metrics = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+    rootScrollWidth: document.documentElement.scrollWidth,
+  }));
+
+  expect(
+    Math.max(metrics.bodyScrollWidth, metrics.rootScrollWidth),
+  ).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+}
 
 test.describe("Dashboard smoke tests", () => {
   test("page loads and renders root element", async ({ page }) => {
@@ -66,31 +78,95 @@ test.describe("Dashboard smoke tests", () => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
     await page.goto("/home");
 
-    const sidebar = page.getByTestId("app-sidebar");
+    const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
     expect(box?.width).toBeGreaterThan(230);
     expect(box?.width).toBeLessThan(250);
   });
 
-  test("desktop: sidebar navigation updates route and breadcrumb", async ({ page }, testInfo) => {
+  test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+
+    await page.setViewportSize({ width: 899, height: 900 });
     await page.goto("/home");
 
-    await page.getByRole("button", { name: /칸반|Kanban/ }).click();
-    await expect(page).toHaveURL(/\/kanban$/);
-    await expect(page.getByTestId("topbar")).toContainText(/칸반|Kanban/);
+    await expect(page.getByTestId("app-mobile-tabbar")).toBeVisible();
+    await expect(page.getByTestId("app-sidebar-nav")).toHaveCount(0);
+    await expect(page.getByTestId("app-mobile-tabbar").locator("button")).toHaveCount(5);
+
+    await page.setViewportSize({ width: 900, height: 900 });
+
+    await expect(page.getByTestId("app-sidebar-nav")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tabbar")).toHaveCount(0);
   });
 
-  test("mobile: menu button opens the sidebar drawer", async ({ page }, testInfo) => {
+  test("responsive: mobile viewport shows 5-tab bar and opens the More menu", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
 
-    const sidebar = page.getByTestId("app-sidebar");
-    await expect(sidebar).not.toBeVisible();
+    const bottomNav = page.getByTestId("app-mobile-tabbar");
+    await expect(bottomNav).toBeVisible();
+    await expect(bottomNav.locator("button")).toHaveCount(5);
+    await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tab-office")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
 
-    await page.getByRole("button", { name: /사이드바 열기|Open sidebar/ }).click();
-    await expect(sidebar).toBeVisible();
+    await page.getByTestId("app-mobile-more-button").click();
+
+    const moreMenu = page.getByTestId("app-mobile-more-menu");
+    await expect(moreMenu).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /에이전트|Agents/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /운영|Ops/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /업적|Achievements/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /설정|Settings/ })).toBeVisible();
+
+    const shellStyles = await page.getByTestId("app-main-scroll").evaluate((element) => ({
+      marginBottom: (element as HTMLElement).style.marginBottom,
+    }));
+    expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
+
+    const tabbarStyles = await bottomNav.evaluate((element) => ({
+      height: (element as HTMLElement).style.height,
+      paddingBottom: (element as HTMLElement).style.paddingBottom,
+      paddingLeft: (element as HTMLElement).style.paddingLeft,
+      paddingRight: (element as HTMLElement).style.paddingRight,
+    }));
+    expect(tabbarStyles.height).toContain("env(safe-area-inset-bottom)");
+    expect(tabbarStyles.paddingBottom).toContain("env(safe-area-inset-bottom)");
+    expect(tabbarStyles.paddingLeft).toContain("env(safe-area-inset-left)");
+    expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
+  });
+
+  test("responsive: mobile routes avoid horizontal overflow", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-tab-office").click();
+    await expect(page).toHaveURL(/\/office$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-tab-kanban").click();
+    await expect(page).toHaveURL(/\/kanban$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-tab-stats").click();
+    await expect(page).toHaveURL(/\/stats$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-more-button").click();
+    await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /에이전트|Agents/ }).click();
+    await expect(page).toHaveURL(/\/agents$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-more-button").click();
+    await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /설정|Settings/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("settings button routes to settings page", async ({ page }, testInfo) => {
@@ -98,14 +174,16 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     await page.getByRole("button", { name: /설정으로 이동|Open settings/ }).click();
-    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page).toHaveURL(/\/settings(\?.*)?$/);
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });
 
   test("all app shell routes are directly reachable", async ({ page }) => {
     for (const route of ROUTES) {
       await page.goto(route.path);
-      await expect(page).toHaveURL(new RegExp(`${route.path.replace("/", "\\/")}$`));
+      await expect(page).toHaveURL(
+        new RegExp(`${route.path.replace("/", "\\/")}$`),
+      );
       await expect(page.getByTestId("topbar")).toContainText(route.label);
     }
   });

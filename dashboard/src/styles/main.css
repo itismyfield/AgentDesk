@@ -3,6 +3,9 @@
 
 /* ── Tailwind v4 semantic color tokens ── */
 @theme {
+  /* The dashboard shell switches to the mobile layout at 900px, so sm/md stay aligned on purpose. */
+  --breakpoint-sm: 56.25rem;
+  --breakpoint-md: 56.25rem;
   --color-surface-subtle: var(--th-overlay-subtle);
   --color-surface-light: var(--th-overlay-light);
   --color-surface-medium: var(--th-overlay-medium);
@@ -189,7 +192,7 @@ textarea {
   font: inherit;
 }
 
-@media (max-width: 639px) {
+@media (max-width: 899px) {
   body { overflow-x: hidden; overflow-y: auto; }
 }
 

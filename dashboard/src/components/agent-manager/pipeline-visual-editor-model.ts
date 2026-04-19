@@ -4,8 +4,9 @@ import type {
   PipelineOverride,
   PipelineStage,
 } from "../../types";
+import { MOBILE_LAYOUT_BREAKPOINT_PX } from "../../app/breakpoints";
 
-export const PIPELINE_VISUAL_EDITOR_MOBILE_BREAKPOINT = 720;
+export const PIPELINE_VISUAL_EDITOR_MOBILE_BREAKPOINT = MOBILE_LAYOUT_BREAKPOINT_PX;
 
 export type StageTrigger = "ready" | "review_pass";
 
