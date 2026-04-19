@@ -6625,6 +6625,88 @@ mod tests {
         );
     }
 
+    /// #743 regression: escalateToManualIntervention can overwrite the
+    /// machine-readable create-pr escalation marker with a human-readable
+    /// message. markPrCreateFailed must restore the machine marker afterward so
+    /// merge automation keeps the card in the create-pr failure lane.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_mark_pr_create_failed_escalation_preserves_machine_marker() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-743-mark-escalated",
+            "review",
+            "test/repo",
+            1000,
+            None,
+        );
+        seed_pr_tracking(
+            &db,
+            "card-743-mark-escalated",
+            "test/repo",
+            Some("wt/card-743-mark-escalated"),
+            "feature/card-743-mark-escalated",
+            None,
+            Some("sha-743-mark-escalated"),
+            "create-pr",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE pr_tracking SET retry_count = 2, last_error = 'previous_failure' \
+                 WHERE card_id = 'card-743-mark-escalated'",
+                [],
+            )
+            .unwrap();
+        }
+
+        engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.reviewAutomation.markPrCreateFailed(
+                        "card-743-mark-escalated",
+                        "handoff_crashed"
+                    );
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let (card_status, blocked_reason, tracking_state, retry_count): (
+            String,
+            Option<String>,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT kc.status, kc.blocked_reason, pt.state, pt.retry_count \
+                 FROM kanban_cards kc \
+                 JOIN pr_tracking pt ON pt.card_id = kc.id \
+                 WHERE kc.id = 'card-743-mark-escalated'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(card_status, "done");
+        assert_eq!(tracking_state, "escalated");
+        assert_eq!(retry_count, 3);
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some("pr:create_failed_escalated:max_retries"),
+            "#743: escalation must preserve the machine marker after human notification overwrites blocked_reason"
+        );
+    }
+
     /// #743: pr:create_failed card with NO pr_tracking row → escalate to
     /// manual intervention via blocked_reason='pr:create_failed_escalated:no_tracking'
     /// rather than silently deferring to processTrackedMergeQueue (which has
@@ -6794,6 +6876,105 @@ mod tests {
             Some("cancelled"),
             "#743: reseedPrTracking must cancel the active stale dispatch so the partial unique index does not block the next handoff"
         );
+    }
+
+    /// #743: if handoffCreatePr reuses an already-active create-pr dispatch, it
+    /// must refresh pr_tracking back to the active dispatch's generation so
+    /// stale loser generations do not leak into retry logic.
+    #[cfg(unix)]
+    #[test]
+    fn scenario_743_handoff_reuse_refreshes_tracking_generation_from_active_dispatch() {
+        let (_repo, _repo_guard) = setup_test_repo();
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-743-handoff-reuse",
+            "review",
+            "test/repo",
+            1005,
+            None,
+        );
+
+        let active_generation = seed_stamped_create_pr_state(
+            &db,
+            "disp-743-existing",
+            "card-743-handoff-reuse",
+            "test/repo",
+            Some("wt/card-743-handoff-reuse"),
+            "feature/card-743-handoff-reuse",
+            None,
+            Some("sha-743-handoff-reuse"),
+            "create-pr",
+            "pending",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE pr_tracking SET dispatch_generation = '00000000-0000-0000-0000-stale0reuse01' \
+                 WHERE card_id = 'card-743-handoff-reuse'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = 'card-743-handoff-reuse'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let raw = engine
+            .eval_js::<String>(
+                r#"(() => JSON.stringify(agentdesk.reviewAutomation.handoffCreatePr(
+                    "card-743-handoff-reuse",
+                    {
+                        repo_id: "test/repo",
+                        worktree_path: "wt/card-743-handoff-reuse",
+                        branch: "feature/card-743-handoff-reuse",
+                        head_sha: "sha-743-handoff-reuse",
+                        agent_id: "agent-1",
+                        title: "Test Create PR Reuse"
+                    }
+                )))()"#,
+            )
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let conn = db.lock().unwrap();
+        let (dispatch_generation, blocked_reason, active_count): (
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT pt.dispatch_generation, kc.blocked_reason, \
+                        (SELECT COUNT(*) FROM task_dispatches \
+                         WHERE kanban_card_id = 'card-743-handoff-reuse' \
+                           AND dispatch_type = 'create-pr' \
+                           AND status IN ('pending', 'dispatched')) \
+                 FROM pr_tracking pt \
+                 JOIN kanban_cards kc ON kc.id = pt.card_id \
+                 WHERE pt.card_id = 'card-743-handoff-reuse'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["reused"], true);
+        assert_eq!(result["dispatch_id"], "disp-743-existing");
+        assert_eq!(result["generation"], active_generation);
+        assert_eq!(
+            dispatch_generation.as_deref(),
+            Some(active_generation.as_str()),
+            "#743: handoffCreatePr reuse must refresh pr_tracking to the active dispatch generation"
+        );
+        assert_eq!(blocked_reason.as_deref(), Some("pr:creating"));
+        assert_eq!(active_count, 1);
     }
 
     /// #743: pr_tracking.head_sha divergence from the latest completed work
