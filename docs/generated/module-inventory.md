@@ -207,10 +207,10 @@
 | `services::discord::config_audit` | `src/services/discord/config_audit.rs` | 1145 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 528 |  |
 | `services::discord::dm_reply_store` | `src/services/discord/dm_reply_store.rs` | 463 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1414 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1447 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 293 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 2044 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 2072 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 381 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 280 |  |
 | `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3433 | giant-file |
