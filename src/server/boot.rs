@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -113,6 +113,10 @@ fn build_app(
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Router {
+    let dashboard_service = ServeDir::new(dashboard_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(dashboard_dir.join("index.html")));
+
     Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
@@ -127,7 +131,7 @@ fn build_app(
                 pg_pool,
             ),
         )
-        .fallback_service(ServeDir::new(dashboard_dir).append_index_html_on_directories(true))
+        .fallback_service(dashboard_service)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<usize> {
