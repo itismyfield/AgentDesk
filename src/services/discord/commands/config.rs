@@ -120,25 +120,13 @@ pub(in crate::services::discord) async fn effective_provider_for_channel(
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
 ) -> ProviderKind {
-    let override_channel = shared
+    shared
         .dispatch_role_overrides
         .get(&channel_id)
-        .map(|value| *value);
-    let channel_name = if override_channel.is_none() {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.clone())
-    } else {
-        None
-    };
-
-    resolve_role_binding(
-        override_channel.unwrap_or(channel_id),
-        channel_name.as_deref(),
-    )
-    .and_then(|binding| binding.provider)
-    .unwrap_or_else(|| provider.clone())
+        .map(|value| *value)
+        .and_then(|override_channel| resolve_role_binding(override_channel, None))
+        .and_then(|binding| binding.provider)
+        .unwrap_or_else(|| provider.clone())
 }
 
 pub(in crate::services::discord) fn native_fast_mode_supported(provider: &ProviderKind) -> bool {
@@ -1113,7 +1101,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn effective_provider_for_channel_uses_role_binding_when_no_dispatch_override() {
+    async fn effective_provider_for_channel_uses_bot_provider_when_no_dispatch_override() {
         let env = TempAgentdeskRootGuard::new();
         write_agentdesk_yaml(
             env._temp_home.path(),
@@ -1157,6 +1145,37 @@ agents:
                 },
             );
         }
+
+        let effective =
+            effective_provider_for_channel(&shared, channel_id, &ProviderKind::Gemini).await;
+        assert_eq!(effective, ProviderKind::Gemini);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn effective_provider_for_channel_uses_dispatch_override_provider() {
+        let env = TempAgentdeskRootGuard::new();
+        write_agentdesk_yaml(
+            env._temp_home.path(),
+            r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+"#,
+        );
+
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(2000);
+        let override_channel_id = serenity::ChannelId::new(1479671301387059200);
+        shared
+            .dispatch_role_overrides
+            .insert(channel_id, override_channel_id);
 
         let effective =
             effective_provider_for_channel(&shared, channel_id, &ProviderKind::Gemini).await;
