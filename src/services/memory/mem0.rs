@@ -615,6 +615,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What do you know?".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             },
             &config,
         );
@@ -674,6 +678,10 @@ mod tests {
                 session_id: "run-7".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What graph database does Critic use?".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             },
             &config,
         );
@@ -768,6 +776,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "hi".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             })
             .await;
         restore_mem0_env(prev_api_key, prev_base_url);
@@ -816,6 +828,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::ReviewLite,
                 user_text: "hi".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             })
             .await;
         assert!(response.external_recall.is_none());
@@ -841,6 +857,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "hi".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             })
             .await;
 
@@ -942,6 +962,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "hi".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             })
             .await;
 
@@ -995,6 +1019,10 @@ mod tests {
                 session_id: "run-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "Which graph database does AgentDesk use?".to_string(),
+                context_text: None,
+                case_id: None,
+                phase: None,
+                resolution_status: None,
             })
             .await;
 

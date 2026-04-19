@@ -394,6 +394,14 @@ agentdesk auto-queue activate [--run <ID>] [--agent <ID>]
 agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>]
 agentdesk auto-queue config --max-concurrent <N> [--run <ID>]
 
+# Memory / auto-remember
+agentdesk auto-remember audit [--workspace <WS>] [--status <STATUS>] [--stage <STAGE>] [--signal-kind <KIND>] [--candidate-hash <HASH>] [--resubmittable-only] [--json]
+agentdesk auto-remember summary [--workspace <WS>] [--json]
+agentdesk auto-remember resubmit --workspace <WS> --candidate-hash <HASH>
+agentdesk auto-remember verify --workspace <WS> --candidate-hash <HASH> [--note <TEXT>]
+agentdesk auto-remember reject --workspace <WS> --candidate-hash <HASH> [--note <TEXT>]
+agentdesk auto-remember requeue --workspace <WS> --candidate-hash <HASH>
+
 # Git / runtime
 agentdesk github-sync [--repo <OWNER/REPO>]
 agentdesk cherry-merge <BRANCH> [--close-issue]
@@ -409,6 +417,15 @@ agentdesk api GET /api/health                    # Direct API call
 agentdesk tmux-wrapper                           # Claude session wrapper
 agentdesk codex-tmux-wrapper                     # Codex session wrapper
 ```
+
+### Auto-remember P0 Notes
+
+- Auto-remember only runs when `memory.backend: memento`, the turn is a persisted full turn, and `memory.auto_remember.enabled: true`.
+- P0 extracts only three signal classes: `technical_decision`, `confirmed_error_root_cause`, and `config_change`.
+- The quality improver is rewrite-only. Final admission still goes through validator + remember mapping; binding-level memory overrides may disable auto-remember, but provider/model/mode selection stays on runtime config/env.
+- Audit, dedupe, operator actions, and durable retry state live in the auto-remember SQLite sidecar. By default that sidecar is runtime-root-local at `data/memory-auto-remember.sqlite`.
+- If the runtime root is recreated or moved without `memory.auto_remember.sidecar_path`, the local dedupe history resets and equivalent facts can be treated as new again. Pin `sidecar_path` when cross-root continuity matters.
+- Durable retry is sidecar-backed and can replay failed candidates without the same text appearing again in chat. P0 caps remember attempts at 3 before moving the candidate to `abandoned_after_retries`.
 
 ## API Overview
 

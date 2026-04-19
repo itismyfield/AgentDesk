@@ -37,6 +37,10 @@ pub use paths::{
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
 const DEFAULT_MEMORY_BACKEND: &str = "auto";
 
+const fn default_query_recall_after_bootstrap() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryBackendConfig {
@@ -44,7 +48,7 @@ pub struct MemoryBackendConfig {
     pub version: u32,
     #[serde(default = "default_memory_backend")]
     pub backend: String,
-    #[serde(default)]
+    #[serde(default = "default_query_recall_after_bootstrap")]
     pub query_recall_after_bootstrap: bool,
     #[serde(default)]
     pub file: FileMemoryBackendConfig,
@@ -65,7 +69,7 @@ impl Default for MemoryBackendConfig {
         Self {
             version: default_memory_layout_version(),
             backend: default_memory_backend(),
-            query_recall_after_bootstrap: false,
+            query_recall_after_bootstrap: default_query_recall_after_bootstrap(),
             file: FileMemoryBackendConfig::default(),
             mcp: McpMemoryBackendConfig::default(),
             auto_remember: AutoRememberConfig::default(),
@@ -204,10 +208,55 @@ pub struct McpMemoryBackendConfig {
     pub access_key_env: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+fn default_auto_remember_improver_mode() -> String {
+    "local_llm".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoRememberConfig {
+    /// Keeps auto-remember opt-in. Audit/dedupe state defaults to the runtime-root-local
+    /// SQLite sidecar at `data/memory-auto-remember.sqlite`. Set `sidecar_path` to
+    /// pin the store to a stable location across runtime-root moves; when set, AgentDesk
+    /// migrates the legacy runtime-local sidecar on first use.
     pub enabled: bool,
+    pub sidecar_path: Option<String>,
+    pub improver: AutoRememberImproverConfig,
+}
+
+impl Default for AutoRememberConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sidecar_path: None,
+            improver: AutoRememberImproverConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRememberImproverConfig {
+    #[serde(default = "default_auto_remember_improver_mode")]
+    pub mode: String,
+    pub agent: AutoRememberAgentConfig,
+}
+
+impl Default for AutoRememberImproverConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_auto_remember_improver_mode(),
+            agent: AutoRememberAgentConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRememberAgentConfig {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -438,6 +487,15 @@ fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBack
         },
         auto_remember: AutoRememberConfig {
             enabled: config.auto_remember.enabled,
+            sidecar_path: config.auto_remember.sidecar_path,
+            improver: AutoRememberImproverConfig {
+                mode: config.auto_remember.improver.mode,
+                agent: AutoRememberAgentConfig {
+                    provider: config.auto_remember.improver.agent.provider,
+                    model: config.auto_remember.improver.agent.model,
+                    label: config.auto_remember.improver.agent.label,
+                },
+            },
         },
         legacy_sak_path: None,
         legacy_sam_path: None,
@@ -821,6 +879,7 @@ mod tests {
         let backend = load_memory_backend(root);
         assert_eq!(backend.version, 2);
         assert_eq!(backend.backend, "auto");
+        assert!(!backend.query_recall_after_bootstrap);
         assert_eq!(backend.file.sak_path, default_sak_path());
         assert_eq!(backend.file.sam_path, default_sam_path());
         assert_eq!(backend.file.ltm_root, default_ltm_root());
@@ -1139,7 +1198,7 @@ memory:
 
         assert_eq!(backend.version, 2);
         assert_eq!(backend.backend, "memento");
-        assert!(backend.query_recall_after_bootstrap);
+        assert!(!backend.query_recall_after_bootstrap);
         assert_eq!(backend.file.sak_path, "/tmp/yaml/shared.md");
         assert_eq!(backend.file.sam_path, "/tmp/yaml/sam");
         assert_eq!(backend.file.ltm_root, "/tmp/yaml/ltm");
@@ -1223,6 +1282,7 @@ memory:
 
         assert_eq!(backend.version, 1);
         assert_eq!(backend.backend, "auto");
+        assert!(backend.query_recall_after_bootstrap);
         assert_eq!(backend.file.sak_path, "/tmp/legacy/shared.md");
         assert_eq!(backend.file.sam_path, "/tmp/legacy/sam");
         assert_eq!(backend.file.ltm_root, "/tmp/legacy/ltm");

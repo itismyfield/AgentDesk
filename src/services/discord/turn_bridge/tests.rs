@@ -695,6 +695,15 @@ fn build_background_memory_jobs_can_queue_reflect_and_auto_remember_together() {
 
     assert_eq!(jobs.len(), 2);
     match &jobs[0] {
+        super::TurnEndMemoryJob::AutoRemember(request) => {
+            assert_eq!(request.turn_id, "turn-1");
+            assert_eq!(request.role_id, "project-agentdesk");
+            assert_eq!(request.channel_id, 42);
+            assert_eq!(request.assistant_text, "원인은 MCP 세션 ID 누락이다.");
+        }
+        other => panic!("expected auto-remember job, got {other:?}"),
+    }
+    match &jobs[1] {
         super::TurnEndMemoryJob::Reflect(request) => {
             assert_eq!(request.session_id, "session-1");
             assert_eq!(
@@ -703,15 +712,6 @@ fn build_background_memory_jobs_can_queue_reflect_and_auto_remember_together() {
             );
         }
         other => panic!("expected reflect job, got {other:?}"),
-    }
-    match &jobs[1] {
-        super::TurnEndMemoryJob::AutoRemember(request) => {
-            assert_eq!(request.turn_id, "turn-1");
-            assert_eq!(request.role_id, "project-agentdesk");
-            assert_eq!(request.channel_id, 42);
-            assert_eq!(request.assistant_text, "원인은 MCP 세션 ID 누락이다.");
-        }
-        other => panic!("expected auto-remember job, got {other:?}"),
     }
 }
 
@@ -742,6 +742,37 @@ fn build_background_memory_jobs_keeps_capture_without_auto_remember() {
         }
         other => panic!("expected capture job, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn await_background_memory_postprocess_timeout_does_not_cancel_inflight_task() {
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let _ = completed_tx.send(());
+        super::memory_postprocess::MemoryPostprocessResult {
+            token_usage: TokenUsage {
+                input_tokens: 7,
+                output_tokens: 3,
+            },
+        }
+    });
+
+    let result = super::await_background_memory_postprocess(
+        ChannelId::new(42),
+        task,
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert!(
+        result.is_none(),
+        "outer timeout should skip token accounting instead of surfacing a completed result"
+    );
+    tokio::time::timeout(Duration::from_secs(1), completed_rx)
+        .await
+        .expect("in-flight postprocess should keep running after outer timeout")
+        .expect("background postprocess should complete successfully");
 }
 
 #[test]

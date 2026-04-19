@@ -1,4 +1,5 @@
 pub(crate) mod args;
+pub(crate) mod auto_remember;
 pub(crate) mod client;
 pub(crate) mod dcserver;
 pub(crate) mod direct;

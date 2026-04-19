@@ -11,6 +11,20 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
+## Memory Flow
+
+- `src/services/memory/mod.rs` defines the shared recall contract across `file`, `mem0`, and `memento` backends.
+- `src/services/memory/memento.rs` intentionally splits Memento recall into two modes:
+  - bootstrap mode calls `context(structured=true)` to load stable session context
+  - query mode calls `recall(text=user_text, contextText=user_text, sessionId, excludeSeen=true)` for task-conditioned memory
+- `src/services/discord/router/message_handler.rs` chooses bootstrap mode for the first Memento-backed turn, then switches to query mode by default; operators can still force legacy bootstrap-only behavior with `memory.query_recall_after_bootstrap: false`.
+- `src/services/discord/meeting_orchestrator.rs` uses the same gate so meetings query Memento with `agenda + transcript` by default, while explicit `memory.query_recall_after_bootstrap: false` preserves bootstrap-only behavior when compatibility is more important than targeted recall.
+- `src/services/memory/memento.rs` deduplicates `rankedInjection`, `core`, `working`, and `anchors` before serializing external recall text so the same memory line is not injected multiple times.
+- Compatibility rule: `memory.query_recall_after_bootstrap` now defaults to `true` in `src/config.rs`, `src/runtime_layout/mod.rs`, and `src/services/discord/settings.rs`; older deployments can pin `false` to keep the prior bootstrap-only behavior.
+- `src/services/discord/turn_bridge/` keeps turn-end memory ordering explicit: `auto_remember -> capture -> reflect`. Existing recall-feedback analysis still runs even when background auto-remember is enabled.
+- `src/services/memory/auto_remember.rs` is P0-only for Memento-backed full persisted turns. It extracts `technical_decision`, `confirmed_error_root_cause`, and `config_change`, then lets validator + remember mapping keep final write authority.
+- `src/services/memory/auto_remember_store.rs` owns the sidecar-backed audit, retry, and operator-review surface. Default storage is `data/memory-auto-remember.sqlite` under the runtime root; set `memory.auto_remember.sidecar_path` when dedupe/retry continuity must survive runtime-root moves or resets.
+
 ## Generated `src/` Tree
 
 This block is generated from the filesystem and is checked in CI for drift.

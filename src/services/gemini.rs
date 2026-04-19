@@ -167,6 +167,13 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_cancellable(prompt, None)
 }
 
+pub fn execute_command_simple_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
+) -> Result<String, String> {
+    execute_command_simple_cancellable_with_model(prompt, model_override, None)
+}
+
 pub fn execute_command_simple_with_timeout(
     prompt: &str,
     timeout: Duration,
@@ -217,6 +224,14 @@ pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
+    execute_command_simple_cancellable_with_model(prompt, None, cancel_token)
+}
+
+fn execute_command_simple_cancellable_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
     let resolution = resolve_gemini_binary();
     let gemini_bin = resolution
         .resolved_path
@@ -224,7 +239,7 @@ pub fn execute_command_simple_cancellable(
         .ok_or_else(|| "Gemini CLI not found".to_string())?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let working_dir = resolve_gemini_requested_dir(current_dir)?;
-    let exec_args = build_exec_args(prompt, None, None, false)?;
+    let exec_args = build_exec_args(prompt, model_override, None, false)?;
     let mut command = Command::new(&gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     configure_child_process_group(&mut command);

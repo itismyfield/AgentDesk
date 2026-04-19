@@ -1,9 +1,10 @@
 use anyhow::Result;
 
 use super::args::{
-    AutoQueueAction, CardAction, Commands, ConfigAction, DispatchAction, MigrateAction,
-    ReportProvider,
+    AutoQueueAction, AutoRememberAction, AutoRememberStageArg, AutoRememberStatusArg, CardAction,
+    Commands, ConfigAction, DispatchAction, MigrateAction, ReportProvider,
 };
+use crate::services::memory::{AutoRememberMemoryStatus, AutoRememberStage};
 
 fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
     match result {
@@ -322,6 +323,59 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             ConfigAction::Set { json } => super::client::cmd_config_set(&json),
             ConfigAction::Audit { dry_run } => super::client::cmd_config_audit(dry_run),
         }),
+        Commands::AutoRemember { action } => exit_for_cli(match action {
+            AutoRememberAction::Audit {
+                workspace,
+                status,
+                stage,
+                signal_kind,
+                candidate_hash,
+                resubmittable_only,
+                limit,
+                json,
+            } => super::auto_remember::cmd_auto_remember_audit(
+                workspace.as_deref(),
+                status.map(auto_remember_status_from_arg),
+                stage.map(auto_remember_stage_from_arg),
+                signal_kind.as_deref(),
+                candidate_hash.as_deref(),
+                resubmittable_only,
+                limit,
+                json,
+            ),
+            AutoRememberAction::Summary { workspace, json } => {
+                super::auto_remember::cmd_auto_remember_summary(workspace.as_deref(), json)
+            }
+            AutoRememberAction::Resubmit {
+                workspace,
+                candidate_hash,
+            } => super::direct::run_async(super::auto_remember::cmd_auto_remember_resubmit(
+                &workspace,
+                &candidate_hash,
+            )),
+            AutoRememberAction::Verify {
+                workspace,
+                candidate_hash,
+                note,
+            } => super::auto_remember::cmd_auto_remember_verify(
+                &workspace,
+                &candidate_hash,
+                note.as_deref(),
+            ),
+            AutoRememberAction::Reject {
+                workspace,
+                candidate_hash,
+                note,
+            } => super::auto_remember::cmd_auto_remember_reject(
+                &workspace,
+                &candidate_hash,
+                note.as_deref(),
+            ),
+            AutoRememberAction::Requeue {
+                workspace,
+                candidate_hash,
+            } => super::auto_remember::cmd_auto_remember_requeue(&workspace, &candidate_hash),
+        }),
         Commands::Api { method, path, body } => {
             exit_for_cli(super::client::cmd_api(&method, &path, body.as_deref()))
         }
@@ -349,6 +403,30 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 super::direct::run_async(super::migrate::cmd_migrate_postgres_cutover(args))
             }
         }),
+    }
+}
+
+fn auto_remember_status_from_arg(value: AutoRememberStatusArg) -> AutoRememberMemoryStatus {
+    match value {
+        AutoRememberStatusArg::Remembered => AutoRememberMemoryStatus::Remembered,
+        AutoRememberStatusArg::VerifiedPromoted => AutoRememberMemoryStatus::VerifiedPromoted,
+        AutoRememberStatusArg::OperatorVerified => AutoRememberMemoryStatus::OperatorVerified,
+        AutoRememberStatusArg::OperatorRejected => AutoRememberMemoryStatus::OperatorRejected,
+        AutoRememberStatusArg::DuplicateSkip => AutoRememberMemoryStatus::DuplicateSkip,
+        AutoRememberStatusArg::ValidationSkipped => AutoRememberMemoryStatus::ValidationSkipped,
+        AutoRememberStatusArg::RememberFailed => AutoRememberMemoryStatus::RememberFailed,
+        AutoRememberStatusArg::AbandonedAfterRetries => {
+            AutoRememberMemoryStatus::AbandonedAfterRetries
+        }
+    }
+}
+
+fn auto_remember_stage_from_arg(value: AutoRememberStageArg) -> AutoRememberStage {
+    match value {
+        AutoRememberStageArg::Validate => AutoRememberStage::Validate,
+        AutoRememberStageArg::Remember => AutoRememberStage::Remember,
+        AutoRememberStageArg::Verify => AutoRememberStage::Verify,
+        AutoRememberStageArg::Dedupe => AutoRememberStage::Dedupe,
     }
 }
 

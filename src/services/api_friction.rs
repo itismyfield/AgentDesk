@@ -711,6 +711,7 @@ fn build_memento_request(
         topic: "api-friction".to_string(),
         kind: "error".to_string(),
         keywords: report.keywords.clone(),
+        importance: None,
         source: (!source.is_empty()).then_some(source),
         workspace: Some(repo_workspace),
         agent_id: Some("default".to_string()),
@@ -719,8 +720,9 @@ fn build_memento_request(
         outcome: Some("observed".to_string()),
         phase: Some("runtime".to_string()),
         resolution_status: Some("open".to_string()),
-        assertion_status: Some("reported".to_string()),
+        assertion_status: Some("observed".to_string()),
         context_summary: Some(report.summary.clone()),
+        supersedes: Vec::new(),
     }
 }
 

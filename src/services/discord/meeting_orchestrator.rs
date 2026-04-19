@@ -2034,6 +2034,40 @@ fn format_memory_recall_context(recall: &RecallResponse) -> String {
     chunks.join("\n\n")
 }
 
+fn participant_recall_mode(memory: &ResolvedMemorySettings) -> RecallMode {
+    if memory.backend == super::settings::MemoryBackendKind::Memento
+        && !memory.query_recall_after_bootstrap
+    {
+        RecallMode::Bootstrap
+    } else {
+        RecallMode::Query
+    }
+}
+
+fn build_participant_recall_request(
+    participant: &MeetingParticipant,
+    provider: ProviderKind,
+    channel_id: u64,
+    meeting_id: &str,
+    round: u32,
+    agenda: &str,
+    transcript: &str,
+) -> RecallRequest {
+    RecallRequest {
+        mode: participant_recall_mode(&participant.memory),
+        provider,
+        role_id: participant.role_id.clone(),
+        channel_id,
+        session_id: format!("meeting:{meeting_id}:round:{round}:{}", participant.role_id),
+        dispatch_profile: DispatchProfile::Full,
+        user_text: format!("{agenda}\n\n{transcript}"),
+        context_text: Some(format!("{agenda}\n\n{transcript}")),
+        case_id: None,
+        phase: None,
+        resolution_status: None,
+    }
+}
+
 async fn participant_memory_recall(
     participant: &MeetingParticipant,
     provider: ProviderKind,
@@ -2044,23 +2078,16 @@ async fn participant_memory_recall(
     transcript: &str,
 ) -> String {
     let backend = build_resolved_memory_backend(&participant.memory);
-    let recall_mode = if participant.memory.backend == super::settings::MemoryBackendKind::Memento
-        && !participant.memory.query_recall_after_bootstrap
-    {
-        RecallMode::Bootstrap
-    } else {
-        RecallMode::Query
-    };
     let recall = backend
-        .recall(RecallRequest {
-            mode: recall_mode,
+        .recall(build_participant_recall_request(
+            participant,
             provider,
-            role_id: participant.role_id.clone(),
             channel_id,
-            session_id: format!("meeting:{meeting_id}:round:{round}:{}", participant.role_id),
-            dispatch_profile: DispatchProfile::Full,
-            user_text: format!("{agenda}\n\n{transcript}"),
-        })
+            meeting_id,
+            round,
+            agenda,
+            transcript,
+        ))
         .await;
 
     for warning in &recall.warnings {
@@ -2911,14 +2938,15 @@ mod tests {
     use super::{
         ActiveMeetingSlot, DEFAULT_MEETING_SELECTION_STAGE_TIMEOUT_SECS,
         MAX_MEETING_STAGE_TIMEOUT_SECS, MIN_MEETING_STAGE_TIMEOUT_SECS, Meeting,
-        MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
-        ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
+        MeetingAgentConfig, MeetingConfig, MeetingParticipant, MeetingStatus, MeetingUtterance,
+        ProviderKind, RecallMode, ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
         build_fallback_meeting_summary, build_meeting_markdown, build_meeting_start_status_message,
-        build_meeting_status_payload, build_selection_reason_line, clamp_max_participants,
-        display_query_hash, effective_round_count, meeting_query_hash, meeting_slot_state,
-        parse_meeting_start_text, parse_participant_selection_response,
-        resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
-        thread_query_hash, truncate_for_meeting, validate_fixed_participants,
+        build_meeting_status_payload, build_participant_recall_request,
+        build_selection_reason_line, clamp_max_participants, display_query_hash,
+        effective_round_count, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
+        parse_participant_selection_response, resolve_meeting_stage_timeout_secs,
+        select_participants, summary_agent_context, thread_query_hash, truncate_for_meeting,
+        validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -3211,6 +3239,47 @@ mod tests {
         assert!(message.contains(full_reason));
         assert!(!message.contains('…'));
         assert!(message.contains(&format!("선정 사유: {full_reason}")));
+    }
+
+    #[test]
+    fn test_build_participant_recall_request_uses_query_mode_and_combines_agenda_and_transcript() {
+        let participant = MeetingParticipant {
+            role_id: "openclaw-coder".to_string(),
+            prompt_file: "/tmp/openclaw-coder.md".to_string(),
+            display_name: "코딩이".to_string(),
+            provider: Some(ProviderKind::Codex),
+            model: None,
+            reasoning_effort: None,
+            workspace: Some("openclaw-maker".to_string()),
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings {
+                backend: crate::services::discord::settings::MemoryBackendKind::Memento,
+                query_recall_after_bootstrap: true,
+                ..ResolvedMemorySettings::default()
+            },
+        };
+
+        let request = build_participant_recall_request(
+            &participant,
+            ProviderKind::Codex,
+            42,
+            "mtg-123",
+            2,
+            "장기 기억 hardening rollout",
+            "1라운드 합의: query recall을 기본값으로 전환",
+        );
+
+        assert_eq!(request.mode, RecallMode::Query);
+        assert_eq!(request.role_id, "openclaw-coder");
+        assert_eq!(request.session_id, "meeting:mtg-123:round:2:openclaw-coder");
+        assert_eq!(
+            request.user_text,
+            "장기 기억 hardening rollout\n\n1라운드 합의: query recall을 기본값으로 전환"
+        );
+        assert_eq!(
+            request.context_text.as_deref(),
+            Some("장기 기억 hardening rollout\n\n1라운드 합의: query recall을 기본값으로 전환")
+        );
     }
 
     #[test]

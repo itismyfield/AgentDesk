@@ -183,8 +183,23 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_cancellable(prompt, None)
 }
 
+pub fn execute_command_simple_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
+) -> Result<String, String> {
+    execute_command_simple_cancellable_with_model(prompt, model_override, None)
+}
+
 pub fn execute_command_simple_cancellable(
     prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
+    execute_command_simple_cancellable_with_model(prompt, None, cancel_token)
+}
+
+fn execute_command_simple_cancellable_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
     let resolution = resolve_qwen_binary();
@@ -197,7 +212,7 @@ pub fn execute_command_simple_cancellable(
     let mut command = Command::new(&qwen_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let mut child = command
-        .args(build_simple_exec_args(prompt))
+        .args(build_simple_exec_args(prompt, model_override))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1564,8 +1579,13 @@ pub(crate) fn create_system_settings_override(
     Ok(Some(QwenSystemSettingsOverride { path }))
 }
 
-fn build_simple_exec_args(prompt: &str) -> Vec<String> {
-    vec![
+fn build_simple_exec_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args.extend([
         "-p".to_string(),
         prompt.to_string(),
         "--output-format".to_string(),
@@ -1574,7 +1594,8 @@ fn build_simple_exec_args(prompt: &str) -> Vec<String> {
         "yolo".to_string(),
         "--sandbox".to_string(),
         "false".to_string(),
-    ]
+    ]);
+    args
 }
 
 pub(crate) fn build_stream_exec_args(
@@ -1989,7 +2010,7 @@ mod tests {
 
     #[test]
     fn build_simple_exec_args_uses_approval_mode_yolo() {
-        let args = build_simple_exec_args("hello");
+        let args = build_simple_exec_args("hello", None);
 
         assert!(
             args.windows(2)
