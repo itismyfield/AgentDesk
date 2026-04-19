@@ -122,6 +122,24 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         with mock.patch.object(MODULE.os, "geteuid", return_value=0):
             self.assertTrue(MODULE.privileged_root_requested(args))
 
+    def test_trusted_root_python_bin_prefers_root_owned_fallback(self) -> None:
+        with mock.patch.object(
+            MODULE, "preferred_python_bin", return_value=Path("/opt/homebrew/bin/python3")
+        ):
+            with mock.patch.object(
+                MODULE.shutil,
+                "which",
+                side_effect=lambda name: "/opt/homebrew/bin/python3" if name == "python3" else None,
+            ):
+                with mock.patch.object(
+                    MODULE,
+                    "path_is_root_owned_and_locked",
+                    side_effect=lambda path: Path(path) == Path("/usr/bin/python3"),
+                ):
+                    trusted = MODULE.trusted_root_python_bin()
+
+        self.assertEqual(trusted, Path("/usr/bin/python3"))
+
     def test_resolve_job_artifacts_prefers_existing_skills_root(self) -> None:
         spec = MODULE.JOB_SPECS["memory-dream"]
         with tempfile.TemporaryDirectory() as tmpdir:

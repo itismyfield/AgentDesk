@@ -155,7 +155,23 @@ def default_skills_roots() -> list[Path]:
 
 
 def trusted_root_python_bin() -> Path:
-    return preferred_python_bin().expanduser().resolve()
+    candidates = unique_paths(
+        [
+            preferred_python_bin().expanduser().resolve(),
+            Path("/usr/bin/python3"),
+            Path("/usr/bin/python"),
+            Path(sys.executable).expanduser().resolve(),
+        ]
+        + [
+            Path(candidate).expanduser().resolve()
+            for candidate in (shutil.which("python3"), shutil.which("python"))
+            if candidate
+        ]
+    )
+    for candidate in candidates:
+        if path_is_root_owned_and_locked(candidate):
+            return candidate
+    return candidates[0]
 
 
 def path_is_root_owned_and_locked(path: Path) -> bool:
