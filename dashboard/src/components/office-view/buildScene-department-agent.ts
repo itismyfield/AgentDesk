@@ -153,10 +153,6 @@ export function renderDeskAgentAndSubClones({
     haloG.circle(ax, charFeetY - TARGET_CHAR_H / 2, 22).fill({ color: 0xef4444, alpha: 0.08 });
     haloG.circle(ax, charFeetY - TARGET_CHAR_H / 2, 22).stroke({ width: 1.5, color: 0xef4444, alpha: 0.5 });
     room.addChild(haloG);
-    const blockedBadge = new Text({ text: "🚫", style: new TextStyle({ fontSize: 9 }) });
-    blockedBadge.anchor.set(0.5, 0.5);
-    blockedBadge.position.set(ax - 18, charFeetY - TARGET_CHAR_H + 8);
-    room.addChild(blockedBadge);
   }
 
   const activeTask = tasks.find((task) => task.assigned_agent_id === agent.id && task.status === "in_progress");

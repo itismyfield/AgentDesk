@@ -25,7 +25,11 @@ import type { OfficeTickerContext } from "./office-view/officeTicker";
 import OfficeInsightPanel from "./office-view/OfficeInsightPanel";
 import { useOfficePixiRuntime } from "./office-view/useOfficePixiRuntime";
 import type { SupportedLocale } from "./office-view/themes-locale";
-import { isManualInterventionCard } from "./agent-manager/kanban-utils";
+import {
+  deriveOfficeAgentState,
+  type OfficeManualIntervention,
+  type OfficeSeatStatus,
+} from "./office-view/officeAgentState";
 
 interface OfficeViewProps {
   agents: Agent[];
@@ -175,31 +179,33 @@ export default function OfficeView({
     activeMeeting,
     meetingPresence,
   });
-  // Build active issue lookup map from kanban cards
+  const officeAgentState = useMemo(
+    () => deriveOfficeAgentState(agents, kanbanCards),
+    [agents, kanbanCards],
+  );
+  const {
+    activeIssueByAgent: officeActiveIssueByAgent,
+    manualInterventionByAgent,
+    primaryCardByAgent,
+    seatStatusByAgent,
+  } = officeAgentState;
   const activeIssueByAgent = useMemo(() => {
     const map = new Map<string, { number: number; url: string; startedAt?: number; title?: string }>();
-    if (!kanbanCards) return map;
-    for (const card of kanbanCards) {
-      if (!card.assignee_agent_id || !card.github_issue_number) continue;
-      if (card.status !== "in_progress" && card.status !== "review") continue;
-      if (map.has(card.assignee_agent_id)) continue; // first match wins
-      map.set(card.assignee_agent_id, {
-        number: card.github_issue_number,
-        url: card.github_issue_url || `https://github.com/${card.github_repo}/issues/${card.github_issue_number}`,
-        startedAt: card.started_at != null ? (card.started_at < 1e12 ? card.started_at * 1000 : card.started_at) : undefined,
-        title: card.title,
+    for (const [agentId, issue] of officeActiveIssueByAgent) {
+      if (issue.number == null || !issue.url) continue;
+      map.set(agentId, {
+        number: issue.number,
+        url: issue.url,
+        startedAt: issue.startedAt ?? undefined,
+        title: issue.title,
       });
     }
     return map;
-  }, [kanbanCards]);
-  const blockedAgentIds = useMemo(() => {
-    const set = new Set<string>();
-    if (!kanbanCards) return set;
-    for (const card of kanbanCards) {
-      if (isManualInterventionCard(card) && card.assignee_agent_id) set.add(card.assignee_agent_id);
-    }
-    return set;
-  }, [kanbanCards]);
+  }, [officeActiveIssueByAgent]);
+  const blockedAgentIds = useMemo(
+    () => new Set(manualInterventionByAgent.keys()),
+    [manualInterventionByAgent],
+  );
   dataRef.current = {
     departments,
     agents,
@@ -269,7 +275,7 @@ export default function OfficeView({
   };
 
   // ── Scene revision state (triggers re-render after scene build) ──
-  const [, setSceneRevision] = useState(0);
+  const [sceneRevision, setSceneRevision] = useState(0);
 
   // ── Build scene context ──
   const sceneContext = useMemo<BuildOfficeSceneContext>(
@@ -419,6 +425,23 @@ export default function OfficeView({
   });
 
   const isKo = language === "ko";
+  const manualWarningEntries = useMemo(
+    () =>
+      agents
+        .map((agent) => {
+          const warning = manualInterventionByAgent.get(agent.id);
+          const position = agentPosRef.current.get(agent.id);
+          if (!warning || !position) return null;
+          return { agent, warning, position };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is { agent: Agent; warning: OfficeManualIntervention; position: { x: number; y: number } } =>
+            entry !== null,
+        ),
+    [agents, manualInterventionByAgent, sceneRevision],
+  );
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col sm:flex-row sm:gap-3">
@@ -434,10 +457,24 @@ export default function OfficeView({
             isKo={isKo}
             onSelectAgent={onSelectAgent}
           />
-          <MobileAgentStatusGrid agents={agents} isKo={isKo} onSelectAgent={onSelectAgent} />
+          <MobileAgentStatusGrid
+            agents={agents}
+            isKo={isKo}
+            onSelectAgent={onSelectAgent}
+            manualInterventionByAgent={manualInterventionByAgent}
+            primaryCardByAgent={primaryCardByAgent}
+            seatStatusByAgent={seatStatusByAgent}
+          />
         </div>
         {/* Desktop: full Pixi office */}
-        <div ref={containerRef} className="hidden w-full min-h-full pb-40 sm:block" style={{ imageRendering: "pixelated" }} />
+        <div className="relative hidden w-full min-h-full pb-40 sm:block">
+          <div ref={containerRef} className="w-full min-h-full" style={{ imageRendering: "pixelated" }} />
+          <OfficeManualWarningOverlay
+            entries={manualWarningEntries}
+            isKo={isKo}
+            onSelectAgent={onSelectAgent}
+          />
+        </div>
       </div>
       <div className="hidden min-h-0 sm:block sm:h-full sm:w-[min(22rem,calc(100vw-1.5rem))] sm:shrink-0 sm:overflow-y-auto">
         <OfficeInsightPanel
@@ -457,68 +494,253 @@ export default function OfficeView({
 
 // ── Mobile Office Lite: agent status cards ──
 
-const STATUS_COLORS: Record<string, string> = {
-  working: "#34d399",
-  idle: "#94a3b8",
-  break: "#fbbf24",
-  offline: "#64748b",
-};
+function getSeatStatusMeta(
+  status: OfficeSeatStatus,
+  isKo: boolean,
+): { label: string; color: string; background: string; border: string } {
+  switch (status) {
+    case "working":
+      return {
+        label: isKo ? "작업 중" : "Working",
+        color: "var(--ok)",
+        background: "color-mix(in oklch, var(--ok) 12%, var(--bg-2) 88%)",
+        border: "color-mix(in oklch, var(--ok) 28%, var(--line) 72%)",
+      };
+    case "review":
+      return {
+        label: isKo ? "검토 중" : "In review",
+        color: "var(--warn)",
+        background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
+        border: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
+      };
+    case "offline":
+      return {
+        label: isKo ? "오프라인" : "Offline",
+        color: "var(--fg-faint)",
+        background: "color-mix(in oklch, var(--fg-faint) 12%, var(--bg-2) 88%)",
+        border: "color-mix(in oklch, var(--fg-faint) 24%, var(--line) 76%)",
+      };
+    case "idle":
+    default:
+      return {
+        label: isKo ? "대기" : "Idle",
+        color: "var(--fg-muted)",
+        background: "color-mix(in oklch, var(--fg-muted) 12%, var(--bg-2) 88%)",
+        border: "color-mix(in oklch, var(--fg-muted) 24%, var(--line) 76%)",
+      };
+  }
+}
+
+function previewManualReason(reason: string | null | undefined): string {
+  if (!reason) return "";
+  return reason.length > 72 ? `${reason.slice(0, 72)}…` : reason;
+}
+
+function previewCardTitle(title: string | null | undefined): string {
+  if (!title) return "";
+  return title.length > 52 ? `${title.slice(0, 52)}…` : title;
+}
+
+function OfficeManualWarningOverlay({
+  entries,
+  isKo,
+  onSelectAgent,
+}: {
+  entries: Array<{ agent: Agent; warning: OfficeManualIntervention; position: { x: number; y: number } }>;
+  isKo: boolean;
+  onSelectAgent?: (agent: Agent) => void;
+}) {
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10">
+      {entries.map(({ agent, warning, position }) => (
+        <div
+          key={warning.cardId}
+          className="group absolute pointer-events-auto"
+          style={{
+            left: position.x + 16,
+            top: position.y - 28,
+            transform: "translate(-50%, -50%)",
+          }}
+        >
+          <button
+            type="button"
+            className="flex h-7 min-w-7 items-center justify-center rounded-full border text-xs font-semibold shadow-sm transition hover:scale-[1.04] focus:outline-none focus:ring-2"
+            style={{
+              color: "var(--warn)",
+              borderColor: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
+              background: "color-mix(in oklch, var(--warn) 14%, var(--bg-2) 86%)",
+            }}
+            aria-label={
+              isKo
+                ? `${agent.alias || agent.name_ko || agent.name} 수동 개입 경고`
+                : `${agent.alias || agent.name} manual intervention warning`
+            }
+          >
+            !
+          </button>
+          <div
+            className="pointer-events-none absolute bottom-[calc(100%+0.55rem)] left-1/2 hidden w-64 -translate-x-1/2 rounded-2xl border px-3 py-3 shadow-xl group-hover:block group-focus-within:block"
+            style={{
+              borderColor: "color-mix(in oklch, var(--warn) 26%, var(--line) 74%)",
+              background: "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)",
+            }}
+          >
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
+              {isKo ? "수동 개입" : "Manual intervention"}
+            </div>
+            <div className="mt-1 text-sm font-semibold" style={{ color: "var(--fg)" }}>
+              {warning.title}
+            </div>
+            <div className="mt-2 text-xs leading-5" style={{ color: "var(--fg-muted)" }}>
+              {warning.reason
+                ?? (isKo
+                  ? "구체 사유는 카드 상세에서 확인할 수 있습니다."
+                  : "Open the detail drawer to inspect the full reason.")}
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
+                {warning.issueNumber ? `#${warning.issueNumber}` : warning.status}
+              </span>
+              <button
+                type="button"
+                className="pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] font-semibold transition hover:opacity-90"
+                onClick={() => onSelectAgent?.(agent)}
+                style={{
+                  color: "var(--warn)",
+                  borderColor: "color-mix(in oklch, var(--warn) 30%, var(--line) 70%)",
+                  background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
+                }}
+              >
+                {isKo ? "세부 보기" : "Open detail"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function MobileAgentStatusGrid({
   agents,
   isKo,
   onSelectAgent,
+  manualInterventionByAgent,
+  primaryCardByAgent,
+  seatStatusByAgent,
 }: {
   agents: Agent[];
   isKo: boolean;
   onSelectAgent?: (agent: Agent) => void;
+  manualInterventionByAgent: Map<string, OfficeManualIntervention>;
+  primaryCardByAgent: Map<string, KanbanCard>;
+  seatStatusByAgent: Map<string, OfficeSeatStatus>;
 }) {
   const sorted = [...agents].sort((a, b) => {
-    const order: Record<string, number> = { working: 0, break: 1, idle: 2, offline: 3 };
-    return (order[a.status] ?? 9) - (order[b.status] ?? 9);
+    const leftManual = manualInterventionByAgent.has(a.id) ? 0 : 1;
+    const rightManual = manualInterventionByAgent.has(b.id) ? 0 : 1;
+    if (leftManual !== rightManual) return leftManual - rightManual;
+
+    const order: Record<OfficeSeatStatus, number> = {
+      review: 0,
+      working: 1,
+      idle: 2,
+      offline: 3,
+    };
+    const leftStatus = seatStatusByAgent.get(a.id) ?? "idle";
+    const rightStatus = seatStatusByAgent.get(b.id) ?? "idle";
+    const statusDiff = (order[leftStatus] ?? 9) - (order[rightStatus] ?? 9);
+    if (statusDiff !== 0) return statusDiff;
+    return (a.alias || a.name_ko || a.name).localeCompare(b.alias || b.name_ko || b.name);
   });
 
   return (
-    <div className="px-3 pb-6 mt-3">
+    <div className="mt-3 px-3 pb-6">
       <div className="text-xs font-semibold uppercase tracking-[0.24em] mb-2 px-1" style={{ color: "var(--th-text-muted)" }}>
         {isKo ? "에이전트 현황" : "Agent Status"}
       </div>
       <div className="grid grid-cols-2 gap-2">
-        {sorted.map((agent) => (
-          <button
-            key={agent.id}
-            type="button"
-            onClick={() => onSelectAgent?.(agent)}
-            className="rounded-xl px-3 py-2.5 text-left"
-            style={{
-              background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
-              border: "1px solid var(--th-card-border)",
-            }}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-base">{agent.avatar_emoji}</span>
-              <span className="text-xs font-medium truncate" style={{ color: "var(--th-text-primary)" }}>
-                {agent.alias || agent.name_ko || agent.name}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 mt-1.5">
-              <span
-                className="w-2 h-2 rounded-full shrink-0"
-                style={{ background: STATUS_COLORS[agent.status] ?? STATUS_COLORS.offline }}
-              />
-              <span className="text-xs truncate" style={{ color: STATUS_COLORS[agent.status] ?? STATUS_COLORS.offline }}>
-                {agent.session_info || (isKo
-                  ? (agent.status === "working" ? "작업 중" : agent.status === "idle" ? "대기" : agent.status === "break" ? "휴식" : "오프라인")
-                  : agent.status.charAt(0).toUpperCase() + agent.status.slice(1))}
-              </span>
-            </div>
-            {agent.department_name_ko && (
-              <div className="text-xs mt-1 truncate" style={{ color: "var(--th-text-muted)" }}>
-                {isKo ? agent.department_name_ko : (agent.department_name || agent.department_name_ko)}
+        {sorted.map((agent) => {
+          const status = seatStatusByAgent.get(agent.id) ?? "idle";
+          const statusMeta = getSeatStatusMeta(status, isKo);
+          const manualIntervention = manualInterventionByAgent.get(agent.id) ?? null;
+          const primaryCard = primaryCardByAgent.get(agent.id) ?? null;
+          const preview = manualIntervention?.reason
+            ? previewManualReason(manualIntervention.reason)
+            : previewCardTitle(primaryCard?.title ?? null);
+
+          return (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => onSelectAgent?.(agent)}
+              className="rounded-2xl px-3 py-3 text-left"
+              style={{
+                background: manualIntervention
+                  ? "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)"
+                  : "color-mix(in oklch, var(--fg-faint) 6%, var(--bg-2) 94%)",
+                border: manualIntervention
+                  ? "1px solid color-mix(in oklch, var(--warn) 28%, var(--line) 72%)"
+                  : "1px solid var(--th-card-border)",
+              }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-base">{agent.avatar_emoji}</span>
+                  <span className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
+                    {agent.alias || agent.name_ko || agent.name}
+                  </span>
+                </div>
+                {manualIntervention && (
+                  <span
+                    className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                    style={{
+                      color: "var(--warn)",
+                      background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
+                    }}
+                  >
+                    {isKo ? "수동 개입" : "Manual"}
+                  </span>
+                )}
               </div>
-            )}
-          </button>
-        ))}
+              <div className="mt-2 flex items-center gap-1.5">
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ background: statusMeta.color }}
+                />
+                <span
+                  className="truncate text-xs"
+                  style={{ color: statusMeta.color }}
+                >
+                  {agent.session_info || statusMeta.label}
+                </span>
+              </div>
+              {preview && (
+                <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  {preview}
+                </div>
+              )}
+              {agent.department_name_ko && (
+                <div className="mt-2">
+                  <span
+                    className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
+                    style={{
+                      color: statusMeta.color,
+                      background: statusMeta.background,
+                      border: `1px solid ${statusMeta.border}`,
+                    }}
+                  >
+                    <span className="truncate">
+                      {isKo ? agent.department_name_ko : (agent.department_name || agent.department_name_ko)}
+                    </span>
+                  </span>
+                </div>
+              )}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
