@@ -22,6 +22,12 @@ pub struct PostgresCutoverArgs {
     /// Skip PostgreSQL import and only report/export the SQLite history
     #[arg(long)]
     pub skip_pg_import: bool,
+    /// Acknowledge and proceed even when SQLite still has unsent message_outbox
+    /// rows. By default cutover refuses so Discord messages are not silently
+    /// dropped — pass this only after confirming the pending rows are known
+    /// stale and will not need to be re-delivered.
+    #[arg(long = "allow-unsent-messages")]
+    pub allow_unsent_messages: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -31,11 +37,18 @@ struct SqliteCutoverCounts {
     active_dispatches: i64,
     working_sessions: i64,
     open_dispatch_outbox: i64,
+    /// Unsent rows in `message_outbox` (status = 'pending'). These are Discord
+    /// messages enqueued by the policy engine that have not yet been
+    /// delivered, so cutover would silently drop them if ignored.
+    pending_message_outbox: i64,
 }
 
 impl SqliteCutoverCounts {
     fn has_live_state(&self) -> bool {
-        self.active_dispatches > 0 || self.working_sessions > 0 || self.open_dispatch_outbox > 0
+        self.active_dispatches > 0
+            || self.working_sessions > 0
+            || self.open_dispatch_outbox > 0
+            || self.pending_message_outbox > 0
     }
 }
 
@@ -46,6 +59,7 @@ struct PgCutoverCounts {
     active_dispatches: i64,
     working_sessions: i64,
     open_dispatch_outbox: i64,
+    pending_message_outbox: i64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -337,7 +351,7 @@ fn cutover_blocker(
 ) -> Option<String> {
     if args.skip_pg_import && sqlite_counts.has_live_state() {
         return Some(
-            "sqlite still has in-flight dispatch/session/outbox state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
+            "sqlite still has in-flight dispatch/session/outbox/message state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
                 .to_string(),
         );
     }
@@ -347,6 +361,18 @@ fn cutover_blocker(
             "sqlite still has open dispatch_outbox rows; drain outbox before PG cutover to avoid duplicate delivery."
                 .to_string(),
         );
+    }
+
+    if !args.skip_pg_import
+        && sqlite_counts.pending_message_outbox > 0
+        && !args.allow_unsent_messages
+    {
+        return Some(format!(
+            "sqlite still has {count} pending message_outbox row(s); these Discord messages would be lost on cutover. \
+Drain by letting the message-outbox worker settle (restart dcserver if it is stalled) or pass --allow-unsent-messages \
+after confirming the rows are stale and safe to drop.",
+            count = sqlite_counts.pending_message_outbox,
+        ));
     }
 
     None
@@ -460,6 +486,14 @@ fn sqlite_cutover_counts(conn: &Connection) -> Result<SqliteCutoverCounts, Strin
         open_dispatch_outbox: query_count(
             conn,
             "SELECT COUNT(*) FROM dispatch_outbox WHERE status <> 'done' OR processed_at IS NULL",
+        )?,
+        // SQLite message_outbox uses status = 'pending' for queued-but-unsent
+        // rows; once delivered the worker flips to 'sent' (success) or
+        // 'failed' (permanent). 'failed' rows are not retried, so they do not
+        // need to block cutover — only true pending entries do.
+        pending_message_outbox: query_count(
+            conn,
+            "SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'",
         )?,
     })
 }
@@ -973,12 +1007,23 @@ async fn load_pg_cutover_counts(pool: &PgPool) -> Result<PgCutoverCounts, String
     .fetch_one(pool)
     .await
     .map_err(|e| format!("count postgres open dispatch_outbox: {e}"))?;
+    // PG message_outbox additionally uses 'processing' while a worker is mid-
+    // delivery (claimed_at set). Treat anything other than terminal states
+    // ('sent'/'failed') as still in flight so the report mirrors the SQLite
+    // surface for operators verifying drain.
+    let pending_message_outbox = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM message_outbox WHERE status NOT IN ('sent', 'failed')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("count postgres pending message_outbox: {e}"))?;
     Ok(PgCutoverCounts {
         audit_logs,
         session_transcripts,
         active_dispatches,
         working_sessions,
         open_dispatch_outbox,
+        pending_message_outbox,
     })
 }
 
@@ -1735,11 +1780,29 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'hello', 'announce', 'system', 'pending')",
+            [],
+        )
+        .unwrap();
+        // Already-delivered and permanently-failed rows must not inflate the
+        // pending counter — only true unsent rows should block cutover.
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'sent already', 'announce', 'system', 'sent')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'failed perm', 'announce', 'system', 'failed')",
+            [],
+        )
+        .unwrap();
 
         let counts = sqlite_cutover_counts(&conn).expect("count sqlite cutover state");
         assert_eq!(counts.active_dispatches, 1);
         assert_eq!(counts.working_sessions, 1);
         assert_eq!(counts.open_dispatch_outbox, 1);
+        assert_eq!(counts.pending_message_outbox, 1);
         assert!(counts.has_live_state());
     }
 
@@ -1749,6 +1812,7 @@ mod tests {
             dry_run: false,
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
+            allow_unsent_messages: false,
         };
         let counts = SqliteCutoverCounts {
             active_dispatches: 1,
@@ -1765,9 +1829,27 @@ mod tests {
             dry_run: false,
             archive_dir: Some("/tmp/cutover-archive".to_string()),
             skip_pg_import: true,
+            allow_unsent_messages: false,
         };
 
         assert!(cutover_blocker(&args, &SqliteCutoverCounts::default()).is_none());
+    }
+
+    #[test]
+    fn archive_only_cutover_blocks_when_only_pending_messages_remain() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 3,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts).expect("message_outbox blocker");
+        assert!(blocker.contains("archive-only cutover would lose it"));
     }
 
     #[test]
@@ -1776,6 +1858,7 @@ mod tests {
             dry_run: false,
             archive_dir: None,
             skip_pg_import: false,
+            allow_unsent_messages: false,
         };
         let counts = SqliteCutoverCounts {
             open_dispatch_outbox: 1,
@@ -1784,6 +1867,93 @@ mod tests {
 
         let blocker = cutover_blocker(&args, &counts).expect("dispatch_outbox blocker");
         assert!(blocker.contains("drain outbox"));
+    }
+
+    #[test]
+    fn pg_cutover_blocks_when_message_outbox_has_pending_rows() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 4,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts).expect("message_outbox blocker");
+        assert!(
+            blocker.contains("4 pending message_outbox row(s)"),
+            "operator-facing blocker should surface the pending count, got: {blocker}"
+        );
+        assert!(
+            blocker.contains("--allow-unsent-messages"),
+            "blocker should advertise the opt-out flag, got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn pg_cutover_dry_run_blocks_message_outbox_same_as_real_run() {
+        // Dry-run must show the same blocker so operators see the gate before
+        // attempting a real cutover.
+        let dry_args = PostgresCutoverArgs {
+            dry_run: true,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: false,
+        };
+        let real_args = PostgresCutoverArgs {
+            dry_run: false,
+            ..dry_args.clone()
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 2,
+            ..Default::default()
+        };
+
+        let dry_blocker = cutover_blocker(&dry_args, &counts).expect("dry-run blocker");
+        let real_blocker = cutover_blocker(&real_args, &counts).expect("real-run blocker");
+        assert_eq!(dry_blocker, real_blocker);
+    }
+
+    #[test]
+    fn pg_cutover_proceeds_when_operator_acknowledges_unsent_messages() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: true,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 7,
+            ..Default::default()
+        };
+
+        assert!(
+            cutover_blocker(&args, &counts).is_none(),
+            "--allow-unsent-messages must release the message_outbox blocker"
+        );
+    }
+
+    #[test]
+    fn archive_only_cutover_still_blocks_pending_messages_even_with_override() {
+        // --allow-unsent-messages is for the PG-import path. Archive-only
+        // cutover would still drop the messages because there is no PG to
+        // carry them over to, so we keep blocking via has_live_state().
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: true,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 1,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts).expect("archive-only ignores the override");
+        assert!(blocker.contains("archive-only cutover would lose it"));
     }
 
     #[test]
@@ -1952,6 +2122,32 @@ mod tests {
         assert_eq!(counts.active_dispatches, 1);
         assert_eq!(counts.working_sessions, 1);
         assert_eq!(counts.open_dispatch_outbox, 1);
+        assert_eq!(
+            counts.pending_message_outbox, 0,
+            "no message_outbox rows seeded yet — count must be zero"
+        );
+
+        // #767 regression guard: PG-side pending_message_outbox must reflect
+        // any non-terminal message_outbox rows so post-import audits surface
+        // drain progress. Seed pending + processing rows alongside terminal
+        // rows and assert only the non-terminal ones contribute.
+        sqlx::query(
+            "INSERT INTO message_outbox (target, content, bot, source, status)
+             VALUES ('thread-pending', 'pending body', 'announce', 'test', 'pending'),
+                    ('thread-processing', 'mid-flight body', 'announce', 'test', 'processing'),
+                    ('thread-sent', 'already delivered', 'announce', 'test', 'sent'),
+                    ('thread-failed', 'permanent failure', 'announce', 'test', 'failed')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed message_outbox rows for pending count");
+        let counts_after_seed = load_pg_cutover_counts(&pool)
+            .await
+            .expect("pg cutover counts after message_outbox seed");
+        assert_eq!(
+            counts_after_seed.pending_message_outbox, 2,
+            "PG count must include 'pending' + 'processing' but exclude 'sent' / 'failed'"
+        );
 
         let session = sqlx::query(
             "SELECT status, active_dispatch_id, raw_provider_session_id
@@ -2201,9 +2397,11 @@ mod tests {
             dry_run: true,
             archive_dir: None,
             skip_pg_import: false,
+            allow_unsent_messages: false,
         };
         assert!(args.dry_run);
         assert!(!args.skip_pg_import);
+        assert!(!args.allow_unsent_messages);
     }
 
     #[test]
