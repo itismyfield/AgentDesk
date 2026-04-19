@@ -102,6 +102,32 @@ pub(crate) fn dispatch_type_uses_thread_routing(dispatch_type: Option<&str>) -> 
     !matches!(dispatch_type, Some("phase-gate"))
 }
 
+/// Resolve the per-dispatch session strategy from the incoming context.
+///
+/// ## `force_new_session` semantics — read this first (#800)
+///
+/// Despite its suggestive name, the `force_new_session` flag (and its alias
+/// `reset_provider_state`) only controls **provider-side session state** — i.e.
+/// whether the underlying agent CLI (Claude / Codex) should start a fresh
+/// conversation versus reusing the previous transcript. It is purely an input
+/// to [`DispatchSessionStrategy::reset_provider_state`].
+///
+/// **What `force_new_session` does NOT do:**
+/// - It does not delete or recreate the worktree directory.
+/// - It does not clear `worktree_path` / `worktree_branch` from the new
+///   dispatch context.
+/// - It does not interact with the worktree-reuse path. That logic lives in
+///   [`latest_completed_work_dispatch_target`], which now (per #800) validates
+///   that any recorded `worktree_path` still exists on disk before re-injecting
+///   it. Stale/missing paths are dropped automatically and the downstream
+///   fallback chain (`resolve_card_worktree`, `resolve_card_issue_commit_target`,
+///   repo-HEAD recovery) resolves a fresh execution target.
+///
+/// If you want a "blow away the worktree state" reset, that lives in the
+/// `reset_full=true` branch of `POST /api/kanban-cards/:id/reopen`, which
+/// invokes `cleanup_force_transition_revert_fields_on_conn` to scrub the
+/// recorded worktree metadata from `task_dispatches` JSON columns. See
+/// `src/kanban.rs:strip_stale_worktree_metadata_from_dispatches_on_conn`.
 pub(crate) fn dispatch_session_strategy_from_context(
     context: Option<&serde_json::Value>,
     dispatch_type: Option<&str>,
@@ -657,7 +683,7 @@ fn latest_completed_work_dispatch_target(
         .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
 
-    let path = result_json
+    let raw_path = result_json
         .as_ref()
         .and_then(|v| json_string_field(v, "completed_worktree_path"))
         .or_else(|| {
@@ -670,7 +696,7 @@ fn latest_completed_work_dispatch_target(
                 .as_ref()
                 .and_then(|v| json_string_field(v, "worktree_path"))
         });
-    let branch = result_json
+    let raw_branch = result_json
         .as_ref()
         .and_then(|v| json_string_field(v, "completed_branch"))
         .or_else(|| {
@@ -694,6 +720,34 @@ fn latest_completed_work_dispatch_target(
                 .and_then(|v| json_string_field(v, "branch"))
         })
         .map(str::to_string);
+
+    // #800: Validate that the recorded worktree path still exists on disk
+    // before propagating it into the new dispatch context. A done card that
+    // gets reopened may reference a worktree that has since been removed
+    // (`git worktree remove`, manual cleanup, branch deletion). Without this
+    // check the new dispatch is silently re-pointed at the orphaned path,
+    // which manifests as the agent restarting work in the same broken
+    // location and reproducing the original conflict.
+    //
+    // When the path is stale we drop BOTH `worktree_path` and the associated
+    // branch; downstream fallbacks (`resolve_card_worktree`,
+    // `resolve_card_issue_commit_target`, repo-HEAD recovery) will then
+    // resolve a fresh execution target from the card's current scope.
+    let (path, branch) = match raw_path {
+        Some(candidate) if std::path::Path::new(candidate).is_dir() => {
+            (Some(candidate), raw_branch)
+        }
+        Some(stale) => {
+            tracing::warn!(
+                "[dispatch] Card {}: dropping stale completed-work worktree metadata — recorded path '{}' no longer exists; clearing branch '{}' and falling back to fresh worktree resolution",
+                kanban_card_id,
+                stale,
+                raw_branch.as_deref().unwrap_or("<none>")
+            );
+            (None, None)
+        }
+        None => (None, raw_branch),
+    };
     let reviewed_commit = result_json
         .as_ref()
         .and_then(|v| json_string_field(v, "completed_commit"))
@@ -1752,5 +1806,121 @@ mod tests {
         assert_eq!(parsed["pr_number"], 901);
         assert_eq!(parsed["reviewed_commit"], reviewed_commit);
         assert_eq!(parsed["verdict_endpoint"], "POST /api/review-verdict");
+    }
+
+    /// #800: Verify that a recorded `worktree_path` pointing at a now-missing
+    /// directory does NOT survive into the resolved
+    /// `latest_completed_work_dispatch_target`. Without this guard a reopened
+    /// done card silently re-points the new dispatch at the orphaned worktree
+    /// and the agent restarts work in a broken location.
+    #[test]
+    fn latest_completed_work_dispatch_target_drops_stale_worktree_path() {
+        let db = test_db();
+        seed_card(&db, "card-stale-completed-wt", 800, "ready");
+
+        // Materialize a real directory, capture its path, then remove the
+        // directory so the recorded path becomes stale on disk while the
+        // dispatch row keeps pointing at it.
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale_path = stale_dir.path().to_path_buf();
+        let stale_path_str = stale_path.to_str().unwrap().to_string();
+        let stale_branch = "wt/800-stale".to_string();
+        drop(stale_dir);
+        assert!(
+            !stale_path.exists(),
+            "tempdir must be removed before the test runs to simulate a stale wt"
+        );
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-800-stale', 'card-stale-completed-wt', 'agent-1', 'implementation', 'completed',
+                'Stale wt completion', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            libsql_rusqlite::params![
+                serde_json::json!({
+                    "worktree_path": stale_path_str,
+                    "worktree_branch": stale_branch,
+                })
+                .to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_path_str,
+                    "completed_branch": stale_branch,
+                    // Intentionally no `completed_commit` so the function
+                    // exits via the "trusted_path" branch (lines after the
+                    // path-validation guard) and we can observe that the
+                    // stale path was filtered out instead of returned.
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let target = latest_completed_work_dispatch_target(&db, "card-stale-completed-wt");
+        assert!(
+            target.is_none(),
+            "stale worktree path with no recoverable commit must yield no dispatch target, got {:?}",
+            target
+        );
+    }
+
+    /// #800 companion: when a `completed_commit` IS recorded alongside a stale
+    /// `worktree_path`, the function falls back through `fallback_repo_dir`.
+    /// We assert that `worktree_path` on the returned target is NOT the stale
+    /// recorded value — proving the path-validation guard fired.
+    #[test]
+    fn latest_completed_work_dispatch_target_does_not_reuse_stale_path_with_commit() {
+        let db = test_db();
+        seed_card(&db, "card-stale-completed-with-commit", 800, "ready");
+
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale_path_str = stale_dir.path().to_str().unwrap().to_string();
+        drop(stale_dir);
+
+        // Use a real repo for the fallback so resolve_card_target_repo_ref/
+        // fallback_repo_dir yields *something*, otherwise the function returns
+        // a target with worktree_path: None which still satisfies "no stale
+        // reuse" but for the wrong reason.
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap().to_string();
+        let completed_commit = crate::services::platform::git_head_commit(&repo_dir).unwrap();
+        set_card_repo_id(&db, "card-stale-completed-with-commit", &repo_dir);
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-800-stale-commit', 'card-stale-completed-with-commit', 'agent-1', 'implementation', 'completed',
+                'Stale wt completion (with commit)', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            libsql_rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": stale_path_str,
+                    "completed_branch": "wt/800-stale-commit",
+                    "completed_commit": completed_commit,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let target = latest_completed_work_dispatch_target(
+            &db,
+            "card-stale-completed-with-commit",
+        )
+        .expect("target must exist when completed_commit is present and a fallback repo dir is resolvable");
+
+        assert_eq!(target.reviewed_commit, completed_commit);
+        assert_ne!(
+            target.worktree_path.as_deref(),
+            Some(stale_path_str.as_str()),
+            "stale worktree_path must not be reused even when commit recovery succeeds"
+        );
     }
 }

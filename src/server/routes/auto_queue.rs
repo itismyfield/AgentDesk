@@ -1598,6 +1598,59 @@ async fn rollback_cancelled_run_cards_pg(
             .await
             .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
 
+            // #800 parity: scrub stale worktree metadata from prior dispatches so a
+            // subsequent redispatch off the rolled-back card doesn't reuse a wt
+            // path that the operator just deleted from git. Mirrors the SQLite
+            // path in src/kanban.rs::strip_stale_worktree_metadata_from_dispatches_on_conn.
+            sqlx::query(
+                "UPDATE task_dispatches
+                 SET context = CASE
+                         WHEN context IS NULL OR context = '' THEN context
+                         ELSE NULLIF(
+                             (context::jsonb
+                                 - 'worktree_path'
+                                 - 'worktree_branch'
+                                 - 'completed_worktree_path'
+                                 - 'completed_branch'
+                             )::text,
+                             '{}'
+                         )
+                     END,
+                     result = CASE
+                         WHEN result IS NULL OR result = '' THEN result
+                         ELSE NULLIF(
+                             (result::jsonb
+                                 - 'worktree_path'
+                                 - 'worktree_branch'
+                                 - 'completed_worktree_path'
+                                 - 'completed_branch'
+                             )::text,
+                             '{}'
+                         )
+                     END
+                 WHERE kanban_card_id = $1
+                   AND (
+                       (context IS NOT NULL AND context <> '' AND (
+                           (context::jsonb) ? 'worktree_path'
+                           OR (context::jsonb) ? 'worktree_branch'
+                           OR (context::jsonb) ? 'completed_worktree_path'
+                           OR (context::jsonb) ? 'completed_branch'
+                       ))
+                       OR (result IS NOT NULL AND result <> '' AND (
+                           (result::jsonb) ? 'worktree_path'
+                           OR (result::jsonb) ? 'worktree_branch'
+                           OR (result::jsonb) ? 'completed_worktree_path'
+                           OR (result::jsonb) ? 'completed_branch'
+                       ))
+                   )",
+            )
+            .bind(card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("scrub postgres dispatch worktree metadata {card_id}: {error}")
+            })?;
+
             Ok::<bool, String>(true)
         }
         .await;

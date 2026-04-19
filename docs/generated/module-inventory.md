@@ -73,7 +73,7 @@
 | `db::turns` | `src/db/turns.rs` | 451 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 4628 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1756 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1926 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 719 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 624 |  |
 | `engine` | `src/engine/mod.rs` | 1708 | giant-file |
@@ -108,7 +108,7 @@
 | `github::sync` | `src/github/sync.rs` | 1167 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 319 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1191 | giant-file |
-| `kanban` | `src/kanban.rs` | 2737 | giant-file |
+| `kanban` | `src/kanban.rs` | 2974 | giant-file |
 | `launch` | `src/launch.rs` | 39 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 67 |  |
@@ -130,7 +130,7 @@
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1081 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1184 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 92 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10526 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10579 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 134 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 317 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 164 |  |
@@ -207,10 +207,10 @@
 | `services::discord::config_audit` | `src/services/discord/config_audit.rs` | 1145 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 528 |  |
 | `services::discord::dm_reply_store` | `src/services/discord/dm_reply_store.rs` | 463 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1414 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1447 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 293 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 2044 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 2072 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 381 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 280 |  |
 | `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3433 | giant-file |
