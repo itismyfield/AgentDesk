@@ -94,7 +94,7 @@ interface AppShellProps {
   dismissNotification: (id: string) => void;
 }
 
-type AgentsPageTab = "agents" | "departments" | "dispatch";
+type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "agentdesk.sidebar.collapsed";
@@ -308,7 +308,9 @@ export default function AppShell({
     ) => {
       setShowMobileMoreMenu(false);
       if (options?.agentsTab) {
-        setAgentsPageTab(options.agentsTab);
+        setAgentsPageTab(
+          options.agentsTab === "dispatch" ? "backlog" : options.agentsTab,
+        );
       }
       if (options?.kanbanFocus) {
         setKanbanSignalFocus(options.kanbanFocus);
@@ -972,6 +974,7 @@ export default function AppShell({
                   <AgentManagerView
                     agents={agents}
                     departments={departments}
+                    kanbanCards={kanbanCards}
                     language={settings.language}
                     officeId={selectedOfficeId}
                     onAgentsChange={() => {
@@ -993,6 +996,7 @@ export default function AppShell({
                         ),
                       );
                     }}
+                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                     activeTab={agentsPageTab}
                     onTabChange={setAgentsPageTab}
                   />
@@ -1059,7 +1063,7 @@ export default function AppShell({
                       })
                     }
                     onOpenDispatchSessions={() =>
-                      navigateToRoute("/agents", { agentsTab: "dispatch" })
+                      navigateToRoute("/agents", { agentsTab: "backlog" })
                     }
                     onOpenSettings={() => navigateToRoute("/settings")}
                     onRefreshMeetings={() =>
@@ -1117,7 +1121,7 @@ export default function AppShell({
                       })
                     }
                     onOpenDispatchSessions={() =>
-                      navigateToRoute("/agents", { agentsTab: "dispatch" })
+                      navigateToRoute("/agents", { agentsTab: "backlog" })
                     }
                     onOpenSettings={() => navigateToRoute("/settings")}
                     onRefreshMeetings={() =>
