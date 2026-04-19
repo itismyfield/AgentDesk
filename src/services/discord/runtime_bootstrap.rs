@@ -15,7 +15,7 @@ pub(crate) struct RunBotContext {
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 
-fn restored_fast_mode_channels_for_provider(
+fn restored_fast_mode_enabled_channels_for_provider(
     bot_settings: &DiscordBotSettings,
     provider: &ProviderKind,
 ) -> Vec<ChannelId> {
@@ -23,7 +23,7 @@ fn restored_fast_mode_channels_for_provider(
         return Vec::new();
     }
 
-    bot_settings
+    let mut channels: Vec<ChannelId> = bot_settings
         .channel_fast_modes
         .iter()
         .filter_map(|(channel_id, enabled)| {
@@ -32,7 +32,26 @@ fn restored_fast_mode_channels_for_provider(
             }
             channel_id.parse::<u64>().ok().map(ChannelId::new)
         })
-        .collect()
+        .collect();
+    channels.sort_unstable_by_key(|channel_id| channel_id.get());
+    channels
+}
+
+fn restored_fast_mode_reset_channels_for_provider(
+    bot_settings: &DiscordBotSettings,
+    provider: &ProviderKind,
+) -> Vec<ChannelId> {
+    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
+        return Vec::new();
+    }
+
+    let mut channels: Vec<ChannelId> = bot_settings
+        .channel_fast_modes
+        .keys()
+        .filter_map(|channel_id| channel_id.parse::<u64>().ok().map(ChannelId::new))
+        .collect();
+    channels.sort_unstable_by_key(|channel_id| channel_id.get());
+    channels
 }
 
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
@@ -641,7 +660,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         })
         .collect();
     let restored_fast_mode_channels =
-        restored_fast_mode_channels_for_provider(&bot_settings, &provider);
+        restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
+    let restored_fast_mode_reset_channels =
+        restored_fast_mode_reset_channels_for_provider(&bot_settings, &provider);
 
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
@@ -686,7 +707,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         },
         fast_mode_session_reset_pending: {
             let set = dashmap::DashSet::new();
-            for channel_id in &restored_fast_mode_channels {
+            for channel_id in &restored_fast_mode_reset_channels {
                 set.insert(*channel_id);
             }
             set
@@ -703,7 +724,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             for (channel_id, _) in &restored_model_overrides {
                 set.insert(*channel_id);
             }
-            for channel_id in &restored_fast_mode_channels {
+            for channel_id in &restored_fast_mode_reset_channels {
                 set.insert(*channel_id);
             }
             set
@@ -1524,11 +1545,29 @@ mod tests {
         settings.channel_fast_modes.insert("456".to_string(), false);
 
         let claude_channels =
-            restored_fast_mode_channels_for_provider(&settings, &ProviderKind::Claude);
+            restored_fast_mode_enabled_channels_for_provider(&settings, &ProviderKind::Claude);
         assert_eq!(claude_channels, vec![ChannelId::new(123)]);
 
         let gemini_channels =
-            restored_fast_mode_channels_for_provider(&settings, &ProviderKind::Gemini);
+            restored_fast_mode_enabled_channels_for_provider(&settings, &ProviderKind::Gemini);
+        assert!(gemini_channels.is_empty());
+    }
+
+    #[test]
+    fn restored_fast_mode_reset_channels_preserve_disabled_entries() {
+        let mut settings = DiscordBotSettings::default();
+        settings.channel_fast_modes.insert("123".to_string(), true);
+        settings.channel_fast_modes.insert("456".to_string(), false);
+
+        let claude_channels =
+            restored_fast_mode_reset_channels_for_provider(&settings, &ProviderKind::Claude);
+        assert_eq!(
+            claude_channels,
+            vec![ChannelId::new(123), ChannelId::new(456)]
+        );
+
+        let gemini_channels =
+            restored_fast_mode_reset_channels_for_provider(&settings, &ProviderKind::Gemini);
         assert!(gemini_channels.is_empty());
     }
 
