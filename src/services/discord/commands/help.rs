@@ -43,6 +43,9 @@ AI can read, edit, and run commands in your session.
 **Skills**
 `/cc <skill>` — Run a provider skill (autocomplete)
 
+**MCP** (Claude only)
+`/mcp-reload` — Restart Claude session to pick up newly-authenticated MCP servers (preserves conversation via --resume)
+
 **Settings**
 `/debug` — Toggle debug logging
 

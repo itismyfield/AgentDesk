@@ -2,6 +2,7 @@ mod config;
 mod control;
 mod diagnostics;
 mod help;
+mod mcp_reload;
 mod meeting_cmd;
 mod model_picker;
 mod model_ui;
@@ -33,6 +34,7 @@ pub(super) use diagnostics::{
     cmd_status,
 };
 pub(super) use help::cmd_help;
+pub(super) use mcp_reload::cmd_mcp_reload;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use receipt::cmd_receipt;

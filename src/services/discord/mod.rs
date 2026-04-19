@@ -10,6 +10,7 @@ mod handoff;
 pub(crate) mod health;
 mod inflight;
 pub(crate) mod internal_api;
+mod mcp_credential_watcher;
 pub(crate) mod meeting_orchestrator;
 mod metrics;
 mod model_catalog;
