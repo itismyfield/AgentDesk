@@ -2122,6 +2122,32 @@ mod tests {
         assert_eq!(counts.active_dispatches, 1);
         assert_eq!(counts.working_sessions, 1);
         assert_eq!(counts.open_dispatch_outbox, 1);
+        assert_eq!(
+            counts.pending_message_outbox, 0,
+            "no message_outbox rows seeded yet — count must be zero"
+        );
+
+        // #767 regression guard: PG-side pending_message_outbox must reflect
+        // any non-terminal message_outbox rows so post-import audits surface
+        // drain progress. Seed pending + processing rows alongside terminal
+        // rows and assert only the non-terminal ones contribute.
+        sqlx::query(
+            "INSERT INTO message_outbox (target, content, bot, source, status)
+             VALUES ('thread-pending', 'pending body', 'announce', 'test', 'pending'),
+                    ('thread-processing', 'mid-flight body', 'announce', 'test', 'processing'),
+                    ('thread-sent', 'already delivered', 'announce', 'test', 'sent'),
+                    ('thread-failed', 'permanent failure', 'announce', 'test', 'failed')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed message_outbox rows for pending count");
+        let counts_after_seed = load_pg_cutover_counts(&pool)
+            .await
+            .expect("pg cutover counts after message_outbox seed");
+        assert_eq!(
+            counts_after_seed.pending_message_outbox, 2,
+            "PG count must include 'pending' + 'processing' but exclude 'sent' / 'failed'"
+        );
 
         let session = sqlx::query(
             "SELECT status, active_dispatch_id, raw_provider_session_id
