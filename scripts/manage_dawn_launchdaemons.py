@@ -197,6 +197,10 @@ def path_is_root_owned_and_locked(path: Path) -> bool:
     return st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
 
 
+def path_is_executable(path: Path) -> bool:
+    return path.exists() and os.access(path, os.X_OK)
+
+
 def privileged_root_requested(args: argparse.Namespace) -> bool:
     if args.action == "status" and os.geteuid() == 0:
         return True
@@ -287,7 +291,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "  status     inspect configured jobs without requiring root by default\n"
             "  uninstall  remove installed LaunchDaemon plists\n"
             "  preflight  verify python path, skill roots, plist validity, and sudo readiness\n"
-            "  sudoers    print the exact sudoers drop-in content for manual review"
+            "  sudoers    print the managed-entrypoint sudoers drop-in for manual review"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -649,14 +653,23 @@ def access_denied(stderr: str) -> bool:
 
 
 def render_preflight(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJobSpec]]) -> int:
-    python_bin = Path(args.python_bin).expanduser()
+    requested_python_bin = Path(args.python_bin).expanduser()
+    python_bin = trusted_root_python_bin() if os.geteuid() == 0 else requested_python_bin
     skills_roots = candidate_skills_roots(args)
     manager_python = trusted_root_python_bin()
     managed_script = managed_entrypoint_target()
     managed_script_exists = managed_script.exists()
-    if python_bin.exists():
-        version_result = run_command([str(python_bin), "--version"])
-        invocation_python_version = version_result.stdout.strip() or version_result.stderr.strip() or "unknown"
+    if path_is_executable(python_bin):
+        try:
+            version_result = run_command([str(python_bin), "--version"])
+        except OSError as exc:
+            invocation_python_version = str(exc)
+        else:
+            invocation_python_version = (
+                version_result.stdout.strip() or version_result.stderr.strip() or "unknown"
+            )
+    elif python_bin.exists():
+        invocation_python_version = "not executable"
     else:
         invocation_python_version = "missing"
     lines = [
@@ -664,18 +677,20 @@ def render_preflight(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJob
         "",
         f"- script_path: `{SCRIPT_PATH}`",
         f"- invocation_python: `{python_bin}`",
+        f"- requested_python: `{requested_python_bin}`",
         f"- manager_python: `{manager_python}`",
         f"- managed_entrypoint: `{managed_script}`",
         f"- managed_entrypoint_exists: `{managed_script_exists}`",
         f"- runtime_python: `{sys.executable}`",
         f"- invocation_python_exists: `{python_bin.exists()}`",
+        f"- invocation_python_executable: `{path_is_executable(python_bin)}`",
         f"- invocation_python_version: `{invocation_python_version}`",
         f"- sudoers_user: `{args.sudoers_user}`",
         f"- skills_roots: `{', '.join(str(path) for path in skills_roots) or '(none)'}`",
         "",
     ]
 
-    all_ok = python_bin.exists()
+    all_ok = path_is_executable(python_bin)
     for job_name, spec in jobs:
         try:
             resolved = resolve_job_artifacts(job_name, spec, skills_roots=skills_roots)
@@ -746,8 +761,8 @@ def render_preflight(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJob
         [
             "",
             "## next_steps",
-            f"- install sudoers file with `python3 {SCRIPT_PATH} sudoers` output",
-            f"- or run `sudo {python_bin} {SCRIPT_PATH} bootstrap` once",
+            f"- first bootstrap with `sudo {manager_python} {SCRIPT_PATH} bootstrap`",
+            f"- after bootstrap, review or refresh the sudoers drop-in with `python3 {SCRIPT_PATH} sudoers`",
             f"- status can be checked with `python3 {SCRIPT_PATH} status`",
         ]
     )
@@ -822,7 +837,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(
             sudoers_text(
                 user_name=args.sudoers_user,
-                python_bin=effective_manager_python(args),
+                python_bin=trusted_root_python_bin(),
                 script_path=managed_entrypoint_target(),
             )
         )

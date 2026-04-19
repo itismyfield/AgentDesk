@@ -276,6 +276,144 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         self.assertEqual(seen["python_bin"], Path("/usr/bin/python3"))
         self.assertIsNone(seen["script_path"])
 
+    def test_root_preflight_uses_trusted_python_for_version_probe(self) -> None:
+        args = argparse.Namespace(
+            action="preflight",
+            job=None,
+            hour=None,
+            minute=None,
+            python_bin="/opt/homebrew/bin/python3",
+            sudoers_user="agentdesk",
+            skills_root=None,
+            as_root=False,
+        )
+        resolved = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/tmp/skills/memory-dream"),
+            manager_script=Path("/tmp/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/tmp/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
+        seen_commands: list[list[str]] = []
+
+        def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            seen_commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="Python 3.12.0\n", stderr="")
+
+        with mock.patch.object(MODULE.os, "geteuid", return_value=0):
+            with mock.patch.object(MODULE, "candidate_skills_roots", return_value=[Path("/tmp/skills")]):
+                with mock.patch.object(
+                    MODULE, "trusted_root_python_bin", return_value=Path("/usr/bin/python3")
+                ):
+                    with mock.patch.object(MODULE, "resolve_job_artifacts", return_value=resolved):
+                        with mock.patch.object(MODULE, "plist_valid", return_value=True):
+                            with mock.patch.object(
+                                MODULE,
+                                "validate_privileged_job_artifacts",
+                                return_value=None,
+                            ):
+                                with mock.patch.object(
+                                    MODULE,
+                                    "build_preflight_probe_command",
+                                    return_value=["sudo", "-n", "/usr/bin/python3", str(SCRIPT_PATH), "status"],
+                                ):
+                                    with mock.patch.object(MODULE, "run_command", side_effect=fake_run):
+                                        with mock.patch("builtins.print"):
+                                            MODULE.render_preflight(
+                                                args,
+                                                [("memory-dream", MODULE.JOB_SPECS["memory-dream"])],
+                                            )
+
+        self.assertEqual(seen_commands[0], ["/usr/bin/python3", "--version"])
+
+    def test_preflight_reports_non_executable_python_without_crashing(self) -> None:
+        args = argparse.Namespace(
+            action="preflight",
+            job=None,
+            hour=None,
+            minute=None,
+            python_bin="/tmp/custom-python",
+            sudoers_user="agentdesk",
+            skills_root=None,
+            as_root=False,
+        )
+        resolved = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/tmp/skills/memory-dream"),
+            manager_script=Path("/tmp/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/tmp/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
+
+        def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command and command[0] == "sudo":
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command: {command}")
+
+        with mock.patch.object(MODULE, "candidate_skills_roots", return_value=[Path("/tmp/skills")]):
+            with mock.patch.object(MODULE, "resolve_job_artifacts", return_value=resolved):
+                with mock.patch.object(MODULE, "plist_valid", return_value=True):
+                    with mock.patch.object(
+                        MODULE,
+                        "validate_privileged_job_artifacts",
+                        return_value=None,
+                    ):
+                        with mock.patch.object(
+                            MODULE.Path,
+                            "exists",
+                            return_value=True,
+                        ):
+                            with mock.patch.object(
+                                MODULE,
+                                "path_is_executable",
+                                side_effect=lambda path: False,
+                            ):
+                                with mock.patch.object(
+                                    MODULE,
+                                    "build_preflight_probe_command",
+                                    return_value=["sudo", "-n", "/usr/bin/python3", str(SCRIPT_PATH), "status"],
+                                ):
+                                    with mock.patch.object(MODULE, "run_command", side_effect=fake_run):
+                                        with mock.patch("builtins.print") as printer:
+                                            rc = MODULE.render_preflight(
+                                                args,
+                                                [("memory-dream", MODULE.JOB_SPECS["memory-dream"])],
+                                            )
+
+        self.assertEqual(rc, 1)
+        rendered = "\n".join(call.args[0] for call in printer.call_args_list)
+        self.assertIn("- invocation_python_executable: `False`", rendered)
+        self.assertIn("- invocation_python_version: `not executable`", rendered)
+
+    def test_run_bootstrap_validates_installed_entrypoint_not_repo_checkout(self) -> None:
+        args = argparse.Namespace(
+            action="bootstrap",
+            job=["memory-dream"],
+            hour=None,
+            minute=None,
+            python_bin="/opt/homebrew/bin/python3",
+            sudoers_user="agentdesk-runtime",
+            skills_root=None,
+            as_root=True,
+        )
+
+        with mock.patch.object(MODULE, "effective_manager_python", return_value=Path("/usr/bin/python3")):
+            with mock.patch.object(
+                MODULE,
+                "install_managed_entrypoint",
+                return_value=Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+            ):
+                with mock.patch.object(MODULE, "validate_privileged_entrypoint") as validate_entrypoint:
+                    with mock.patch.object(
+                        MODULE,
+                        "install_sudoers_dropin",
+                        return_value=(False, "skip install"),
+                    ):
+                        MODULE.run_bootstrap(args, [("memory-dream", MODULE.JOB_SPECS["memory-dream"])])
+
+        validate_entrypoint.assert_called_once_with(
+            Path("/usr/bin/python3"),
+            Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
