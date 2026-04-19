@@ -196,7 +196,7 @@ def path_is_root_owned_and_locked(path: Path) -> bool:
 
 
 def privileged_root_requested(args: argparse.Namespace) -> bool:
-    if args.action == "status" and args.as_root and os.geteuid() == 0:
+    if args.action == "status" and os.geteuid() == 0:
         return True
     return action_needs_privileged_reexec(args.action) and (args.as_root or os.geteuid() == 0)
 

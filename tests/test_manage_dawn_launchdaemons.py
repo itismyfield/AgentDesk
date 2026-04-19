@@ -126,7 +126,7 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         )
 
     def test_status_as_root_is_treated_as_privileged_probe(self) -> None:
-        args = argparse.Namespace(action="status", as_root=True)
+        args = argparse.Namespace(action="status", as_root=False)
 
         with mock.patch.object(MODULE.os, "geteuid", return_value=0):
             self.assertTrue(MODULE.privileged_root_requested(args))
