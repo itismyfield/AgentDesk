@@ -121,9 +121,9 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3181 | giant-file |
+| `server` | `src/server/mod.rs` | 3185 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
-| `server::boot` | `src/server/boot.rs` | 152 |  |
+| `server::boot` | `src/server/boot.rs` | 153 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 71 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 200 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1389 | giant-file |
@@ -154,7 +154,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1700 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 264 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 243 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 293 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 123 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 3841 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 461 |  |

@@ -501,16 +501,16 @@ async fn discord_control_endpoints_require_auth_token_on_non_loopback_host() {
     config.server.host = "0.0.0.0".to_string();
     let app = test_api_router_with_config(db, engine, config, None);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/send")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/send")
+        .body(Body::from("{}"))
         .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+
+    let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
@@ -523,16 +523,16 @@ async fn discord_control_endpoints_allow_loopback_without_auth_token() {
     config.server.host = "127.0.0.1".to_string();
     let app = test_api_router_with_config(db, engine, config, None);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/send")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/send")
+        .body(Body::from("{}"))
         .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+
+    let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
