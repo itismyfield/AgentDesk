@@ -146,6 +146,13 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
 }
 
 /// POST /api/send — agent-to-agent native routing.
+///
+/// Requires `ConnectInfo<SocketAddr>` injected by the server bootstrap
+/// (see `boot.rs::run_with_state` and `mod.rs::launch_*` which both call
+/// `into_make_service_with_connect_info::<SocketAddr>`). The
+/// `discord_control_endpoints_allowed` helper supports `peer_addr: None`
+/// for internal callers / unit tests where the connection info isn't
+/// available; in production HTTP traffic the extractor is always present.
 pub async fn send_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -176,6 +183,9 @@ pub async fn send_handler(
 }
 
 /// POST /api/senddm — send a DM to a Discord user.
+///
+/// See `send_handler` for the rationale on the mandatory
+/// `ConnectInfo<SocketAddr>` extractor.
 pub async fn senddm_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
