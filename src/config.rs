@@ -37,6 +37,43 @@ pub struct Config {
     pub escalation: EscalationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
+    #[serde(default, skip_serializing_if = "McpConfig::is_default")]
+    pub mcp: McpConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpConfig {
+    /// When true, AgentDesk watches the Claude MCP credential / config files
+    /// (`~/.claude.json`, `~/.claude/.mcp.json`, `~/.claude/.credentials.json`,
+    /// honoring `$CLAUDE_CONFIG_DIR` if set) and posts a notification to all
+    /// active Claude sessions when they change so the operator can run
+    /// `/mcp-reload` to pick up newly-authenticated MCP servers.
+    #[serde(default = "default_true")]
+    pub watch_credentials: bool,
+    /// Per-channel cooldown between credential-change notifications, in seconds.
+    /// Defaults to 300s (5 minutes).
+    #[serde(default = "default_credential_notify_dedupe_secs")]
+    pub credential_notify_dedupe_secs: u64,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            watch_credentials: true,
+            credential_notify_dedupe_secs: default_credential_notify_dedupe_secs(),
+        }
+    }
+}
+
+impl McpConfig {
+    pub fn is_default(&self) -> bool {
+        *self == McpConfig::default()
+    }
+}
+
+fn default_credential_notify_dedupe_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -948,6 +985,7 @@ impl Default for Config {
             automation: AutomationConfig::default(),
             escalation: EscalationConfig::default(),
             memory: None,
+            mcp: McpConfig::default(),
         }
         .apply_runtime_defaults()
     }

@@ -721,6 +721,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 commands::cmd_receipt(),
                 commands::cmd_help(),
                 commands::cmd_meeting(),
+                commands::cmd_mcp_reload(),
             ],
             command_check: Some(|ctx| {
                 Box::pin(async move {
@@ -882,6 +883,29 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         last_fingerprint = fp;
                     }
                 });
+
+                // #799: MCP credential watcher (Claude only).
+                // Watches ~/.claude/.credentials.json and ~/.claude/mcp.json and posts
+                // a one-line notification to all active Claude sessions when one of
+                // them changes, so the operator can run /mcp-reload to pick up
+                // newly-authenticated MCP servers without losing context.
+                if matches!(provider_for_setup, ProviderKind::Claude) {
+                    let mcp_cfg = crate::config::load_graceful().mcp;
+                    if mcp_cfg.watch_credentials {
+                        let dedupe_window = std::time::Duration::from_secs(
+                            mcp_cfg.credential_notify_dedupe_secs,
+                        );
+                        super::mcp_credential_watcher::spawn_watcher(
+                            shared_for_tmux.clone(),
+                            dedupe_window,
+                            "🔔 MCP credential 변화 감지됨. 새 MCP 적용하려면 `/mcp-reload`.",
+                        );
+                    } else {
+                        tracing::info!(
+                            "MCP credential watcher disabled via config (mcp.watch_credentials=false)"
+                        );
+                    }
+                }
 
                 // Restore inflight turns FIRST, then flush restart reports.
                 // Recovery skips channels that have a pending restart report,
