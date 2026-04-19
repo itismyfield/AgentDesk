@@ -74,6 +74,54 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         self.assertTrue(MODULE.action_needs_privileged_reexec("install"))
         self.assertTrue(MODULE.action_needs_privileged_reexec("uninstall"))
 
+    def test_preflight_probe_command_reenters_status_as_root(self) -> None:
+        args = argparse.Namespace(
+            action="preflight",
+            job=["memory-dream"],
+            hour=None,
+            minute=None,
+            python_bin="/opt/homebrew/bin/python3",
+            sudoers_user="agentdesk-runtime",
+            skills_root=["/tmp/skills-a", "/tmp/skills-b"],
+            as_root=False,
+        )
+
+        with mock.patch.object(MODULE, "trusted_root_python_bin", return_value=Path("/usr/bin/python3")):
+            command = MODULE.build_preflight_probe_command(args, "memory-dream")
+
+        self.assertEqual(
+            command[:8],
+            [
+                "sudo",
+                "-n",
+                "/usr/bin/python3",
+                str(SCRIPT_PATH),
+                "--as-root",
+                "status",
+                "--python-bin",
+                "/usr/bin/python3",
+            ],
+        )
+        self.assertIn("--sudoers-user", command)
+        self.assertIn("agentdesk-runtime", command)
+        self.assertEqual(
+            command[-6:],
+            [
+                "--job",
+                "memory-dream",
+                "--skills-root",
+                "/tmp/skills-a",
+                "--skills-root",
+                "/tmp/skills-b",
+            ],
+        )
+
+    def test_status_as_root_is_treated_as_privileged_probe(self) -> None:
+        args = argparse.Namespace(action="status", as_root=True)
+
+        with mock.patch.object(MODULE.os, "geteuid", return_value=0):
+            self.assertTrue(MODULE.privileged_root_requested(args))
+
     def test_resolve_job_artifacts_prefers_existing_skills_root(self) -> None:
         spec = MODULE.JOB_SPECS["memory-dream"]
         with tempfile.TemporaryDirectory() as tmpdir:
