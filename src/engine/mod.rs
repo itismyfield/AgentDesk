@@ -4,6 +4,7 @@ pub mod loader;
 pub mod ops;
 pub mod sql_guard;
 pub mod transition;
+pub mod transition_executor_pg;
 
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,

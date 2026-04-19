@@ -1,0 +1,678 @@
+use sqlx::{Postgres, Row};
+
+pub(crate) async fn execute_pg_transition_intent(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    intent: &crate::engine::transition::TransitionIntent,
+) -> Result<(), String> {
+    match intent {
+        crate::engine::transition::TransitionIntent::UpdateStatus { card_id, to, .. } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET status = $1, updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(to)
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("update status for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+            card_id,
+            dispatch_id,
+        } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET latest_dispatch_id = $1, updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(dispatch_id.as_deref())
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("set latest_dispatch_id for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id,
+            review_status,
+        } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET review_status = $1, updated_at = NOW()
+                 WHERE id = $2",
+            )
+            .bind(review_status.as_deref())
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("set review_status for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::ApplyClock { card_id, clock, .. } => {
+            if let Some(clock) = clock {
+                let sql = if clock.mode.as_deref() == Some("coalesce") {
+                    format!(
+                        "UPDATE kanban_cards
+                         SET {field} = COALESCE({field}, NOW()), updated_at = NOW()
+                         WHERE id = $1",
+                        field = clock.set
+                    )
+                } else {
+                    format!(
+                        "UPDATE kanban_cards
+                         SET {field} = NOW(), updated_at = NOW()
+                         WHERE id = $1",
+                        field = clock.set
+                    )
+                };
+                sqlx::query(&sql)
+                    .bind(card_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|error| format!("apply clock {} for {card_id}: {error}", clock.set))?;
+            }
+        }
+        crate::engine::transition::TransitionIntent::ClearTerminalFields { card_id } => {
+            sqlx::query(
+                "UPDATE kanban_cards
+                 SET review_status = NULL,
+                     suggestion_pending_at = NULL,
+                     review_entered_at = NULL,
+                     awaiting_dod_at = NULL,
+                     blocked_reason = NULL,
+                     review_round = NULL,
+                     deferred_dod_json = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("clear terminal fields for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::SyncAutoQueue { card_id } => {
+            crate::github::sync::sync_auto_queue_terminal_on_pg(tx, card_id).await?;
+        }
+        crate::engine::transition::TransitionIntent::SyncReviewState { card_id, state } => {
+            crate::github::sync::sync_review_state_on_pg(tx, card_id, state).await?;
+        }
+        crate::engine::transition::TransitionIntent::AuditLog {
+            card_id,
+            from,
+            to,
+            source,
+            message,
+        } => {
+            sqlx::query(
+                "INSERT INTO kanban_audit_logs (
+                    card_id, from_status, to_status, source, result
+                 )
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(card_id)
+            .bind(from)
+            .bind(to)
+            .bind(source)
+            .bind(message)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("insert audit log for {card_id}: {error}"))?;
+        }
+        crate::engine::transition::TransitionIntent::CancelDispatch { dispatch_id } => {
+            sqlx::query(
+                "UPDATE task_dispatches
+                 SET status = 'cancelled',
+                     updated_at = NOW(),
+                     completed_at = COALESCE(completed_at, NOW())
+                 WHERE id = $1 AND status IN ('pending', 'dispatched')",
+            )
+            .bind(dispatch_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn execute_activate_transition_intent_pg(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    intent: &crate::engine::transition::TransitionIntent,
+) -> Result<(), String> {
+    execute_pg_transition_intent(tx, intent).await
+}
+
+pub(crate) async fn cancel_live_dispatches_for_terminal_card_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> Result<(), String> {
+    let rows = sqlx::query(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("load live dispatches for {card_id}: {error}"))?;
+
+    let reason_payload =
+        serde_json::json!({ "reason": "auto_cancelled_on_terminal_card" }).to_string();
+
+    for row in rows {
+        let dispatch_id: String = row
+            .try_get("id")
+            .map_err(|error| format!("read live dispatch id for {card_id}: {error}"))?;
+        sqlx::query(
+            "UPDATE sessions
+             SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END,
+                 active_dispatch_id = NULL
+             WHERE active_dispatch_id = $1",
+        )
+        .bind(&dispatch_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("clear session active_dispatch_id for {dispatch_id}: {error}"))?;
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'cancelled',
+                 updated_at = NOW(),
+                 completed_at = COALESCE(completed_at, NOW()),
+                 result = COALESCE(result, $2)
+             WHERE id = $1 AND status IN ('pending', 'dispatched')",
+        )
+        .bind(&dispatch_id)
+        .bind(&reason_payload)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("cancel live dispatch {dispatch_id}: {error}"))?;
+    }
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET latest_dispatch_id = NULL,
+             updated_at = NOW()
+         WHERE id = $1 AND latest_dispatch_id IS NOT NULL",
+    )
+    .bind(card_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("clear latest_dispatch_id for {card_id}: {error}"))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::transition::TransitionIntent;
+    use crate::pipeline::ClockConfig;
+    use sqlx::{PgPool, Row};
+    use std::collections::HashMap;
+
+    struct TestDatabase {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestDatabase {
+        async fn create() -> Self {
+            let admin_url = admin_database_url();
+            let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", base_database_url(), database_name);
+            let admin_pool = sqlx::PgPool::connect(&admin_url)
+                .await
+                .expect("connect postgres admin db");
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+                .expect("create postgres test db");
+            admin_pool.close().await;
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> PgPool {
+            let pool = sqlx::PgPool::connect(&self.database_url)
+                .await
+                .expect("connect postgres test db");
+            crate::db::postgres::migrate(&pool)
+                .await
+                .expect("migrate postgres test db");
+            pool
+        }
+
+        async fn drop(self) {
+            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
+                .await
+                .expect("reconnect postgres admin db");
+            sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await
+            .expect("terminate postgres test db sessions");
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await
+            .expect("drop postgres test db");
+            admin_pool.close().await;
+        }
+    }
+
+    fn base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", base_database_url(), admin_db)
+    }
+
+    async fn execute_intent(pool: &PgPool, intent: &TransitionIntent) {
+        let mut tx = pool.begin().await.expect("begin test tx");
+        execute_pg_transition_intent(&mut tx, intent)
+            .await
+            .expect("execute pg intent");
+        tx.commit().await.expect("commit test tx");
+    }
+
+    async fn seed_agent(pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind("agent-1")
+        .bind("Agent One")
+        .bind("claude")
+        .bind("111")
+        .execute(pool)
+        .await
+        .expect("seed agent");
+    }
+
+    async fn seed_card(pool: &PgPool, card_id: &str, status: &str) {
+        seed_agent(pool).await;
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(format!("Card {card_id}"))
+        .bind(status)
+        .bind("agent-1")
+        .execute(pool)
+        .await
+        .expect("seed card");
+    }
+
+    async fn seed_dispatch(
+        pool: &PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        status: &str,
+        dispatch_type: &str,
+    ) {
+        seed_agent(pool).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, NOW(), NOW()
+             )",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind("agent-1")
+        .bind(dispatch_type)
+        .bind(status)
+        .bind(format!("Dispatch {dispatch_id}"))
+        .execute(pool)
+        .await
+        .expect("seed dispatch");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pg_transition_intent_variants_mutate_expected_rows() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        seed_card(&pool, "card-status", "requested").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::UpdateStatus {
+                card_id: "card-status".to_string(),
+                from: "requested".to_string(),
+                to: "in_progress".to_string(),
+            },
+        )
+        .await;
+        let updated_status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind("card-status")
+                .fetch_one(&pool)
+                .await
+                .expect("load updated status");
+        assert_eq!(updated_status, "in_progress");
+
+        seed_card(&pool, "card-latest", "ready").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::SetLatestDispatchId {
+                card_id: "card-latest".to_string(),
+                dispatch_id: Some("dispatch-latest".to_string()),
+            },
+        )
+        .await;
+        let latest_dispatch_id: Option<String> =
+            sqlx::query_scalar("SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind("card-latest")
+                .fetch_one(&pool)
+                .await
+                .expect("load latest_dispatch_id");
+        assert_eq!(latest_dispatch_id.as_deref(), Some("dispatch-latest"));
+
+        seed_card(&pool, "card-review-status", "review").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::SetReviewStatus {
+                card_id: "card-review-status".to_string(),
+                review_status: Some("reviewing".to_string()),
+            },
+        )
+        .await;
+        let review_status: Option<String> =
+            sqlx::query_scalar("SELECT review_status FROM kanban_cards WHERE id = $1")
+                .bind("card-review-status")
+                .fetch_one(&pool)
+                .await
+                .expect("load review_status");
+        assert_eq!(review_status.as_deref(), Some("reviewing"));
+
+        seed_card(&pool, "card-clock", "requested").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::ApplyClock {
+                card_id: "card-clock".to_string(),
+                state: "in_progress".to_string(),
+                clock: Some(ClockConfig {
+                    set: "started_at".to_string(),
+                    mode: None,
+                }),
+            },
+        )
+        .await;
+        let started_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT started_at FROM kanban_cards WHERE id = $1")
+                .bind("card-clock")
+                .fetch_one(&pool)
+                .await
+                .expect("load started_at");
+        assert!(started_at.is_some(), "ApplyClock should set started_at");
+
+        seed_card(&pool, "card-terminal", "done").await;
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET review_status = 'reviewing',
+                 suggestion_pending_at = NOW(),
+                 review_entered_at = NOW(),
+                 awaiting_dod_at = NOW(),
+                 blocked_reason = 'needs follow-up',
+                 review_round = 3,
+                 deferred_dod_json = '{\"missing\":[\"tests\"]}'
+             WHERE id = $1",
+        )
+        .bind("card-terminal")
+        .execute(&pool)
+        .await
+        .expect("seed terminal fields");
+        execute_intent(
+            &pool,
+            &TransitionIntent::ClearTerminalFields {
+                card_id: "card-terminal".to_string(),
+            },
+        )
+        .await;
+        let cleared = sqlx::query(
+            "SELECT review_status, suggestion_pending_at, review_entered_at, awaiting_dod_at,
+                    blocked_reason, review_round, deferred_dod_json
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind("card-terminal")
+        .fetch_one(&pool)
+        .await
+        .expect("load cleared terminal fields");
+        assert!(cleared.get::<Option<String>, _>("review_status").is_none());
+        assert!(
+            cleared
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("suggestion_pending_at")
+                .is_none()
+        );
+        assert!(
+            cleared
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("review_entered_at")
+                .is_none()
+        );
+        assert!(
+            cleared
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("awaiting_dod_at")
+                .is_none()
+        );
+        assert!(cleared.get::<Option<String>, _>("blocked_reason").is_none());
+        assert!(cleared.get::<Option<i64>, _>("review_round").is_none());
+        assert!(
+            cleared
+                .get::<Option<String>, _>("deferred_dod_json")
+                .is_none()
+        );
+
+        seed_card(&pool, "card-aq", "done").await;
+        for (run_id, status) in [
+            ("run-own", "active"),
+            ("run-active-sibling", "active"),
+            ("run-paused-sibling", "paused"),
+            ("run-generated", "generated"),
+            ("run-completed", "completed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(run_id)
+            .bind("test-repo")
+            .bind("agent-1")
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed auto_queue_run");
+        }
+        for (entry_id, run_id, status) in [
+            ("entry-own", "run-own", "dispatched"),
+            ("entry-active", "run-active-sibling", "pending"),
+            ("entry-paused", "run-paused-sibling", "pending"),
+            ("entry-generated", "run-generated", "pending"),
+            ("entry-completed", "run-completed", "pending"),
+        ] {
+            sqlx::query(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, created_at
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, NOW()
+                 )",
+            )
+            .bind(entry_id)
+            .bind(run_id)
+            .bind("card-aq")
+            .bind("agent-1")
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed auto_queue_entry");
+        }
+        execute_intent(
+            &pool,
+            &TransitionIntent::SyncAutoQueue {
+                card_id: "card-aq".to_string(),
+            },
+        )
+        .await;
+        let statuses: HashMap<String, String> = sqlx::query(
+            "SELECT id, status
+             FROM auto_queue_entries
+             WHERE kanban_card_id = $1
+             ORDER BY id",
+        )
+        .bind("card-aq")
+        .fetch_all(&pool)
+        .await
+        .expect("load auto_queue statuses")
+        .into_iter()
+        .map(|row| (row.get::<String, _>("id"), row.get::<String, _>("status")))
+        .collect();
+        assert_eq!(statuses.get("entry-own").map(String::as_str), Some("done"));
+        assert_eq!(
+            statuses.get("entry-active").map(String::as_str),
+            Some("skipped")
+        );
+        assert_eq!(
+            statuses.get("entry-paused").map(String::as_str),
+            Some("skipped")
+        );
+        assert_eq!(
+            statuses.get("entry-generated").map(String::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            statuses.get("entry-completed").map(String::as_str),
+            Some("pending")
+        );
+
+        seed_card(&pool, "card-review-state", "review").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::SyncReviewState {
+                card_id: "card-review-state".to_string(),
+                state: "reviewing".to_string(),
+            },
+        )
+        .await;
+        let review_state = sqlx::query(
+            "SELECT state, review_entered_at
+             FROM card_review_state
+             WHERE card_id = $1",
+        )
+        .bind("card-review-state")
+        .fetch_one(&pool)
+        .await
+        .expect("load card_review_state");
+        assert_eq!(review_state.get::<String, _>("state"), "reviewing");
+        assert!(
+            review_state
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("review_entered_at")
+                .is_some()
+        );
+
+        seed_card(&pool, "card-audit", "ready").await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::AuditLog {
+                card_id: "card-audit".to_string(),
+                from: "ready".to_string(),
+                to: "requested".to_string(),
+                source: "test".to_string(),
+                message: "OK".to_string(),
+            },
+        )
+        .await;
+        let audit = sqlx::query(
+            "SELECT from_status, to_status, source, result
+             FROM kanban_audit_logs
+             WHERE card_id = $1
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind("card-audit")
+        .fetch_one(&pool)
+        .await
+        .expect("load audit log");
+        assert_eq!(audit.get::<String, _>("from_status"), "ready");
+        assert_eq!(audit.get::<String, _>("to_status"), "requested");
+        assert_eq!(audit.get::<String, _>("source"), "test");
+        assert_eq!(audit.get::<String, _>("result"), "OK");
+
+        seed_card(&pool, "card-dispatch", "requested").await;
+        seed_dispatch(
+            &pool,
+            "dispatch-cancel",
+            "card-dispatch",
+            "pending",
+            "implementation",
+        )
+        .await;
+        execute_intent(
+            &pool,
+            &TransitionIntent::CancelDispatch {
+                dispatch_id: "dispatch-cancel".to_string(),
+            },
+        )
+        .await;
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-cancel")
+                .fetch_one(&pool)
+                .await
+                .expect("load cancelled dispatch");
+        assert_eq!(dispatch_status, "cancelled");
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+}
