@@ -36,6 +36,16 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                 script_path=SCRIPT_PATH,
             )
 
+    def test_sudoers_text_can_include_bootstrap_notice(self) -> None:
+        text = MODULE.sudoers_text(
+            user_name="agentdesk",
+            python_bin=Path("/usr/bin/python3"),
+            script_path=Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+            bootstrap_required=True,
+        )
+
+        self.assertIn("First-time setup still requires", text)
+
     def test_build_self_command_keeps_jobs_and_schedule(self) -> None:
         args = argparse.Namespace(
             action="install",

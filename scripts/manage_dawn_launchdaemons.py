@@ -588,12 +588,24 @@ def plist_valid(path: Path) -> bool:
     return run_command(["plutil", "-lint", str(path)]).returncode == 0
 
 
-def sudoers_text(*, user_name: str, python_bin: Path, script_path: Path) -> str:
+def sudoers_text(
+    *,
+    user_name: str,
+    python_bin: Path,
+    script_path: Path,
+    bootstrap_required: bool = False,
+) -> str:
     safe_user_name = validate_sudoers_user_name(user_name)
-    return "\n".join(
+    lines = [
+        "# /etc/sudoers.d/agentdesk-dawn-manager",
+        "# Install with: sudo visudo -f /etc/sudoers.d/agentdesk-dawn-manager",
+    ]
+    if bootstrap_required:
+        lines.append(
+            "# First-time setup still requires `sudo ... manage_dawn_launchdaemons.py bootstrap`"
+        )
+    lines.extend(
         [
-            "# /etc/sudoers.d/agentdesk-dawn-manager",
-            "# Install with: sudo visudo -f /etc/sudoers.d/agentdesk-dawn-manager",
             "",
             f"User_Alias AGENTDESK_RUNTIME = {safe_user_name}",
             "",
@@ -603,6 +615,7 @@ def sudoers_text(*, user_name: str, python_bin: Path, script_path: Path) -> str:
             "AGENTDESK_RUNTIME ALL = (root) NOPASSWD: AGENTDESK_DAWN_MANAGER",
         ]
     )
+    return "\n".join(lines)
 
 
 def visudo_bin() -> Path:
@@ -839,6 +852,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 user_name=args.sudoers_user,
                 python_bin=trusted_root_python_bin(),
                 script_path=managed_entrypoint_target(),
+                bootstrap_required=not managed_entrypoint_target().exists(),
             )
         )
         return 0
