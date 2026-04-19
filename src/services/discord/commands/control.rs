@@ -12,6 +12,11 @@ use super::super::turn_bridge::cancel_active_token;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
 };
+use super::config::{
+    any_fast_mode_reset_pending, clear_fast_mode_reset_pending_for_channel,
+    clear_fast_mode_reset_pending_for_provider, fast_mode_reset_pending_for_provider,
+    fast_mode_reset_pending_key, sync_session_reset_pending,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedSessionClearBehavior {
@@ -248,15 +253,12 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) {
-    let legacy_session_reset_pending = shared.session_reset_pending.remove(&channel_id).is_some();
-    let fast_mode_reset_pending = shared
-        .fast_mode_session_reset_pending
-        .remove(&channel_id)
-        .is_some();
-    let model_reset_pending = shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_some();
+    let fast_mode_reset_pending =
+        fast_mode_reset_pending_for_provider(shared, channel_id, provider);
+    let model_reset_pending = shared.model_session_reset_pending.contains(&channel_id);
+    let legacy_session_reset_pending = shared.session_reset_pending.contains(&channel_id)
+        && !any_fast_mode_reset_pending(shared, channel_id)
+        && !model_reset_pending;
 
     let Some(plan) = pending_session_reset_plan(
         provider,
@@ -264,6 +266,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         model_reset_pending,
         legacy_session_reset_pending,
     ) else {
+        sync_session_reset_pending(shared, channel_id);
         return;
     };
 
@@ -280,8 +283,16 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     .await;
 
     if fast_mode_reset_pending {
-        persist_fast_mode_reset_marker(shared, channel_id, false).await;
+        clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider);
+        persist_fast_mode_reset_marker(shared, channel_id, provider, false).await;
     }
+    if model_reset_pending {
+        shared.model_session_reset_pending.remove(&channel_id);
+    }
+    if legacy_session_reset_pending {
+        shared.session_reset_pending.remove(&channel_id);
+    }
+    sync_session_reset_pending(shared, channel_id);
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(
@@ -319,10 +330,10 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
 
     shared.dispatch_role_overrides.remove(&channel_id);
 
-    shared.fast_mode_session_reset_pending.remove(&channel_id);
+    clear_fast_mode_reset_pending_for_channel(shared, channel_id);
     shared.model_session_reset_pending.remove(&channel_id);
     shared.session_reset_pending.remove(&channel_id);
-    persist_fast_mode_reset_marker(shared, channel_id, false).await;
+    clear_all_fast_mode_reset_markers(shared, channel_id).await;
 
     if let Some(token) = cleared.removed_token {
         cancel_active_token(
@@ -734,6 +745,7 @@ pub(in crate::services::discord) async fn cmd_shell(
 async fn persist_fast_mode_reset_marker(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
     pending: bool,
 ) {
     let Some(token) = shared.cached_bot_token.get() else {
@@ -741,13 +753,39 @@ async fn persist_fast_mode_reset_marker(
     };
 
     let channel_key = channel_id.get().to_string();
+    let provider_key = fast_mode_reset_pending_key(channel_id, provider);
     let mut settings = shared.settings.write().await;
     if pending {
-        settings.channel_fast_mode_reset_pending.insert(channel_key);
+        settings
+            .channel_fast_mode_reset_pending
+            .remove(&channel_key);
+        settings
+            .channel_fast_mode_reset_pending
+            .insert(provider_key);
     } else {
         settings
             .channel_fast_mode_reset_pending
             .remove(&channel_key);
+        settings
+            .channel_fast_mode_reset_pending
+            .remove(&provider_key);
     }
+    save_bot_settings(token, &settings);
+}
+
+async fn clear_all_fast_mode_reset_markers(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) {
+    let Some(token) = shared.cached_bot_token.get() else {
+        return;
+    };
+
+    let channel_key = channel_id.get().to_string();
+    let suffix = format!(":{channel_key}");
+    let mut settings = shared.settings.write().await;
+    settings
+        .channel_fast_mode_reset_pending
+        .retain(|entry| entry != &channel_key && !entry.ends_with(&suffix));
     save_bot_settings(token, &settings);
 }

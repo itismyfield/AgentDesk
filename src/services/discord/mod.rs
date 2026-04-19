@@ -476,9 +476,9 @@ pub(super) struct SharedData {
     pub(super) model_overrides: dashmap::DashMap<ChannelId, String>,
     /// Per-channel native fast mode enablement for providers that support it.
     pub(super) fast_mode_channels: dashmap::DashSet<ChannelId>,
-    /// Channels that must start a fresh provider session on the next turn
-    /// because the persisted fast-mode runtime override changed.
-    pub(super) fast_mode_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Provider-scoped pending native fast-mode resets, encoded as
+    /// `provider:channel_id` strings for mixed-provider dispatch safety.
+    pub(super) fast_mode_session_reset_pending: dashmap::DashSet<String>,
     /// Channels that must start a fresh provider session on the next turn
     /// because the effective model override changed.
     pub(super) model_session_reset_pending: dashmap::DashSet<ChannelId>,

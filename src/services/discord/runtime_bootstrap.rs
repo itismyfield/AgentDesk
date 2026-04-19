@@ -33,16 +33,30 @@ fn restored_fast_mode_enabled_channels_for_provider(
     channels
 }
 
-fn restored_fast_mode_reset_channels_for_provider(
-    bot_settings: &DiscordBotSettings,
-    _provider: &ProviderKind,
-) -> Vec<ChannelId> {
+fn restored_fast_mode_reset_entries(bot_settings: &DiscordBotSettings) -> Vec<String> {
+    let mut entries: Vec<String> = bot_settings
+        .channel_fast_mode_reset_pending
+        .iter()
+        .cloned()
+        .collect();
+    entries.sort_unstable();
+    entries
+}
+
+fn restored_fast_mode_reset_channels(bot_settings: &DiscordBotSettings) -> Vec<ChannelId> {
     let mut channels: Vec<ChannelId> = bot_settings
         .channel_fast_mode_reset_pending
         .iter()
-        .filter_map(|channel_id| channel_id.parse::<u64>().ok().map(ChannelId::new))
+        .filter_map(|entry| {
+            let raw_channel_id = entry
+                .split_once(':')
+                .map(|(_, channel_id)| channel_id)
+                .unwrap_or(entry.as_str());
+            raw_channel_id.parse::<u64>().ok().map(ChannelId::new)
+        })
         .collect();
     channels.sort_unstable_by_key(|channel_id| channel_id.get());
+    channels.dedup_by_key(|channel_id| channel_id.get());
     channels
 }
 
@@ -653,8 +667,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         .collect();
     let restored_fast_mode_channels =
         restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
-    let restored_fast_mode_reset_channels =
-        restored_fast_mode_reset_channels_for_provider(&bot_settings, &provider);
+    let restored_fast_mode_reset_entries = restored_fast_mode_reset_entries(&bot_settings);
+    let restored_fast_mode_reset_channels = restored_fast_mode_reset_channels(&bot_settings);
 
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
@@ -699,8 +713,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         },
         fast_mode_session_reset_pending: {
             let set = dashmap::DashSet::new();
-            for channel_id in &restored_fast_mode_reset_channels {
-                set.insert(*channel_id);
+            for entry in &restored_fast_mode_reset_entries {
+                set.insert(entry.clone());
             }
             set
         },
@@ -1546,21 +1560,25 @@ mod tests {
     }
 
     #[test]
-    fn restored_fast_mode_reset_channels_only_restore_pending_entries() {
+    fn restored_fast_mode_reset_channels_restore_pending_entries_for_all_providers() {
         let mut settings = DiscordBotSettings::default();
         settings.channel_fast_modes.insert("123".to_string(), true);
         settings.channel_fast_modes.insert("456".to_string(), false);
         settings
             .channel_fast_mode_reset_pending
-            .insert("456".to_string());
+            .insert("codex:456".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("123".to_string());
 
-        let claude_channels =
-            restored_fast_mode_reset_channels_for_provider(&settings, &ProviderKind::Claude);
-        assert_eq!(claude_channels, vec![ChannelId::new(456)]);
-
-        let gemini_channels =
-            restored_fast_mode_reset_channels_for_provider(&settings, &ProviderKind::Gemini);
-        assert_eq!(gemini_channels, vec![ChannelId::new(456)]);
+        assert_eq!(
+            restored_fast_mode_reset_entries(&settings),
+            vec!["123".to_string(), "codex:456".to_string()]
+        );
+        assert_eq!(
+            restored_fast_mode_reset_channels(&settings),
+            vec![ChannelId::new(123), ChannelId::new(456)]
+        );
     }
 
     struct PgTestDatabase {

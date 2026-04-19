@@ -1,3 +1,5 @@
+use poise::serenity_prelude as serenity;
+
 use crate::services::provider::ProviderKind;
 
 use super::super::{Context, Error, check_auth};
@@ -30,6 +32,31 @@ fn build_fast_disabled_notice(provider: &ProviderKind, reset_pending: bool) -> S
     )
 }
 
+async fn fallback_channel_name_for_fast(
+    ctx: Context<'_>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    let http = ctx.serenity_context().http.clone();
+    if let Some((parent_id, parent_name)) =
+        super::super::resolve_thread_parent(&http, channel_id).await
+    {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(super::super::synthetic_thread_channel_name(
+            &parent_name,
+            channel_id,
+        ));
+    }
+
+    channel_id
+        .to_channel(&http)
+        .await
+        .ok()
+        .and_then(|channel| match channel {
+            serenity::Channel::Guild(guild_channel) => Some(guild_channel.name),
+            _ => None,
+        })
+}
+
 /// /fast — Toggle native fast mode for the current provider session
 #[poise::command(slash_command, rename = "fast")]
 pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(), Error> {
@@ -43,8 +70,14 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
     tracing::info!("  [{ts}] ◀ [{user_name}] /fast");
 
     let channel_id = ctx.channel_id();
-    let effective_provider =
-        effective_provider_for_channel(&ctx.data().shared, channel_id, &ctx.data().provider).await;
+    let channel_name_hint = fallback_channel_name_for_fast(ctx, channel_id).await;
+    let effective_provider = effective_provider_for_channel(
+        &ctx.data().shared,
+        channel_id,
+        &ctx.data().provider,
+        channel_name_hint.as_deref(),
+    )
+    .await;
 
     if !native_fast_mode_supported(&effective_provider) {
         ctx.say("/fast is only available in Claude and Codex channels.")
@@ -58,6 +91,7 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
         &ctx.data().shared,
         &ctx.data().token,
         channel_id,
+        &effective_provider,
         next_enabled,
     )
     .await;
