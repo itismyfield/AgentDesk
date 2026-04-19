@@ -26,6 +26,7 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const noop = (() => {}) as any;
 const noopGetAgentLabel = (_id: string | null | undefined) => "—";
+const noopGetAgentProvider = () => null;
 const noopResolveAgent = (_labels: Array<{ name: string; color: string }>) => null;
 
 // ---------------------------------------------------------------------------
@@ -451,6 +452,7 @@ export default function KanbanBoard({
                     closingIssueNumber={null}
                     assigningIssue={false}
                     getAgentLabel={noopGetAgentLabel}
+                    getAgentProvider={noopGetAgentProvider}
                     resolveAgentFromLabels={noopResolveAgent}
                     onCardClick={onCardClick}
                     onBacklogIssueClick={onBacklogIssueClick}

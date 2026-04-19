@@ -8,6 +8,10 @@ import {
   SurfaceNotice,
   SurfaceSection,
 } from "../common/SurfacePrimitives";
+import {
+  getProviderLevelColors,
+  getProviderMeta,
+} from "../../app/providerTheme";
 
 interface RateLimitBucket {
   id: string;
@@ -114,58 +118,12 @@ export function transformRawData(
   };
 }
 
-interface ProviderPalette {
-  accent: string;
-  normal: { bar: string; text: string; glow: string };
-  warning: { bar: string; text: string; glow: string };
-  danger: { bar: string; text: string; glow: string };
-}
-
-const PROVIDER_PALETTES: Record<string, ProviderPalette> = {
-  Claude: {
-    accent: "#f59e0b",
-    normal: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.3)" },
-    warning: { bar: "#ea580c", text: "#fb923c", glow: "rgba(234,88,12,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  Codex: {
-    accent: "#34d399",
-    normal: { bar: "#34d399", text: "#6ee7b7", glow: "rgba(52,211,153,0.3)" },
-    warning: { bar: "#fbbf24", text: "#fcd34d", glow: "rgba(251,191,36,0.4)" },
-    danger: { bar: "#f87171", text: "#fca5a5", glow: "rgba(248,113,113,0.5)" },
-  },
-  Gemini: {
-    accent: "#3b82f6",
-    normal: { bar: "#3b82f6", text: "#60a5fa", glow: "rgba(59,130,246,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  Qwen: {
-    accent: "#8b5cf6",
-    normal: { bar: "#8b5cf6", text: "#a78bfa", glow: "rgba(139,92,246,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-};
-
-const DEFAULT_PALETTE: ProviderPalette = PROVIDER_PALETTES.Codex;
 const PROVIDER_ICONS: Record<string, string> = {
   Claude: "🤖",
   Codex: "⚡",
   Gemini: "🔮",
   Qwen: "🧠",
 };
-
-function getColors(provider: string, level: string) {
-  const palette = PROVIDER_PALETTES[provider] || DEFAULT_PALETTE;
-  if (level === "danger") return palette.danger;
-  if (level === "warning") return palette.warning;
-  return palette.normal;
-}
-
-function getAccent(provider: string) {
-  return (PROVIDER_PALETTES[provider] || DEFAULT_PALETTE).accent;
-}
 
 function formatTimeRemaining(resetsAt: string | null): string {
   if (!resetsAt) return "";
@@ -346,7 +304,8 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
       ) : (
         <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {providers.map((provider) => {
-            const accent = getAccent(provider.provider);
+            const providerMeta = getProviderMeta(provider.provider);
+            const accent = providerMeta.color;
             const statusLabel = provider.unsupported
               ? t({ ko: "미지원", en: "N/A", ja: "未対応", zh: "未支持" })
               : provider.stale
@@ -358,8 +317,8 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                 key={provider.provider}
                 className="rounded-3xl p-5"
                 style={{
-                  borderColor: `color-mix(in srgb, ${accent} 22%, var(--th-border) 78%)`,
-                  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                  borderColor: providerMeta.border,
+                  background: providerMeta.bg,
                 }}
               >
                 <div className="flex items-start justify-between gap-3">
@@ -396,13 +355,23 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                   <span
                     className="rounded-full px-2 py-1 text-[10px] font-medium"
                     style={{
-                      color: provider.unsupported ? "#cbd5f5" : provider.stale ? "#fbbf24" : accent,
-                      border: `1px solid ${provider.unsupported ? "rgba(203,213,225,0.24)" : provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
-                      background: provider.unsupported
-                        ? "rgba(148,163,184,0.12)"
+                      color: provider.unsupported
+                        ? "var(--fg-dim)"
                         : provider.stale
-                          ? "rgba(251,191,36,0.1)"
-                          : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
+                          ? "var(--warn)"
+                          : accent,
+                      border: `1px solid ${
+                        provider.unsupported
+                          ? "color-mix(in oklch, var(--fg-faint) 24%, var(--line) 76%)"
+                          : provider.stale
+                            ? "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)"
+                            : providerMeta.border
+                      }`,
+                      background: provider.unsupported
+                        ? "color-mix(in oklch, var(--fg-faint) 10%, var(--bg-2) 90%)"
+                        : provider.stale
+                          ? "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)"
+                          : providerMeta.bg,
                     }}
                   >
                     {statusLabel}
@@ -413,9 +382,8 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                   <div
                     className="mt-4 rounded-2xl border px-3 py-3"
                     style={{
-                      borderColor: "rgba(148,163,184,0.16)",
-                      background:
-                        "color-mix(in srgb, var(--th-bg-surface) 94%, rgba(148,163,184,0.12) 6%)",
+                      borderColor: "color-mix(in oklch, var(--fg-faint) 20%, var(--line) 80%)",
+                      background: "color-mix(in oklch, var(--fg-faint) 6%, var(--th-bg-surface) 94%)",
                     }}
                   >
                     <div className="text-xs font-semibold" style={{ color: "var(--th-text)" }}>
@@ -442,7 +410,7 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                 ) : (
                   <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
                     {provider.buckets.map((bucket) => {
-                      const colors = getColors(provider.provider, bucket.level);
+                      const colors = getProviderLevelColors(provider.provider, bucket.level);
                       const remaining = formatTimeRemaining(bucket.resets_at);
                       return (
                         <div key={bucket.id} className="relative">
@@ -471,8 +439,8 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                               className="relative overflow-hidden rounded-full"
                               style={{
                                 height: 10,
-                                background: "rgba(255,255,255,0.12)",
-                                border: "1px solid rgba(255,255,255,0.08)",
+                                background: "var(--line-soft)",
+                                border: "1px solid color-mix(in oklch, var(--line) 60%, transparent)",
                               }}
                             >
                               <div

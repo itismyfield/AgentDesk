@@ -31,6 +31,7 @@ import type {
   DiscordBinding,
   AgentOfficeMembership,
 } from "../../api/client";
+import { getProviderMeta } from "../../app/providerTheme";
 import {
   describeDiscordBinding,
   describeDiscordTarget,
@@ -1089,6 +1090,7 @@ export default function AgentInfoCard({
               ) : (
                 <div className="space-y-1.5">
                   {claudeSessions.map((s) => {
+                    const providerMeta = getProviderMeta(s.provider);
                     const sessionChannelInfo = resolveDiscordChannelInfo(
                       s.thread_channel_id ?? null,
                     );
@@ -1116,25 +1118,12 @@ export default function AgentInfoCard({
                           <span
                             className="rounded px-1.5 py-0.5 text-xs"
                             style={{
-                              background:
-                                s.provider === "codex"
-                                  ? "rgba(56,189,248,0.18)"
-                                  : s.provider === "gemini"
-                                    ? "rgba(250,204,21,0.18)"
-                                    : s.provider === "qwen"
-                                      ? "rgba(34,197,94,0.18)"
-                                      : "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
-                              color:
-                                s.provider === "codex"
-                                  ? "#38bdf8"
-                                  : s.provider === "gemini"
-                                    ? "#facc15"
-                                    : s.provider === "qwen"
-                                      ? "#86efac"
-                                      : "var(--th-accent-primary)",
+                              background: providerMeta.bg,
+                              color: providerMeta.color,
+                              border: `1px solid ${providerMeta.border}`,
                             }}
                           >
-                            {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
+                            {providerMeta.label}
                           </span>
                           <span
                             className="rounded px-1.5 py-0.5 text-xs"

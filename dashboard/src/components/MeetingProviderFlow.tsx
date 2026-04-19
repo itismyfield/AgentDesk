@@ -1,72 +1,7 @@
 import { useI18n } from "../i18n";
+import { getProviderMeta } from "../app/providerTheme";
 
-export const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
-  claude: {
-    label: "Claude",
-    bg: "rgba(245,158,11,0.12)",
-    color: "#fbbf24",
-    border: "rgba(245,158,11,0.25)",
-  },
-  codex: {
-    label: "Codex",
-    bg: "rgba(56,189,248,0.12)",
-    color: "#7dd3fc",
-    border: "rgba(56,189,248,0.24)",
-  },
-  gemini: {
-    label: "Gemini",
-    bg: "rgba(59,130,246,0.12)",
-    color: "#60a5fa",
-    border: "rgba(59,130,246,0.25)",
-  },
-  qwen: {
-    label: "Qwen",
-    bg: "rgba(34,197,94,0.12)",
-    color: "#86efac",
-    border: "rgba(34,197,94,0.25)",
-  },
-  opencode: {
-    label: "OpenCode",
-    bg: "rgba(6,182,212,0.12)",
-    color: "#22d3ee",
-    border: "rgba(6,182,212,0.25)",
-  },
-  copilot: {
-    label: "Copilot",
-    bg: "rgba(16,185,129,0.12)",
-    color: "#6ee7b7",
-    border: "rgba(16,185,129,0.25)",
-  },
-  antigravity: {
-    label: "Antigravity",
-    bg: "rgba(249,115,22,0.12)",
-    color: "#fdba74",
-    border: "rgba(249,115,22,0.25)",
-  },
-  api: {
-    label: "API",
-    bg: "rgba(148,163,184,0.12)",
-    color: "#cbd5e1",
-    border: "rgba(148,163,184,0.25)",
-  },
-};
-
-export function getProviderMeta(provider: string | null) {
-  if (!provider) {
-    return {
-      label: "Unknown",
-      bg: "rgba(148,163,184,0.1)",
-      color: "#cbd5e1",
-      border: "rgba(148,163,184,0.18)",
-    };
-  }
-  return PROVIDER_META[provider.toLowerCase()] ?? {
-    label: provider.toUpperCase(),
-    bg: "rgba(148,163,184,0.1)",
-    color: "#cbd5e1",
-    border: "rgba(148,163,184,0.18)",
-  };
-}
+export { getProviderMeta };
 
 export function formatProviderFlow(
   primaryProvider: string | null,

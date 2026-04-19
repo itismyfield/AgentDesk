@@ -482,6 +482,11 @@ export default function KanbanTab({
     return localeName(locale, agent);
   };
 
+  const getAgentProvider = (agentId: string | null | undefined) => {
+    if (!agentId) return null;
+    return agentMap.get(agentId)?.cli_provider ?? null;
+  };
+
   const getTimelineKindLabel = (kind: "review" | "pm" | "work" | "general") => {
     switch (kind) {
       case "review":
@@ -2093,6 +2098,7 @@ export default function KanbanTab({
                           closingIssueNumber={closingIssueNumber}
                           assigningIssue={assigningIssue}
                           getAgentLabel={getAgentLabel}
+                          getAgentProvider={getAgentProvider}
                           resolveAgentFromLabels={resolveAgentFromLabels}
                           onCardClick={setSelectedCardId}
                           onBacklogIssueClick={setSelectedBacklogIssue}
