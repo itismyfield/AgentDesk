@@ -159,7 +159,7 @@ pub(super) fn register_kanban_ops<'js>(
                     "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now'){} WHERE id = ?2",
                     extra
                 );
-                if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) {
+                if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) { // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                     return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
                 }
 
@@ -294,7 +294,7 @@ pub(super) fn register_kanban_ops<'js>(
                 "UPDATE kanban_cards SET status = ?1, completed_at = NULL, updated_at = datetime('now'){} WHERE id = ?2",
                 clock_extra
             );
-            if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) {
+            if let Err(e) = conn.execute(&sql, libsql_rusqlite::params![new_status, card_id]) { // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
             }
 
@@ -448,7 +448,7 @@ pub(super) fn register_kanban_ops<'js>(
 
                 // Build dynamic SET clause
                 let mut sets = vec!["updated_at = datetime('now')".to_string()];
-                let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = vec![];
+                let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = vec![]; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 
                 if let Some(rs) = opts.get("review_status") {
                     if rs.is_null() {
@@ -512,7 +512,7 @@ pub(super) fn register_kanban_ops<'js>(
                     sets.join(", "),
                     where_clause
                 );
-                let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
+                let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> = // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                     params.iter().map(|p| p.as_ref()).collect();
                 if let Err(e) = conn.execute(&sql, param_refs.as_slice()) {
                     return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
@@ -1060,6 +1060,7 @@ pub(super) fn review_state_sync(db: &Db, json_str: &str) -> String {
 /// stale pending copies in active or paused runs should be skipped so they do
 /// not block other runs.
 pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connection, card_id: &str) {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let dispatched_ids: Vec<String> = conn
         .prepare(
             "SELECT id FROM auto_queue_entries
@@ -1126,9 +1127,10 @@ pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connectio
 /// Only active/paused runs are touched. Generated or future runs stay intact so
 /// PMD can intentionally re-queue the card later after fixing prerequisites.
 pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     card_id: &str,
 ) -> libsql_rusqlite::Result<usize> {
+    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut stmt = conn.prepare(
         "SELECT id FROM auto_queue_entries
          WHERE kanban_card_id = ?1
@@ -1152,6 +1154,7 @@ pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
         .map_err(|error| match error {
             crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
             other => libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 std::io::Error::other(other.to_string()),
             )),
         })?
@@ -1167,7 +1170,7 @@ pub(super) fn skip_live_auto_queue_entries_for_card_on_conn(
 /// Same as `review_state_sync` but operates on an already-acquired connection.
 /// Use this inside transactions or when a lock is already held (#158).
 pub(super) fn review_state_sync_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &libsql_rusqlite::Connection, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     json_str: &str,
 ) -> String {
     let params: serde_json::Value = match serde_json::from_str(json_str) {
@@ -1185,7 +1188,7 @@ pub(super) fn review_state_sync_on_conn(
     if state == "clear_verdict" {
         let result = conn.execute(
             "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
-            libsql_rusqlite::params![card_id],
+            libsql_rusqlite::params![card_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         );
         return match result {
             Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
@@ -1220,7 +1223,7 @@ pub(super) fn review_state_sync_on_conn(
          session_reset_round = COALESCE(?8, session_reset_round), \
          review_entered_at = COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
          updated_at = datetime('now')",
-        libsql_rusqlite::params![
+        libsql_rusqlite::params![ // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             card_id,
             state,
             review_round,

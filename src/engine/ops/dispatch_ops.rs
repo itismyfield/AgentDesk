@@ -1,5 +1,7 @@
 use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use serde_json::json;
+use sqlx::{PgPool, Row as SqlxRow};
 
 // ── Dispatch ops ────────────────────────────────────────────────
 //
@@ -7,13 +9,18 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 // Creates a task_dispatch row + updates kanban card to "requested".
 // Discord notification is handled by posting to the local /api/send endpoint.
 
-pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+pub(super) fn register_dispatch_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Db,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
     // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title, context_json) → json_string
     // Synchronous DB INSERT — no deferred intent.
     let db_d = db.clone();
+    let pg_create = pg_pool.clone();
     dispatch_obj.set(
         "__create_sync",
         Function::new(
@@ -25,6 +32,12 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                       title: String,
                       context_json: String|
                       -> String {
+                    if pg_create.is_some() {
+                        // TODO(#839 phase C): `dispatch.create` still depends on sqlite-only
+                        // dispatch-layer helpers (`create_dispatch_core*`,
+                        // `build_review_context`, attached-intent transactions).
+                        // Porting it cleanly requires lifting those invariants to PG first.
+                    }
                     dispatch_create_sync(
                         &db_d,
                         &card_id,
@@ -41,11 +54,23 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     // __mark_failed_raw(dispatch_id, reason) → json_string
     // Marks a dispatch as failed. Used by timeout handlers.
     let db_mf = db.clone();
+    let pg_mf = pg_pool.clone();
     dispatch_obj.set(
         "__mark_failed_raw",
         Function::new(
             ctx.clone(),
             move |dispatch_id: String, reason: String| -> String {
+                if let Some(pool) = pg_mf.as_ref() {
+                    let reason_json = json!({ "reason": reason });
+                    return dispatch_set_status_raw_pg(
+                        pool,
+                        &dispatch_id,
+                        "failed",
+                        Some(reason_json),
+                        "js_dispatch_mark_failed_raw",
+                        false,
+                    );
+                }
                 let conn = match db_mf.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
@@ -70,11 +95,24 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     // __mark_completed_raw(dispatch_id, result_json) → json_string
     // Marks a dispatch as completed. Used by orphan recovery.
     let db_mc = db.clone();
+    let pg_mc = pg_pool.clone();
     dispatch_obj.set(
         "__mark_completed_raw",
         Function::new(
             ctx.clone(),
             move |dispatch_id: String, result_json: String| -> String {
+                if let Some(pool) = pg_mc.as_ref() {
+                    let parsed_result = serde_json::from_str::<serde_json::Value>(&result_json)
+                        .unwrap_or_else(|_| serde_json::json!({ "raw_result": result_json }));
+                    return dispatch_set_status_raw_pg(
+                        pool,
+                        &dispatch_id,
+                        "completed",
+                        Some(parsed_result),
+                        "js_dispatch_mark_completed_raw",
+                        true,
+                    );
+                }
                 let conn = match db_mc.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
@@ -100,9 +138,13 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     // __has_active_work_raw(card_id) → json_string {"count":N}
     // Checks if a card has active implementation/rework dispatches.
     let db_aw = db.clone();
+    let pg_aw = pg_pool.clone();
     dispatch_obj.set(
         "__has_active_work_raw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
+            if let Some(pool) = pg_aw.as_ref() {
+                return dispatch_has_active_work_raw_pg(pool, &card_id);
+            }
             let conn = match db_aw.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
@@ -111,7 +153,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 "SELECT COUNT(*) FROM task_dispatches \
                      WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
                      AND status IN ('pending', 'dispatched')",
-                libsql_rusqlite::params![card_id],
+                [card_id],
                 |row| row.get::<_, i64>(0),
             ) {
                 Ok(cnt) => format!(r#"{{"count":{cnt}}}"#),
@@ -123,18 +165,22 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     // __set_retry_count_raw(dispatch_id, count) → json_string
     // Updates retry_count for auto-retry tracking.
     let db_rc = db;
+    let pg_rc = pg_pool;
     dispatch_obj.set(
         "__set_retry_count_raw",
         Function::new(
             ctx.clone(),
             move |dispatch_id: String, count: i32| -> String {
+                if let Some(pool) = pg_rc.as_ref() {
+                    return dispatch_set_retry_count_raw_pg(pool, &dispatch_id, count);
+                }
                 let conn = match db_rc.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
                 };
                 match conn.execute(
                     "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
-                    libsql_rusqlite::params![count, dispatch_id],
+                    libsql_rusqlite::params![count, dispatch_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 ) {
                     Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
                     Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
@@ -265,5 +311,243 @@ fn dispatch_create_sync(
         Err(e) => {
             format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"))
         }
+    }
+}
+
+fn dispatch_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
+    let card_id = card_id.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                 FROM task_dispatches
+                 WHERE kanban_card_id = $1
+                   AND dispatch_type IN ('implementation', 'rework')
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&card_id)
+            .fetch_one(&bridge_pool)
+            .await
+            .map_err(|error| format!("count postgres active dispatches for {card_id}: {error}"))
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(count) => format!(r#"{{"count":{count}}}"#),
+        Err(error_json) => error_json,
+    }
+}
+
+fn dispatch_set_retry_count_raw_pg(pool: &PgPool, dispatch_id: &str, count: i32) -> String {
+    let dispatch_id = dispatch_id.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query("UPDATE task_dispatches SET retry_count = $1 WHERE id = $2")
+                .bind(count)
+                .bind(&dispatch_id)
+                .execute(&bridge_pool)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(|error| {
+                    format!("update postgres dispatch retry_count for {dispatch_id}: {error}")
+                })
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
+        Err(error_json) => error_json,
+    }
+}
+
+fn dispatch_set_status_raw_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<serde_json::Value>,
+    transition_source: &str,
+    touch_completed_at: bool,
+) -> String {
+    let dispatch_id = dispatch_id.to_string();
+    let to_status = to_status.to_string();
+    let transition_source = transition_source.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let mut tx = bridge_pool.begin().await.map_err(|error| {
+                format!("begin postgres dispatch status transaction {dispatch_id}: {error}")
+            })?;
+
+            let current = sqlx::query(
+                "SELECT status, kanban_card_id, dispatch_type
+                 FROM task_dispatches
+                 WHERE id = $1",
+            )
+            .bind(&dispatch_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
+            let Some(current) = current else {
+                tx.rollback().await.ok();
+                return Ok(0_u64);
+            };
+
+            let current_status = current
+                .try_get::<Option<String>, _>("status")
+                .map_err(|error| format!("decode postgres dispatch status {dispatch_id}: {error}"))?
+                .unwrap_or_default();
+            if !matches!(current_status.as_str(), "pending" | "dispatched") {
+                tx.rollback().await.ok();
+                return Ok(0_u64);
+            }
+
+            let payload_json = result.as_ref().map(serde_json::Value::to_string);
+            let changed = match (payload_json.as_deref(), touch_completed_at) {
+                (Some(payload), true) => sqlx::query(
+                    "UPDATE task_dispatches
+                     SET status = $1,
+                         result = $2,
+                         updated_at = NOW(),
+                         completed_at = CASE
+                             WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                             ELSE completed_at
+                         END
+                     WHERE id = $3
+                       AND status = $4",
+                )
+                .bind(&to_status)
+                .bind(payload)
+                .bind(&dispatch_id)
+                .bind(&current_status)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
+                .rows_affected(),
+                (Some(payload), false) => sqlx::query(
+                    "UPDATE task_dispatches
+                     SET status = $1,
+                         result = $2,
+                         updated_at = NOW()
+                     WHERE id = $3
+                       AND status = $4",
+                )
+                .bind(&to_status)
+                .bind(payload)
+                .bind(&dispatch_id)
+                .bind(&current_status)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
+                .rows_affected(),
+                (None, true) => sqlx::query(
+                    "UPDATE task_dispatches
+                     SET status = $1,
+                         updated_at = NOW(),
+                         completed_at = CASE
+                             WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                             ELSE completed_at
+                         END
+                     WHERE id = $2
+                       AND status = $3",
+                )
+                .bind(&to_status)
+                .bind(&dispatch_id)
+                .bind(&current_status)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
+                .rows_affected(),
+                (None, false) => sqlx::query(
+                    "UPDATE task_dispatches
+                     SET status = $1,
+                         updated_at = NOW()
+                     WHERE id = $2
+                       AND status = $3",
+                )
+                .bind(&to_status)
+                .bind(&dispatch_id)
+                .bind(&current_status)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
+                .rows_affected(),
+            };
+
+            if changed > 0 && current_status != to_status {
+                sqlx::query(
+                    "INSERT INTO dispatch_events (
+                        dispatch_id,
+                        kanban_card_id,
+                        dispatch_type,
+                        from_status,
+                        to_status,
+                        transition_source,
+                        payload_json
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(&dispatch_id)
+                .bind(
+                    current
+                        .try_get::<Option<String>, _>("kanban_card_id")
+                        .map_err(|error| {
+                            format!("decode postgres dispatch card id {dispatch_id}: {error}")
+                        })?,
+                )
+                .bind(
+                    current
+                        .try_get::<Option<String>, _>("dispatch_type")
+                        .map_err(|error| {
+                            format!("decode postgres dispatch type {dispatch_id}: {error}")
+                        })?,
+                )
+                .bind(Some(current_status.as_str()))
+                .bind(&to_status)
+                .bind(&transition_source)
+                .bind(payload_json.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("insert postgres dispatch event {dispatch_id}: {error}")
+                })?;
+
+                let enqueue = match to_status.as_str() {
+                    "failed" | "cancelled" => true,
+                    "completed" => {
+                        let src = transition_source.trim();
+                        !(src.starts_with("turn_bridge") || src.starts_with("watcher"))
+                    }
+                    _ => false,
+                };
+                if enqueue {
+                    sqlx::query(
+                        "INSERT INTO dispatch_outbox (dispatch_id, action)
+                         SELECT $1, 'status_reaction'
+                         WHERE NOT EXISTS (
+                             SELECT 1
+                             FROM dispatch_outbox
+                             WHERE dispatch_id = $1
+                               AND action = 'status_reaction'
+                               AND status IN ('pending', 'processing')
+                         )",
+                    )
+                    .bind(&dispatch_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        format!("insert postgres status reaction outbox for {dispatch_id}: {error}")
+                    })?;
+                }
+            }
+
+            tx.commit().await.map_err(|error| {
+                format!("commit postgres dispatch status {dispatch_id}: {error}")
+            })?;
+
+            Ok(changed)
+        },
+        |error| format!(r#"{{"error":"{error}"}}"#),
+    ) {
+        Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
+        Err(error_json) => error_json,
     }
 }

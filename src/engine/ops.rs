@@ -80,7 +80,7 @@ pub fn register_globals_with_supervisor_and_pg(
     db_ops::register_db_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.cards ──────────────────────────────────────────
-    cards_ops::register_card_ops(ctx, db.clone())?;
+    cards_ops::register_card_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.log ────────────────────────────────────────────
     log_ops::register_log_ops(ctx)?;
@@ -92,22 +92,22 @@ pub fn register_globals_with_supervisor_and_pg(
     http_ops::register_http_ops(ctx)?;
 
     // ── agentdesk.dispatch ────────────────────────────────────────
-    dispatch_ops::register_dispatch_ops(ctx, db.clone())?;
+    dispatch_ops::register_dispatch_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.kanban ────────────────────────────────────────
     kanban_ops::register_kanban_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.kv ─────────────────────────────────────────────
-    kv_ops::register_kv_ops(ctx, db.clone())?;
+    kv_ops::register_kv_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.review ─────────────────────────────────────────
-    review_ops::register_review_ops(ctx, db.clone())?;
+    review_ops::register_review_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.reviewAutomation ─────────────────────────────── #743
     review_automation_ops::register_review_automation_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.queue ──────────────────────────────────────────
-    queue_ops::register_queue_ops(ctx, db.clone())?;
+    queue_ops::register_queue_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.autoQueue ─────────────────────────────────────
     auto_queue_ops::register_auto_queue_ops(
@@ -138,7 +138,7 @@ pub fn register_globals_with_supervisor_and_pg(
     dm_reply_ops::register_dm_reply_ops(ctx, db_for_dm_reply, pg_for_dm_reply)?;
 
     // ── agentdesk.agents ─────────────────────────────────────────
-    agent_ops::register_agent_ops(ctx, db_for_agents)?;
+    agent_ops::register_agent_ops(ctx, db_for_agents, pg_pool)?;
 
     Ok(())
 }

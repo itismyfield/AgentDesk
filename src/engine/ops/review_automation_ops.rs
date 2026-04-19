@@ -17,7 +17,7 @@
 
 use crate::db::Db;
 use crate::dispatch::{DispatchCreateOptions, apply_dispatch_attached_intents_on_conn};
-use libsql_rusqlite::OptionalExtension;
+use libsql_rusqlite::OptionalExtension; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde::Deserialize;
 use serde_json::json;
@@ -456,7 +456,7 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
            review_round = excluded.review_round, \
            retry_count = 0, \
            updated_at = CURRENT_TIMESTAMP",
-        libsql_rusqlite::params![
+        libsql_rusqlite::params![ // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             payload.card_id,
             payload.repo_id,
             payload.worktree_path,
@@ -698,7 +698,7 @@ fn record_pr_create_failure_tx(
            last_error = ?1, \
            updated_at = CURRENT_TIMESTAMP \
          WHERE card_id = ?2",
-        libsql_rusqlite::params![error, card_id],
+        libsql_rusqlite::params![error, card_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     if updated == 0 {
         // Row missing — caller's handoff tx rolled back before seeding. Create
@@ -708,7 +708,7 @@ fn record_pr_create_failure_tx(
                card_id, state, last_error, dispatch_generation, review_round, retry_count, \
                created_at, updated_at \
              ) VALUES (?1, 'create-pr', ?2, '', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            libsql_rusqlite::params![card_id, error],
+            libsql_rusqlite::params![card_id, error], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         )?;
     }
 
@@ -946,7 +946,7 @@ fn reseed_pr_tracking_tx(db: &Db, card_id: &str) -> anyhow::Result<serde_json::V
            last_error = NULL, \
            updated_at = CURRENT_TIMESTAMP \
          WHERE card_id = ?4",
-        libsql_rusqlite::params![generation, current_round, latest_head, card_id],
+        libsql_rusqlite::params![generation, current_round, latest_head, card_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
     if updated == 0 {
         // No row yet — create a minimal one so the retry loop can act on it.
@@ -955,7 +955,7 @@ fn reseed_pr_tracking_tx(db: &Db, card_id: &str) -> anyhow::Result<serde_json::V
                card_id, head_sha, state, dispatch_generation, review_round, retry_count, \
                created_at, updated_at \
              ) VALUES (?1, ?2, 'create-pr', ?3, ?4, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            libsql_rusqlite::params![card_id, latest_head, generation, current_round],
+            libsql_rusqlite::params![card_id, latest_head, generation, current_round], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
         )?;
     }
 

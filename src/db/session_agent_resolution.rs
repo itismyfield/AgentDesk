@@ -1,4 +1,4 @@
-use libsql_rusqlite::Connection;
+use libsql_rusqlite::Connection; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 
 use crate::db::agents::AgentChannelBindings;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
