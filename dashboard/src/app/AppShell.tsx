@@ -78,7 +78,7 @@ const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const OfficeManagerView = lazy(() => import("../components/OfficeManagerView"));
-const MeetingMinutesView = lazy(() => import("../components/MeetingMinutesView"));
+const MeetingsAndSkillsPage = lazy(() => import("../components/MeetingsAndSkillsPage"));
 const SettingsView = lazy(() => import("../components/SettingsView"));
 const AgentInfoCard = lazy(() => import("../components/agent-manager/AgentInfoCard"));
 const CommandPalette = lazy(() => import("../components/CommandPalette"));
@@ -1069,7 +1069,7 @@ export default function AppShell({
               <Route
                 path="/meetings"
                 element={
-                  <MeetingMinutesView
+                  <MeetingsAndSkillsPage
                     meetings={roundTableMeetings}
                     onRefresh={() =>
                       api
