@@ -1,5 +1,5 @@
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, EditMessage, MessageId};
+use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -10,6 +10,11 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
 const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
 const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
+
+/// Byte budget for the inline preview kept alongside a .txt attachment when a
+/// message would otherwise have to be split. Leaves ~300 bytes of DISCORD_MSG_LIMIT
+/// for a truncation footer and any code-fence closure.
+const ATTACHMENT_PREVIEW_BYTES: usize = 1700;
 
 /// All available tools with (name, description, is_destructive)
 pub(super) const ALL_TOOLS: &[(&str, &str, bool)] = &[
@@ -323,27 +328,54 @@ mod tests {
     }
 
     #[test]
-    fn test_split_message_short_passthrough() {
-        use super::split_message;
+    fn test_build_long_message_attachment_preview_fits_limit() {
+        use super::{ATTACHMENT_PREVIEW_BYTES, DISCORD_MSG_LIMIT, build_long_message_attachment};
 
-        let short = "Hello, world!";
-        let chunks = split_message(short);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], short);
+        let long: String = "A".repeat(DISCORD_MSG_LIMIT + 5000);
+        let (preview, _attachment) = build_long_message_attachment(&long);
+
+        assert!(preview.len() <= DISCORD_MSG_LIMIT);
+        assert!(preview.contains("📎 전문 첨부"));
+        // The preview is anchored near the preview budget, not the full length.
+        assert!(preview.len() >= ATTACHMENT_PREVIEW_BYTES / 2);
     }
 
     #[test]
-    fn test_split_message_long_produces_multiple_chunks() {
-        use super::{DISCORD_MSG_LIMIT, split_message};
+    fn test_build_long_message_attachment_closes_open_code_fence() {
+        use super::{DISCORD_MSG_LIMIT, build_attachment_preview};
 
-        // Create a message longer than the Discord limit
-        let long_msg: String = "A".repeat(DISCORD_MSG_LIMIT + 500);
-        let chunks = split_message(&long_msg);
-        assert!(chunks.len() >= 2);
-        // Each chunk should be within the limit (with some overhead tolerance)
-        for chunk in &chunks {
-            assert!(chunk.len() <= DISCORD_MSG_LIMIT + 50);
-        }
+        // Open a fenced block near the top so the preview cut falls inside it.
+        let head = "```rust\n";
+        let body = "let x = 1;\n".repeat(500);
+        let tail = "```\nepilogue\n";
+        let text = format!("{head}{body}{tail}");
+        assert!(text.len() > DISCORD_MSG_LIMIT);
+
+        let preview = build_attachment_preview(&text);
+        // Even-number of fences means the preview does not leave an open block.
+        let fence_count = preview
+            .lines()
+            .filter(|l| l.trim_start().starts_with("```"))
+            .count();
+        assert!(
+            fence_count % 2 == 0,
+            "preview has an unclosed code fence: {fence_count}"
+        );
+        assert!(preview.ends_with("생략)"));
+    }
+
+    #[test]
+    fn test_build_long_message_attachment_utf8_safe_boundary() {
+        use super::{DISCORD_MSG_LIMIT, build_long_message_attachment};
+
+        // Multi-byte characters that could straddle the preview budget.
+        let text: String = "한글🙂".repeat(1500);
+        assert!(text.len() > DISCORD_MSG_LIMIT);
+
+        let (preview, _attachment) = build_long_message_attachment(&text);
+        // Preview must remain valid UTF-8 and fit the limit.
+        assert!(preview.is_char_boundary(preview.len()));
+        assert!(preview.len() <= DISCORD_MSG_LIMIT);
     }
 
     #[test]
@@ -1124,27 +1156,28 @@ pub(super) fn format_for_discord(s: &str) -> String {
     result
 }
 
-/// Send a message using poise Context, splitting if necessary
+/// Send a message using poise Context. If it overflows Discord's single-message
+/// limit, send the message as an inline preview plus a `.txt` attachment with
+/// the full content.
 pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Result<(), Error> {
     if text.len() <= DISCORD_MSG_LIMIT {
         ctx.say(text).await?;
         return Ok(());
     }
 
-    let chunks = split_message(text);
-    for (i, chunk) in chunks.iter().enumerate() {
-        if i == 0 {
-            ctx.say(chunk).await?;
-        } else {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            ctx.channel_id().say(ctx.serenity_context(), chunk).await?;
-        }
-    }
-
+    let (preview, attachment) = build_long_message_attachment(text);
+    ctx.send(
+        poise::CreateReply::default()
+            .content(preview)
+            .attachment(attachment),
+    )
+    .await?;
     Ok(())
 }
 
-/// Send a long message using raw HTTP, splitting if necessary
+/// Send a long message using raw HTTP. Overflow falls back to an inline preview
+/// plus a `.txt` attachment so recipient bots still see opening context while
+/// humans can download the full text.
 pub(super) async fn send_long_message_raw(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -1159,19 +1192,19 @@ pub(super) async fn send_long_message_raw(
         return Ok(());
     }
 
-    let chunks = split_message(text);
-    for chunk in &chunks {
-        rate_limit_wait(shared, channel_id).await;
-        channel_id
-            .send_message(http, CreateMessage::new().content(chunk))
-            .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
-
+    let (preview, attachment) = build_long_message_attachment(text);
+    rate_limit_wait(shared, channel_id).await;
+    channel_id
+        .send_message(
+            http,
+            CreateMessage::new().content(preview).add_file(attachment),
+        )
+        .await?;
     Ok(())
 }
 
-/// Replace an existing Discord message with the first chunk, then send the remaining chunks.
+/// Replace an existing Discord message with long content. For overflow, the
+/// placeholder is edited to carry the preview and a `.txt` attachment.
 pub(super) async fn replace_long_message_raw(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -1179,14 +1212,37 @@ pub(super) async fn replace_long_message_raw(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    let chunks = split_message(text);
-    let Some(first_chunk) = chunks.first() else {
+    if text.is_empty() {
         return Ok(());
-    };
+    }
 
+    if text.len() <= DISCORD_MSG_LIMIT {
+        rate_limit_wait(shared, channel_id).await;
+        let edit_result = channel_id
+            .edit_message(http, message_id, EditMessage::new().content(text))
+            .await;
+        if let Err(e) = edit_result {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⚠ replace_long_message_raw edit failed for channel {} msg {}: {e}",
+                channel_id.get(),
+                message_id.get()
+            );
+            return send_long_message_raw(http, channel_id, text, shared).await;
+        }
+        return Ok(());
+    }
+
+    let (preview, attachment) = build_long_message_attachment(text);
     rate_limit_wait(shared, channel_id).await;
     let edit_result = channel_id
-        .edit_message(http, message_id, EditMessage::new().content(first_chunk))
+        .edit_message(
+            http,
+            message_id,
+            EditMessage::new()
+                .content(&preview)
+                .new_attachment(attachment),
+        )
         .await;
 
     if let Err(e) = edit_result {
@@ -1199,87 +1255,64 @@ pub(super) async fn replace_long_message_raw(
         return send_long_message_raw(http, channel_id, text, shared).await;
     }
 
-    for chunk in chunks.iter().skip(1) {
-        rate_limit_wait(shared, channel_id).await;
-        channel_id
-            .send_message(http, CreateMessage::new().content(chunk))
-            .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
-
     Ok(())
 }
 
-/// Split a message into chunks that fit within Discord's 2000 char limit.
-/// Handles code block boundaries correctly.
-pub(super) fn split_message(text: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-    let mut in_code_block = false;
-    let mut code_block_lang = String::new();
+/// Build an `(inline_preview, attachment)` pair for content that exceeds
+/// `DISCORD_MSG_LIMIT`. The preview contains the first safe-boundary-aligned
+/// prefix of `text` plus a footer indicating the omitted byte count; the
+/// attachment carries the full unmodified `text` as a `.txt` file.
+pub(super) fn build_long_message_attachment(text: &str) -> (String, CreateAttachment) {
+    let filename = format!(
+        "response-{}.txt",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let attachment = CreateAttachment::bytes(text.as_bytes().to_vec(), filename);
+    let preview = build_attachment_preview(text);
+    (preview, attachment)
+}
 
-    while !remaining.is_empty() {
-        // Reserve space for code block tags we may need to add
-        let tag_overhead = if in_code_block {
-            // closing ``` + opening ```lang\n
-            3 + 3 + code_block_lang.len() + 1
-        } else {
-            0
-        };
-        let effective_limit = DISCORD_MSG_LIMIT
-            .saturating_sub(tag_overhead)
-            .saturating_sub(10);
+fn build_attachment_preview(text: &str) -> String {
+    let preview_budget = ATTACHMENT_PREVIEW_BYTES.min(text.len());
+    let safe_end = floor_char_boundary(text, preview_budget);
+    // Prefer to cut at a line boundary within the budget; fall back to the raw
+    // char-boundary offset if there is no newline in range.
+    let split_at = text[..safe_end].rfind('\n').map_or(safe_end, |idx| idx + 1);
+    let (head, _) = text.split_at(split_at);
+    let mut preview = head.to_string();
 
-        if remaining.len() <= effective_limit {
-            let mut chunk = String::new();
-            if in_code_block {
-                chunk.push_str("```");
-                chunk.push_str(&code_block_lang);
-                chunk.push('\n');
-            }
-            chunk.push_str(remaining);
-            chunks.push(chunk);
-            break;
+    // Close any unterminated fenced code block so Discord does not swallow the
+    // footer into a code block.
+    if count_code_fences(&preview) % 2 == 1 {
+        if !preview.ends_with('\n') {
+            preview.push('\n');
         }
-
-        // Find a safe split point
-        let safe_end = floor_char_boundary(remaining, effective_limit);
-        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
-
-        let (raw_chunk, rest) = remaining.split_at(split_at);
-
-        let mut chunk = String::new();
-        if in_code_block {
-            chunk.push_str("```");
-            chunk.push_str(&code_block_lang);
-            chunk.push('\n');
-        }
-        chunk.push_str(raw_chunk);
-
-        // Track code blocks across chunk boundaries
-        for line in raw_chunk.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
-                if in_code_block {
-                    in_code_block = false;
-                    code_block_lang.clear();
-                } else {
-                    in_code_block = true;
-                    code_block_lang = trimmed.strip_prefix("```").unwrap_or("").to_string();
-                }
-            }
-        }
-
-        // Close unclosed code block at end of chunk
-        if in_code_block {
-            chunk.push_str("\n```");
-        }
-
-        chunks.push(chunk);
-        remaining = rest.strip_prefix('\n').unwrap_or(rest);
+        preview.push_str("```");
     }
 
-    chunks
+    let omitted_bytes = text.len() - split_at;
+    let footer = format!(
+        "\n\n📎 전문 첨부 ({} bytes 중 {} bytes 생략)",
+        text.len(),
+        omitted_bytes
+    );
+
+    // Defensive: ensure preview + footer fits below DISCORD_MSG_LIMIT even in
+    // pathological inputs (long codepoints, many code fences).
+    let total_len = preview.len() + footer.len();
+    if total_len > DISCORD_MSG_LIMIT {
+        let trim_target = DISCORD_MSG_LIMIT.saturating_sub(footer.len());
+        let trimmed = floor_char_boundary(&preview, trim_target);
+        preview.truncate(trimmed);
+    }
+    preview.push_str(&footer);
+    preview
+}
+
+fn count_code_fences(text: &str) -> usize {
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count()
 }
 
 /// Add reaction using raw HTTP reference
