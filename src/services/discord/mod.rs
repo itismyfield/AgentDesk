@@ -59,7 +59,7 @@ use tokio::sync::Mutex;
 
 use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, EditMessage, MessageId, UserId};
+use serenity::{ChannelId, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
