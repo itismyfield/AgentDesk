@@ -45,6 +45,7 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
         )
 
         self.assertIn("First-time setup still requires", text)
+        self.assertIn("managed root-owned entrypoint", text)
 
     def test_build_self_command_keeps_jobs_and_schedule(self) -> None:
         args = argparse.Namespace(
@@ -202,6 +203,31 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
 
         self.assertEqual(trusted, Path("/usr/bin/python3"))
 
+    def test_validate_privileged_job_artifacts_ignores_source_skill_root(self) -> None:
+        job = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/Users/agentdesk/.codex/skills/memory-dream"),
+            manager_script=Path("/usr/local/libexec/agentdesk/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/usr/local/libexec/agentdesk/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
+
+        trusted_paths = {
+            Path("/usr/bin/python3"),
+            Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+            job.manager_script,
+            job.daemon_plist,
+        }
+        with mock.patch.object(
+            MODULE,
+            "path_is_root_owned_and_locked",
+            side_effect=lambda path: Path(path) in trusted_paths,
+        ):
+            MODULE.validate_privileged_job_artifacts(
+                job,
+                Path("/usr/bin/python3"),
+                Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
+            )
+
     def test_resolve_job_artifacts_prefers_existing_skills_root(self) -> None:
         spec = MODULE.JOB_SPECS["memory-dream"]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -314,7 +340,7 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                 with mock.patch.object(
                     MODULE, "trusted_root_python_bin", return_value=Path("/usr/bin/python3")
                 ):
-                    with mock.patch.object(MODULE, "resolve_job_artifacts", return_value=resolved):
+                    with mock.patch.object(MODULE, "resolve_managed_job_artifacts", return_value=resolved):
                         with mock.patch.object(MODULE, "plist_valid", return_value=True):
                             with mock.patch.object(
                                 MODULE,
@@ -404,6 +430,18 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
             skills_root=None,
             as_root=True,
         )
+        source_job = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/Users/agentdesk/.codex/skills/memory-dream"),
+            manager_script=Path("/Users/agentdesk/.codex/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/Users/agentdesk/.codex/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
+        staged_job = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/usr/local/libexec/agentdesk/skills/memory-dream"),
+            manager_script=Path("/usr/local/libexec/agentdesk/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/usr/local/libexec/agentdesk/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
 
         with mock.patch.object(MODULE, "effective_manager_python", return_value=Path("/usr/bin/python3")):
             with mock.patch.object(
@@ -411,18 +449,75 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                 "install_managed_entrypoint",
                 return_value=Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
             ):
-                with mock.patch.object(MODULE, "validate_privileged_entrypoint") as validate_entrypoint:
-                    with mock.patch.object(
-                        MODULE,
-                        "install_sudoers_dropin",
-                        return_value=(False, "skip install"),
-                    ):
-                        MODULE.run_bootstrap(args, [("memory-dream", MODULE.JOB_SPECS["memory-dream"])])
+                with mock.patch.object(MODULE, "candidate_skills_roots", return_value=[Path("/Users/agentdesk/.codex/skills")]):
+                    with mock.patch.object(MODULE, "resolve_job_artifacts", return_value=source_job):
+                        with mock.patch.object(
+                            MODULE,
+                            "install_managed_job_artifacts",
+                            return_value=staged_job,
+                        ) as install_managed_job_artifacts:
+                            with mock.patch.object(MODULE, "validate_privileged_entrypoint") as validate_entrypoint:
+                                with mock.patch.object(
+                                    MODULE,
+                                    "install_sudoers_dropin",
+                                    return_value=(False, "skip install"),
+                                ):
+                                    MODULE.run_bootstrap(
+                                        args,
+                                        [("memory-dream", MODULE.JOB_SPECS["memory-dream"])],
+                                    )
 
         validate_entrypoint.assert_called_once_with(
             Path("/usr/bin/python3"),
             Path("/usr/local/libexec/agentdesk/manage_dawn_launchdaemons.py"),
         )
+        install_managed_job_artifacts.assert_called_once_with(
+            source_job,
+            MODULE.JOB_SPECS["memory-dream"],
+        )
+
+    def test_render_batch_summary_privileged_uses_managed_job_artifacts(self) -> None:
+        args = argparse.Namespace(
+            action="install",
+            job=["memory-dream"],
+            hour=None,
+            minute=None,
+            python_bin="/usr/bin/python3",
+            sudoers_user="agentdesk-runtime",
+            skills_root=None,
+            as_root=True,
+        )
+        managed_job = MODULE.ResolvedDawnJob(
+            name="memory-dream",
+            skill_root=Path("/usr/local/libexec/agentdesk/skills/memory-dream"),
+            manager_script=Path("/usr/local/libexec/agentdesk/skills/memory-dream/scripts/manage_memory_dream_launchd.py"),
+            daemon_plist=Path("/usr/local/libexec/agentdesk/skills/memory-dream/launchd/com.agentdesk.memory-dream-dawn.plist"),
+        )
+        run_result = subprocess.CompletedProcess(["python3"], 0, stdout="ok", stderr="")
+
+        with mock.patch.object(MODULE, "candidate_skills_roots", return_value=[Path("/Users/agentdesk/.codex/skills")]):
+            with mock.patch.object(MODULE, "effective_manager_python", return_value=Path("/usr/bin/python3")):
+                with mock.patch.object(MODULE, "resolve_managed_job_artifacts", return_value=managed_job):
+                    with mock.patch.object(
+                        MODULE,
+                        "resolve_job_artifacts",
+                        side_effect=AssertionError("should not resolve user-owned skill roots in privileged mode"),
+                    ):
+                        with mock.patch.object(
+                            MODULE,
+                            "validate_privileged_job_artifacts",
+                            return_value=None,
+                        ):
+                            with mock.patch.object(MODULE, "run_manager", return_value=run_result) as run_manager:
+                                with mock.patch("builtins.print"):
+                                    rc = MODULE.render_batch_summary(
+                                        args,
+                                        [("memory-dream", MODULE.JOB_SPECS["memory-dream"])],
+                                    )
+
+        self.assertEqual(rc, 0)
+        run_manager.assert_called_once()
+        self.assertEqual(run_manager.call_args.args[0], managed_job)
 
 
 if __name__ == "__main__":
