@@ -16,7 +16,12 @@ const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
-    let hex = token_hash
+    // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
+    // so the first 16 chars we sample are actual hex; otherwise the `is_ascii_hexdigit`
+    // check fails on non-hex letters in the prefix and every bot collapses onto the
+    // same fallback lock id, causing only one bot to acquire the singleton lease.
+    let raw = token_hash.strip_prefix("discord_").unwrap_or(token_hash);
+    let hex = raw
         .get(..16)
         .filter(|prefix| prefix.chars().all(|ch| ch.is_ascii_hexdigit()))
         .unwrap_or("0");
@@ -1634,6 +1639,24 @@ mod tests {
         let left = discord_gateway_lock_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let right = discord_gateway_lock_id("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn discord_gateway_lock_id_strips_discord_prefix_so_each_bot_gets_unique_id() {
+        // `discord_token_hash` produces "discord_<8 bytes hex>" — without stripping
+        // the prefix every bot collapses onto the fallback "0" lock id and only the
+        // first bot to start can acquire the singleton lease.
+        let claude_hash = super::super::settings::discord_token_hash("claude-bot-token-aaa");
+        let codex_hash = super::super::settings::discord_token_hash("codex-bot-token-bbb");
+        assert!(claude_hash.starts_with("discord_"));
+        assert!(codex_hash.starts_with("discord_"));
+        let claude_lock = discord_gateway_lock_id(&claude_hash);
+        let codex_lock = discord_gateway_lock_id(&codex_hash);
+        assert_ne!(claude_lock, codex_lock);
+        // Neither should collapse onto the prefix-only fallback (= 0x0443_0000_0000_0000)
+        let fallback_lock_id = (DISCORD_GATEWAY_LOCK_PREFIX) as i64;
+        assert_ne!(claude_lock, fallback_lock_id);
+        assert_ne!(codex_lock, fallback_lock_id);
     }
 
     #[tokio::test]
