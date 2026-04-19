@@ -1845,16 +1845,25 @@ mod tests {
     #[test]
     fn test_append_claude_mcp_config_arg_skips_when_no_runtime_config() {
         let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let previous_config = std::env::var_os("AGENTDESK_CONFIG");
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_memento_access_key = std::env::var_os("MEMENTO_ACCESS_KEY");
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") };
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("agentdesk.yaml");
+        crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+        unsafe { std::env::set_var("AGENTDESK_CONFIG", &config_path) };
 
         let mut args = vec!["-p".to_string()];
         append_claude_mcp_config_arg(&mut args);
 
         assert_eq!(args, vec!["-p".to_string()]);
 
+        match previous_config {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_CONFIG", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_CONFIG") },
+        }
         match previous_root {
             Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
