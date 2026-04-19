@@ -167,6 +167,8 @@ def path_is_root_owned_and_locked(path: Path) -> bool:
 
 
 def privileged_root_requested(args: argparse.Namespace) -> bool:
+    if args.action == "status" and args.as_root and os.geteuid() == 0:
+        return True
     return action_needs_privileged_reexec(args.action) and (args.as_root or os.geteuid() == 0)
 
 
@@ -488,6 +490,26 @@ def run_via_sudo(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def build_preflight_probe_command(args: argparse.Namespace, probe_job_name: str) -> list[str]:
+    command = [
+        "sudo",
+        "-n",
+        str(trusted_root_python_bin()),
+        str(SCRIPT_PATH),
+        "--as-root",
+        "status",
+        "--python-bin",
+        str(trusted_root_python_bin()),
+        "--sudoers-user",
+        args.sudoers_user,
+        "--job",
+        probe_job_name,
+    ]
+    for path in candidate_skills_roots(args):
+        command.extend(["--skills-root", str(path)])
+    return command
+
+
 def plist_valid(path: Path) -> bool:
     if not path.exists():
         return False
@@ -625,21 +647,7 @@ def render_preflight(args: argparse.Namespace, jobs: Sequence[tuple[str, DawnJob
         all_ok = all_ok and manager_exists and source_exists and source_valid and trusted_for_privileged_actions
 
     probe_job_name = jobs[0][0]
-    probe_command = [
-        "sudo",
-        "-n",
-        str(trusted_root_python_bin()),
-        str(SCRIPT_PATH),
-        "status",
-        "--python-bin",
-        str(trusted_root_python_bin()),
-        "--sudoers-user",
-        args.sudoers_user,
-        "--job",
-        probe_job_name,
-    ]
-    for path in candidate_skills_roots(args):
-        probe_command.extend(["--skills-root", str(path)])
+    probe_command = build_preflight_probe_command(args, probe_job_name)
     probe_result = run_command(probe_command)
     probe_access = probe_result.returncode == 0 and not access_denied(probe_result.stderr or "")
     lines.extend(
