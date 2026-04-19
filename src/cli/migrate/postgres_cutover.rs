@@ -510,9 +510,10 @@ const RUNTIME_TCP_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
 /// Probe whether dcserver is currently running. Two signals are checked and
 /// merged: (1) the canonical `runtime/dcserver.pid` file at the runtime root,
 /// and (2) a TCP connect to the configured server `host:port`. Either signal
-/// firing is enough to declare the runtime active. Detection failures are
-/// treated as `active=true` to keep the safety bias conservative — the
-/// operator can still pass `--allow-runtime-active` to override.
+/// firing is enough to declare the runtime active. Detection failures (any
+/// non-empty `error` on either probe) are also promoted to `active=true` so
+/// the safety bias is genuinely conservative — operator can still pass
+/// `--allow-runtime-active` to override after manual verification.
 fn detect_runtime_active(
     runtime_root: Option<&Path>,
     host: &str,
@@ -521,10 +522,17 @@ fn detect_runtime_active(
 ) -> RuntimeActiveStatus {
     let pid_signal = runtime_root.map(probe_pid_file);
     let tcp_signal = probe_server_tcp(host, port, RUNTIME_TCP_PROBE_TIMEOUT);
-    let pid_active = pid_signal.as_ref().is_some_and(|p| p.process_alive);
-    let tcp_active = tcp_signal.as_ref().is_some_and(|t| t.listening);
+    // Direct positive signals — either probe successfully observed the runtime.
+    let pid_alive = pid_signal.as_ref().is_some_and(|p| p.process_alive);
+    let tcp_listening = tcp_signal.as_ref().is_some_and(|t| t.listening);
+    // Fail-closed: a probe that errored (unreadable pid, garbage pid, DNS
+    // failure, unexpected TCP error, slow-to-respond TCP connect) leaves us
+    // uncertain — promote uncertainty to active so we never skip the safety
+    // gate when we cannot positively rule out a running dcserver.
+    let pid_uncertain = pid_signal.as_ref().is_some_and(|p| p.error.is_some());
+    let tcp_uncertain = tcp_signal.as_ref().is_some_and(|t| t.error.is_some());
     RuntimeActiveStatus {
-        active: pid_active || tcp_active,
+        active: pid_alive || tcp_listening || pid_uncertain || tcp_uncertain,
         pid_file: pid_signal,
         tcp: tcp_signal,
         overridden: allow_override,
@@ -628,6 +636,11 @@ fn probe_server_tcp(host: &str, port: u16, timeout: Duration) -> Option<TcpSigna
             error: Some("no socket addresses resolved".to_string()),
         });
     }
+    // ConnectionRefused on a loopback / configured host means "no listener" — a
+    // clean negative signal. Other errors (TimedOut, AddrNotAvailable, OS-level
+    // failure) leave us uncertain about runtime state, so we surface the last
+    // such error and let `detect_runtime_active` promote it to `active=true`.
+    let mut last_uncertain_error: Option<String> = None;
     for addr in addrs {
         match std::net::TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
@@ -640,21 +653,11 @@ fn probe_server_tcp(host: &str, port: u16, timeout: Duration) -> Option<TcpSigna
                 });
             }
             Err(error) => {
-                let kind = error.kind();
-                if matches!(
-                    kind,
-                    std::io::ErrorKind::ConnectionRefused
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::AddrNotAvailable
-                ) {
+                if error.kind() == std::io::ErrorKind::ConnectionRefused {
                     continue;
                 }
-                return Some(TcpSignal {
-                    host: normalized,
-                    port,
-                    listening: false,
-                    error: Some(format!("tcp connect {addr}: {error}")),
-                });
+                last_uncertain_error = Some(format!("tcp connect {addr}: {error}"));
+                continue;
             }
         }
     }
@@ -662,7 +665,7 @@ fn probe_server_tcp(host: &str, port: u16, timeout: Duration) -> Option<TcpSigna
         host: normalized,
         port,
         listening: false,
-        error: None,
+        error: last_uncertain_error,
     })
 }
 
@@ -2495,6 +2498,104 @@ mod tests {
         );
 
         drop(listener);
+    }
+
+    // #768 fail-closed regression: probe failures must not silently allow
+    // archive-only cutover to proceed. Each test covers one of the uncertainty
+    // signals (garbage pid file, unresolvable host) and asserts that
+    // detect_runtime_active promotes them to `active=true`.
+
+    #[test]
+    fn detect_runtime_active_promotes_garbage_pid_file_to_active() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::write(runtime_dir.join("dcserver.pid"), "not-a-pid\n").expect("write pid");
+
+        // Use a host:port that cannot succeed (loopback + port that should be
+        // closed). The TCP probe will return ConnectionRefused → no error,
+        // listening=false. The only uncertainty here is the garbage pid file.
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, false);
+
+        assert!(
+            status.active,
+            "garbage pid file leaves runtime state uncertain — must be active=true"
+        );
+        let pid = status.pid_file.as_ref().expect("pid signal");
+        assert!(pid.error.is_some(), "pid probe must record the parse error");
+    }
+
+    #[test]
+    fn detect_runtime_active_promotes_unresolvable_host_to_active() {
+        let temp = TempDir::new().expect("tempdir");
+        // No pid file — pid signal stays clean (exists=false, no error).
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+        // Hostname that cannot resolve — TCP probe returns Some(error).
+        let status = detect_runtime_active(
+            Some(temp.path()),
+            "this-host-must-not-exist.invalid",
+            8791,
+            false,
+        );
+
+        assert!(
+            status.active,
+            "DNS failure on TCP probe leaves state uncertain — must be active=true"
+        );
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(
+            tcp.error.is_some(),
+            "tcp probe must record the resolve error"
+        );
+    }
+
+    #[test]
+    fn detect_runtime_active_stays_idle_on_clean_negatives() {
+        // Clean negative scenario: no pid file at all, TCP probe gets a clean
+        // ConnectionRefused (loopback to a port that nobody is bound to).
+        // detect_runtime_active must report active=false here — otherwise the
+        // gate would block every cutover even when dcserver is properly down.
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, false);
+
+        assert!(
+            !status.active,
+            "clean ConnectionRefused on loopback + no pid file should be inactive"
+        );
+        let tcp = status.tcp.as_ref().expect("tcp signal");
+        assert!(!tcp.listening);
+        assert!(
+            tcp.error.is_none(),
+            "ConnectionRefused must not be recorded as an uncertainty"
+        );
+    }
+
+    #[test]
+    fn cutover_blocker_payload_describes_runtime_active_when_archive_only() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts::default();
+        let runtime = active_runtime_status();
+        let blocker = cutover_blocker(&args, &counts, Some(&runtime))
+            .expect("active runtime + archive-only must produce a blocker");
+        assert!(
+            blocker.contains("dcserver runtime appears active"),
+            "blocker text must mention dcserver runtime, got: {blocker}"
+        );
+        assert!(
+            blocker.contains("--allow-runtime-active"),
+            "blocker text must guide operator to the override flag, got: {blocker}"
+        );
     }
 
     #[test]
