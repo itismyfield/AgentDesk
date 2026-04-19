@@ -221,7 +221,10 @@ mod tests {
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
-            let admin_pool = sqlx::PgPool::connect(&admin_url)
+            let admin_pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(30))
+                .connect(&admin_url)
                 .await
                 .expect("connect postgres admin db");
             sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
@@ -238,7 +241,10 @@ mod tests {
         }
 
         async fn migrate(&self) -> PgPool {
-            let pool = sqlx::PgPool::connect(&self.database_url)
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .acquire_timeout(std::time::Duration::from_secs(30))
+                .connect(&self.database_url)
                 .await
                 .expect("connect postgres test db");
             crate::db::postgres::migrate(&pool)
@@ -248,7 +254,10 @@ mod tests {
         }
 
         async fn drop(self) {
-            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
+            let admin_pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(30))
+                .connect(&self.admin_url)
                 .await
                 .expect("reconnect postgres admin db");
             sqlx::query(

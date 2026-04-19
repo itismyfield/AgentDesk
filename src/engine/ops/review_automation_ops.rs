@@ -1450,9 +1450,9 @@ mod tests {
         let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO auto_queue_runs (
-                id, agent_id, status, total_entries, batch_phase_max,
-                created_at, updated_at
-             ) VALUES ($1, 'project-agentdesk', 'running', 1, 1, NOW(), NOW())",
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count,
+                created_at
+             ) VALUES ($1, 'itismyfield/AgentDesk', 'project-agentdesk', 'running', 1, 1, NOW())",
         )
         .bind(&run_id)
         .execute(pool)
@@ -1463,8 +1463,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, status, dispatch_id, slot_index,
-                batch_phase, thread_group, dispatched_at, created_at, updated_at
-             ) VALUES ($1, $2, $3, 'dispatched', $4, 0, 1, 1, NOW(), NOW(), NOW())",
+                batch_phase, thread_group, dispatched_at, created_at
+             ) VALUES ($1, $2, $3, 'dispatched', $4, 0, 1, 1, NOW(), NOW())",
         )
         .bind(&entry_id)
         .bind(&run_id)
