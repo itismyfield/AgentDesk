@@ -1136,6 +1136,7 @@ export default function AppShell({
                     settings={settings}
                     onSave={handleSettingsSave}
                     isKo={isKo}
+                    onNotify={pushNotification}
                   />
                 }
               />

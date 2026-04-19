@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
-import type { CompanySettings } from "../types";
+import type { CompanySettings, Agent } from "../types";
 import * as api from "../api";
+import type { GitHubRepoOption } from "../api";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import {
   readLocalStorageValue,
@@ -15,15 +16,16 @@ import {
 } from "./common/SettingsPrimitives";
 import {
   SurfaceSection,
-  SurfaceSegmentButton,
 } from "./common/SurfacePrimitives";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
+const PipelineVisualEditor = lazy(() => import("./agent-manager/PipelineVisualEditor"));
 
 interface SettingsViewProps {
   settings: CompanySettings;
   onSave: (patch: Record<string, unknown>) => Promise<void>;
   isKo: boolean;
+  onNotify?: (message: string, type?: SettingsNotificationType) => string | void;
 }
 
 interface ConfigField {
@@ -55,6 +57,7 @@ type ConfigEntry = {
 type ConfigEditValue = string | boolean;
 type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding";
 type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract" | "typed-only" | "backend-followup";
+type SettingsNotificationType = "info" | "success" | "warning" | "error";
 
 interface AuditNote {
   id: string;
@@ -606,6 +609,67 @@ function configLayerClass(overrideActive: boolean): string {
   return overrideActive ? "border-amber-400/30 bg-amber-400/10 text-amber-100" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
 }
 
+function configSourceLabel(entry: ConfigEntry, isKo: boolean): string {
+  if (entry.override_active) return "kv_meta";
+  if (entry.baseline_source === "config") {
+    return isKo ? "env/config" : "env/config";
+  }
+  return isKo ? "default" : "default";
+}
+
+function configSourceClass(entry: ConfigEntry): string {
+  if (entry.override_active) {
+    return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+  }
+  if (entry.baseline_source === "config") {
+    return "border-violet-400/30 bg-violet-400/10 text-violet-100";
+  }
+  return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+}
+
+function formatConfigValue(value: ConfigEditValue): string {
+  return typeof value === "boolean" ? String(value) : value;
+}
+
+function applyConfigEdits(
+  entries: ConfigEntry[],
+  edits: Record<string, ConfigEditValue>,
+): ConfigEntry[] {
+  if (Object.keys(edits).length === 0) return entries;
+  return entries.map((entry) => {
+    if (!Object.prototype.hasOwnProperty.call(edits, entry.key)) {
+      return entry;
+    }
+    return {
+      ...entry,
+      value: formatConfigValue(edits[entry.key]),
+      override_active: true,
+    };
+  });
+}
+
+function selectDefaultPipelineRepo(
+  repos: GitHubRepoOption[],
+  viewerLogin: string,
+): string {
+  return (
+    repos.find((repo) => repo.nameWithOwner === "itismyfield/AgentDesk")
+      ?.nameWithOwner
+    || repos.find((repo) => repo.nameWithOwner.endsWith("/AgentDesk"))
+      ?.nameWithOwner
+    || repos.find(
+      (repo) => viewerLogin && repo.nameWithOwner.startsWith(`${viewerLogin}/`),
+    )?.nameWithOwner
+    || repos[0]?.nameWithOwner
+    || ""
+  );
+}
+
+function formatPipelineAgentLabel(agent: Agent, isKo: boolean): string {
+  const name = isKo ? agent.name_ko || agent.name : agent.name || agent.name_ko;
+  return `${agent.avatar_emoji} ${name}`;
+}
+
 function baselineSourceNote(source: string | null | undefined, isKo: boolean): string | null {
   if (source === "yaml") return isKo ? "기준값 출처: agentdesk.yaml" : "Baseline source: agentdesk.yaml";
   if (source === "hardcoded") return isKo ? "기준값 출처: 하드코딩 기본값" : "Baseline source: hardcoded default";
@@ -633,6 +697,7 @@ function restartBehaviorNote(behavior: string | null | undefined, isKo: boolean)
 }
 
 function PanelNavButton({
+  id,
   active,
   title,
   detail,
@@ -640,6 +705,7 @@ function PanelNavButton({
   ariaControls,
   onClick,
 }: {
+  id: string;
   active: boolean;
   title: string;
   detail: string;
@@ -649,6 +715,7 @@ function PanelNavButton({
 }) {
   return (
     <button
+      id={id}
       type="button"
       onClick={onClick}
       aria-current={active ? "page" : undefined}
@@ -855,6 +922,7 @@ export default function SettingsView({
   settings,
   onSave,
   isKo,
+  onNotify,
 }: SettingsViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
 
@@ -873,12 +941,36 @@ export default function SettingsView({
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
   const [configSaving, setConfigSaving] = useState(false);
+  const [pipelineRepos, setPipelineRepos] = useState<GitHubRepoOption[]>([]);
+  const [pipelineAgents, setPipelineAgents] = useState<Agent[]>([]);
+  const [selectedPipelineRepo, setSelectedPipelineRepo] = useState("");
+  const [selectedPipelineAgentId, setSelectedPipelineAgentId] = useState<string | null>(null);
+  const [pipelineSelectorLoaded, setPipelineSelectorLoaded] = useState(false);
+  const [pipelineSelectorLoading, setPipelineSelectorLoading] = useState(false);
+  const [pipelineSelectorError, setPipelineSelectorError] = useState<string | null>(null);
 
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
   const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
+  const [panelQuery, setPanelQuery] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const onboardingDialogRef = useRef<HTMLDivElement | null>(null);
   const onboardingCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const notify = useCallback(
+    (ko: string, en: string, type: SettingsNotificationType = "info") => {
+      onNotify?.(tr(ko, en), type);
+    },
+    [onNotify, tr],
+  );
+  const loadConfigEntries = useCallback(async () => {
+    const response = await fetch("/api/settings/config", { credentials: "include" });
+    if (!response.ok) {
+      throw new Error("config-load-failed");
+    }
+    const data = await response.json() as { entries?: ConfigEntry[] };
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    setConfigEntries(entries);
+    return entries;
+  }, []);
 
   useEffect(() => {
     setCompanyName(settings.companyName);
@@ -968,11 +1060,56 @@ export default function SettingsView({
         setRcLoaded(true);
       });
 
-    void fetch("/api/settings/config", { credentials: "include" })
-      .then((response) => response.json())
-      .then((data: { entries: ConfigEntry[] }) => setConfigEntries(data.entries || []))
+    void loadConfigEntries()
       .catch(() => {});
-  }, []);
+  }, [loadConfigEntries]);
+
+  useEffect(() => {
+    if (activePanel !== "pipeline" || pipelineSelectorLoaded || pipelineSelectorLoading) {
+      return;
+    }
+    let stale = false;
+    setPipelineSelectorLoading(true);
+    setPipelineSelectorError(null);
+    void Promise.all([api.getGitHubRepos(), api.getAgents()])
+      .then(([repoResponse, agents]) => {
+        if (stale) return;
+        setPipelineRepos(repoResponse.repos);
+        setPipelineAgents(agents);
+        setSelectedPipelineRepo((current) =>
+          current || selectDefaultPipelineRepo(repoResponse.repos, repoResponse.viewer_login),
+        );
+        setPipelineSelectorLoaded(true);
+      })
+      .catch(() => {
+        if (stale) return;
+        setPipelineSelectorError(
+          tr(
+            "파이프라인 에디터용 repo/agent 목록을 불러오지 못했습니다.",
+            "Failed to load repo and agent options for the pipeline editor.",
+          ),
+        );
+        notify(
+          "파이프라인 에디터 목록을 불러오지 못했습니다.",
+          "Failed to load pipeline editor options.",
+          "error",
+        );
+      })
+      .finally(() => {
+        if (!stale) {
+          setPipelineSelectorLoading(false);
+        }
+      });
+    return () => {
+      stale = true;
+    };
+  }, [
+    activePanel,
+    notify,
+    pipelineSelectorLoaded,
+    pipelineSelectorLoading,
+    tr,
+  ]);
 
   const normalizedCompanyName = companyName.trim();
   const normalizedCeoName = ceoName.trim();
@@ -1067,6 +1204,27 @@ export default function SettingsView({
     ],
     [generalFieldCount, runtimeFieldCount, tr, visibleConfigEntries.length],
   );
+  const panelQueryNormalized = panelQuery.trim().toLowerCase();
+  const filteredNavItems = useMemo(
+    () =>
+      navItems.filter((item) => {
+        if (!panelQueryNormalized) return true;
+        return `${item.title} ${item.detail}`.toLowerCase().includes(panelQueryNormalized);
+      }),
+    [navItems, panelQueryNormalized],
+  );
+  const activeNavItem = navItems.find((item) => item.id === activePanel) ?? navItems[0];
+  const pipelineLiveOverrideCount = useMemo(
+    () => configEntries.filter((entry) => entry.override_active).length,
+    [configEntries],
+  );
+  const pipelineReadOnlyCount = useMemo(
+    () =>
+      configEntries.filter(
+        (entry) => isReadOnlyConfigKey(entry.key) || entry.editable === false,
+      ).length,
+    [configEntries],
+  );
 
   const inputStyle: CSSProperties = {
     background: "var(--th-bg-surface)",
@@ -1099,6 +1257,9 @@ export default function SettingsView({
         language,
         theme,
       });
+      notify("일반 설정을 저장했습니다.", "Saved general settings.", "success");
+    } catch {
+      notify("일반 설정 저장에 실패했습니다.", "Failed to save general settings.", "error");
     } finally {
       setSaving(false);
     }
@@ -1109,6 +1270,9 @@ export default function SettingsView({
     try {
       await api.saveRuntimeConfig(rcValues);
       setRcDirty(false);
+      notify("런타임 설정을 저장했습니다.", "Saved runtime settings.", "success");
+    } catch {
+      notify("런타임 설정 저장에 실패했습니다.", "Failed to save runtime settings.", "error");
     } finally {
       setRcSaving(false);
     }
@@ -1133,18 +1297,35 @@ export default function SettingsView({
 
   const handleConfigSave = async () => {
     if (!configDirty) return;
+    const pendingEdits = { ...configEdits };
+    const previousEntries = configEntries;
     setConfigSaving(true);
+    setConfigEntries((current) => applyConfigEdits(current, pendingEdits));
+    setConfigEdits({});
     try {
-      await fetch("/api/settings/config", {
+      const response = await fetch("/api/settings/config", {
         method: "PATCH",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(configEdits),
+        body: JSON.stringify(pendingEdits),
       });
-      setConfigEdits({});
-      const response = await fetch("/api/settings/config", { credentials: "include" });
-      const data = await response.json();
-      setConfigEntries(data.entries || []);
+      if (!response.ok) {
+        throw new Error("config-save-failed");
+      }
+      await loadConfigEntries();
+      notify(
+        "파이프라인 설정을 저장했습니다.",
+        "Saved pipeline settings.",
+        "success",
+      );
+    } catch {
+      setConfigEntries(previousEntries);
+      setConfigEdits(pendingEdits);
+      notify(
+        "파이프라인 설정 저장에 실패해 이전 값으로 복원했습니다.",
+        "Failed to save pipeline settings and restored the previous values.",
+        "error",
+      );
     } finally {
       setConfigSaving(false);
     }
@@ -1514,11 +1695,8 @@ export default function SettingsView({
             const footer = (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium"
-                    style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
-                  >
-                    kv_meta
+                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${configSourceClass(entry)}`}>
+                    {configSourceLabel(entry, isKo)}
                   </span>
                   <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${layerClass}`}>
                     {layerLabel}
@@ -1647,6 +1825,96 @@ export default function SettingsView({
             </p>
           </SettingsCallout>
 
+          <SettingsSubsection
+            title={tr("FSM 비주얼 에디터", "FSM visual editor")}
+            description={tr(
+              "파이프라인 FSM과 stage 편집을 같은 그룹에서 다룹니다. repo와 agent 범위를 선택한 뒤 바로 아래에서 상태 전환을 조정합니다.",
+              "Edit the pipeline FSM and stage metadata in the same group. Pick the repo and agent scope, then adjust transitions below.",
+            )}
+          >
+            {pipelineSelectorLoading ? (
+              <SettingsEmptyState className="text-sm">
+                {tr("파이프라인 에디터 대상을 불러오는 중...", "Loading pipeline editor targets...")}
+              </SettingsEmptyState>
+            ) : pipelineSelectorError ? (
+              <SettingsEmptyState className="text-sm">
+                {pipelineSelectorError}
+              </SettingsEmptyState>
+            ) : pipelineRepos.length === 0 ? (
+              <SettingsEmptyState className="text-sm">
+                {tr("편집 가능한 repo가 없습니다.", "No editable repositories are available.")}
+              </SettingsEmptyState>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+                  <CompactFieldCard
+                    label={tr("대상 repo", "Target repo")}
+                    description={tr(
+                      "기본 FSM은 repo 레벨에서 편집하고, 필요할 때만 agent override로 내려갑니다.",
+                      "Start at the repo-level FSM and only drop to an agent override when needed.",
+                    )}
+                  >
+                    <select
+                      value={selectedPipelineRepo}
+                      onChange={(event) => setSelectedPipelineRepo(event.target.value)}
+                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                      style={inputStyle}
+                    >
+                      {pipelineRepos.map((repo) => (
+                        <option key={repo.nameWithOwner} value={repo.nameWithOwner}>
+                          {repo.nameWithOwner}
+                        </option>
+                      ))}
+                    </select>
+                  </CompactFieldCard>
+                  <CompactFieldCard
+                    label={tr("에이전트 override", "Agent override")}
+                    description={tr(
+                      "선택하면 editor 안에서 agent 레벨 전환을 활성화합니다.",
+                      "Selecting an agent enables the agent-level path inside the editor.",
+                    )}
+                  >
+                    <select
+                      value={selectedPipelineAgentId ?? ""}
+                      onChange={(event) => setSelectedPipelineAgentId(event.target.value || null)}
+                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                      style={inputStyle}
+                    >
+                      <option value="">{tr("없음", "None")}</option>
+                      {pipelineAgents.map((agent) => (
+                        <option key={agent.id} value={agent.id}>
+                          {formatPipelineAgentLabel(agent, isKo)}
+                        </option>
+                      ))}
+                    </select>
+                  </CompactFieldCard>
+                </div>
+
+                {selectedPipelineRepo ? (
+                  <Suspense
+                    fallback={(
+                      <SettingsEmptyState className="text-sm">
+                        {tr("FSM 에디터를 준비하는 중...", "Preparing FSM editor...")}
+                      </SettingsEmptyState>
+                    )}
+                  >
+                    <PipelineVisualEditor
+                      tr={tr}
+                      locale={isKo ? "ko" : "en"}
+                      repo={selectedPipelineRepo}
+                      agents={pipelineAgents}
+                      selectedAgentId={selectedPipelineAgentId}
+                    />
+                  </Suspense>
+                ) : (
+                  <SettingsEmptyState className="text-sm">
+                    {tr("repo를 선택하면 FSM 에디터가 열립니다.", "Select a repo to open the FSM editor.")}
+                  </SettingsEmptyState>
+                )}
+              </div>
+            )}
+          </SettingsSubsection>
+
           <div className="space-y-3">
             <GroupLabel title={tr("자주 쓰는 설정", "Frequent settings")} />
             {PRIMARY_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
@@ -1656,19 +1924,21 @@ export default function SettingsView({
             {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
           </div>
 
-          <SettingsSubsection
-            title={tr("감사 노트", "Audit notes")}
-            description={tr(
-              "일반 폼에 바로 넣으면 거짓말이 되거나, 프론트만으로는 정본을 보장할 수 없는 항목입니다. 운영자에게 현재 한계를 숨기지 않기 위해 그대로 노출합니다.",
-              "These items would become misleading in the regular form or cannot be made truthful from the frontend alone. They stay visible so operators can see the current limits.",
-            )}
-          >
-            <div className="grid gap-3 md:grid-cols-2">
-              {AUDIT_NOTES.map((note) => (
-                <AuditNoteCard key={note.id} note={note} isKo={isKo} />
-              ))}
-            </div>
-          </SettingsSubsection>
+          <div id="settings-audit-notes">
+            <SettingsSubsection
+              title={tr("감사 노트", "Audit notes")}
+              description={tr(
+                "일반 폼에 바로 넣으면 거짓말이 되거나, 프론트만으로는 정본을 보장할 수 없는 항목입니다. 운영자에게 현재 한계를 숨기지 않기 위해 그대로 노출합니다.",
+                "These items would become misleading in the regular form or cannot be made truthful from the frontend alone. They stay visible so operators can see the current limits.",
+              )}
+            >
+              <div className="grid gap-3 md:grid-cols-2">
+                {AUDIT_NOTES.map((note) => (
+                  <AuditNoteCard key={note.id} note={note} isKo={isKo} />
+                ))}
+              </div>
+            </SettingsSubsection>
+          </div>
         </div>
       )}
     </SettingsSection>
@@ -1743,45 +2013,216 @@ export default function SettingsView({
         return renderGeneralPanel();
     }
   };
+  const renderHeaderActions = () => {
+    if (activePanel === "onboarding") {
+      return (
+        <button
+          onClick={openOnboarding}
+          className={secondaryActionClass}
+          style={secondaryActionStyle}
+        >
+          {tr("온보딩 다시 실행", "Re-run onboarding")}
+        </button>
+      );
+    }
+
+    if (activePanel === "pipeline") {
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              document
+                .getElementById("settings-audit-notes")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
+            }
+            className={secondaryActionClass}
+            style={secondaryActionStyle}
+          >
+            {tr("audit 노트", "Audit notes")}
+          </button>
+          <button
+            onClick={handleConfigSave}
+            disabled={configSaving || !configDirty}
+            className={primaryActionClass}
+            style={primaryActionStyle}
+          >
+            {configSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
+          </button>
+        </>
+      );
+    }
+
+    if (activePanel === "runtime") {
+      return (
+        <button
+          onClick={handleRcSave}
+          disabled={rcSaving || !rcDirty}
+          className={primaryActionClass}
+          style={primaryActionStyle}
+        >
+          {rcSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
+        </button>
+      );
+    }
+
+    return (
+      <button
+        onClick={() => void handleSave()}
+        disabled={saving || generalFormInvalid || !companyDirty}
+        className={primaryActionClass}
+        style={primaryActionStyle}
+      >
+        {saving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
+      </button>
+    );
+  };
+  const renderHeaderMeta = () => {
+    if (activePanel === "pipeline") {
+      return (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
+            {tr(`키 ${visibleConfigEntries.length}개`, `${visibleConfigEntries.length} keys`)}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1 text-[11px] font-medium text-amber-100">
+            {tr(`live override ${pipelineLiveOverrideCount}개`, `${pipelineLiveOverrideCount} live overrides`)}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-slate-400/30 bg-slate-400/10 px-3 py-1 text-[11px] font-medium text-slate-200">
+            {tr(`read only ${pipelineReadOnlyCount}개`, `${pipelineReadOnlyCount} read-only`)}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-[11px] font-medium text-sky-100">
+            {tr(`audit 노트 ${AUDIT_NOTES.length}개`, `${AUDIT_NOTES.length} audit notes`)}
+          </span>
+        </div>
+      );
+    }
+
+    if (activePanel === "runtime") {
+      return (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
+            {tr(`현재 카테고리 ${tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}`, `Current category ${tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}`)}
+          </span>
+          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: rcDirty ? "var(--th-text)" : "var(--th-text-muted)" }}>
+            {rcDirty ? tr("저장되지 않은 변경 있음", "Unsaved changes") : tr("모든 변경 저장됨", "All changes saved")}
+          </span>
+        </div>
+      );
+    }
+
+    if (activePanel === "general") {
+      return (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
+            {tr(`기본 필드 ${generalFieldCount}개`, `${generalFieldCount} base fields`)}
+          </span>
+          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: companyDirty ? "var(--th-text)" : "var(--th-text-muted)" }}>
+            {companyDirty ? tr("변경 감지됨", "Changes detected") : tr("동기화됨", "In sync")}
+          </span>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-4 flex flex-wrap gap-2">
+        <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
+          {tr("Discord 연결과 초기 세팅 전용", "Dedicated to Discord wiring and first-run setup")}
+        </span>
+      </div>
+    );
+  };
 
   return (
     <div
-      className="mx-auto w-full max-w-5xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
+      className="mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <SurfaceSection
-        title={tr("설정", "Settings")}
-        actions={(
-          <>
-            {navItems.map((item) => (
-              <SurfaceSegmentButton
-                key={item.id}
-                active={activePanel === item.id}
-                tone="info"
-                onClick={() => handlePanelChange(item.id)}
-              >
-                {item.title}
-              </SurfaceSegmentButton>
-            ))}
-          </>
-        )}
-        className="rounded-[28px] p-4 sm:p-5"
-        style={{
-          borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-          background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-        }}
-      >
-      </SurfaceSection>
+      <div className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="min-w-0 md:sticky md:top-4 md:self-start">
+          <SettingsCard
+            className="rounded-[28px] p-4 sm:p-5"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+            }}
+          >
+            <div
+              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+              style={{ color: "var(--th-text-muted)" }}
+            >
+              {tr("설정 그룹", "Settings groups")}
+            </div>
+            <div className="mt-2 text-lg font-semibold" style={{ color: "var(--th-text)" }}>
+              {tr("220px 그룹 내비", "220px group nav")}
+            </div>
+            <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                "좌측에서 그룹을 고르고, 우측에서 실제 설정 카드와 저장 상태를 확인합니다.",
+                "Pick a group on the left, then inspect cards and save state on the right.",
+              )}
+            </p>
 
-      <div className="mt-4">
-        <div
-          id="settings-panel-content"
-          role="tabpanel"
-          aria-labelledby={`settings-tab-${activePanel}`}
-          tabIndex={-1}
-          className="min-w-0"
-        >
-          {renderActivePanel()}
+            <div className="mt-4">
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+                {tr("검색", "Search")}
+              </label>
+              <input
+                type="search"
+                value={panelQuery}
+                onChange={(event) => setPanelQuery(event.target.value)}
+                placeholder={tr("그룹 이름 검색", "Search groups")}
+                className="mt-2 w-full rounded-2xl px-3 py-2.5 text-sm"
+                style={inputStyle}
+              />
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {filteredNavItems.length > 0 ? (
+                filteredNavItems.map((item) => (
+                  <PanelNavButton
+                    key={item.id}
+                    id={`settings-tab-${item.id}`}
+                    active={activePanel === item.id}
+                    title={item.title}
+                    detail={item.detail}
+                    count={item.count}
+                    ariaControls="settings-panel-content"
+                    onClick={() => handlePanelChange(item.id)}
+                  />
+                ))
+              ) : (
+                <SettingsEmptyState className="text-sm">
+                  {tr("검색 결과가 없습니다.", "No groups match the search.")}
+                </SettingsEmptyState>
+              )}
+            </div>
+          </SettingsCard>
+        </aside>
+
+        <div className="min-w-0 space-y-4">
+          <SurfaceSection
+            eyebrow={tr("설정", "Settings")}
+            title={activeNavItem.title}
+            description={activeNavItem.detail}
+            actions={renderHeaderActions()}
+            className="rounded-[28px] p-4 sm:p-5"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+            }}
+          >
+            {renderHeaderMeta()}
+          </SurfaceSection>
+
+          <div
+            id="settings-panel-content"
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${activePanel}`}
+            tabIndex={-1}
+            className="min-w-0"
+          >
+            {renderActivePanel()}
+          </div>
         </div>
       </div>
 
