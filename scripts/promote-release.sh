@@ -458,13 +458,7 @@ fi
 echo "▸ Ensuring global agentdesk CLI..."
 "$SCRIPT_DIR/ensure-agentdesk-cli.sh"
 
-# Initialize release database if it doesn't exist (never overwrite release data)
-if [ ! -f "$ADK_REL/data/agentdesk.sqlite" ]; then
-    echo "▸ Initializing release database from dev..."
-    cp "$ADK_DEV/data/agentdesk.sqlite" "$ADK_REL/data/agentdesk.sqlite"
-else
-    echo "▸ Release database exists — preserving release data (skip copy)"
-fi
+# Postgres database is operator-managed; SQLite copy removed after #461 cutover.
 
 REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then

@@ -61,9 +61,10 @@ pub(in crate::services::discord) fn store_session_retry_context(
 
     if let Some(db) = db {
         let conn = db.lock().map_err(|err| format!("db lock failed: {err}"))?;
+        let key = session_retry_context_key(channel_id);
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![session_retry_context_key(channel_id), history],
+            [key.as_str(), history],
         )
         .map_err(|err| err.to_string())?;
         Ok(())

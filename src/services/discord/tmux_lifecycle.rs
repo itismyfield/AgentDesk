@@ -39,23 +39,7 @@ pub(super) fn resolve_dispatch_tmux_protection(
     channel_name_hint: Option<&str>,
 ) -> Option<DispatchTmuxProtection> {
     let db = db?;
-    let conn = db.separate_conn().ok()?;
-    resolve_dispatch_tmux_protection_from_conn(
-        &conn,
-        token_hash,
-        provider,
-        tmux_session_name,
-        channel_name_hint,
-    )
-}
-
-fn resolve_dispatch_tmux_protection_from_conn(
-    conn: &libsql_rusqlite::Connection,
-    token_hash: &str,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    channel_name_hint: Option<&str>,
-) -> Option<DispatchTmuxProtection> {
+    let conn = db.read_conn().ok()?;
     let parsed_channel_name = parse_provider_and_channel_from_tmux_name(tmux_session_name)
         .and_then(|(parsed_provider, channel_name)| {
             (parsed_provider == *provider).then_some(channel_name)
@@ -67,7 +51,8 @@ fn resolve_dispatch_tmux_protection_from_conn(
                 .as_deref()
                 .and_then(super::adk_session::parse_thread_channel_id_from_name)
         })
-        .map(|value| value.to_string());
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let namespaced_session_key_prefix = format!("{}/{}/%", provider.as_str(), token_hash);
 
     let session_keys =
@@ -83,7 +68,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
              s.session_key = ?1
              OR s.session_key = ?2
              OR (
-               ?3 IS NOT NULL
+               ?3 != ''
                AND s.thread_channel_id = ?3
                AND s.provider = ?4
                AND s.session_key LIKE ?5
@@ -98,10 +83,10 @@ fn resolve_dispatch_tmux_protection_from_conn(
            datetime(COALESCE(s.last_heartbeat, s.created_at)) DESC,
            s.rowid DESC
          LIMIT 1",
-        libsql_rusqlite::params![
+        [
             session_keys[0].as_str(),
             session_keys[1].as_str(),
-            thread_channel_id.as_deref(),
+            thread_channel_id.as_str(),
             provider.as_str(),
             namespaced_session_key_prefix.as_str(),
         ],
@@ -115,7 +100,9 @@ fn resolve_dispatch_tmux_protection_from_conn(
         return Some(protection);
     }
 
-    let thread_channel_id = thread_channel_id?;
+    if thread_channel_id.is_empty() {
+        return None;
+    }
     conn.query_row(
         "SELECT td.id, td.status
          FROM task_dispatches td
@@ -137,7 +124,7 @@ fn resolve_dispatch_tmux_protection_from_conn(
            datetime(td.created_at) DESC,
            td.rowid DESC
          LIMIT 1",
-        libsql_rusqlite::params![
+        [
             thread_channel_id.as_str(),
             provider.as_str(),
             namespaced_session_key_prefix.as_str(),
@@ -154,36 +141,46 @@ fn resolve_dispatch_tmux_protection_from_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::{DispatchTmuxProtection, resolve_dispatch_tmux_protection_from_conn};
+    use super::{DispatchTmuxProtection, resolve_dispatch_tmux_protection};
     use crate::services::provider::ProviderKind;
 
     fn sample_tmux_name() -> String {
         ProviderKind::Codex.build_tmux_session_name("adk-cdx-t1485506232256168011")
     }
 
+    fn fresh_dispatch_lookup_db() -> crate::db::Db {
+        let db = crate::db::test_db();
+        db.lock()
+            .unwrap()
+            .execute_batch(
+                "
+                DROP TABLE IF EXISTS sessions;
+                DROP TABLE IF EXISTS task_dispatches;
+                CREATE TABLE sessions (
+                    session_key TEXT,
+                    provider TEXT,
+                    status TEXT,
+                    active_dispatch_id TEXT,
+                    created_at TEXT,
+                    last_heartbeat TEXT,
+                    thread_channel_id TEXT
+                );
+                CREATE TABLE task_dispatches (
+                    id TEXT PRIMARY KEY,
+                    status TEXT,
+                    thread_id TEXT,
+                    created_at TEXT
+                );
+                ",
+            )
+            .unwrap();
+        db
+    }
+
     #[test]
     fn protects_session_rows_with_active_dispatch_even_when_idle() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
-            ",
-        )
-        .unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
@@ -200,12 +197,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-495', datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
+            [session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -223,24 +221,10 @@ mod tests {
 
     #[test]
     fn ignores_thread_dispatches_when_current_namespace_session_row_is_missing() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES
                 ('dispatch-pending', 'pending', '1485506232256168011', '2026-04-14 01:00:00'),
@@ -248,71 +232,43 @@ mod tests {
             ",
         )
         .unwrap();
+        drop(conn);
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn, "tokenxyz", &provider, &tmux_name, None,
-        );
+        let protection =
+            resolve_dispatch_tmux_protection(Some(&db), "tokenxyz", &provider, &tmux_name, None);
 
         assert_eq!(protection, None);
     }
 
     #[test]
     fn ignores_completed_dispatches_without_active_session_rows() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-done', 'completed', '1485506232256168011', '2026-04-14 01:01:00');
             ",
         )
         .unwrap();
+        drop(conn);
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn, "tokenxyz", &provider, &tmux_name, None,
-        );
+        let protection =
+            resolve_dispatch_tmux_protection(Some(&db), "tokenxyz", &provider, &tmux_name, None);
 
         assert_eq!(protection, None);
     }
 
     #[test]
     fn protects_session_rows_with_completed_dispatch_ids_until_ttl() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-stale', 'completed', '1485506232256168011', '2026-04-14 01:01:00');
             ",
@@ -328,12 +284,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-stale', datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
+            [session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -351,27 +308,8 @@ mod tests {
 
     #[test]
     fn ignores_session_rows_with_missing_dispatch_ids() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
-            ",
-        )
-        .unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
@@ -382,12 +320,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-missing', datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![session_key.as_str(), provider.as_str()],
+            [session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -399,24 +338,10 @@ mod tests {
 
     #[test]
     fn ignores_thread_channel_session_rows_from_other_provider() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-other-provider', 'dispatched', 'other-thread', '2026-04-14 01:01:00');
             ",
@@ -432,9 +357,10 @@ mod tests {
             [],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -446,24 +372,10 @@ mod tests {
 
     #[test]
     fn ignores_thread_channel_session_rows_from_other_token_namespace() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-other-token', 'completed', '1485506232256168011', '2026-04-14 01:01:00');
             ",
@@ -482,12 +394,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-other-token', datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![foreign_session_key, provider.as_str()],
+            [foreign_session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -499,24 +412,10 @@ mod tests {
 
     #[test]
     fn ignores_thread_dispatches_from_other_token_namespace() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-other-runtime', 'dispatched', '1485506232256168011', '2026-04-14 01:01:00');
             ",
@@ -535,12 +434,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', NULL, datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![foreign_session_key, provider.as_str()],
+            [foreign_session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -552,24 +452,10 @@ mod tests {
 
     #[test]
     fn protects_thread_dispatches_when_current_namespace_owns_thread() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES
                 ('dispatch-pending', 'pending', '1485506232256168011', '2026-04-14 01:00:00'),
@@ -590,12 +476,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', NULL, datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![sidecar_session_key, provider.as_str()],
+            [sidecar_session_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -613,24 +500,10 @@ mod tests {
 
     #[test]
     fn protects_thread_channel_session_rows_with_same_token_namespace() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let db = fresh_dispatch_lookup_db();
+        let conn = db.lock().unwrap();
         conn.execute_batch(
             "
-            CREATE TABLE sessions (
-                session_key TEXT,
-                provider TEXT,
-                status TEXT,
-                active_dispatch_id TEXT,
-                created_at TEXT,
-                last_heartbeat TEXT,
-                thread_channel_id TEXT
-            );
-            CREATE TABLE task_dispatches (
-                id TEXT PRIMARY KEY,
-                status TEXT,
-                thread_id TEXT,
-                created_at TEXT
-            );
             INSERT INTO task_dispatches (id, status, thread_id, created_at)
             VALUES ('dispatch-same-token', 'dispatched', '1485506232256168011', '2026-04-14 01:01:00');
             ",
@@ -649,12 +522,13 @@ mod tests {
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
              VALUES (?1, ?2, 'idle', 'dispatch-same-token', datetime('now'), datetime('now'), '1485506232256168011')",
-            libsql_rusqlite::params![namespaced_sidecar_key, provider.as_str()],
+            [namespaced_sidecar_key.as_str(), provider.as_str()],
         )
         .unwrap();
+        drop(conn);
 
-        let protection = resolve_dispatch_tmux_protection_from_conn(
-            &conn,
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -684,7 +558,7 @@ mod tests {
             .execute(
                 "INSERT INTO task_dispatches (id, status, thread_id, created_at, updated_at, dispatch_type, title)
                  VALUES (?1, 'dispatched', ?2, datetime('now'), datetime('now'), 'implementation', 'active dispatch')",
-                libsql_rusqlite::params!["dispatch-db-wrapper", "1485506232256168011"],
+                ["dispatch-db-wrapper", "1485506232256168011"],
             )
             .unwrap();
         db.lock()
@@ -693,7 +567,7 @@ mod tests {
                 "INSERT INTO sessions
                  (session_key, provider, status, active_dispatch_id, thread_channel_id, created_at, last_heartbeat)
                  VALUES (?1, ?2, 'idle', 'dispatch-db-wrapper', '1485506232256168011', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![session_key, provider.as_str()],
+                [session_key.as_str(), provider.as_str()],
             )
             .unwrap();
 

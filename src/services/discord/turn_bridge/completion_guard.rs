@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::utils::format::safe_suffix;
+use sqlx::Row;
 
 #[derive(Debug)]
 pub(super) struct DispatchSnapshot {
@@ -292,47 +293,18 @@ pub(in crate::services::discord) async fn guard_review_dispatch_completion(
     }
 }
 
-/// Explicitly complete implementation/rework dispatches at turn end.
-/// Last-resort dispatch completion via runtime-root SQLite file.
-///
-/// Opens a fresh connection to the on-disk DB (bypassing the Db pool) and writes
-/// a status + reconciliation marker so onTick can run the hook chain later.
-/// Returns `true` if the UPDATE affected at least one row.
-pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> bool {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return false;
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) else {
-        return false;
-    };
-    let changed = crate::dispatch::set_dispatch_status_on_conn(
-        &conn,
-        dispatch_id,
-        "completed",
-        Some(result),
-        "turn_bridge_runtime_db_fallback",
-        Some(&["pending", "dispatched"]),
-        true,
-    )
-    .unwrap_or(0);
-    if changed > 0 {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-        )
-        .ok();
-    }
-    changed > 0
+fn transition_source_uses_live_command_bot(transition_source: &str) -> bool {
+    let source = transition_source.trim();
+    source.starts_with("turn_bridge") || source.starts_with("watcher")
 }
 
-fn reset_linked_auto_queue_entries_on_conn(
-    conn: &libsql_rusqlite::Connection,
+fn reset_linked_auto_queue_entries_on_db(
+    db: &crate::db::Db,
     dispatch_id: &str,
-) -> libsql_rusqlite::Result<usize> {
+) -> Result<usize, String> {
+    let conn = db
+        .separate_conn()
+        .map_err(|error| format!("open sqlite auto_queue_entries connection: {error}"))?;
     conn.execute(
         "UPDATE auto_queue_entries
          SET status = 'pending',
@@ -344,19 +316,325 @@ fn reset_linked_auto_queue_entries_on_conn(
            AND status IN ('pending', 'dispatched')",
         [dispatch_id],
     )
+    .map_err(|error| format!("reset sqlite auto_queue_entries for {dispatch_id}: {error}"))
 }
 
-fn runtime_db_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return false;
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) else {
-        return false;
-    };
-    reset_linked_auto_queue_entries_on_conn(&conn, dispatch_id)
-        .map(|changed| changed > 0)
-        .unwrap_or(false)
+fn with_runtime_postgres_result<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            sqlx::PgPool,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>
+        + Send
+        + 'static,
+{
+    let config = crate::config::load().map_err(|error| format!("load runtime config: {error}"))?;
+    crate::utils::async_bridge::block_on_result(
+        async move {
+            let Some(pool) = crate::db::postgres::connect(&config).await? else {
+                return Err("postgres is not configured".to_string());
+            };
+            operation(pool).await
+        },
+        |error| error,
+    )
+}
+
+fn runtime_postgres_reconcile_key(dispatch_id: &str) -> String {
+    format!("reconcile_dispatch:{dispatch_id}")
+}
+
+fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_json::Value) -> bool {
+    let dispatch_id = dispatch_id.to_string();
+    let result_json = result.to_string();
+    with_runtime_postgres_result(move |pool| {
+        Box::pin(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin postgres completion fallback for {dispatch_id}: {error}"))?;
+
+            let current = sqlx::query(
+                "SELECT status, kanban_card_id, dispatch_type
+                 FROM task_dispatches
+                 WHERE id = $1",
+            )
+            .bind(&dispatch_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
+            let Some(current) = current else {
+                return Ok(false);
+            };
+
+            let current_status = current
+                .try_get::<Option<String>, _>("status")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if !matches!(current_status.as_str(), "pending" | "dispatched") {
+                return Ok(false);
+            }
+
+            let changed = sqlx::query(
+                "UPDATE task_dispatches
+                 SET status = 'completed',
+                     result = CAST($1 AS jsonb),
+                     updated_at = NOW(),
+                     completed_at = COALESCE(completed_at, NOW())
+                 WHERE id = $2
+                   AND status = $3",
+            )
+            .bind(&result_json)
+            .bind(&dispatch_id)
+            .bind(&current_status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update postgres dispatch {dispatch_id} to completed: {error}"))?
+            .rows_affected();
+            if changed == 0 {
+                return Ok(false);
+            }
+
+            let kanban_card_id = current
+                .try_get::<Option<String>, _>("kanban_card_id")
+                .ok()
+                .flatten();
+            let dispatch_type = current
+                .try_get::<Option<String>, _>("dispatch_type")
+                .ok()
+                .flatten();
+
+            sqlx::query(
+                "INSERT INTO dispatch_events (
+                    dispatch_id,
+                    kanban_card_id,
+                    dispatch_type,
+                    from_status,
+                    to_status,
+                    transition_source,
+                    payload_json
+                ) VALUES ($1, $2, $3, $4, 'completed', 'turn_bridge_runtime_db_fallback', CAST($5 AS jsonb))",
+            )
+            .bind(&dispatch_id)
+            .bind(kanban_card_id)
+            .bind(dispatch_type)
+            .bind(&current_status)
+            .bind(&result_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("record postgres dispatch event for {dispatch_id}: {error}"))?;
+
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value",
+            )
+            .bind(runtime_postgres_reconcile_key(&dispatch_id))
+            .bind(&dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("set postgres reconcile marker for {dispatch_id}: {error}"))?;
+
+            if !transition_source_uses_live_command_bot("turn_bridge_runtime_db_fallback") {
+                sqlx::query(
+                    "INSERT INTO dispatch_outbox (dispatch_id, action)
+                     SELECT $1, 'status_reaction'
+                     WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM dispatch_outbox
+                         WHERE dispatch_id = $1
+                           AND action = 'status_reaction'
+                           AND status IN ('pending', 'processing')
+                     )",
+                )
+                .bind(&dispatch_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("enqueue postgres status reaction for {dispatch_id}: {error}"))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit postgres completion fallback for {dispatch_id}: {error}"))?;
+            Ok(true)
+        })
+    })
+    .unwrap_or(false)
+}
+
+fn runtime_pg_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
+    let dispatch_id = dispatch_id.to_string();
+    with_runtime_postgres_result(move |pool| {
+        Box::pin(async move {
+            let changed = sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'pending',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NULL
+                 WHERE dispatch_id = $1
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                format!("reset postgres auto_queue_entries for {dispatch_id}: {error}")
+            })?
+            .rows_affected();
+            Ok(changed > 0)
+        })
+    })
+    .unwrap_or(false)
+}
+
+fn runtime_pg_fail_dispatch_with_result(dispatch_id: &str, error_msg: &str) -> bool {
+    let dispatch_id = dispatch_id.to_string();
+    let fallback_result = serde_json::json!({
+        "error": error_msg.chars().take(500).collect::<String>(),
+        "fallback": true,
+    })
+    .to_string();
+    with_runtime_postgres_result(move |pool| {
+        Box::pin(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin postgres failure fallback for {dispatch_id}: {error}"))?;
+
+            let current = sqlx::query(
+                "SELECT status, kanban_card_id, dispatch_type
+                 FROM task_dispatches
+                 WHERE id = $1",
+            )
+            .bind(&dispatch_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
+            let Some(current) = current else {
+                return Ok(false);
+            };
+
+            let current_status = current
+                .try_get::<Option<String>, _>("status")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if !matches!(current_status.as_str(), "pending" | "dispatched") {
+                return Ok(false);
+            }
+
+            let changed = sqlx::query(
+                "UPDATE task_dispatches
+                 SET status = 'failed',
+                     result = CAST($1 AS jsonb),
+                     updated_at = NOW()
+                 WHERE id = $2
+                   AND status = $3",
+            )
+            .bind(&fallback_result)
+            .bind(&dispatch_id)
+            .bind(&current_status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("update postgres dispatch {dispatch_id} to failed: {error}"))?
+            .rows_affected();
+            if changed == 0 {
+                return Ok(false);
+            }
+
+            let kanban_card_id = current
+                .try_get::<Option<String>, _>("kanban_card_id")
+                .ok()
+                .flatten();
+            let dispatch_type = current
+                .try_get::<Option<String>, _>("dispatch_type")
+                .ok()
+                .flatten();
+
+            sqlx::query(
+                "INSERT INTO dispatch_events (
+                    dispatch_id,
+                    kanban_card_id,
+                    dispatch_type,
+                    from_status,
+                    to_status,
+                    transition_source,
+                    payload_json
+                ) VALUES ($1, $2, $3, $4, 'failed', 'turn_bridge_patch_failure_fallback', CAST($5 AS jsonb))",
+            )
+            .bind(&dispatch_id)
+            .bind(kanban_card_id)
+            .bind(dispatch_type)
+            .bind(&current_status)
+            .bind(&fallback_result)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("record postgres dispatch failure event for {dispatch_id}: {error}"))?;
+
+            sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'pending',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NULL
+                 WHERE dispatch_id = $1
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("reset postgres auto_queue_entries for failed dispatch {dispatch_id}: {error}"))?;
+
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value",
+            )
+            .bind(runtime_postgres_reconcile_key(&dispatch_id))
+            .bind(&dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("set postgres reconcile marker for failed dispatch {dispatch_id}: {error}"))?;
+
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (dispatch_id, action)
+                 SELECT $1, 'status_reaction'
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM dispatch_outbox
+                     WHERE dispatch_id = $1
+                       AND action = 'status_reaction'
+                       AND status IN ('pending', 'processing')
+                 )",
+            )
+            .bind(&dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("enqueue postgres failure status reaction for {dispatch_id}: {error}"))?;
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit postgres failure fallback for {dispatch_id}: {error}"))?;
+            Ok(true)
+        })
+    })
+    .unwrap_or(false)
+}
+
+/// Explicitly complete implementation/rework dispatches at turn end.
+/// Last-resort dispatch completion via the canonical Postgres store.
+pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> bool {
+    runtime_pg_complete_dispatch_with_result(dispatch_id, result)
 }
 
 #[allow(dead_code)]
@@ -697,7 +975,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
         {
             Ok(_) => {
                 tracing::warn!("marked dispatch as failed after transport error");
-                if !runtime_db_reset_linked_auto_queue_entries(dispatch_id) {
+                if !runtime_pg_reset_linked_auto_queue_entries(dispatch_id) {
                     tracing::warn!("failed dispatch auto-queue reset skipped or affected no rows");
                 }
                 return;
@@ -712,28 +990,8 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     // Fallback: direct DB update to prevent orphan dispatch.
     // Also leave a reconciliation marker so onTick can run the hook chain later.
     tracing::error!("dispatch PATCH failed after retries; falling back to direct DB");
-    if let Some(root) = crate::cli::agentdesk_runtime_root() {
-        let db_path = root.join("data/agentdesk.sqlite");
-        if let Ok(conn) = libsql_rusqlite::Connection::open(&db_path) {
-            let fallback_result = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true});
-            let _ = crate::dispatch::set_dispatch_status_on_conn(
-                &conn,
-                dispatch_id,
-                "failed",
-                Some(&fallback_result),
-                "turn_bridge_patch_failure_fallback",
-                Some(&["pending", "dispatched"]),
-                false,
-            );
-            if let Err(error) = reset_linked_auto_queue_entries_on_conn(&conn, dispatch_id) {
-                tracing::warn!(%error, "failed to reset linked auto-queue entries after dispatch failure fallback");
-            }
-            // Leave reconciliation marker for onTick to pick up and run hook chain
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-            );
-        }
+    if !runtime_pg_fail_dispatch_with_result(dispatch_id, error_msg) {
+        tracing::warn!("postgres failure fallback skipped or affected no rows");
     }
 }
 
@@ -895,12 +1153,10 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             )
             .unwrap_or(0);
             if changed > 0 {
+                let reconcile_key = runtime_postgres_reconcile_key(dispatch_id);
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    libsql_rusqlite::params![
-                        format!("reconcile_dispatch:{dispatch_id}"),
-                        dispatch_id
-                    ],
+                    [reconcile_key.as_str(), dispatch_id],
                 )
                 .ok();
             }
@@ -1229,9 +1485,11 @@ mod tests {
 
     #[test]
     fn reset_linked_auto_queue_entries_on_conn_resets_pending_and_dispatched_rows() {
-        let conn = libsql_rusqlite::Connection::open_in_memory().expect("in-memory db");
+        let db = crate::db::test_db();
+        let conn = db.lock().expect("db lock");
         conn.execute_batch(
-            "CREATE TABLE auto_queue_entries (
+            "DROP TABLE IF EXISTS auto_queue_entries;
+             CREATE TABLE auto_queue_entries (
                 id TEXT PRIMARY KEY,
                 run_id TEXT,
                 kanban_card_id TEXT,
@@ -1257,8 +1515,9 @@ mod tests {
             [],
         )
         .expect("seed entries");
+        drop(conn);
 
-        let changed = reset_linked_auto_queue_entries_on_conn(&conn, "dispatch-1").expect("reset");
+        let changed = reset_linked_auto_queue_entries_on_db(&db, "dispatch-1").expect("reset");
         assert_eq!(changed, 2);
 
         let pending: (
@@ -1267,7 +1526,9 @@ mod tests {
             Option<i64>,
             Option<String>,
             Option<String>,
-        ) = conn
+        ) = db
+            .read_conn()
+            .expect("read conn")
             .query_row(
                 "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
                  FROM auto_queue_entries
@@ -1296,7 +1557,9 @@ mod tests {
             Option<i64>,
             Option<String>,
             Option<String>,
-        ) = conn
+        ) = db
+            .read_conn()
+            .expect("read conn")
             .query_row(
                 "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
                  FROM auto_queue_entries
@@ -1325,7 +1588,9 @@ mod tests {
             Option<i64>,
             Option<String>,
             Option<String>,
-        ) = conn
+        ) = db
+            .read_conn()
+            .expect("read conn")
             .query_row(
                 "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
                  FROM auto_queue_entries

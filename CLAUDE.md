@@ -43,6 +43,8 @@ scripts/deploy-dashboard.sh release           # build + deploy to ~/.adk/release
 
 **Runtime policy**: release only. Do not use `scripts/deploy-dev.sh` as a build or restart entrypoint, and do not start `dcserver` from `~/.adk/dev`. `scripts/deploy-dev.sh` is a cleanup shim for removing stray dev artifacts.
 
+After the 2026-04-19 PostgreSQL cutover (#461), AgentDesk runtime state is canonical in PostgreSQL. Ongoing SQLite retirement work is tracked in epic #834. `~/.adk/release/data/agentdesk.sqlite` may still exist as a pre-cutover backup, but the release runtime does not read it.
+
 **Signing guidance**: local operators may use ad-hoc signing during release promotion when Developer ID signing is unavailable, and should clear `com.apple.quarantine` on promoted macOS artifacts when needed. Keep signing policy in deploy scripts and operator docs, not hardcoded in Rust source.
 
 ## CLI Subcommands
@@ -60,9 +62,11 @@ Default (no subcommand) starts the full HTTP server + policy engine + Discord ga
 
 ## Database Path
 
-- Canonical DB path is `~/.adk/{release|dev}/data/agentdesk.sqlite` (or `$AGENTDESK_ROOT_DIR/data/agentdesk.sqlite` when overridden).
+- Canonical runtime store is PostgreSQL: use `config.database.{host,port,dbname}` from `agentdesk.yaml` or the resolved `DATABASE_URL`.
+- Ongoing cleanup is tracked in epic #834. The 2026-04-19 cutover (#461) made PostgreSQL the only runtime authority for release operations.
+- `~/.adk/release/data/agentdesk.sqlite` is a pre-cutover backup artifact, not a live runtime database.
 - Do not point `sqlite3` at guessed paths such as `~/.adk/release/agentdesk.db` or `~/.adk/release/data.db`. SQLite will create empty files there, which then mislead diagnostics.
-- Prefer the HTTP API first for operational inspection; use direct DB access only when the task explicitly requires it and the canonical path is confirmed.
+- Prefer the HTTP API first for operational inspection; use direct DB access only when the task explicitly requires it and the canonical PostgreSQL target is confirmed.
 
 ## Architecture
 

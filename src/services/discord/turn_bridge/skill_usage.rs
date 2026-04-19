@@ -19,12 +19,13 @@ pub(super) fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<
 }
 
 fn resolve_skill_usage_agent_id(
-    conn: &libsql_rusqlite::Connection,
+    db: &Db,
     session_key: Option<&str>,
     role_binding: Option<&RoleBinding>,
 ) -> Option<String> {
     session_key
         .and_then(|key| {
+            let conn = db.read_conn().ok()?;
             conn.query_row(
                 "SELECT agent_id FROM sessions WHERE session_key = ?1",
                 [key],
@@ -47,12 +48,33 @@ fn record_skill_usage(
     role_binding: Option<&RoleBinding>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
-    let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
-    conn.execute(
-        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        libsql_rusqlite::params![skill_id, agent_id, session_key],
-    )
-    .map_err(|e| format!("insert skill_usage failed: {e}"))?;
+    let agent_id = resolve_skill_usage_agent_id(db, session_key, role_binding);
+    match (agent_id.as_deref(), session_key) {
+        (Some(agent_id), Some(session_key)) => conn
+            .execute(
+                "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
+                [skill_id, agent_id, session_key],
+            )
+            .map_err(|e| format!("insert skill_usage failed: {e}"))?,
+        (Some(agent_id), None) => conn
+            .execute(
+                "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, NULL)",
+                [skill_id, agent_id],
+            )
+            .map_err(|e| format!("insert skill_usage failed: {e}"))?,
+        (None, Some(session_key)) => conn
+            .execute(
+                "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, NULL, ?2)",
+                [skill_id, session_key],
+            )
+            .map_err(|e| format!("insert skill_usage failed: {e}"))?,
+        (None, None) => conn
+            .execute(
+                "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, NULL, NULL)",
+                [skill_id],
+            )
+            .map_err(|e| format!("insert skill_usage failed: {e}"))?,
+    };
     Ok(())
 }
 
