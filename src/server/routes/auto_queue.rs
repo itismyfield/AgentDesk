@@ -169,53 +169,6 @@ fn deploy_phase_api_enabled(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn load_run_ids_with_status(
-    conn: &libsql_rusqlite::Connection,
-    statuses: &[&str],
-) -> libsql_rusqlite::Result<Vec<String>> {
-    if statuses.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let placeholders = std::iter::repeat("?")
-        .take(statuses.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT id FROM auto_queue_runs WHERE status IN ({placeholders}) ORDER BY rowid ASC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(libsql_rusqlite::params_from_iter(statuses.iter()), |row| {
-        row.get(0)
-    })?
-    .collect::<Result<Vec<_>, _>>()
-}
-
-fn load_slot_bindings_for_runs(
-    conn: &libsql_rusqlite::Connection,
-    run_ids: &[String],
-) -> libsql_rusqlite::Result<Vec<(String, String, i64)>> {
-    if run_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let placeholders = std::iter::repeat("?")
-        .take(run_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT DISTINCT assigned_run_id, agent_id, slot_index
-         FROM auto_queue_slots
-         WHERE assigned_run_id IN ({placeholders})
-           AND assigned_run_id IS NOT NULL"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })?
-    .collect::<Result<Vec<_>, _>>()
-}
-
 fn slot_thread_map_has_bindings(
     conn: &libsql_rusqlite::Connection,
     agent_id: &str,
@@ -245,6 +198,31 @@ fn slot_thread_map_has_bindings(
             })
         })
         .unwrap_or(false)
+}
+
+fn load_slot_bindings_for_runs(
+    conn: &libsql_rusqlite::Connection,
+    run_ids: &[String],
+) -> libsql_rusqlite::Result<Vec<(String, String, i64)>> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT assigned_run_id, agent_id, slot_index
+         FROM auto_queue_slots
+         WHERE assigned_run_id IN ({placeholders})
+           AND assigned_run_id IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?
+    .collect::<Result<Vec<_>, _>>()
 }
 
 fn slot_has_dispatch_thread_history(
@@ -421,146 +399,6 @@ async fn group_has_dispatched_entries_pg(
         format!("count dispatched postgres auto-queue entries for {run_id}:{thread_group}: {error}")
     })?;
     Ok(count > 0)
-}
-
-async fn execute_activate_transition_intent_pg(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    intent: &crate::engine::transition::TransitionIntent,
-) -> Result<(), String> {
-    match intent {
-        crate::engine::transition::TransitionIntent::UpdateStatus { card_id, to, .. } => {
-            sqlx::query(
-                "UPDATE kanban_cards
-                 SET status = $1,
-                     updated_at = NOW()
-                 WHERE id = $2",
-            )
-            .bind(to)
-            .bind(card_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("update status for {card_id}: {error}"))?;
-        }
-        crate::engine::transition::TransitionIntent::SetLatestDispatchId {
-            card_id,
-            dispatch_id,
-        } => {
-            sqlx::query(
-                "UPDATE kanban_cards
-                 SET latest_dispatch_id = $1,
-                     updated_at = NOW()
-                 WHERE id = $2",
-            )
-            .bind(dispatch_id.as_deref())
-            .bind(card_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("set latest_dispatch_id for {card_id}: {error}"))?;
-        }
-        crate::engine::transition::TransitionIntent::SetReviewStatus {
-            card_id,
-            review_status,
-        } => {
-            sqlx::query(
-                "UPDATE kanban_cards
-                 SET review_status = $1,
-                     updated_at = NOW()
-                 WHERE id = $2",
-            )
-            .bind(review_status.as_deref())
-            .bind(card_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("set review_status for {card_id}: {error}"))?;
-        }
-        crate::engine::transition::TransitionIntent::ApplyClock { card_id, clock, .. } => {
-            if let Some(clock) = clock {
-                let sql = if clock.mode.as_deref() == Some("coalesce") {
-                    format!(
-                        "UPDATE kanban_cards
-                         SET {field} = COALESCE({field}, NOW()),
-                             updated_at = NOW()
-                         WHERE id = $1",
-                        field = clock.set
-                    )
-                } else {
-                    format!(
-                        "UPDATE kanban_cards
-                         SET {field} = NOW(),
-                             updated_at = NOW()
-                         WHERE id = $1",
-                        field = clock.set
-                    )
-                };
-                sqlx::query(&sql)
-                    .bind(card_id)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|error| format!("apply clock {} for {card_id}: {error}", clock.set))?;
-            }
-        }
-        crate::engine::transition::TransitionIntent::ClearTerminalFields { card_id } => {
-            sqlx::query(
-                "UPDATE kanban_cards
-                 SET review_status = NULL,
-                     suggestion_pending_at = NULL,
-                     review_entered_at = NULL,
-                     awaiting_dod_at = NULL,
-                     blocked_reason = NULL,
-                     review_round = NULL,
-                     deferred_dod_json = NULL,
-                     updated_at = NOW()
-                 WHERE id = $1",
-            )
-            .bind(card_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("clear terminal fields for {card_id}: {error}"))?;
-        }
-        crate::engine::transition::TransitionIntent::SyncAutoQueue { card_id } => {
-            crate::github::sync::sync_auto_queue_terminal_on_pg(tx, card_id).await?;
-        }
-        crate::engine::transition::TransitionIntent::SyncReviewState { card_id, state } => {
-            crate::github::sync::sync_review_state_on_pg(tx, card_id, state).await?;
-        }
-        crate::engine::transition::TransitionIntent::AuditLog {
-            card_id,
-            from,
-            to,
-            source,
-            message,
-        } => {
-            sqlx::query(
-                "INSERT INTO kanban_audit_logs (
-                    card_id, from_status, to_status, source, result
-                 ) VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(card_id)
-            .bind(from)
-            .bind(to)
-            .bind(source)
-            .bind(message)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("insert audit log for {card_id}: {error}"))?;
-        }
-        crate::engine::transition::TransitionIntent::CancelDispatch { dispatch_id } => {
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET status = 'cancelled',
-                     updated_at = NOW(),
-                     completed_at = COALESCE(completed_at, NOW())
-                 WHERE id = $1
-                   AND status IN ('pending', 'dispatched')",
-            )
-            .bind(dispatch_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
-        }
-    }
-
-    Ok(())
 }
 
 async fn create_activate_dispatch_pg(
@@ -853,7 +691,10 @@ async fn create_activate_dispatch_pg(
     .map_err(|error| format!("insert postgres dispatch outbox for {dispatch_id}: {error}"))?;
 
     for intent in &decision.intents {
-        execute_activate_transition_intent_pg(&mut tx, intent).await?;
+        crate::engine::transition_executor_pg::execute_activate_transition_intent_pg(
+            &mut tx, intent,
+        )
+        .await?;
     }
 
     tx.commit()
@@ -904,108 +745,6 @@ fn load_dispatched_card_ids_for_runs(
         row.get(0)
     })?
     .collect::<Result<Vec<_>, _>>()
-}
-
-fn rollback_cancelled_run_cards(
-    conn: &libsql_rusqlite::Connection,
-    card_ids: &[String],
-    source: &str,
-) -> usize {
-    let mut rolled_back = 0usize;
-
-    for card_id in card_ids {
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok();
-        let Some(status) = status else {
-            continue;
-        };
-        if !matches!(status.as_str(), "requested" | "in_progress") {
-            continue;
-        }
-
-        let has_active_dispatch: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if has_active_dispatch {
-            continue;
-        }
-
-        if let Err(error) = conn.execute_batch("SAVEPOINT auto_queue_run_cancel_card_rollback") {
-            crate::auto_queue_log!(
-                warn,
-                "run_cancel_card_rollback_savepoint_failed",
-                AutoQueueLogContext::new().card(card_id),
-                "[auto-queue] failed to open rollback savepoint for card {} during run cancel: {}",
-                card_id,
-                error
-            );
-            continue;
-        }
-
-        let rollback_result = (|| -> anyhow::Result<bool> {
-            let changed = conn.execute(
-                "UPDATE kanban_cards
-                 SET status = 'ready', updated_at = datetime('now')
-                 WHERE id = ?1 AND status IN ('requested', 'in_progress')",
-                [card_id],
-            )?;
-            if changed == 0 {
-                return Ok(false);
-            }
-
-            crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
-            crate::kanban::log_audit_on_conn(
-                conn,
-                card_id,
-                &status,
-                "ready",
-                source,
-                "OK (run cancel rollback)",
-            );
-            Ok(true)
-        })();
-
-        match rollback_result {
-            Ok(true) => {
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
-                    .ok();
-                rolled_back += 1;
-            }
-            Ok(false) => {
-                conn.execute_batch("ROLLBACK TO SAVEPOINT auto_queue_run_cancel_card_rollback")
-                    .ok();
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
-                    .ok();
-            }
-            Err(error) => {
-                conn.execute_batch("ROLLBACK TO SAVEPOINT auto_queue_run_cancel_card_rollback")
-                    .ok();
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_run_cancel_card_rollback")
-                    .ok();
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to roll back card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-            }
-        }
-    }
-
-    rolled_back
 }
 
 fn delete_phase_gate_rows_for_runs(
@@ -1466,221 +1205,6 @@ async fn transition_entry_to_skipped_pg(
     Ok(true)
 }
 
-async fn rollback_cancelled_run_cards_pg(
-    pool: &sqlx::PgPool,
-    card_ids: &[String],
-    source: &str,
-) -> usize {
-    let mut rolled_back = 0usize;
-
-    for card_id in card_ids {
-        let status = match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT status FROM kanban_cards WHERE id = $1",
-        )
-        .bind(card_id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(status)) => status,
-            Ok(None) => continue,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_status_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to load postgres card {} during run cancel rollback: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
-        if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
-            continue;
-        }
-
-        let has_active_dispatch = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM task_dispatches
-             WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
-        )
-        .bind(card_id)
-        .fetch_one(pool)
-        .await
-        .ok()
-        .unwrap_or(0)
-            > 0;
-        if has_active_dispatch {
-            continue;
-        }
-
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_begin_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to open postgres rollback transaction for card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
-
-        let rollback_result = async {
-            let changed = sqlx::query(
-                "UPDATE kanban_cards
-                 SET status = 'ready',
-                     latest_dispatch_id = NULL,
-                     review_status = NULL,
-                     review_round = 0,
-                     review_notes = NULL,
-                     suggestion_pending_at = NULL,
-                     review_entered_at = NULL,
-                     awaiting_dod_at = NULL,
-                     blocked_reason = NULL,
-                     updated_at = NOW()
-                 WHERE id = $1
-                   AND status IN ('requested', 'in_progress')",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("rollback postgres card {card_id}: {error}"))?
-            .rows_affected() as usize;
-            if changed == 0 {
-                return Ok(false);
-            }
-
-            sqlx::query(
-                "INSERT INTO card_review_state (
-                    card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
-                    decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
-                 ) VALUES (
-                    $1, 0, 'idle', NULL, NULL, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NOW()
-                 )
-                 ON CONFLICT (card_id) DO UPDATE SET
-                    review_round = 0,
-                    state = 'idle',
-                    pending_dispatch_id = NULL,
-                    last_verdict = NULL,
-                    last_decision = NULL,
-                    decided_by = NULL,
-                    decided_at = NULL,
-                    approach_change_round = NULL,
-                    session_reset_round = NULL,
-                    review_entered_at = NULL,
-                    updated_at = NOW()",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("reset postgres card review state {card_id}: {error}"))?;
-
-            sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
-                .bind(format!("pm_pending:{card_id}"))
-                .bind(format!("pm_decision_sent:{card_id}"))
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("clear postgres card escalation state {card_id}: {error}"))?;
-
-            sqlx::query(
-                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
-                 VALUES ($1, $2, 'ready', $3, 'OK (run cancel rollback)')",
-            )
-            .bind(card_id)
-            .bind(&status)
-            .bind(source)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
-
-            // #800 parity: scrub stale worktree metadata from prior dispatches so a
-            // subsequent redispatch off the rolled-back card doesn't reuse a wt
-            // path that the operator just deleted from git. Mirrors the SQLite
-            // path in src/kanban.rs::strip_stale_worktree_metadata_from_dispatches_on_conn.
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET context = CASE
-                         WHEN context IS NULL OR context = '' THEN context
-                         ELSE NULLIF(
-                             (context::jsonb
-                                 - 'worktree_path'
-                                 - 'worktree_branch'
-                                 - 'completed_worktree_path'
-                                 - 'completed_branch'
-                             )::text,
-                             '{}'
-                         )
-                     END,
-                     result = CASE
-                         WHEN result IS NULL OR result = '' THEN result
-                         ELSE NULLIF(
-                             (result::jsonb
-                                 - 'worktree_path'
-                                 - 'worktree_branch'
-                                 - 'completed_worktree_path'
-                                 - 'completed_branch'
-                             )::text,
-                             '{}'
-                         )
-                     END
-                 WHERE kanban_card_id = $1
-                   AND (
-                       (context IS NOT NULL AND context <> '' AND (
-                           (context::jsonb) ? 'worktree_path'
-                           OR (context::jsonb) ? 'worktree_branch'
-                           OR (context::jsonb) ? 'completed_worktree_path'
-                           OR (context::jsonb) ? 'completed_branch'
-                       ))
-                       OR (result IS NOT NULL AND result <> '' AND (
-                           (result::jsonb) ? 'worktree_path'
-                           OR (result::jsonb) ? 'worktree_branch'
-                           OR (result::jsonb) ? 'completed_worktree_path'
-                           OR (result::jsonb) ? 'completed_branch'
-                       ))
-                   )",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!("scrub postgres dispatch worktree metadata {card_id}: {error}")
-            })?;
-
-            Ok::<bool, String>(true)
-        }
-        .await;
-
-        match rollback_result {
-            Ok(true) => {
-                if tx.commit().await.is_ok() {
-                    rolled_back += 1;
-                }
-            }
-            Ok(false) => {
-                let _ = tx.rollback().await;
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to roll back postgres card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-            }
-        }
-    }
-
-    rolled_back
-}
-
 async fn clear_and_release_slots_for_runs_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
@@ -1779,135 +1303,13 @@ async fn cancel_selected_runs_with_pg(
     target_run_ids: &[String],
     reason: &str,
 ) -> Result<serde_json::Value, String> {
-    let rollback_candidate_card_ids =
-        load_dispatched_card_ids_for_runs_pg(pool, target_run_ids).await?;
-    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, target_run_ids).await?;
-    let cancelled_dispatches =
-        cancel_live_dispatches_for_runs_pg(pool, target_run_ids, reason).await?;
-    let deleted_phase_gates = delete_phase_gate_rows_for_runs_pg(pool, target_run_ids).await?;
-    let mut slot_cleanup =
-        clear_and_release_slots_for_runs_pg(health_registry, pool, target_run_ids).await;
-    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
-        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
-        Err(error) => {
-            crate::auto_queue_log!(
-                warn,
-                "run_cancel_dispatch_session_clear_pg_failed",
-                target_run_ids
-                    .first()
-                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
-                    .unwrap_or_default(),
-                "[auto-queue] failed to clear postgres sessions for cancelled dispatches {:?}: {}",
-                live_dispatch_ids,
-                error
-            );
-            slot_cleanup.warnings.push(format!(
-                "failed to clear sessions for cancelled dispatches {:?}: {}",
-                live_dispatch_ids, error
-            ));
-        }
-    }
-
-    let cancelled_runs = if target_run_ids.is_empty() {
-        0
-    } else {
-        let mut query = QueryBuilder::<Postgres>::new(
-            "UPDATE auto_queue_runs
-             SET status = 'cancelled',
-                 completed_at = NOW()
-             WHERE id IN (",
-        );
-        let mut separated = query.separated(", ");
-        for run_id in target_run_ids {
-            separated.push_bind(run_id);
-        }
-        separated.push_unseparated(format!(
-            ") AND status IN ('active', 'paused', '{}')",
-            RUN_STATUS_RESTORING
-        ));
-        query
-            .build()
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "cancel postgres auto_queue_runs {:?}: {error}",
-                    target_run_ids
-                )
-            })?
-            .rows_affected() as usize
-    };
-
-    let entry_rows: Vec<String> = if target_run_ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_scalar::<_, String>(
-            "SELECT id
-             FROM auto_queue_entries
-             WHERE run_id = ANY($1)
-               AND status IN ('pending', 'dispatched')
-             ORDER BY id ASC",
-        )
-        .bind(target_run_ids)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| {
-            format!(
-                "load postgres cancel entry ids {:?}: {error}",
-                target_run_ids
-            )
-        })?
-    };
-
-    let mut cancelled_entries = 0usize;
-    for entry_id in entry_rows {
-        match transition_entry_to_skipped_pg(pool, &entry_id, "run_cancel").await {
-            Ok(true) => cancelled_entries += 1,
-            Ok(false) => {}
-            Err(error) => crate::auto_queue_log!(
-                warn,
-                "run_cancel_entry_pg_failed",
-                AutoQueueLogContext::new().entry(&entry_id),
-                "[auto-queue] failed to cancel postgres entry {} during run cancel: {}",
-                entry_id,
-                error
-            ),
-        }
-    }
-
-    let rolled_back_cards =
-        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
-    let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
-    if remaining_live_dispatches > 0 {
-        let log_ctx = target_run_ids
-            .first()
-            .map(|run_id| AutoQueueLogContext::new().run(run_id))
-            .unwrap_or_default();
-        crate::auto_queue_log!(
-            warn,
-            "run_cancel_remaining_live_dispatches_pg",
-            log_ctx,
-            "[auto-queue] postgres cancel left {} non-terminal dispatches for runs {:?}",
-            remaining_live_dispatches,
-            target_run_ids
-        );
-    }
-
-    let mut response = json!({
-        "ok": true,
-        "cancelled_entries": cancelled_entries,
-        "cancelled_runs": cancelled_runs,
-        "cancelled_dispatches": cancelled_dispatches,
-        "deleted_phase_gates": deleted_phase_gates,
-        "rolled_back_cards": rolled_back_cards,
-        "remaining_live_dispatches": remaining_live_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
-    });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
-        response["warning"] = json!(warning);
-    }
-    Ok(response)
+    crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+        health_registry,
+        pool,
+        target_run_ids,
+        reason,
+    )
+    .await
 }
 
 async fn reset_with_pg(body: &ResetBody, pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
@@ -2187,23 +1589,42 @@ pub(crate) fn cancel_with_conn(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     conn: &libsql_rusqlite::Connection,
 ) -> serde_json::Value {
-    let target_run_ids =
-        load_run_ids_with_status(conn, &["active", "paused", RUN_STATUS_RESTORING])
-            .unwrap_or_default();
-    cancel_selected_runs_with_conn(health_registry, conn, &target_run_ids, "auto_queue_cancel")
+    crate::services::auto_queue::cancel_run::cancel_with_conn(health_registry, conn)
 }
 
 async fn pause_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
-    let active_run_ids = load_run_ids_with_status_pg(pool, &["active"]).await?;
-    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, &active_run_ids).await?;
+    let active_run_ids =
+        crate::services::auto_queue::cancel_run::load_run_ids_with_status_pg(pool, &["active"])
+            .await?;
+    let live_dispatch_ids =
+        crate::services::auto_queue::cancel_run::load_live_dispatch_ids_for_runs_pg(
+            pool,
+            &active_run_ids,
+        )
+        .await?;
     let cancelled_dispatches =
-        cancel_live_dispatches_for_runs_pg(pool, &active_run_ids, "auto_queue_pause").await?;
+        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs_pg(
+            pool,
+            &active_run_ids,
+            "auto_queue_pause",
+        )
+        .await?;
     let mut slot_cleanup =
-        clear_and_release_slots_for_runs_pg(health_registry, pool, &active_run_ids).await;
-    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
+        crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs_pg(
+            health_registry,
+            pool,
+            &active_run_ids,
+        )
+        .await;
+    match crate::services::auto_queue::cancel_run::clear_sessions_for_dispatches_pg(
+        pool,
+        &live_dispatch_ids,
+    )
+    .await
+    {
         Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
         Err(error) => {
             crate::auto_queue_log!(
@@ -2241,7 +1662,9 @@ async fn pause_with_pg(
         "released_slots": slot_cleanup.released_slots,
         "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+    if let Some(warning) =
+        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
+    {
         response["warning"] = json!(warning);
     }
     Ok(response)
@@ -2251,9 +1674,7 @@ async fn cancel_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
-    let target_run_ids =
-        load_run_ids_with_status_pg(pool, &["active", "paused", RUN_STATUS_RESTORING]).await?;
-    cancel_selected_runs_with_pg(health_registry, pool, &target_run_ids, "auto_queue_cancel").await
+    crate::services::auto_queue::cancel_run::cancel_with_pg(health_registry, pool).await
 }
 
 fn cancel_selected_runs_with_conn(
@@ -2262,105 +1683,12 @@ fn cancel_selected_runs_with_conn(
     target_run_ids: &[String],
     reason: &str,
 ) -> serde_json::Value {
-    let rollback_candidate_card_ids =
-        load_dispatched_card_ids_for_runs(conn, target_run_ids).unwrap_or_default();
-    let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, target_run_ids, reason);
-    let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, target_run_ids);
-    let slot_cleanup = clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
-    let cancelled_runs = if target_run_ids.is_empty() {
-        0
-    } else {
-        let placeholders = std::iter::repeat("?")
-            .take(target_run_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE auto_queue_runs
-             SET status = 'cancelled', completed_at = datetime('now')
-             WHERE id IN ({placeholders}) AND status IN ('active', 'paused', '{RUN_STATUS_RESTORING}')"
-        );
-        conn.execute(
-            &sql,
-            libsql_rusqlite::params_from_iter(target_run_ids.iter()),
-        )
-        .unwrap_or(0)
-    };
-    let entry_ids: Vec<String> = if target_run_ids.is_empty() {
-        Vec::new()
-    } else {
-        let placeholders = std::iter::repeat("?")
-            .take(target_run_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT id FROM auto_queue_entries
-             WHERE run_id IN ({placeholders})
-               AND status IN ('pending', 'dispatched')"
-        );
-        conn.prepare(&sql)
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map(
-                    libsql_rusqlite::params_from_iter(target_run_ids.iter()),
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-                .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            })
-            .unwrap_or_default()
-    };
-    let mut cancelled_entries = 0usize;
-    for entry_id in entry_ids {
-        match crate::db::auto_queue::update_entry_status_on_conn(
-            conn,
-            &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
-            "run_cancel",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        ) {
-            Ok(result) if result.changed => cancelled_entries += 1,
-            Ok(_) => {}
-            Err(error) => crate::auto_queue_log!(
-                warn,
-                "run_cancel_entry_failed",
-                AutoQueueLogContext::new().entry(&entry_id),
-                "[auto-queue] failed to cancel entry {entry_id} during run cancel: {error}"
-            ),
-        }
-    }
-    let rolled_back_cards =
-        rollback_cancelled_run_cards(conn, &rollback_candidate_card_ids, reason);
-    let remaining_live_dispatches = count_live_dispatches_for_runs(conn, &target_run_ids);
-    if remaining_live_dispatches > 0 {
-        let log_ctx = target_run_ids
-            .first()
-            .map(|run_id| AutoQueueLogContext::new().run(run_id))
-            .unwrap_or_default();
-        crate::auto_queue_log!(
-            warn,
-            "run_cancel_remaining_live_dispatches",
-            log_ctx,
-            "[auto-queue] cancel left {} non-terminal dispatches for runs {:?}",
-            remaining_live_dispatches,
-            target_run_ids
-        );
-    }
-
-    let mut response = json!({
-        "ok": true,
-        "cancelled_entries": cancelled_entries,
-        "cancelled_runs": cancelled_runs,
-        "cancelled_dispatches": cancelled_dispatches,
-        "deleted_phase_gates": deleted_phase_gates,
-        "rolled_back_cards": rolled_back_cards,
-        "remaining_live_dispatches": remaining_live_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
-    });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
-        response["warning"] = json!(warning);
-    }
-    response
+    crate::services::auto_queue::cancel_run::cancel_selected_runs_with_conn(
+        health_registry,
+        conn,
+        target_run_ids,
+        reason,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -5092,7 +4420,7 @@ pub async fn generate(
             .iter()
             .map(|(run_id, _)| run_id.clone())
             .collect();
-        cancel_selected_runs_with_conn(
+        crate::services::auto_queue::cancel_run::cancel_selected_runs_with_conn(
             state.health_registry.clone(),
             &conn,
             &target_run_ids,
@@ -7937,7 +7265,7 @@ pub async fn dispatch(
             .iter()
             .map(|(run_id, _)| run_id.clone())
             .collect();
-        cancel_selected_runs_with_conn(
+        crate::services::auto_queue::cancel_run::cancel_selected_runs_with_conn(
             state.health_registry.clone(),
             &conn,
             &target_run_ids,
@@ -9434,11 +8762,20 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             );
         }
     };
-    let active_run_ids = load_run_ids_with_status(&conn, &["active"]).unwrap_or_default();
+    let active_run_ids =
+        crate::services::auto_queue::cancel_run::load_run_ids_with_status(&conn, &["active"])
+            .unwrap_or_default();
     let cancelled_dispatches =
-        cancel_live_dispatches_for_runs(&conn, &active_run_ids, "auto_queue_pause");
-    let slot_cleanup =
-        clear_and_release_slots_for_runs(state.health_registry.clone(), &conn, &active_run_ids);
+        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs(
+            &conn,
+            &active_run_ids,
+            "auto_queue_pause",
+        );
+    let slot_cleanup = crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs(
+        state.health_registry.clone(),
+        &conn,
+        &active_run_ids,
+    );
     let paused = conn
         .execute(
             "UPDATE auto_queue_runs
@@ -9455,10 +8792,25 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
         "released_slots": slot_cleanup.released_slots,
         "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+    if let Some(warning) =
+        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
+    {
         response["warning"] = json!(warning);
     }
     (StatusCode::OK, Json(response))
+}
+
+fn cancel_route_error_response(
+    error: crate::error::AppError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut body = json!({ "error": error.message() });
+    if let Some(run_id) = error.context().get("run_id") {
+        body["run_id"] = run_id.clone();
+    }
+    if let Some(status) = error.context().get("status") {
+        body["status"] = status.clone();
+    }
+    (error.status(), Json(body))
 }
 
 /// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
@@ -9619,84 +8971,24 @@ pub async fn cancel(
     Query(query): Query<CancelQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool.as_ref() {
-        if let Some(run_id) = query
+        let service = state.auto_queue_service();
+        let result = if let Some(run_id) = query
             .run_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let run_status = match sqlx::query_scalar::<_, Option<String>>(
-                "SELECT status
-                 FROM auto_queue_runs
-                 WHERE id = $1",
-            )
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await
-            {
-                Ok(Some(status)) => status,
-                Ok(None) => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({
-                            "error": format!("auto-queue run '{run_id}' not found"),
-                            "run_id": run_id,
-                        })),
-                    );
-                }
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": format!("load auto-queue run '{run_id}': {error}")
-                        })),
-                    );
-                }
-            };
-            match run_status.as_deref() {
-                Some("active") | Some("paused") | Some(RUN_STATUS_RESTORING) => {
-                    return match cancel_selected_runs_with_pg(
-                        state.health_registry.clone(),
-                        pool,
-                        &[run_id.to_string()],
-                        "auto_queue_cancel",
-                    )
-                    .await
-                    {
-                        Ok(payload) => (StatusCode::OK, Json(payload)),
-                        Err(error) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": error})),
-                        ),
-                    };
-                }
-                Some(status) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": format!("auto-queue run '{run_id}' is not cancelable (status={status})"),
-                            "run_id": run_id,
-                            "status": status,
-                        })),
-                    );
-                }
-                None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({
-                            "error": format!("auto-queue run '{run_id}' not found"),
-                            "run_id": run_id,
-                        })),
-                    );
-                }
-            }
-        }
-        return match cancel_with_pg(state.health_registry.clone(), pool).await {
+            service
+                .cancel_run_with_pg(state.health_registry.clone(), pool, run_id)
+                .await
+        } else {
+            service
+                .cancel_runs_with_pg(state.health_registry.clone(), pool)
+                .await
+        };
+        return match result {
             Ok(payload) => (StatusCode::OK, Json(payload)),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => cancel_route_error_response(error),
         };
     }
 
@@ -9709,54 +9001,21 @@ pub async fn cancel(
             );
         }
     };
-    if let Some(run_id) = query
+    let service = state.auto_queue_service();
+    let result = if let Some(run_id) = query
         .run_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let run_status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM auto_queue_runs WHERE id = ?1",
-                [run_id],
-                |row| row.get(0),
-            )
-            .ok();
-        match run_status.as_deref() {
-            Some("active") | Some("paused") | Some(RUN_STATUS_RESTORING) => {
-                let payload = cancel_selected_runs_with_conn(
-                    state.health_registry.clone(),
-                    &conn,
-                    &[run_id.to_string()],
-                    "auto_queue_cancel",
-                );
-                return (StatusCode::OK, Json(payload));
-            }
-            Some(status) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("auto-queue run '{run_id}' is not cancelable (status={status})"),
-                        "run_id": run_id,
-                        "status": status,
-                    })),
-                );
-            }
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("auto-queue run '{run_id}' not found"),
-                        "run_id": run_id,
-                    })),
-                );
-            }
-        }
+        service.cancel_run(state.health_registry.clone(), &conn, run_id)
+    } else {
+        service.cancel_runs(state.health_registry.clone(), &conn)
+    };
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)),
+        Err(error) => cancel_route_error_response(error),
     }
-    (
-        StatusCode::OK,
-        Json(cancel_with_conn(state.health_registry.clone(), &conn)),
-    )
 }
 
 /// PATCH /api/auto-queue/reorder

@@ -588,7 +588,7 @@ pub async fn transition_status_with_opts_pg(
             .await
             .map_err(|error| anyhow::anyhow!("begin blocked postgres transition tx: {error}"))?;
         for intent in &decision.intents {
-            crate::github::sync::execute_pg_transition_intent(&mut tx, intent)
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
         }
@@ -625,15 +625,17 @@ pub async fn transition_status_with_opts_pg(
         .map_err(|error| anyhow::anyhow!("begin postgres transition tx: {error}"))?;
 
     for intent in &decision.intents {
-        crate::github::sync::execute_pg_transition_intent(&mut tx, intent)
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
 
     if effective.is_terminal(new_status) {
-        crate::github::sync::cancel_live_dispatches_for_terminal_card_pg(&mut tx, card_id)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+            &mut tx, card_id,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
 
     let new_state_row = sqlx::query(
