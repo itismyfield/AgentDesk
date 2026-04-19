@@ -1267,7 +1267,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     // Graceful shutdown: on SIGTERM, cancel all tmux watchers before dying
     let shared_for_signal = shared.clone();
-    let token_for_signal = token.to_string();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -1328,91 +1327,14 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     }
                 }
 
-                // ── Inflight state, restart reports & placeholder updates ──
+                // ── Inflight state preservation for silent re-attach ──
                 let inflight_states = inflight::load_inflight_states(&provider_for_shutdown);
-
-                // Save restart reports FIRST (disk-only, guaranteed to complete)
-                // before any HTTP calls that might hang/timeout.
-                for state in &inflight_states {
-                    let existing = restart_report::load_restart_report(
-                        &provider_for_shutdown,
-                        state.channel_id,
-                    );
-                    if existing.as_ref().map(|r| r.status.as_str()) == Some("pending") {
-                        continue;
-                    }
-                    let mut report = restart_report::RestartCompletionReport::new(
-                        provider_for_shutdown.clone(),
-                        state.channel_id,
-                        "sigterm",
-                        "dcserver가 SIGTERM으로 종료되었습니다. 재시작 후 작업을 이어받습니다.",
-                    );
-                    report.current_msg_id = Some(state.current_msg_id);
-                    report.channel_name = state.channel_name.clone();
-                    report.user_msg_id = Some(state.user_msg_id);
-                    if let Err(e) = restart_report::save_restart_report(&report) {
-                        tracing::warn!(
-                            "  ⚠ failed to save restart report for channel {}: {e}",
-                            state.channel_id
-                        );
-                    }
-                }
                 if !inflight_states.is_empty() {
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts2}] 📝 saved {} restart report(s) for inflight channels",
+                        "  [{ts2}] 👁 preserving {} inflight turn(s) for silent watcher re-attach after restart",
                         inflight_states.len()
                     );
-                }
-
-                // Best-effort: update placeholder messages with restart notice.
-                // Each edit gets a 3-second timeout to avoid blocking shutdown.
-                if !inflight_states.is_empty() {
-                    let http = serenity::Http::new(&token_for_signal);
-                    for state in &inflight_states {
-                        let channel = ChannelId::new(state.channel_id);
-                        let msg_id = MessageId::new(state.current_msg_id);
-                        let restart_notice = if state.full_response.trim().is_empty() {
-                            "⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다".to_string()
-                        } else {
-                            let partial = formatting::format_for_discord_with_provider(
-                                state.full_response.trim(),
-                                &provider_for_shutdown,
-                            );
-                            format!("{partial}\n\n⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다")
-                        };
-                        let edit_fut = channel.edit_message(
-                            &http,
-                            msg_id,
-                            EditMessage::new().content(&restart_notice),
-                        );
-                        match tokio::time::timeout(tokio::time::Duration::from_secs(3), edit_fut)
-                            .await
-                        {
-                            Ok(Ok(_)) => {
-                                let ts_ok = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts_ok}] ✓ Updated placeholder msg {} in channel {}",
-                                    state.current_msg_id,
-                                    state.channel_id
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    "  ⚠ Failed to update placeholder msg {} in channel {}: {e}",
-                                    state.current_msg_id,
-                                    state.channel_id
-                                );
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    "  ⚠ Timeout updating placeholder msg {} in channel {}",
-                                    state.current_msg_id,
-                                    state.channel_id
-                                );
-                            }
-                        }
-                    }
                 }
 
                 // ── Final state snapshot (belt-and-suspenders) ──
