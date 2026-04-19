@@ -71,7 +71,7 @@
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1130 | giant-file |
 | `db::turns` | `src/db/turns.rs` | 451 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 4628 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 4642 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 1926 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 719 |  |
@@ -97,7 +97,7 @@
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 275 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 206 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 105 |  |
-| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 1389 | giant-file |
+| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 1559 | giant-file |
 | `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 338 |  |
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 106 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |

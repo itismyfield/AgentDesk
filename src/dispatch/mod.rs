@@ -137,11 +137,38 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
     dispatch_id: &str,
     reason: Option<&str>,
 ) -> Result<usize, String> {
-    let cancel_payload = reason.map(|value| json!({ "reason": value }));
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("begin postgres dispatch cancel transaction: {error}"))?;
+
+    // On error the Transaction's Drop runs an implicit rollback, so any
+    // partial writes from the helper are discarded automatically.
+    let changed =
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx(&mut tx, dispatch_id, reason).await?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres dispatch cancel {dispatch_id}: {error}"))?;
+
+    Ok(changed)
+}
+
+/// Cancel a live dispatch and reset linked auto-queue entries inside a caller-owned
+/// PostgreSQL transaction.
+///
+/// Mirrors `cancel_dispatch_and_reset_auto_queue_on_pg` semantics (stale guard on
+/// `pending`/`dispatched`, dispatch_events insert, status_reaction outbox,
+/// auto_queue_entries reset to `pending`) but does not begin or commit the
+/// transaction. The caller composes this into a wider atomic operation. On
+/// stale-guard / missing-row paths this returns `Ok(0)` without writing — the
+/// caller decides whether to commit or rollback the surrounding work.
+pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> Result<usize, String> {
+    let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
     let current = sqlx::query(
         "SELECT status, kanban_card_id, dispatch_type
@@ -149,13 +176,10 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
          WHERE id = $1",
     )
     .bind(dispatch_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
     let Some(current) = current else {
-        tx.rollback().await.map_err(|error| {
-            format!("rollback missing postgres dispatch {dispatch_id}: {error}")
-        })?;
         return Ok(0);
     };
 
@@ -165,9 +189,6 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         .flatten()
         .unwrap_or_default();
     if !matches!(current_status.as_str(), "pending" | "dispatched") {
-        tx.rollback()
-            .await
-            .map_err(|error| format!("rollback postgres dispatch {dispatch_id}: {error}"))?;
         return Ok(0);
     }
 
@@ -183,7 +204,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         .bind(payload.to_string())
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
@@ -196,16 +217,13 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         )
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
     };
 
     if changed == 0 {
-        tx.rollback().await.map_err(|error| {
-            format!("rollback unchanged postgres dispatch {dispatch_id}: {error}")
-        })?;
         return Ok(0);
     }
 
@@ -235,7 +253,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
     )
     .bind(&current_status)
     .bind(cancel_payload.clone())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await;
 
     let _ = sqlx::query(
@@ -250,7 +268,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
          )",
     )
     .bind(dispatch_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await;
 
     let entry_rows = sqlx::query(
@@ -260,7 +278,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
            AND status IN ('pending', 'dispatched')",
     )
     .bind(dispatch_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(|error| format!("load postgres queue entries for dispatch {dispatch_id}: {error}"))?;
 
@@ -283,7 +301,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         )
         .bind(&entry_id)
         .bind(&from_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| format!("reset postgres queue entry {entry_id}: {error}"))?
         .rows_affected() as usize;
@@ -298,14 +316,10 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
             )
             .bind(&entry_id)
             .bind(&from_status)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await;
         }
     }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres dispatch cancel {dispatch_id}: {error}"))?;
 
     Ok(changed)
 }
