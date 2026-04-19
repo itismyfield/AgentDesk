@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Args;
 use libsql_rusqlite::{Connection, OptionalExtension};
@@ -88,6 +90,7 @@ struct CutoverCounts {
     active_dispatches: i64,
     working_sessions: i64,
     open_dispatch_outbox: i64,
+    pending_message_outbox: i64,
 }
 
 type SqliteCutoverCounts = CutoverCounts;
@@ -95,7 +98,10 @@ type PgCutoverCounts = CutoverCounts;
 
 impl CutoverCounts {
     fn has_live_state(&self) -> bool {
-        self.active_dispatches > 0 || self.working_sessions > 0 || self.open_dispatch_outbox > 0
+        self.active_dispatches > 0
+            || self.working_sessions > 0
+            || self.open_dispatch_outbox > 0
+            || self.pending_message_outbox > 0
     }
 }
 
@@ -160,7 +166,33 @@ struct PostgresCutoverReport {
     postgres_after: Option<PgCutoverCounts>,
     archive: Option<ArchiveOutput>,
     imported: Option<ImportSummary>,
+    runtime_active: Option<RuntimeActiveStatus>,
     blocker: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct RuntimeActiveStatus {
+    active: bool,
+    pid_file: Option<PidFileSignal>,
+    tcp: Option<TcpSignal>,
+    overridden: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct PidFileSignal {
+    path: String,
+    exists: bool,
+    pid: Option<u32>,
+    process_alive: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TcpSignal {
+    host: String,
+    port: u16,
+    listening: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -556,6 +588,8 @@ struct MessageOutboxRow {
     content: String,
     bot: Option<String>,
     source: Option<String>,
+    reason_code: Option<String>,
+    session_key: Option<String>,
     status: Option<String>,
     created_at: Option<String>,
     sent_at: Option<String>,
@@ -833,6 +867,16 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
     }
 
     let config = load_effective_config()?;
+    let runtime_active = if args.skip_pg_import {
+        Some(detect_runtime_active(
+            crate::config::runtime_root().as_deref(),
+            &config.server.host,
+            config.server.port,
+            args.allow_runtime_active,
+        ))
+    } else {
+        None
+    };
     let need_history_rows = args.archive_dir.is_some() || !args.skip_pg_import;
     let need_full_rows = !args.skip_pg_import;
     let pg_pool = if args.skip_pg_import {
@@ -876,10 +920,11 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
             postgres_after: None,
             archive: None,
             imported: None,
+            runtime_active: runtime_active.clone(),
             blocker: None,
         };
 
-        report.blocker = cutover_blocker(&args, &report.sqlite);
+        report.blocker = cutover_blocker(&args, &report.sqlite, runtime_active.as_ref());
 
         if args.dry_run || report.blocker.is_some() {
             report.ok = report.blocker.is_none();
@@ -921,12 +966,28 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
 fn cutover_blocker(
     args: &PostgresCutoverArgs,
     sqlite_counts: &SqliteCutoverCounts,
+    runtime_active: Option<&RuntimeActiveStatus>,
 ) -> Option<String> {
-    if args.skip_pg_import && sqlite_counts.has_live_state() {
-        return Some(
-            "sqlite still has in-flight dispatch/session/outbox state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
-                .to_string(),
-        );
+    if args.skip_pg_import {
+        if let Some(status) = runtime_active
+            && status.active
+            && !status.overridden
+        {
+            return Some(format!(
+                "dcserver runtime appears active ({}); archive-only cutover skips the SQLite write \
+                 barrier and would race against live audit_logs/session_transcripts writes. Stop \
+                 dcserver first (e.g. `launchctl bootout gui/$(id -u)/com.agentdesk.release`) or \
+                 pass `--allow-runtime-active` if the workload is provably frozen.",
+                describe_runtime_active(status)
+            ));
+        }
+
+        if sqlite_counts.has_live_state() {
+            return Some(
+                "sqlite still has in-flight dispatch/session/outbox/message state; archive-only cutover would lose it. Omit --skip-pg-import or drain runtime to idle first."
+                    .to_string(),
+            );
+        }
     }
 
     if !args.skip_pg_import && sqlite_counts.open_dispatch_outbox > 0 {
@@ -936,7 +997,201 @@ fn cutover_blocker(
         );
     }
 
+    if !args.skip_pg_import
+        && sqlite_counts.pending_message_outbox > 0
+        && !args.allow_unsent_messages
+    {
+        return Some(format!(
+            "sqlite still has {count} pending message_outbox row(s); these Discord messages would be lost on cutover. \
+Drain by letting the message-outbox worker settle (restart dcserver if it is stalled) or pass --allow-unsent-messages \
+after confirming the rows are stale and safe to drop.",
+            count = sqlite_counts.pending_message_outbox,
+        ));
+    }
+
     None
+}
+
+fn describe_runtime_active(status: &RuntimeActiveStatus) -> String {
+    let mut signals = Vec::new();
+    if let Some(pid) = status.pid_file.as_ref() {
+        if pid.process_alive {
+            match pid.pid {
+                Some(value) => signals.push(format!("pid {value} alive at {}", pid.path)),
+                None => signals.push(format!("pid file alive at {}", pid.path)),
+            }
+        } else if let Some(error) = pid.error.as_ref() {
+            signals.push(format!("pid probe error: {error}"));
+        }
+    }
+    if let Some(tcp) = status.tcp.as_ref() {
+        if tcp.listening {
+            signals.push(format!(
+                "TCP {host}:{port} accepting connections",
+                host = tcp.host,
+                port = tcp.port
+            ));
+        } else if let Some(error) = tcp.error.as_ref() {
+            signals.push(format!(
+                "TCP probe error ({}:{}): {error}",
+                tcp.host, tcp.port
+            ));
+        }
+    }
+    if signals.is_empty() {
+        "no specific signals captured".to_string()
+    } else {
+        signals.join("; ")
+    }
+}
+
+const RUNTIME_TCP_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+
+fn detect_runtime_active(
+    runtime_root: Option<&Path>,
+    host: &str,
+    port: u16,
+    allow_override: bool,
+) -> RuntimeActiveStatus {
+    let pid_signal = runtime_root.map(probe_pid_file);
+    let tcp_signal = probe_server_tcp(host, port, RUNTIME_TCP_PROBE_TIMEOUT);
+    let pid_alive = pid_signal.as_ref().is_some_and(|p| p.process_alive);
+    let tcp_listening = tcp_signal.as_ref().is_some_and(|t| t.listening);
+    let pid_uncertain = pid_signal.as_ref().is_some_and(|p| p.error.is_some());
+    let tcp_uncertain = tcp_signal.as_ref().is_some_and(|t| t.error.is_some());
+    RuntimeActiveStatus {
+        active: pid_alive || tcp_listening || pid_uncertain || tcp_uncertain,
+        pid_file: pid_signal,
+        tcp: tcp_signal,
+        overridden: allow_override,
+    }
+}
+
+fn probe_pid_file(runtime_root: &Path) -> PidFileSignal {
+    let path = runtime_root.join("runtime").join("dcserver.pid");
+    let exists = path.exists();
+    let display = path.display().to_string();
+    if !exists {
+        return PidFileSignal {
+            path: display,
+            exists: false,
+            ..Default::default()
+        };
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            return PidFileSignal {
+                path: display,
+                exists: true,
+                error: Some(format!("read pid file: {error}")),
+                ..Default::default()
+            };
+        }
+    };
+    let pid = match raw.trim().parse::<u32>() {
+        Ok(value) => value,
+        Err(error) => {
+            return PidFileSignal {
+                path: display,
+                exists: true,
+                error: Some(format!("parse pid '{}': {error}", raw.trim())),
+                ..Default::default()
+            };
+        }
+    };
+    PidFileSignal {
+        path: display,
+        exists: true,
+        pid: Some(pid),
+        process_alive: process_is_alive(pid),
+        error: None,
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
+fn probe_server_tcp(host: &str, port: u16, timeout: Duration) -> Option<TcpSignal> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized =
+        if trimmed == "0.0.0.0" || trimmed == "::" || trimmed.eq_ignore_ascii_case("[::]") {
+            "127.0.0.1".to_string()
+        } else {
+            trimmed.to_string()
+        };
+    let addrs: Vec<SocketAddr> = match (normalized.as_str(), port).to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(error) => {
+            return Some(TcpSignal {
+                host: normalized,
+                port,
+                listening: false,
+                error: Some(format!("resolve socket: {error}")),
+            });
+        }
+    };
+    if addrs.is_empty() {
+        return Some(TcpSignal {
+            host: normalized,
+            port,
+            listening: false,
+            error: Some("no socket addresses resolved".to_string()),
+        });
+    }
+    let mut last_uncertain_error = None;
+    for addr in addrs {
+        match std::net::TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Some(TcpSignal {
+                    host: normalized,
+                    port,
+                    listening: true,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                    continue;
+                }
+                last_uncertain_error = Some(format!("tcp connect {addr}: {error}"));
+            }
+        }
+    }
+    Some(TcpSignal {
+        host: normalized,
+        port,
+        listening: false,
+        error: last_uncertain_error,
+    })
+}
+
+fn load_rows_if_needed<T>(
+    should_load: bool,
+    loader: impl FnOnce() -> Result<Vec<T>, String>,
+) -> Result<Vec<T>, String> {
+    if should_load {
+        loader()
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn load_sqlite_cutover_snapshot(
@@ -946,217 +1201,150 @@ fn load_sqlite_cutover_snapshot(
 ) -> Result<SqliteCutoverSnapshot, String> {
     let counts = sqlite_cutover_counts(sqlite)?;
     Ok(SqliteCutoverSnapshot {
-        counts,
-        offices: if need_full_rows {
-            load_all_offices(sqlite)?
-        } else {
-            Vec::new()
-        },
-        departments: if need_full_rows {
-            load_all_departments(sqlite)?
-        } else {
-            Vec::new()
-        },
-        office_agents: if need_full_rows {
-            load_all_office_agents(sqlite)?
-        } else {
-            Vec::new()
-        },
-        github_repos: if need_full_rows {
-            load_all_github_repos(sqlite)?
-        } else {
-            Vec::new()
-        },
-        agents: if need_full_rows {
-            load_all_agents(sqlite)?
-        } else {
-            Vec::new()
-        },
-        kanban_cards: if need_full_rows {
-            load_all_kanban_cards(sqlite)?
-        } else {
-            Vec::new()
-        },
-        kanban_audit_logs: if need_full_rows {
-            load_all_kanban_audit_logs(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_runs: if need_full_rows {
-            load_all_auto_queue_runs(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_entries: if need_full_rows {
-            load_all_auto_queue_entries(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_entry_transitions: if need_full_rows {
-            load_all_auto_queue_entry_transitions(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_entry_dispatch_history: if need_full_rows {
-            load_all_auto_queue_entry_dispatch_history(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_phase_gates: if need_full_rows {
-            load_all_auto_queue_phase_gates(sqlite)?
-        } else {
-            Vec::new()
-        },
-        auto_queue_slots: if need_full_rows {
-            load_all_auto_queue_slots(sqlite)?
-        } else {
-            Vec::new()
-        },
-        card_retrospectives: if need_full_rows {
-            load_all_card_retrospectives(sqlite)?
-        } else {
-            Vec::new()
-        },
-        card_review_state: if need_full_rows {
-            load_all_card_review_state(sqlite)?
-        } else {
-            Vec::new()
-        },
-        audit_logs: if need_history_rows {
-            load_audit_logs(sqlite)?
-        } else {
-            Vec::new()
-        },
-        session_transcripts: if need_history_rows {
-            load_session_transcripts(sqlite)?
-        } else {
-            Vec::new()
-        },
-        task_dispatches: if need_full_rows {
-            load_all_task_dispatches(sqlite)?
-        } else {
-            Vec::new()
-        },
-        dispatch_events: if need_full_rows {
-            load_all_dispatch_events(sqlite)?
-        } else {
-            Vec::new()
-        },
-        dispatch_queue: if need_full_rows {
-            load_all_dispatch_queue(sqlite)?
-        } else {
-            Vec::new()
-        },
-        review_decisions: if need_full_rows {
-            load_all_review_decisions(sqlite)?
-        } else {
-            Vec::new()
-        },
-        review_tuning_outcomes: if need_full_rows {
-            load_all_review_tuning_outcomes(sqlite)?
-        } else {
-            Vec::new()
-        },
-        sessions: if need_full_rows {
-            load_all_sessions(sqlite)?
-        } else {
-            Vec::new()
-        },
-        dispatch_outbox: if need_full_rows {
-            load_all_dispatch_outbox(sqlite)?
-        } else {
-            Vec::new()
-        },
-        session_termination_events: if need_full_rows {
-            load_all_session_termination_events(sqlite)?
-        } else {
-            Vec::new()
-        },
-        turns: if need_full_rows {
-            load_all_turns(sqlite)?
-        } else {
-            Vec::new()
-        },
-        meetings: if need_full_rows {
-            load_all_meetings(sqlite)?
-        } else {
-            Vec::new()
-        },
-        meeting_transcripts: if need_full_rows {
-            load_all_meeting_transcripts(sqlite)?
-        } else {
-            Vec::new()
-        },
-        messages: if need_full_rows {
-            load_all_messages(sqlite)?
-        } else {
-            Vec::new()
-        },
-        message_outbox: if need_full_rows {
-            load_all_message_outbox(sqlite)?
-        } else {
-            Vec::new()
-        },
-        pending_dm_replies: if need_full_rows {
-            load_all_pending_dm_replies(sqlite)?
-        } else {
-            Vec::new()
-        },
-        pipeline_stages: if need_full_rows {
-            load_all_pipeline_stages(sqlite)?
-        } else {
-            Vec::new()
-        },
-        pr_tracking: if need_full_rows {
-            load_all_pr_tracking(sqlite)?
-        } else {
-            Vec::new()
-        },
-        skills: if need_full_rows {
-            load_all_skills(sqlite)?
-        } else {
-            Vec::new()
-        },
-        skill_usage: if need_full_rows {
-            load_all_skill_usage(sqlite)?
-        } else {
-            Vec::new()
-        },
-        runtime_decisions: if need_full_rows {
-            load_all_runtime_decisions(sqlite)?
-        } else {
-            Vec::new()
-        },
-        kv_meta: if need_full_rows {
-            load_all_kv_meta(sqlite)?
-        } else {
-            Vec::new()
-        },
-        api_friction_events: if need_full_rows {
-            load_all_api_friction_events(sqlite)?
-        } else {
-            Vec::new()
-        },
-        api_friction_issues: if need_full_rows {
-            load_all_api_friction_issues(sqlite)?
-        } else {
-            Vec::new()
-        },
-        memento_feedback_turn_stats: if need_full_rows {
-            load_all_memento_feedback_turn_stats(sqlite)?
-        } else {
-            Vec::new()
-        },
-        rate_limit_cache: if need_full_rows {
-            load_all_rate_limit_cache(sqlite)?
-        } else {
-            Vec::new()
-        },
-        deferred_hooks: if need_full_rows {
-            load_all_deferred_hooks(sqlite)?
-        } else {
-            Vec::new()
-        },
+        counts: counts.clone(),
+        offices: load_rows_if_needed(need_full_rows && counts.offices > 0, || {
+            load_all_offices(sqlite)
+        })?,
+        departments: load_rows_if_needed(need_full_rows && counts.departments > 0, || {
+            load_all_departments(sqlite)
+        })?,
+        office_agents: load_rows_if_needed(need_full_rows && counts.office_agents > 0, || {
+            load_all_office_agents(sqlite)
+        })?,
+        github_repos: load_rows_if_needed(need_full_rows && counts.github_repos > 0, || {
+            load_all_github_repos(sqlite)
+        })?,
+        agents: load_rows_if_needed(need_full_rows && counts.agents > 0, || {
+            load_all_agents(sqlite)
+        })?,
+        kanban_cards: load_rows_if_needed(need_full_rows && counts.kanban_cards > 0, || {
+            load_all_kanban_cards(sqlite)
+        })?,
+        kanban_audit_logs: load_rows_if_needed(
+            need_full_rows && counts.kanban_audit_logs > 0,
+            || load_all_kanban_audit_logs(sqlite),
+        )?,
+        auto_queue_runs: load_rows_if_needed(need_full_rows && counts.auto_queue_runs > 0, || {
+            load_all_auto_queue_runs(sqlite)
+        })?,
+        auto_queue_entries: load_rows_if_needed(
+            need_full_rows && counts.auto_queue_entries > 0,
+            || load_all_auto_queue_entries(sqlite),
+        )?,
+        auto_queue_entry_transitions: load_rows_if_needed(
+            need_full_rows && counts.auto_queue_entry_transitions > 0,
+            || load_all_auto_queue_entry_transitions(sqlite),
+        )?,
+        auto_queue_entry_dispatch_history: load_rows_if_needed(
+            need_full_rows && counts.auto_queue_entry_dispatch_history > 0,
+            || load_all_auto_queue_entry_dispatch_history(sqlite),
+        )?,
+        auto_queue_phase_gates: load_rows_if_needed(
+            need_full_rows && counts.auto_queue_phase_gates > 0,
+            || load_all_auto_queue_phase_gates(sqlite),
+        )?,
+        auto_queue_slots: load_rows_if_needed(
+            need_full_rows && counts.auto_queue_slots > 0,
+            || load_all_auto_queue_slots(sqlite),
+        )?,
+        card_retrospectives: load_rows_if_needed(
+            need_full_rows && counts.card_retrospectives > 0,
+            || load_all_card_retrospectives(sqlite),
+        )?,
+        card_review_state: load_rows_if_needed(
+            need_full_rows && counts.card_review_state > 0,
+            || load_all_card_review_state(sqlite),
+        )?,
+        audit_logs: load_rows_if_needed(need_history_rows && counts.audit_logs > 0, || {
+            load_audit_logs(sqlite)
+        })?,
+        session_transcripts: load_rows_if_needed(
+            need_history_rows && counts.session_transcripts > 0,
+            || load_session_transcripts(sqlite),
+        )?,
+        task_dispatches: load_rows_if_needed(need_full_rows && counts.task_dispatches > 0, || {
+            load_all_task_dispatches(sqlite)
+        })?,
+        dispatch_events: load_rows_if_needed(need_full_rows && counts.dispatch_events > 0, || {
+            load_all_dispatch_events(sqlite)
+        })?,
+        dispatch_queue: load_rows_if_needed(need_full_rows && counts.dispatch_queue > 0, || {
+            load_all_dispatch_queue(sqlite)
+        })?,
+        review_decisions: load_rows_if_needed(
+            need_full_rows && counts.review_decisions > 0,
+            || load_all_review_decisions(sqlite),
+        )?,
+        review_tuning_outcomes: load_rows_if_needed(
+            need_full_rows && counts.review_tuning_outcomes > 0,
+            || load_all_review_tuning_outcomes(sqlite),
+        )?,
+        sessions: load_rows_if_needed(need_full_rows && counts.sessions > 0, || {
+            load_all_sessions(sqlite)
+        })?,
+        dispatch_outbox: load_rows_if_needed(need_full_rows, || load_all_dispatch_outbox(sqlite))?,
+        session_termination_events: load_rows_if_needed(
+            need_full_rows && counts.session_termination_events > 0,
+            || load_all_session_termination_events(sqlite),
+        )?,
+        turns: load_rows_if_needed(need_full_rows && counts.turns > 0, || {
+            load_all_turns(sqlite)
+        })?,
+        meetings: load_rows_if_needed(need_full_rows && counts.meetings > 0, || {
+            load_all_meetings(sqlite)
+        })?,
+        meeting_transcripts: load_rows_if_needed(
+            need_full_rows && counts.meeting_transcripts > 0,
+            || load_all_meeting_transcripts(sqlite),
+        )?,
+        messages: load_rows_if_needed(need_full_rows && counts.messages > 0, || {
+            load_all_messages(sqlite)
+        })?,
+        message_outbox: load_rows_if_needed(need_full_rows && counts.message_outbox > 0, || {
+            load_all_message_outbox(sqlite)
+        })?,
+        pending_dm_replies: load_rows_if_needed(
+            need_full_rows && counts.pending_dm_replies > 0,
+            || load_all_pending_dm_replies(sqlite),
+        )?,
+        pipeline_stages: load_rows_if_needed(need_full_rows && counts.pipeline_stages > 0, || {
+            load_all_pipeline_stages(sqlite)
+        })?,
+        pr_tracking: load_rows_if_needed(need_full_rows && counts.pr_tracking > 0, || {
+            load_all_pr_tracking(sqlite)
+        })?,
+        skills: load_rows_if_needed(need_full_rows && counts.skills > 0, || {
+            load_all_skills(sqlite)
+        })?,
+        skill_usage: load_rows_if_needed(need_full_rows && counts.skill_usage > 0, || {
+            load_all_skill_usage(sqlite)
+        })?,
+        runtime_decisions: load_rows_if_needed(
+            need_full_rows && counts.runtime_decisions > 0,
+            || load_all_runtime_decisions(sqlite),
+        )?,
+        kv_meta: load_rows_if_needed(need_full_rows && counts.kv_meta > 0, || {
+            load_all_kv_meta(sqlite)
+        })?,
+        api_friction_events: load_rows_if_needed(
+            need_full_rows && counts.api_friction_events > 0,
+            || load_all_api_friction_events(sqlite),
+        )?,
+        api_friction_issues: load_rows_if_needed(
+            need_full_rows && counts.api_friction_issues > 0,
+            || load_all_api_friction_issues(sqlite),
+        )?,
+        memento_feedback_turn_stats: load_rows_if_needed(
+            need_full_rows && counts.memento_feedback_turn_stats > 0,
+            || load_all_memento_feedback_turn_stats(sqlite),
+        )?,
+        rate_limit_cache: load_rows_if_needed(
+            need_full_rows && counts.rate_limit_cache > 0,
+            || load_all_rate_limit_cache(sqlite),
+        )?,
+        deferred_hooks: load_rows_if_needed(need_full_rows && counts.deferred_hooks > 0, || {
+            load_all_deferred_hooks(sqlite)
+        })?,
     })
 }
 
@@ -1190,70 +1378,198 @@ async fn connect_postgres_for_cutover(config: &Config) -> Result<PgPool, String>
 
 fn sqlite_cutover_counts(conn: &Connection) -> Result<SqliteCutoverCounts, String> {
     Ok(SqliteCutoverCounts {
-        agents: query_count(conn, "SELECT COUNT(*) FROM agents")?,
-        github_repos: query_count(conn, "SELECT COUNT(*) FROM github_repos")?,
-        kanban_cards: query_count(conn, "SELECT COUNT(*) FROM kanban_cards")?,
-        kanban_audit_logs: query_count(conn, "SELECT COUNT(*) FROM kanban_audit_logs")?,
-        auto_queue_runs: query_count(conn, "SELECT COUNT(*) FROM auto_queue_runs")?,
-        auto_queue_entries: query_count(conn, "SELECT COUNT(*) FROM auto_queue_entries")?,
-        auto_queue_entry_transitions: query_count(
+        agents: query_count_if_table_exists(conn, "agents", "SELECT COUNT(*) FROM agents")?,
+        github_repos: query_count_if_table_exists(
             conn,
+            "github_repos",
+            "SELECT COUNT(*) FROM github_repos",
+        )?,
+        kanban_cards: query_count_if_table_exists(
+            conn,
+            "kanban_cards",
+            "SELECT COUNT(*) FROM kanban_cards",
+        )?,
+        kanban_audit_logs: query_count_if_table_exists(
+            conn,
+            "kanban_audit_logs",
+            "SELECT COUNT(*) FROM kanban_audit_logs",
+        )?,
+        auto_queue_runs: query_count_if_table_exists(
+            conn,
+            "auto_queue_runs",
+            "SELECT COUNT(*) FROM auto_queue_runs",
+        )?,
+        auto_queue_entries: query_count_if_table_exists(
+            conn,
+            "auto_queue_entries",
+            "SELECT COUNT(*) FROM auto_queue_entries",
+        )?,
+        auto_queue_entry_transitions: query_count_if_table_exists(
+            conn,
+            "auto_queue_entry_transitions",
             "SELECT COUNT(*) FROM auto_queue_entry_transitions",
         )?,
-        auto_queue_entry_dispatch_history: query_count(
+        auto_queue_entry_dispatch_history: query_count_if_table_exists(
             conn,
+            "auto_queue_entry_dispatch_history",
             "SELECT COUNT(*) FROM auto_queue_entry_dispatch_history",
         )?,
-        auto_queue_phase_gates: query_count(conn, "SELECT COUNT(*) FROM auto_queue_phase_gates")?,
-        auto_queue_slots: query_count(conn, "SELECT COUNT(*) FROM auto_queue_slots")?,
-        task_dispatches: query_count(conn, "SELECT COUNT(*) FROM task_dispatches")?,
-        dispatch_events: query_count(conn, "SELECT COUNT(*) FROM dispatch_events")?,
-        dispatch_queue: query_count(conn, "SELECT COUNT(*) FROM dispatch_queue")?,
-        card_retrospectives: query_count(conn, "SELECT COUNT(*) FROM card_retrospectives")?,
-        card_review_state: query_count(conn, "SELECT COUNT(*) FROM card_review_state")?,
-        review_decisions: query_count(conn, "SELECT COUNT(*) FROM review_decisions")?,
-        review_tuning_outcomes: query_count(conn, "SELECT COUNT(*) FROM review_tuning_outcomes")?,
-        messages: query_count(conn, "SELECT COUNT(*) FROM messages")?,
-        message_outbox: query_count(conn, "SELECT COUNT(*) FROM message_outbox")?,
-        meetings: query_count(conn, "SELECT COUNT(*) FROM meetings")?,
-        meeting_transcripts: query_count(conn, "SELECT COUNT(*) FROM meeting_transcripts")?,
-        pending_dm_replies: query_count(conn, "SELECT COUNT(*) FROM pending_dm_replies")?,
-        pipeline_stages: query_count(conn, "SELECT COUNT(*) FROM pipeline_stages")?,
-        pr_tracking: query_count(conn, "SELECT COUNT(*) FROM pr_tracking")?,
-        skills: query_count(conn, "SELECT COUNT(*) FROM skills")?,
-        skill_usage: query_count(conn, "SELECT COUNT(*) FROM skill_usage")?,
-        runtime_decisions: query_count(conn, "SELECT COUNT(*) FROM runtime_decisions")?,
-        session_termination_events: query_count(
+        auto_queue_phase_gates: query_count_if_table_exists(
             conn,
+            "auto_queue_phase_gates",
+            "SELECT COUNT(*) FROM auto_queue_phase_gates",
+        )?,
+        auto_queue_slots: query_count_if_table_exists(
+            conn,
+            "auto_queue_slots",
+            "SELECT COUNT(*) FROM auto_queue_slots",
+        )?,
+        task_dispatches: query_count_if_table_exists(
+            conn,
+            "task_dispatches",
+            "SELECT COUNT(*) FROM task_dispatches",
+        )?,
+        dispatch_events: query_count_if_table_exists(
+            conn,
+            "dispatch_events",
+            "SELECT COUNT(*) FROM dispatch_events",
+        )?,
+        dispatch_queue: query_count_if_table_exists(
+            conn,
+            "dispatch_queue",
+            "SELECT COUNT(*) FROM dispatch_queue",
+        )?,
+        card_retrospectives: query_count_if_table_exists(
+            conn,
+            "card_retrospectives",
+            "SELECT COUNT(*) FROM card_retrospectives",
+        )?,
+        card_review_state: query_count_if_table_exists(
+            conn,
+            "card_review_state",
+            "SELECT COUNT(*) FROM card_review_state",
+        )?,
+        review_decisions: query_count_if_table_exists(
+            conn,
+            "review_decisions",
+            "SELECT COUNT(*) FROM review_decisions",
+        )?,
+        review_tuning_outcomes: query_count_if_table_exists(
+            conn,
+            "review_tuning_outcomes",
+            "SELECT COUNT(*) FROM review_tuning_outcomes",
+        )?,
+        messages: query_count_if_table_exists(conn, "messages", "SELECT COUNT(*) FROM messages")?,
+        message_outbox: query_count_if_table_exists(
+            conn,
+            "message_outbox",
+            "SELECT COUNT(*) FROM message_outbox",
+        )?,
+        meetings: query_count_if_table_exists(conn, "meetings", "SELECT COUNT(*) FROM meetings")?,
+        meeting_transcripts: query_count_if_table_exists(
+            conn,
+            "meeting_transcripts",
+            "SELECT COUNT(*) FROM meeting_transcripts",
+        )?,
+        pending_dm_replies: query_count_if_table_exists(
+            conn,
+            "pending_dm_replies",
+            "SELECT COUNT(*) FROM pending_dm_replies",
+        )?,
+        pipeline_stages: query_count_if_table_exists(
+            conn,
+            "pipeline_stages",
+            "SELECT COUNT(*) FROM pipeline_stages",
+        )?,
+        pr_tracking: query_count_if_table_exists(
+            conn,
+            "pr_tracking",
+            "SELECT COUNT(*) FROM pr_tracking",
+        )?,
+        skills: query_count_if_table_exists(conn, "skills", "SELECT COUNT(*) FROM skills")?,
+        skill_usage: query_count_if_table_exists(
+            conn,
+            "skill_usage",
+            "SELECT COUNT(*) FROM skill_usage",
+        )?,
+        runtime_decisions: query_count_if_table_exists(
+            conn,
+            "runtime_decisions",
+            "SELECT COUNT(*) FROM runtime_decisions",
+        )?,
+        session_termination_events: query_count_if_table_exists(
+            conn,
+            "session_termination_events",
             "SELECT COUNT(*) FROM session_termination_events",
         )?,
-        sessions: query_count(conn, "SELECT COUNT(*) FROM sessions")?,
-        audit_logs: query_count(conn, "SELECT COUNT(*) FROM audit_logs")?,
-        session_transcripts: query_count(conn, "SELECT COUNT(*) FROM session_transcripts")?,
-        turns: query_count(conn, "SELECT COUNT(*) FROM turns")?,
-        departments: query_count(conn, "SELECT COUNT(*) FROM departments")?,
-        offices: query_count(conn, "SELECT COUNT(*) FROM offices")?,
-        office_agents: query_count(conn, "SELECT COUNT(*) FROM office_agents")?,
-        kv_meta: query_count(conn, "SELECT COUNT(*) FROM kv_meta")?,
-        api_friction_events: query_count(conn, "SELECT COUNT(*) FROM api_friction_events")?,
-        api_friction_issues: query_count(conn, "SELECT COUNT(*) FROM api_friction_issues")?,
-        memento_feedback_turn_stats: query_count(
+        sessions: query_count_if_table_exists(conn, "sessions", "SELECT COUNT(*) FROM sessions")?,
+        audit_logs: query_count_if_table_exists(
             conn,
+            "audit_logs",
+            "SELECT COUNT(*) FROM audit_logs",
+        )?,
+        session_transcripts: query_count_if_table_exists(
+            conn,
+            "session_transcripts",
+            "SELECT COUNT(*) FROM session_transcripts",
+        )?,
+        turns: query_count_if_table_exists(conn, "turns", "SELECT COUNT(*) FROM turns")?,
+        departments: query_count_if_table_exists(
+            conn,
+            "departments",
+            "SELECT COUNT(*) FROM departments",
+        )?,
+        offices: query_count_if_table_exists(conn, "offices", "SELECT COUNT(*) FROM offices")?,
+        office_agents: query_count_if_table_exists(
+            conn,
+            "office_agents",
+            "SELECT COUNT(*) FROM office_agents",
+        )?,
+        kv_meta: query_count_if_table_exists(conn, "kv_meta", "SELECT COUNT(*) FROM kv_meta")?,
+        api_friction_events: query_count_if_table_exists(
+            conn,
+            "api_friction_events",
+            "SELECT COUNT(*) FROM api_friction_events",
+        )?,
+        api_friction_issues: query_count_if_table_exists(
+            conn,
+            "api_friction_issues",
+            "SELECT COUNT(*) FROM api_friction_issues",
+        )?,
+        memento_feedback_turn_stats: query_count_if_table_exists(
+            conn,
+            "memento_feedback_turn_stats",
             "SELECT COUNT(*) FROM memento_feedback_turn_stats",
         )?,
-        rate_limit_cache: query_count(conn, "SELECT COUNT(*) FROM rate_limit_cache")?,
-        deferred_hooks: query_count(conn, "SELECT COUNT(*) FROM deferred_hooks")?,
-        active_dispatches: query_count(
+        rate_limit_cache: query_count_if_table_exists(
             conn,
+            "rate_limit_cache",
+            "SELECT COUNT(*) FROM rate_limit_cache",
+        )?,
+        deferred_hooks: query_count_if_table_exists(
+            conn,
+            "deferred_hooks",
+            "SELECT COUNT(*) FROM deferred_hooks",
+        )?,
+        active_dispatches: query_count_if_table_exists(
+            conn,
+            "task_dispatches",
             "SELECT COUNT(*) FROM task_dispatches WHERE status IN ('pending', 'dispatched')",
         )?,
-        working_sessions: query_count(
+        working_sessions: query_count_if_table_exists(
             conn,
+            "sessions",
             "SELECT COUNT(*) FROM sessions WHERE status = 'working'",
         )?,
-        open_dispatch_outbox: query_count(
+        open_dispatch_outbox: query_count_if_table_exists(
             conn,
+            "dispatch_outbox",
             "SELECT COUNT(*) FROM dispatch_outbox WHERE status <> 'done' OR processed_at IS NULL",
+        )?,
+        pending_message_outbox: query_count_if_table_exists(
+            conn,
+            "message_outbox",
+            "SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'",
         )?,
     })
 }
@@ -1261,6 +1577,34 @@ fn sqlite_cutover_counts(conn: &Connection) -> Result<SqliteCutoverCounts, Strin
 fn query_count(conn: &Connection, sql: &str) -> Result<i64, String> {
     conn.query_row(sql, [], |row| row.get(0))
         .map_err(|e| format!("sqlite count query failed: {e}"))
+}
+
+fn query_count_if_table_exists(conn: &Connection, table: &str, sql: &str) -> Result<i64, String> {
+    if sqlite_table_exists(conn, table)? {
+        query_count(conn, sql)
+    } else {
+        Ok(0)
+    }
+}
+
+fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name = ?1
+         )",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| format!("check sqlite table {table}: {e}"))
+}
+
+fn sqlite_column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0"))
+        .is_ok()
 }
 
 fn normalize_required_json(value: Option<String>, default: &str) -> String {
@@ -2346,12 +2690,45 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<MessageRow>, String> {
 }
 
 fn load_all_message_outbox(conn: &Connection) -> Result<Vec<MessageOutboxRow>, String> {
+    let reason_code_sql = if sqlite_column_exists(conn, "message_outbox", "reason_code") {
+        "reason_code".to_string()
+    } else {
+        "NULL AS reason_code".to_string()
+    };
+    let session_key_sql = if sqlite_column_exists(conn, "message_outbox", "session_key") {
+        "session_key".to_string()
+    } else {
+        "NULL AS session_key".to_string()
+    };
+    let claimed_at_sql = if sqlite_column_exists(conn, "message_outbox", "claimed_at") {
+        "claimed_at".to_string()
+    } else {
+        "NULL AS claimed_at".to_string()
+    };
+    let claim_owner_sql = if sqlite_column_exists(conn, "message_outbox", "claim_owner") {
+        "claim_owner".to_string()
+    } else {
+        "NULL AS claim_owner".to_string()
+    };
+    let sql = format!(
+        "SELECT id,
+                target,
+                content,
+                bot,
+                source,
+                {reason_code_sql},
+                {session_key_sql},
+                status,
+                created_at,
+                sent_at,
+                error,
+                {claimed_at_sql},
+                {claim_owner_sql}
+         FROM message_outbox
+         ORDER BY id ASC"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT id, target, content, bot, source, status, created_at, sent_at, error, claimed_at, claim_owner
-             FROM message_outbox
-             ORDER BY id ASC",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("prepare message_outbox export: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -2361,12 +2738,14 @@ fn load_all_message_outbox(conn: &Connection) -> Result<Vec<MessageOutboxRow>, S
                 content: row.get(2)?,
                 bot: row.get(3)?,
                 source: row.get(4)?,
-                status: row.get(5)?,
-                created_at: row.get(6)?,
-                sent_at: row.get(7)?,
-                error: row.get(8)?,
-                claimed_at: row.get(9)?,
-                claim_owner: row.get(10)?,
+                reason_code: row.get(5)?,
+                session_key: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+                sent_at: row.get(9)?,
+                error: row.get(10)?,
+                claimed_at: row.get(11)?,
+                claim_owner: row.get(12)?,
             })
         })
         .map_err(|e| format!("query message_outbox export: {e}"))?;
@@ -3209,6 +3588,12 @@ async fn load_pg_cutover_counts(pool: &PgPool) -> Result<PgCutoverCounts, String
     .fetch_one(pool)
     .await
     .map_err(|e| format!("count postgres open dispatch_outbox: {e}"))?;
+    let pending_message_outbox = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM message_outbox WHERE status NOT IN ('sent', 'failed')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("count postgres pending message_outbox: {e}"))?;
     Ok(PgCutoverCounts {
         agents: pg_table_count(pool, "agents").await?,
         github_repos: pg_table_count(pool, "github_repos").await?,
@@ -3258,6 +3643,7 @@ async fn load_pg_cutover_counts(pool: &PgPool) -> Result<PgCutoverCounts, String
         active_dispatches,
         working_sessions,
         open_dispatch_outbox,
+        pending_message_outbox,
     })
 }
 
@@ -4048,7 +4434,7 @@ async fn upsert_message_outbox_into_pg(
     for chunk in rows.chunks(INSERT_BATCH_SIZE) {
         let mut builder = QueryBuilder::<Postgres>::new(
             "INSERT INTO message_outbox (
-                id, target, content, bot, source, status, created_at, sent_at, error, claimed_at, claim_owner
+                id, target, content, bot, source, reason_code, session_key, status, created_at, sent_at, error, claimed_at, claim_owner
              ) ",
         );
         builder.push_values(chunk, |mut b, row| {
@@ -4057,6 +4443,8 @@ async fn upsert_message_outbox_into_pg(
             b.push_bind(&row.content);
             b.push_bind(&row.bot);
             b.push_bind(&row.source);
+            b.push_bind(&row.reason_code);
+            b.push_bind(&row.session_key);
             b.push_bind(&row.status);
             b.push_unseparated(", CAST(")
                 .push_bind_unseparated(&row.created_at)
@@ -4076,6 +4464,8 @@ async fn upsert_message_outbox_into_pg(
                   content = EXCLUDED.content,
                   bot = EXCLUDED.bot,
                   source = EXCLUDED.source,
+                  reason_code = EXCLUDED.reason_code,
+                  session_key = EXCLUDED.session_key,
                   status = EXCLUDED.status,
                   created_at = EXCLUDED.created_at,
                   sent_at = EXCLUDED.sent_at,
@@ -5247,9 +5637,10 @@ async fn import_full_state_into_pg(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentRow, AuditLogRow, DispatchOutboxRow, KanbanCardRow, PostgresCutoverArgs, SessionRow,
-        SessionTranscriptRow, SqliteCutoverCounts, TaskDispatchRow, advance_pg_serial_sequences,
-        cutover_blocker, import_full_state_into_pg, import_history_into_pg,
+        AgentRow, AuditLogRow, DispatchOutboxRow, KanbanCardRow, PidFileSignal,
+        PostgresCutoverArgs, RuntimeActiveStatus, SessionRow, SessionTranscriptRow,
+        SqliteCutoverCounts, TaskDispatchRow, TcpSignal, advance_pg_serial_sequences,
+        cutover_blocker, detect_runtime_active, import_full_state_into_pg, import_history_into_pg,
         import_live_state_into_pg, load_pg_cutover_counts, load_session_transcripts,
         load_sqlite_cutover_snapshot, sqlite_cutover_counts, write_archive_files,
     };
@@ -5257,6 +5648,44 @@ mod tests {
     use sqlx::{PgPool, Row};
     use std::path::Path;
     use tempfile::TempDir;
+
+    fn idle_runtime_status() -> RuntimeActiveStatus {
+        RuntimeActiveStatus {
+            active: false,
+            pid_file: Some(PidFileSignal {
+                path: "/nonexistent/runtime/dcserver.pid".to_string(),
+                exists: false,
+                ..Default::default()
+            }),
+            tcp: Some(TcpSignal {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                listening: false,
+                error: None,
+            }),
+            overridden: false,
+        }
+    }
+
+    fn active_runtime_status() -> RuntimeActiveStatus {
+        RuntimeActiveStatus {
+            active: true,
+            pid_file: Some(PidFileSignal {
+                path: "/tmp/runtime/dcserver.pid".to_string(),
+                exists: true,
+                pid: Some(std::process::id()),
+                process_alive: true,
+                error: None,
+            }),
+            tcp: Some(TcpSignal {
+                host: "127.0.0.1".to_string(),
+                port: 65535,
+                listening: false,
+                error: None,
+            }),
+            overridden: false,
+        }
+    }
 
     struct TestPostgresDb {
         admin_url: String,
@@ -5282,7 +5711,7 @@ mod tests {
         }
 
         async fn connect_and_migrate(&self) -> PgPool {
-            let pool = PgPool::connect(&format!("{}/{}", base_database_url(), self.database_name))
+            let pool = PgPool::connect(&database_url(&self.database_name))
                 .await
                 .expect("connect postgres test db");
             crate::db::postgres::migrate(&pool)
@@ -5316,11 +5745,11 @@ mod tests {
         }
     }
 
-    fn base_database_url() -> String {
+    fn database_url(db_name: &str) -> String {
         if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
             let trimmed = base.trim();
             if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
+                return format!("{}/{}", trimmed.trim_end_matches('/'), db_name);
             }
         }
 
@@ -5339,15 +5768,33 @@ mod tests {
         let host = std::env::var("PGHOST")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
+            .unwrap_or_else(|| {
+                if Path::new("/private/tmp/.s.PGSQL.5432").exists() {
+                    "/private/tmp".to_string()
+                } else {
+                    "localhost".to_string()
+                }
+            });
         let port = std::env::var("PGPORT")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "5432".to_string());
 
-        match password {
-            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
-            None => format!("postgresql://{user}@{host}:{port}"),
+        if host.starts_with('/') {
+            let encoded_host = host.replace('/', "%2F");
+            match password {
+                Some(password) => format!(
+                    "postgresql://{user}:{password}@localhost:{port}/{db_name}?host={encoded_host}"
+                ),
+                None => {
+                    format!("postgresql://{user}@localhost:{port}/{db_name}?host={encoded_host}")
+                }
+            }
+        } else {
+            match password {
+                Some(password) => format!("postgresql://{user}:{password}@{host}:{port}/{db_name}"),
+                None => format!("postgresql://{user}@{host}:{port}/{db_name}"),
+            }
         }
     }
 
@@ -5356,7 +5803,7 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
-        format!("{}/{}", base_database_url(), admin_db)
+        database_url(&admin_db)
     }
 
     fn seed_full_cutover_fixture(conn: &Connection) {
@@ -5607,11 +6054,27 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'hello', 'announce', 'system', 'pending')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'sent already', 'announce', 'system', 'sent')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source, status) VALUES ('thread-cutover', 'failed perm', 'announce', 'system', 'failed')",
+            [],
+        )
+        .unwrap();
 
         let counts = sqlite_cutover_counts(&conn).expect("count sqlite cutover state");
         assert_eq!(counts.active_dispatches, 1);
         assert_eq!(counts.working_sessions, 1);
         assert_eq!(counts.open_dispatch_outbox, 1);
+        assert_eq!(counts.pending_message_outbox, 1);
         assert!(counts.has_live_state());
     }
 
@@ -5629,7 +6092,8 @@ mod tests {
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("live state blocker");
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("live state blocker");
         assert!(blocker.contains("archive-only cutover would lose it"));
     }
 
@@ -5643,7 +6107,87 @@ mod tests {
             allow_runtime_active: false,
         };
 
-        assert!(cutover_blocker(&args, &SqliteCutoverCounts::default()).is_none());
+        assert!(
+            cutover_blocker(
+                &args,
+                &SqliteCutoverCounts::default(),
+                Some(&idle_runtime_status())
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn archive_only_cutover_blocks_when_only_pending_messages_remain() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 3,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("message_outbox blocker");
+        assert!(blocker.contains("archive-only cutover would lose it"));
+    }
+
+    #[test]
+    fn archive_only_cutover_still_blocks_pending_messages_even_with_override() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: true,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 1,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts, Some(&idle_runtime_status()))
+            .expect("archive-only ignores unsent-message override");
+        assert!(blocker.contains("archive-only cutover would lose it"));
+    }
+
+    #[test]
+    fn archive_only_cutover_blocks_when_runtime_active_without_override() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+
+        let blocker = cutover_blocker(
+            &args,
+            &SqliteCutoverCounts::default(),
+            Some(&active_runtime_status()),
+        )
+        .expect("runtime-active blocker");
+        assert!(blocker.contains("dcserver runtime appears active"));
+        assert!(blocker.contains("--allow-runtime-active"));
+    }
+
+    #[test]
+    fn archive_only_cutover_allows_runtime_active_when_override_set() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: Some("/tmp/cutover-archive".to_string()),
+            skip_pg_import: true,
+            allow_unsent_messages: false,
+            allow_runtime_active: true,
+        };
+        let mut runtime = active_runtime_status();
+        runtime.overridden = true;
+
+        assert!(cutover_blocker(&args, &SqliteCutoverCounts::default(), Some(&runtime)).is_none());
     }
 
     #[test]
@@ -5660,8 +6204,83 @@ mod tests {
             ..Default::default()
         };
 
-        let blocker = cutover_blocker(&args, &counts).expect("dispatch_outbox blocker");
+        let blocker = cutover_blocker(&args, &counts, None).expect("dispatch_outbox blocker");
         assert!(blocker.contains("drain outbox"));
+    }
+
+    #[test]
+    fn pg_cutover_blocks_when_message_outbox_has_pending_rows() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 4,
+            ..Default::default()
+        };
+
+        let blocker = cutover_blocker(&args, &counts, None).expect("message_outbox blocker");
+        assert!(blocker.contains("4 pending message_outbox row(s)"));
+        assert!(blocker.contains("--allow-unsent-messages"));
+    }
+
+    #[test]
+    fn pg_cutover_proceeds_when_operator_acknowledges_unsent_messages() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: true,
+            allow_runtime_active: false,
+        };
+        let counts = SqliteCutoverCounts {
+            pending_message_outbox: 7,
+            ..Default::default()
+        };
+
+        assert!(cutover_blocker(&args, &counts, None).is_none());
+    }
+
+    #[test]
+    fn full_pg_cutover_ignores_runtime_active_signal() {
+        let args = PostgresCutoverArgs {
+            dry_run: false,
+            archive_dir: None,
+            skip_pg_import: false,
+            allow_unsent_messages: false,
+            allow_runtime_active: false,
+        };
+
+        assert!(
+            cutover_blocker(
+                &args,
+                &SqliteCutoverCounts::default(),
+                Some(&active_runtime_status())
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn detect_runtime_active_flags_alive_pid_file() {
+        let temp = TempDir::new().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::write(
+            runtime_dir.join("dcserver.pid"),
+            std::process::id().to_string(),
+        )
+        .expect("write pid file");
+
+        let status = detect_runtime_active(Some(temp.path()), "127.0.0.1", 1, false);
+        assert!(status.active);
+        let pid = status.pid_file.as_ref().expect("pid signal");
+        assert!(pid.exists);
+        assert!(pid.process_alive);
+        assert_eq!(pid.pid, Some(std::process::id()));
     }
 
     #[test]
@@ -5705,6 +6324,40 @@ mod tests {
         assert_eq!(snapshot.agents.len(), 1);
         assert_eq!(snapshot.kanban_cards[0].id, "card-cutover");
         assert_eq!(snapshot.agents[0].id, "project-agentdesk");
+    }
+
+    #[test]
+    fn load_sqlite_cutover_snapshot_tolerates_missing_recent_tables() {
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
+        crate::db::schema::migrate(&conn).expect("sqlite migrate");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE auto_queue_phase_gates;
+             DROP TABLE auto_queue_entry_dispatch_history;
+             DROP TABLE auto_queue_entry_transitions;
+             DROP TABLE auto_queue_entries;
+             DROP TABLE auto_queue_slots;
+             DROP TABLE auto_queue_runs;
+             PRAGMA foreign_keys = ON;",
+        )
+        .expect("drop recent auto_queue tables");
+
+        let counts = sqlite_cutover_counts(&conn).expect("count older sqlite snapshot");
+        assert_eq!(counts.auto_queue_runs, 0);
+        assert_eq!(counts.auto_queue_entries, 0);
+        assert_eq!(counts.auto_queue_entry_transitions, 0);
+        assert_eq!(counts.auto_queue_entry_dispatch_history, 0);
+        assert_eq!(counts.auto_queue_phase_gates, 0);
+        assert_eq!(counts.auto_queue_slots, 0);
+
+        let snapshot =
+            load_sqlite_cutover_snapshot(&conn, true, true).expect("load older sqlite snapshot");
+        assert!(snapshot.auto_queue_runs.is_empty());
+        assert!(snapshot.auto_queue_entries.is_empty());
+        assert!(snapshot.auto_queue_entry_transitions.is_empty());
+        assert!(snapshot.auto_queue_entry_dispatch_history.is_empty());
+        assert!(snapshot.auto_queue_phase_gates.is_empty());
+        assert!(snapshot.auto_queue_slots.is_empty());
     }
 
     #[tokio::test]
@@ -6137,6 +6790,27 @@ mod tests {
         assert_eq!(
             summary.session_transcripts_upserted,
             sqlite_table_count(&conn, "session_transcripts")
+        );
+
+        let message_outbox = sqlx::query(
+            "SELECT reason_code, session_key
+             FROM message_outbox
+             WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load imported message_outbox row");
+        assert_eq!(
+            message_outbox
+                .get::<Option<String>, _>("reason_code")
+                .as_deref(),
+            Some("test")
+        );
+        assert_eq!(
+            message_outbox
+                .get::<Option<String>, _>("session_key")
+                .as_deref(),
+            Some("session-1")
         );
 
         pool.close().await;
