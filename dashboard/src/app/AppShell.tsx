@@ -74,6 +74,7 @@ import {
 
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const DashboardPageView = lazy(() => import("../components/DashboardPageView"));
+const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const OfficeManagerView = lazy(() => import("../components/OfficeManagerView"));
@@ -1050,29 +1051,7 @@ export default function AppShell({
               <Route
                 path="/stats"
                 element={
-                  <DashboardPageView
-                    stats={stats}
-                    agents={agents}
-                    sessions={visibleDispatchedSessions}
-                    meetings={roundTableMeetings}
-                    settings={settings}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                    onOpenKanbanSignal={(signal) =>
-                      navigateToRoute("/kanban", {
-                        kanbanFocus: signal,
-                      })
-                    }
-                    onOpenDispatchSessions={() =>
-                      navigateToRoute("/agents", { agentsTab: "backlog" })
-                    }
-                    onOpenSettings={() => navigateToRoute("/settings")}
-                    onRefreshMeetings={() =>
-                      api
-                        .getRoundTableMeetings()
-                        .then(setRoundTableMeetings)
-                        .catch(() => {})
-                    }
-                  />
+                  <StatsPageView settings={settings} />
                 }
               />
               <Route
