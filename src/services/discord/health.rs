@@ -4,11 +4,12 @@ use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
 use serde::Serialize;
-use serenity::ChannelId;
+use serenity::{ChannelId, CreateMessage};
 
+use super::formatting::build_long_message_attachment;
 use super::{
-    SharedData, clear_inflight_state, mailbox_cancel_active_turn, mailbox_clear_channel,
-    mailbox_clear_recovery_marker, mailbox_finish_turn,
+    DISCORD_MSG_LIMIT, SharedData, clear_inflight_state, mailbox_cancel_active_turn,
+    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
 };
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
@@ -1438,17 +1439,44 @@ pub async fn send_message(
         Err(resp) => return resp,
     };
 
-    match channel_id.say(&*http, content).await {
+    // Overflow path: any content beyond DISCORD_MSG_LIMIT is delivered as an
+    // inline preview + `.txt` attachment so recipient agents still see
+    // opening context without the 2000-char split turning into two messages.
+    let send_result = if content.len() <= DISCORD_MSG_LIMIT {
+        channel_id
+            .send_message(&*http, CreateMessage::new().content(content))
+            .await
+    } else {
+        let (preview, attachment) = build_long_message_attachment(content);
+        channel_id
+            .send_message(
+                &*http,
+                CreateMessage::new().content(preview).add_file(attachment),
+            )
+            .await
+    };
+
+    match send_result {
         Ok(_) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let emoji = if bot == "notify" { "🔔" } else { "📨" };
-            tracing::info!("  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot})");
+            let attached = if content.len() > DISCORD_MSG_LIMIT {
+                " +attach"
+            } else {
+                ""
+            };
+            tracing::info!(
+                "  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot}{attached})"
+            );
             let mut response = serde_json::json!({
                 "ok": true,
                 "target": format!("channel:{channel_id}"),
                 "source": source,
                 "bot": bot,
             });
+            if content.len() > DISCORD_MSG_LIMIT {
+                response["delivery"] = serde_json::Value::String("inline_preview+txt".to_string());
+            }
             if target != format!("channel:{channel_id}") {
                 response["requested_target"] = serde_json::Value::String(target.to_string());
             }
