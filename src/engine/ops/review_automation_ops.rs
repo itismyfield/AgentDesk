@@ -312,7 +312,37 @@ async fn handoff_create_pr_pg(
             .await?
             .as_deref()
         {
-            Some("pending") | Some("dispatched") => {}
+            Some("pending") | Some("dispatched") => {
+                refresh_pg_pr_tracking_reuse_state(&mut tx, payload, &generation, current_round)
+                    .await?;
+                sqlx::query(
+                    "UPDATE kanban_cards
+                     SET blocked_reason = 'pr:creating',
+                         updated_at = NOW()
+                     WHERE id = $1",
+                )
+                .bind(&payload.card_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "refresh postgres blocked_reason for {}: {e}",
+                        payload.card_id
+                    )
+                })?;
+                tx.commit().await.map_err(|e| {
+                    format!(
+                        "commit postgres create-pr reuse for {}: {e}",
+                        payload.card_id
+                    )
+                })?;
+                return Ok(json!({
+                    "ok": true,
+                    "reused": true,
+                    "dispatch_id": dispatch_id,
+                    "generation": generation,
+                }));
+            }
             Some("completed") => {
                 tx.commit().await.map_err(|e| {
                     format!(
@@ -333,34 +363,6 @@ async fn handoff_create_pr_pg(
                 // instead of rewinding terminal or failed state.
             }
         }
-        refresh_pg_pr_tracking_reuse_state(&mut tx, payload, &generation, current_round).await?;
-        sqlx::query(
-            "UPDATE kanban_cards
-             SET blocked_reason = 'pr:creating',
-                 updated_at = NOW()
-             WHERE id = $1",
-        )
-        .bind(&payload.card_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            format!(
-                "refresh postgres blocked_reason for {}: {e}",
-                payload.card_id
-            )
-        })?;
-        tx.commit().await.map_err(|e| {
-            format!(
-                "commit postgres create-pr reuse for {}: {e}",
-                payload.card_id
-            )
-        })?;
-        return Ok(json!({
-            "ok": true,
-            "reused": true,
-            "dispatch_id": dispatch_id,
-            "generation": generation,
-        }));
     }
 
     let card_exists = sqlx::query_scalar::<_, bool>(
@@ -616,7 +618,21 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
         lookup_active_create_pr_dispatch(&tx, &payload.card_id)?
     {
         match load_dispatch_status(&tx, &dispatch_id)?.as_deref() {
-            Some("pending") | Some("dispatched") => {}
+            Some("pending") | Some("dispatched") => {
+                refresh_pr_tracking_reuse_state(&tx, payload, &generation, current_round)?;
+                tx.execute(
+                    "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') \
+                     WHERE id = ?1",
+                    [&payload.card_id],
+                )?;
+                tx.commit()?;
+                return Ok(json!({
+                    "ok": true,
+                    "reused": true,
+                    "dispatch_id": dispatch_id,
+                    "generation": generation,
+                }));
+            }
             Some("completed") => {
                 tx.commit()?;
                 return Ok(json!({
@@ -631,19 +647,6 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
                 // state back into create-pr reuse for a completed or failed lane.
             }
         }
-        refresh_pr_tracking_reuse_state(&tx, payload, &generation, current_round)?;
-        tx.execute(
-            "UPDATE kanban_cards SET blocked_reason = 'pr:creating', updated_at = datetime('now') \
-             WHERE id = ?1",
-            [&payload.card_id],
-        )?;
-        tx.commit()?;
-        return Ok(json!({
-            "ok": true,
-            "reused": true,
-            "dispatch_id": dispatch_id,
-            "generation": generation,
-        }));
     }
 
     // 3. Read card row for pipeline resolution + current status.
