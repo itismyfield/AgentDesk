@@ -56,7 +56,7 @@
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::run` | `src/cli/run.rs` | 389 |  |
 | `cli::utils` | `src/cli/utils.rs` | 271 |  |
-| `config` | `src/config.rs` | 1696 | giant-file |
+| `config` | `src/config.rs` | 1697 | giant-file |
 | `crate` | `src/main.rs` | 42 |  |
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 240 |  |
@@ -197,7 +197,7 @@
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 640 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1037 | giant-file |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 62 |  |
-| `services::discord::commands::mcp_reload` | `src/services/discord/commands/mcp_reload.rs` | 220 |  |
+| `services::discord::commands::mcp_reload` | `src/services/discord/commands/mcp_reload.rs` | 218 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
@@ -214,7 +214,7 @@
 | `services::discord::health` | `src/services/discord/health.rs` | 2072 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 381 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 280 |  |
-| `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 293 |  |
+| `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 344 |  |
 | `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3433 | giant-file |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1081 | giant-file |
