@@ -1775,7 +1775,8 @@ pub(super) fn spawn_turn_bridge(
                     duration_ms: Some(turn_duration_ms(turn_start)),
                 },
             )
-            .await {
+            .await
+            {
                 Ok(persisted) => {
                     transcript_persisted = persisted;
                 }

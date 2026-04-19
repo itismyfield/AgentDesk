@@ -18,6 +18,13 @@ struct MemoryInjectionPlan<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnRecallMode {
+    Bootstrap,
+    Query,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionResetReason {
     IdleExpired,
     AssistantTurnCap,
@@ -65,13 +72,15 @@ fn build_memory_injection_plan<'a>(
 fn recall_mode_for_turn(
     memory_settings: &settings::ResolvedMemorySettings,
     memento_context_loaded: bool,
-) -> RecallMode {
+) -> TurnRecallMode {
     if memory_settings.backend != settings::MemoryBackendKind::Memento {
-        RecallMode::Query
-    } else if !memory_settings.query_recall_after_bootstrap || !memento_context_loaded {
-        RecallMode::Bootstrap
+        TurnRecallMode::Query
+    } else if !memento_context_loaded {
+        TurnRecallMode::Bootstrap
+    } else if memory_settings.query_recall_after_bootstrap {
+        TurnRecallMode::Query
     } else {
-        RecallMode::Query
+        TurnRecallMode::Skip
     }
 }
 
@@ -401,19 +410,29 @@ pub(in crate::services::discord) async fn start_headless_turn(
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let recall_mode = recall_mode_for_turn(&memory_settings, memento_context_loaded);
-    let memory_recall = memory_backend
-        .recall(RecallRequest {
-            mode: recall_mode,
-            provider: provider.clone(),
-            role_id: resolve_memory_role_id(role_binding.as_ref()),
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
-            dispatch_profile,
-            user_text: prompt.to_string(),
-        })
-        .await;
+    let memory_recall = match recall_mode {
+        TurnRecallMode::Skip => RecallResponse::default(),
+        TurnRecallMode::Bootstrap | TurnRecallMode::Query => {
+            let mode = match recall_mode {
+                TurnRecallMode::Bootstrap => RecallMode::Bootstrap,
+                TurnRecallMode::Query => RecallMode::Query,
+                TurnRecallMode::Skip => unreachable!("handled above"),
+            };
+            memory_backend
+                .recall(RecallRequest {
+                    mode,
+                    provider: provider.clone(),
+                    role_id: resolve_memory_role_id(role_binding.as_ref()),
+                    channel_id: channel_id.get(),
+                    session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+                    dispatch_profile,
+                    user_text: prompt.to_string(),
+                })
+                .await
+        }
+    };
     if memory_settings.backend == settings::MemoryBackendKind::Memento
-        && recall_mode == RecallMode::Bootstrap
+        && recall_mode == TurnRecallMode::Bootstrap
     {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -1950,19 +1969,29 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let recall_mode = recall_mode_for_turn(&memory_settings, memento_context_loaded);
-    let memory_recall = memory_backend
-        .recall(RecallRequest {
-            mode: recall_mode,
-            provider: provider.clone(),
-            role_id: resolve_memory_role_id(role_binding.as_ref()),
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
-            dispatch_profile,
-            user_text: user_text.to_string(),
-        })
-        .await;
+    let memory_recall = match recall_mode {
+        TurnRecallMode::Skip => RecallResponse::default(),
+        TurnRecallMode::Bootstrap | TurnRecallMode::Query => {
+            let mode = match recall_mode {
+                TurnRecallMode::Bootstrap => RecallMode::Bootstrap,
+                TurnRecallMode::Query => RecallMode::Query,
+                TurnRecallMode::Skip => unreachable!("handled above"),
+            };
+            memory_backend
+                .recall(RecallRequest {
+                    mode,
+                    provider: provider.clone(),
+                    role_id: resolve_memory_role_id(role_binding.as_ref()),
+                    channel_id: channel_id.get(),
+                    session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+                    dispatch_profile,
+                    user_text: user_text.to_string(),
+                })
+                .await
+        }
+    };
     if memory_settings.backend == settings::MemoryBackendKind::Memento
-        && recall_mode == RecallMode::Bootstrap
+        && recall_mode == TurnRecallMode::Bootstrap
     {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -4212,16 +4241,19 @@ mod tests {
     }
 
     #[test]
-    fn recall_mode_defaults_to_bootstrap_for_memento_when_query_recall_disabled() {
+    fn recall_mode_bootstraps_once_then_skips_for_memento_when_query_recall_disabled() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..settings::ResolvedMemorySettings::default()
         };
         let file = settings::ResolvedMemorySettings::default();
 
-        assert_eq!(recall_mode_for_turn(&memento, false), RecallMode::Bootstrap);
-        assert_eq!(recall_mode_for_turn(&memento, true), RecallMode::Bootstrap);
-        assert_eq!(recall_mode_for_turn(&file, true), RecallMode::Query);
+        assert_eq!(
+            recall_mode_for_turn(&memento, false),
+            TurnRecallMode::Bootstrap
+        );
+        assert_eq!(recall_mode_for_turn(&memento, true), TurnRecallMode::Skip);
+        assert_eq!(recall_mode_for_turn(&file, true), TurnRecallMode::Query);
     }
 
     #[test]
@@ -4232,8 +4264,11 @@ mod tests {
             ..settings::ResolvedMemorySettings::default()
         };
 
-        assert_eq!(recall_mode_for_turn(&memento, false), RecallMode::Bootstrap);
-        assert_eq!(recall_mode_for_turn(&memento, true), RecallMode::Query);
+        assert_eq!(
+            recall_mode_for_turn(&memento, false),
+            TurnRecallMode::Bootstrap
+        );
+        assert_eq!(recall_mode_for_turn(&memento, true), TurnRecallMode::Query);
     }
 
     #[test]
@@ -4266,13 +4301,13 @@ mod tests {
         session.note_memento_context_loaded();
         assert_eq!(
             recall_mode_for_turn(&memento, session.memento_context_loaded),
-            RecallMode::Query
+            TurnRecallMode::Query
         );
 
         session.clear_provider_session();
         assert_eq!(
             recall_mode_for_turn(&memento, session.memento_context_loaded),
-            RecallMode::Bootstrap
+            TurnRecallMode::Bootstrap
         );
     }
 

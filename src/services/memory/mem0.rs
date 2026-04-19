@@ -497,8 +497,8 @@ impl MemoryBackend for Mem0Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::memory::RecallMode;
     use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
+    use crate::services::memory::RecallMode;
     use crate::services::provider::ProviderKind;
     use std::time::Duration;
 

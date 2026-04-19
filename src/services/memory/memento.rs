@@ -357,10 +357,7 @@ impl MementoBackend {
         args.insert("sessionId".to_string(), json!(request.session_id));
         args.insert("excludeSeen".to_string(), json!(true));
         args.insert("pageSize".to_string(), json!(QUERY_RECALL_PAGE_SIZE));
-        args.insert(
-            "tokenBudget".to_string(),
-            json!(QUERY_RECALL_TOKEN_BUDGET),
-        );
+        args.insert("tokenBudget".to_string(), json!(QUERY_RECALL_TOKEN_BUDGET));
 
         let result = self
             .call_tool(config, "recall", Value::Object(args))
@@ -1459,7 +1456,10 @@ mod tests {
         }))
         .expect("formatted recall should exist");
 
-        assert_eq!(formatted.matches("Review prior deployment failure").count(), 1);
+        assert_eq!(
+            formatted.matches("Review prior deployment failure").count(),
+            1
+        );
         assert!(formatted.contains("Prefer the latest verified fix path."));
     }
 
@@ -1673,10 +1673,14 @@ mod tests {
         assert!(requests[1].contains("\"sessionId\":\"session-1\""));
         assert!(requests[1].contains("\"excludeSeen\":true"));
         assert!(requests[1].contains("\"text\":\"How should I deploy the service safely?\""));
-        assert!(requests[1].contains("\"contextText\":\"How should I deploy the service safely?\""));
+        assert!(
+            requests[1].contains("\"contextText\":\"How should I deploy the service safely?\"")
+        );
 
         let external_recall = recall.external_recall.unwrap_or_default();
-        assert!(external_recall.contains("Use deploy script before touching the live runtime tree"));
+        assert!(
+            external_recall.contains("Use deploy script before touching the live runtime tree")
+        );
         assert!(external_recall.contains("Scope query recall to the active session."));
         assert!(recall.warnings.is_empty());
         assert_eq!(

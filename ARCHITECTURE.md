@@ -201,6 +201,7 @@ src/
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
 │   │   │   ├── memory_lifecycle.rs
+│   │   │   ├── memory_postprocess.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
@@ -247,6 +248,8 @@ src/
 │   │   ├── tmux_reaper.rs
 │   │   └── tmux_restart_handoff.rs
 │   ├── memory/
+│   │   ├── auto_remember.rs
+│   │   ├── auto_remember_store.rs
 │   │   ├── local.rs
 │   │   ├── mem0.rs
 │   │   ├── memento.rs
