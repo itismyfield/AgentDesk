@@ -1392,10 +1392,12 @@ mod tests {
     }
 
     // Helper used by the atomicity-focused tests below. Seeds a card + active
-    // create-pr dispatch + pr_tracking row so `reseed_pr_tracking_pg` has
-    // state to cancel and rewrite. Returns the dispatch id and the original
-    // generation string on pr_tracking.
-    async fn seed_reseed_fixture(pool: &sqlx::PgPool, card_id: &str) -> (String, String) {
+    // create-pr dispatch + pr_tracking row + a dispatched auto_queue entry tied
+    // to that dispatch so `reseed_pr_tracking_pg` has state to cancel/reset and
+    // rewrite. Returns the dispatch id, the original pr_tracking generation,
+    // and the seeded auto_queue entry id (so the rollback test can verify the
+    // queue half also rolls back atomically).
+    async fn seed_reseed_fixture(pool: &sqlx::PgPool, card_id: &str) -> (String, String, String) {
         sqlx::query(
             "INSERT INTO kanban_cards (id, title, status, repo_id)
              VALUES ($1, $2, 'review', 'repo-1')",
@@ -1440,7 +1442,39 @@ mod tests {
         .await
         .expect("insert initial pr_tracking row");
 
-        (dispatch_id, original_generation)
+        // Seed an auto_queue run + entry tied to the dispatch so the cancel
+        // helper exercises its queue-reset half (it resets status and clears
+        // dispatch_id / slot_index, and inserts an auto_queue_entry_transitions
+        // row). The atomicity tests assert these mutations also roll back when
+        // the caller-owned tx is aborted.
+        let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (
+                id, agent_id, status, total_entries, batch_phase_max,
+                created_at, updated_at
+             ) VALUES ($1, 'project-agentdesk', 'running', 1, 1, NOW(), NOW())",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        .expect("insert auto_queue run");
+
+        let entry_id = format!("entry-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, status, dispatch_id, slot_index,
+                batch_phase, thread_group, dispatched_at, created_at, updated_at
+             ) VALUES ($1, $2, $3, 'dispatched', $4, 0, 1, 1, NOW(), NOW(), NOW())",
+        )
+        .bind(&entry_id)
+        .bind(&run_id)
+        .bind(card_id)
+        .bind(&dispatch_id)
+        .execute(pool)
+        .await
+        .expect("insert dispatched auto_queue entry");
+
+        (dispatch_id, original_generation, entry_id)
     }
 
     // Regression guard for #766: a successful reseed leaves dispatch cancelled
@@ -1453,7 +1487,9 @@ mod tests {
         let pool = test_db.migrate().await;
 
         let card_id = "card-reseed-atomic-ok";
-        let (dispatch_id, original_generation) = seed_reseed_fixture(&pool, card_id).await;
+        let (dispatch_id, original_generation, entry_id) =
+            seed_reseed_fixture(&pool, card_id).await;
+        let _ = entry_id; // success path doesn't assert per-entry — see rollback test
 
         let reseed = reseed_pr_tracking_pg(&pool, card_id)
             .await
@@ -1495,7 +1531,8 @@ mod tests {
         let pool = test_db.migrate().await;
 
         let card_id = "card-reseed-atomic-rollback";
-        let (dispatch_id, original_generation) = seed_reseed_fixture(&pool, card_id).await;
+        let (dispatch_id, original_generation, entry_id) =
+            seed_reseed_fixture(&pool, card_id).await;
 
         let mut tx = pool.begin().await.expect("begin outer tx");
         let changed = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
@@ -1544,6 +1581,45 @@ mod tests {
         assert_eq!(
             cancel_event_count, 0,
             "rollback must also discard the dispatch_events audit row"
+        );
+
+        // Auto-queue half of the helper must roll back too: the entry stays
+        // 'dispatched' with its dispatch_id intact, and no
+        // auto_queue_entry_transitions row was persisted for the cancel.
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = $1")
+                .bind(&entry_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load auto_queue entry status after rollback");
+        assert_eq!(
+            entry_status, "dispatched",
+            "rollback must revert the auto_queue entry status reset"
+        );
+
+        let entry_dispatch_id: Option<String> =
+            sqlx::query_scalar("SELECT dispatch_id FROM auto_queue_entries WHERE id = $1")
+                .bind(&entry_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load auto_queue entry dispatch_id after rollback");
+        assert_eq!(
+            entry_dispatch_id.as_deref(),
+            Some(dispatch_id.as_str()),
+            "rollback must revert the auto_queue entry dispatch_id clear"
+        );
+
+        let queue_transition_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auto_queue_entry_transitions
+             WHERE entry_id = $1 AND trigger_source = 'dispatch_cancel'",
+        )
+        .bind(&entry_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count auto_queue_entry_transitions after rollback");
+        assert_eq!(
+            queue_transition_count, 0,
+            "rollback must also discard the auto_queue_entry_transitions row"
         );
 
         pool.close().await;
