@@ -155,8 +155,8 @@ where
 }
 
 fn parse_session_key(session_key: &str) -> Option<(String, String)> {
-    let (host, tmux_name) = session_key.split_once(':')?;
-    let host = normalize_host(host)?;
+    let (host_prefix, tmux_name) = session_key.split_once(':')?;
+    let host = host_prefix.rsplit('/').next().and_then(normalize_host)?;
     let tmux_name = tmux_name.trim();
     if tmux_name.is_empty() {
         return None;
@@ -262,6 +262,31 @@ mod tests {
             Some("mac-mini:AgentDesk-codex-adk-dash-cdx"),
             Some("working"),
             Some("dispatch-3"),
+            Some(
+                &(now - Duration::seconds(5))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            ),
+            now,
+            &mut probe_live,
+            &mut probe_ready,
+        );
+
+        assert_eq!(state.status, "idle");
+        assert_eq!(state.active_dispatch_id, None);
+        assert!(!state.is_working);
+    }
+
+    #[test]
+    fn prefixed_local_ready_for_input_tmux_session_becomes_idle() {
+        let now = Utc::now();
+        let mut probe_live = |_name: &str| true;
+        let mut probe_ready = |_name: &str| true;
+        let state = resolve_effective_state_with(
+            &local_aliases(),
+            Some("codex/discord_key/mac-mini:AgentDesk-codex-adk-dash-cdx"),
+            Some("working"),
+            Some("dispatch-3b"),
             Some(
                 &(now - Duration::seconds(5))
                     .format("%Y-%m-%d %H:%M:%S")
