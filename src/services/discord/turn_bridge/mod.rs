@@ -37,6 +37,7 @@ pub(super) use recovery_text::{
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
 pub(super) use tmux_runtime::cancel_active_token;
+pub(super) use tmux_runtime::planned_restart_inflight_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 
 // Re-export pub(crate) items

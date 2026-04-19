@@ -4,7 +4,7 @@ use super::settings::{
     load_last_remote_profile, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
-use super::turn_bridge::stale_inflight_message;
+use super::turn_bridge::{planned_restart_inflight_message, stale_inflight_message};
 use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
@@ -1115,7 +1115,11 @@ pub(super) async fn restore_inflight_turns(
                 state.last_offset
             );
             let final_text = if state.full_response.trim().is_empty() {
-                stale_inflight_message("")
+                if state.planned_restart {
+                    planned_restart_inflight_message("")
+                } else {
+                    stale_inflight_message("")
+                }
             } else {
                 super::formatting::format_for_discord_with_provider(&state.full_response, provider)
             };
@@ -1149,6 +1153,22 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 state.full_response.clone()
             };
+            if state.planned_restart {
+                tracing::info!(
+                    "  [{ts}] ↻ cannot reattach inflight turn for channel {} after planned restart: starting post-restart handoff",
+                    state.channel_id
+                );
+                let _ = super::tmux_restart_handoff::start_restart_handoff_from_state(
+                    channel_id,
+                    http,
+                    shared,
+                    provider,
+                    state,
+                    &best_response,
+                )
+                .await;
+                continue;
+            }
             let stale_text = stale_inflight_message(&best_response);
             let death_diag = tmux_session_name
                 .as_deref()
@@ -1828,6 +1848,7 @@ mod tests {
             session_key: Some("host:tmux-1".to_string()),
             dispatch_id: Some("dispatch-from-state".to_string()),
             last_watcher_relayed_offset: None,
+            planned_restart: false,
         };
 
         assert!(
@@ -1936,6 +1957,7 @@ mod tests {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
+            planned_restart: false,
         };
 
         save_missing_session_handoff(

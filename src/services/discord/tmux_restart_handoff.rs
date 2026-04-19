@@ -92,7 +92,7 @@ pub(super) async fn start_restart_handoff_from_state(
     state: super::inflight::InflightTurnState,
     best_response: &str,
 ) -> bool {
-    let stale_text = super::turn_bridge::stale_inflight_message(best_response);
+    let stale_text = super::turn_bridge::planned_restart_inflight_message(best_response);
     let _ = super::formatting::replace_long_message_raw(
         http,
         channel_id,

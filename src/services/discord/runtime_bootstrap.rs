@@ -1330,10 +1330,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // ── Inflight state preservation for silent re-attach ──
                 let inflight_states = inflight::load_inflight_states(&provider_for_shutdown);
                 if !inflight_states.is_empty() {
+                    let marked_for_restart =
+                        inflight::mark_all_inflight_states_planned_restart(&provider_for_shutdown);
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts2}] 👁 preserving {} inflight turn(s) for silent watcher re-attach after restart",
-                        inflight_states.len()
+                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery (marked {} as planned_restart)",
+                        inflight_states.len(),
+                        marked_for_restart
                     );
                 }
 
