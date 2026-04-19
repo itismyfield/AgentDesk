@@ -877,8 +877,12 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
     } else {
         None
     };
-    let need_history_rows = args.archive_dir.is_some() || !args.skip_pg_import;
-    let need_full_rows = !args.skip_pg_import;
+    // dry_run only prints counts/blockers — no rows need to be loaded into memory
+    // for either history (archive) or full state (PG import). This keeps preflight
+    // O(table-count SELECT COUNT(*)) instead of O(total-row-bytes), so large
+    // installations don't OOM their preflight check.
+    let need_history_rows = !args.dry_run && (args.archive_dir.is_some() || !args.skip_pg_import);
+    let need_full_rows = !args.dry_run && !args.skip_pg_import;
     let pg_pool = if args.skip_pg_import {
         None
     } else {
@@ -1782,30 +1786,51 @@ fn load_all_github_repos(conn: &Connection) -> Result<Vec<GithubRepoRow>, String
 }
 
 fn load_all_agents(conn: &Connection) -> Result<Vec<AgentRow>, String> {
+    let sprite_number_sql = if sqlite_column_exists(conn, "agents", "sprite_number") {
+        "sprite_number".to_string()
+    } else {
+        "NULL AS sprite_number".to_string()
+    };
+    let description_sql = if sqlite_column_exists(conn, "agents", "description") {
+        "description".to_string()
+    } else {
+        "NULL AS description".to_string()
+    };
+    let system_prompt_sql = if sqlite_column_exists(conn, "agents", "system_prompt") {
+        "system_prompt".to_string()
+    } else {
+        "NULL AS system_prompt".to_string()
+    };
+    let pipeline_config_sql = if sqlite_column_exists(conn, "agents", "pipeline_config") {
+        "pipeline_config".to_string()
+    } else {
+        "NULL AS pipeline_config".to_string()
+    };
+    let sql = format!(
+        "SELECT id,
+                name,
+                name_ko,
+                department,
+                provider,
+                discord_channel_id,
+                discord_channel_alt,
+                discord_channel_cc,
+                discord_channel_cdx,
+                avatar_emoji,
+                status,
+                xp,
+                skills,
+                {sprite_number_sql},
+                {description_sql},
+                {system_prompt_sql},
+                {pipeline_config_sql},
+                created_at,
+                updated_at
+         FROM agents
+         ORDER BY id ASC"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT id,
-                    name,
-                    name_ko,
-                    department,
-                    provider,
-                    discord_channel_id,
-                    discord_channel_alt,
-                    discord_channel_cc,
-                    discord_channel_cdx,
-                    avatar_emoji,
-                    status,
-                    xp,
-                    skills,
-                    sprite_number,
-                    description,
-                    system_prompt,
-                    pipeline_config,
-                    created_at,
-                    updated_at
-             FROM agents
-             ORDER BY id ASC",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("prepare agents export: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -5328,8 +5353,10 @@ async fn import_supporting_tables_into_pg(
                 $1, $2, $3, $4, $5, $6, COALESCE($7, 60),
                 COALESCE($8, 'fail'), $9, $10, $11, $12, COALESCE($13, 0), $14
              )
-             ON CONFLICT (repo_id, stage_name) DO UPDATE
-             SET stage_order = EXCLUDED.stage_order,
+             ON CONFLICT (id) DO UPDATE
+             SET repo_id = EXCLUDED.repo_id,
+                 stage_name = EXCLUDED.stage_name,
+                 stage_order = EXCLUDED.stage_order,
                  trigger_after = EXCLUDED.trigger_after,
                  entry_skill = EXCLUDED.entry_skill,
                  timeout_minutes = EXCLUDED.timeout_minutes,
