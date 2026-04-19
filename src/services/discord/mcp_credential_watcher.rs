@@ -1,6 +1,13 @@
-//! Watches the Claude CLI MCP credential files (`~/.claude/.credentials.json`,
-//! `~/.claude/mcp.json`) and posts a one-line notification to every active Claude
-//! session when one of them changes.
+//! Watches the Claude CLI MCP credential / config files and posts a one-line
+//! notification to every active Claude session when one of them changes.
+//!
+//! Watched paths (relative to `$CLAUDE_CONFIG_DIR` if set, otherwise `$HOME`):
+//! - `.claude.json` — top-level Claude Code config (MCP server registrations live here per docs)
+//! - `.claude/.mcp.json` — project-scoped MCP config (matches the existing repo lookup
+//!   in `mcp_config::resolve_claude_user_mcp_config_path`)
+//! - `.claude/.credentials.json` — auth tokens for OAuth-backed MCP servers (Linux-style;
+//!   on macOS Claude Code stores OAuth tokens in Keychain, but we still watch the file
+//!   in case it exists or gets created)
 //!
 //! Background: Claude CLI attaches MCP servers at boot and never hot-reloads
 //! them. When the operator authenticates a new MCP server (e.g. memento)
@@ -66,18 +73,28 @@ impl CredentialNotifyDedupe {
 /// Resolve the credential files we should watch. Returns the (existing-or-not)
 /// candidate paths so that creation events are also picked up.
 pub(super) fn credential_paths() -> Vec<PathBuf> {
-    credential_paths_from_home(dirs::home_dir())
+    let override_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    credential_paths_with_overrides(override_dir, dirs::home_dir())
 }
 
-/// Pure helper for tests.
-pub(super) fn credential_paths_from_home(home: Option<PathBuf>) -> Vec<PathBuf> {
-    let Some(home) = home else {
-        return Vec::new();
+/// Pure helper for tests. Honors `CLAUDE_CONFIG_DIR` when present; otherwise
+/// falls back to the user's home directory. Returns paths covering both the
+/// top-level Claude config and the project/credentials files under `.claude/`.
+pub(super) fn credential_paths_with_overrides(
+    override_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    // CLAUDE_CONFIG_DIR semantics (per Claude Code docs): when set, all config
+    // files normally rooted at $HOME live under that directory instead.
+    let base = match override_dir.or(home) {
+        Some(base) => base,
+        None => return Vec::new(),
     };
-    let claude_dir = home.join(".claude");
+    let claude_subdir = base.join(".claude");
     vec![
-        claude_dir.join(".credentials.json"),
-        claude_dir.join("mcp.json"),
+        base.join(".claude.json"),
+        claude_subdir.join(".mcp.json"),
+        claude_subdir.join(".credentials.json"),
     ]
 }
 
@@ -95,22 +112,27 @@ pub(super) fn spawn_watcher(
         );
         return;
     }
-    let watch_dir = match paths.first().and_then(|p| p.parent().map(PathBuf::from)) {
-        Some(dir) => dir,
-        None => {
-            tracing::warn!("MCP credential watcher: cannot derive watch dir; disabled");
-            return;
-        }
+    // Collect every distinct parent directory so we can watch each one non-recursively
+    // (one watch per dir). Some watched files live at $HOME (.claude.json) and others
+    // under $HOME/.claude/, so we may have multiple parents.
+    let watch_dirs: Vec<PathBuf> = {
+        let mut dedup: Vec<PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.parent().map(PathBuf::from))
+            .collect();
+        dedup.sort();
+        dedup.dedup();
+        dedup
     };
-    if !watch_dir.exists() {
-        tracing::info!(
-            "MCP credential watcher: {} does not exist yet; watcher will start when it is created",
-            watch_dir.display()
+    if watch_dirs.is_empty() {
+        tracing::warn!(
+            "MCP credential watcher: no parent dirs derived from credential paths; disabled"
         );
+        return;
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<()>();
-    let watch_dir_for_thread = watch_dir.clone();
+    let watch_dirs_for_thread = watch_dirs.clone();
     let paths_for_filter = paths.clone();
 
     // Notify watcher runs on its own OS thread (the notify crate uses sync callbacks).
@@ -148,20 +170,36 @@ pub(super) fn spawn_watcher(
                     }
                 };
 
-            // Watch the parent dir non-recursively so create/delete of either
-            // credential file is observed.
-            if watch_dir_for_thread.exists() {
-                if let Err(e) = watcher.watch(&watch_dir_for_thread, RecursiveMode::NonRecursive) {
-                    tracing::warn!(
-                        "MCP credential watcher: cannot watch {}: {e}",
-                        watch_dir_for_thread.display()
-                    );
-                    return;
+            // Try to attach watches to each parent dir. For dirs that do not yet
+            // exist, retry every 30s until they appear; this avoids the previous
+            // bug where missing-at-startup dirs were silently never watched.
+            let mut pending: Vec<PathBuf> = watch_dirs_for_thread.clone();
+            loop {
+                let mut still_pending = Vec::new();
+                for dir in pending.drain(..) {
+                    if !dir.exists() {
+                        still_pending.push(dir);
+                        continue;
+                    }
+                    match watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                        Ok(()) => {
+                            tracing::info!("MCP credential watcher: watching {}", dir.display())
+                        }
+                        Err(e) => tracing::warn!(
+                            "MCP credential watcher: cannot watch {}: {e}",
+                            dir.display()
+                        ),
+                    }
                 }
-                tracing::info!(
-                    "MCP credential watcher: watching {}",
-                    watch_dir_for_thread.display()
+                if still_pending.is_empty() {
+                    break;
+                }
+                pending = still_pending;
+                tracing::debug!(
+                    "MCP credential watcher: {} dir(s) not yet present; retrying in 30s",
+                    pending.len()
                 );
+                std::thread::sleep(Duration::from_secs(30));
             }
 
             // Keep the watcher alive forever — it owns its own background thread.
@@ -231,23 +269,38 @@ async fn broadcast_credential_change(
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialNotifyDedupe, credential_paths_from_home};
+    use super::{CredentialNotifyDedupe, credential_paths_with_overrides};
     use poise::serenity_prelude::ChannelId;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn credential_paths_returns_two_canonical_files_under_dot_claude() {
+    fn credential_paths_covers_top_level_config_and_dot_claude_files() {
         let home = PathBuf::from("/tmp/test-home");
-        let paths = credential_paths_from_home(Some(home.clone()));
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], home.join(".claude").join(".credentials.json"));
-        assert_eq!(paths[1], home.join(".claude").join("mcp.json"));
+        let paths = credential_paths_with_overrides(None, Some(home.clone()));
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0], home.join(".claude.json"));
+        assert_eq!(paths[1], home.join(".claude").join(".mcp.json"));
+        assert_eq!(paths[2], home.join(".claude").join(".credentials.json"));
     }
 
     #[test]
-    fn credential_paths_empty_when_no_home() {
-        assert!(credential_paths_from_home(None).is_empty());
+    fn credential_paths_honors_claude_config_dir_override() {
+        let home = PathBuf::from("/tmp/test-home");
+        let override_dir = PathBuf::from("/tmp/custom-claude");
+        let paths = credential_paths_with_overrides(Some(override_dir.clone()), Some(home));
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0], override_dir.join(".claude.json"));
+        assert_eq!(paths[1], override_dir.join(".claude").join(".mcp.json"));
+        assert_eq!(
+            paths[2],
+            override_dir.join(".claude").join(".credentials.json")
+        );
+    }
+
+    #[test]
+    fn credential_paths_empty_when_no_home_and_no_override() {
+        assert!(credential_paths_with_overrides(None, None).is_empty());
     }
 
     #[test]

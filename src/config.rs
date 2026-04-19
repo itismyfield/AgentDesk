@@ -44,10 +44,11 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct McpConfig {
-    /// When true, AgentDesk watches the Claude MCP credential files
-    /// (`~/.claude/.credentials.json`, `~/.claude/mcp.json`) and posts a
-    /// notification to all active Claude sessions when they change so the
-    /// operator can run `/mcp-reload` to pick up newly-authenticated MCP servers.
+    /// When true, AgentDesk watches the Claude MCP credential / config files
+    /// (`~/.claude.json`, `~/.claude/.mcp.json`, `~/.claude/.credentials.json`,
+    /// honoring `$CLAUDE_CONFIG_DIR` if set) and posts a notification to all
+    /// active Claude sessions when they change so the operator can run
+    /// `/mcp-reload` to pick up newly-authenticated MCP servers.
     #[serde(default = "default_true")]
     pub watch_credentials: bool,
     /// Per-channel cooldown between credential-change notifications, in seconds.
