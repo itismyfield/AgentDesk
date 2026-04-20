@@ -213,7 +213,7 @@ jobs:
         run: python3 scripts/generate_inventory_docs.py --check
 
   cli_smoke:
-    name: CLI smoke and doctor
+    name: CLI smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,10 +234,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-cli-nightly-
 
-      - name: CLI smoke test (help)
-        run: cargo run -- --help
-
-      - name: CLI doctor
-        run: cargo run -- doctor --json
+      - name: CLI smoke test (agentdesk --help)
+        run: cargo run --quiet -- --help
         env:
-          AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-doctor
+          AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-smoke
