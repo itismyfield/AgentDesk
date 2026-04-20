@@ -1623,23 +1623,25 @@ mod tests {
         seed_agent(&db);
         seed_card(&db, "card-s2", "review");
 
-        let r1 = dispatch::create_dispatch_core_sqlite_test(
+        let r1 = dispatch::create_dispatch_record_sqlite_test(
             &db,
             "card-s2",
             "agent-1",
             "review-decision",
             "[RD1]",
             &serde_json::json!({"verdict": "improve"}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(r1.is_ok(), "first review-decision should succeed");
 
-        let r2 = dispatch::create_dispatch_core_sqlite_test(
+        let r2 = dispatch::create_dispatch_record_sqlite_test(
             &db,
             "card-s2",
             "agent-1",
             "review-decision",
             "[RD2]",
             &serde_json::json!({"verdict": "rework"}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(r2.is_ok(), "second review-decision should succeed");
 
@@ -2671,13 +2673,14 @@ mod tests {
         seed_card(&db, "card-s6", "in_progress");
 
         // Step 1: Create implementation dispatch via canonical path
-        let (dispatch_id, _, _) = dispatch::create_dispatch_core_sqlite_test(
+        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
             &db,
             "card-s6",
             "agent-1",
             "implementation",
             "[Impl]",
             &serde_json::json!({}),
+            dispatch::DispatchCreateOptions::default(),
         )
         .unwrap();
         assert_eq!(get_dispatch_status(&db, &dispatch_id), "pending");
@@ -2761,13 +2764,14 @@ mod tests {
         seed_agent(&db);
         seed_card(&db, "card-s6b", "in_progress");
 
-        let (dispatch_id, _, _) = dispatch::create_dispatch_core_sqlite_test(
+        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
             &db,
             "card-s6b",
             "agent-1",
             "implementation",
             "[Impl]",
             &json!({}),
+            dispatch::DispatchCreateOptions::default(),
         )
         .unwrap();
         seed_assistant_response_for_dispatch(&db, &dispatch_id, "implemented card-s6b");
@@ -3465,7 +3469,7 @@ mod tests {
         );
 
         // Create dispatch via sqlite dispatch-core-with-id helper — should use card's effective pipeline
-        let result = dispatch::create_dispatch_core_with_id_sqlite_test(
+        let result = dispatch::create_dispatch_record_with_id_sqlite_test(
             &db,
             "d-s7-new",
             "card-s7",
@@ -3473,6 +3477,7 @@ mod tests {
             "implementation",
             "[S7 test]",
             &serde_json::json!({}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(
             result.is_ok(),
@@ -3501,13 +3506,14 @@ mod tests {
                 [],
             ).unwrap();
         }
-        let result2 = dispatch::create_dispatch_core_sqlite_test(
+        let result2 = dispatch::create_dispatch_record_sqlite_test(
             &db,
             "card-s7b",
             "agent-1",
             "implementation",
             "[S7b test]",
             &serde_json::json!({}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(
             result2.is_ok(),
@@ -3827,7 +3833,7 @@ mod tests {
             ).unwrap();
         }
 
-        let result_a = dispatch::create_dispatch_core_with_id_sqlite_test(
+        let result_a = dispatch::create_dispatch_record_with_id_sqlite_test(
             &db,
             "d-multi-a",
             "card-multi-a",
@@ -3835,6 +3841,7 @@ mod tests {
             "implementation",
             "[Multi A]",
             &serde_json::json!({}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(
             result_a.is_ok(),
@@ -3862,7 +3869,7 @@ mod tests {
             ).unwrap();
         }
 
-        let result_b = dispatch::create_dispatch_core_with_id_sqlite_test(
+        let result_b = dispatch::create_dispatch_record_with_id_sqlite_test(
             &db,
             "d-multi-b",
             "card-multi-b",
@@ -3870,6 +3877,7 @@ mod tests {
             "implementation",
             "[Multi B]",
             &serde_json::json!({}),
+            dispatch::DispatchCreateOptions::default(),
         );
         assert!(
             result_b.is_ok(),

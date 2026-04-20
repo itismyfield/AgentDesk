@@ -31,7 +31,7 @@ use dispatch_context::{
     inject_review_merge_base_context,
 };
 #[allow(unused_imports)]
-pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_conn;
+pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_pg_tx;
 pub(crate) use dispatch_create::query_dispatch_row_pg;
 #[allow(unused_imports)]
 pub use dispatch_create::{
@@ -41,8 +41,7 @@ pub use dispatch_create::{
 };
 #[cfg(test)]
 pub(crate) use dispatch_create::{
-    create_dispatch_core_sqlite_test, create_dispatch_core_with_id_and_options_sqlite_test,
-    create_dispatch_core_with_id_sqlite_test,
+    create_dispatch_record_sqlite_test, create_dispatch_record_with_id_sqlite_test,
 };
 #[allow(unused_imports)]
 pub use dispatch_status::{complete_dispatch, finalize_dispatch, mark_dispatch_completed};
@@ -754,9 +753,7 @@ pub fn drain_unified_thread_kill_signals() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::build_review_context_sqlite_test as build_review_context;
-    use super::create_dispatch_core_sqlite_test as create_dispatch_core_test;
-    use super::create_dispatch_core_with_id_and_options_sqlite_test as create_dispatch_core_with_id_and_options;
-    use super::create_dispatch_core_with_id_sqlite_test as create_dispatch_core_with_id;
+    use super::create_dispatch_record_sqlite_test as create_dispatch_record_test;
     use super::resolve_card_worktree_sqlite_test as resolve_card_worktree;
     use super::*;
     use std::process::Command;
@@ -1733,68 +1730,6 @@ mod tests {
     }
 
     #[test]
-    fn create_dispatch_core_shares_invariants_with_create_dispatch() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-core", "ready");
-
-        // sqlite dispatch-core helper returns (dispatch_id, old_status, reused)
-        let (dispatch_id, old_status, _reused) = create_dispatch_core_test(
-            &db,
-            "card-core",
-            "agent-1",
-            "implementation",
-            "Core dispatch",
-            &json!({"key": "value"}),
-        )
-        .unwrap();
-
-        assert_eq!(old_status, "ready");
-
-        // #255: ready→requested is free, so kickoff_for("ready") returns "in_progress"
-        let conn = db.separate_conn().unwrap();
-        let (card_status, latest_dispatch_id): (String, String) = conn
-            .query_row(
-                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-core'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(card_status, "in_progress");
-        assert_eq!(latest_dispatch_id, dispatch_id);
-
-        // Dispatch row exists
-        let dispatch = query_dispatch_row(&conn, &dispatch_id).unwrap();
-        assert_eq!(dispatch["status"], "pending");
-        assert_eq!(dispatch["kanban_card_id"], "card-core");
-        assert_eq!(
-            count_notify_outbox(&conn, &dispatch_id),
-            1,
-            "core creation must atomically enqueue exactly one notify outbox row"
-        );
-        assert_eq!(
-            load_dispatch_events(&conn, &dispatch_id),
-            vec![(None, "pending".to_string(), "create_dispatch".to_string())],
-            "dispatch creation must record the initial pending event"
-        );
-        drop(conn);
-
-        // create_dispatch delegates to core — verify same invariants
-        seed_card(&db, "card-full", "ready");
-        let full_dispatch = create_dispatch(
-            &db,
-            &engine,
-            "card-full",
-            "agent-1",
-            "implementation",
-            "Full dispatch",
-            &json!({}),
-        )
-        .unwrap();
-        assert_eq!(full_dispatch["status"], "pending");
-    }
-
-    #[test]
     fn dispatch_type_force_new_session_defaults_split_by_dispatch_type() {
         assert_eq!(
             dispatch_type_force_new_session_default(Some("implementation")),
@@ -1864,155 +1799,6 @@ mod tests {
     }
 
     #[test]
-    fn create_dispatch_core_injects_fresh_session_default_for_implementation() {
-        let db = test_db();
-        seed_card(&db, "card-session-default", "ready");
-
-        let (dispatch_id, _, _) = create_dispatch_core_test(
-            &db,
-            "card-session-default",
-            "agent-1",
-            "implementation",
-            "Fresh implementation",
-            &json!({"key": "value"}),
-        )
-        .unwrap();
-
-        let conn = db.separate_conn().unwrap();
-        let context: String = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [&dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
-        assert_eq!(context_json["force_new_session"], true);
-        assert_eq!(context_json["reset_provider_state"], true);
-        assert_eq!(context_json["recreate_tmux"], false);
-        assert_eq!(context_json["key"], "value");
-    }
-
-    #[test]
-    fn create_dispatch_core_keeps_explicit_session_override() {
-        let db = test_db();
-        seed_card(&db, "card-session-override", "ready");
-
-        let (dispatch_id, _, _) = create_dispatch_core_test(
-            &db,
-            "card-session-override",
-            "agent-1",
-            "implementation",
-            "Warm override",
-            &json!({"force_new_session": false}),
-        )
-        .unwrap();
-
-        let conn = db.separate_conn().unwrap();
-        let context: String = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [&dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
-        assert_eq!(context_json["force_new_session"], false);
-        assert_eq!(context_json["reset_provider_state"], false);
-        assert_eq!(context_json["recreate_tmux"], false);
-    }
-
-    #[test]
-    fn create_dispatch_core_injects_warm_resume_default_for_review_decision() {
-        let db = test_db();
-        seed_card(&db, "card-session-review-decision", "review");
-
-        let (dispatch_id, _, _) = create_dispatch_core_test(
-            &db,
-            "card-session-review-decision",
-            "agent-1",
-            "review-decision",
-            "Warm review decision",
-            &json!({"verdict": "improve"}),
-        )
-        .unwrap();
-
-        let conn = db.separate_conn().unwrap();
-        let context: String = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [&dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
-        assert_eq!(context_json["force_new_session"], false);
-        assert_eq!(context_json["reset_provider_state"], false);
-        assert_eq!(context_json["recreate_tmux"], false);
-        assert_eq!(context_json["verdict"], "improve");
-    }
-
-    #[test]
-    fn create_dispatch_core_with_id_atomically_inserts_notify_outbox() {
-        let db = test_db();
-        seed_card(&db, "card-core-id", "ready");
-
-        let (dispatch_id, old_status, reused) = create_dispatch_core_with_id(
-            &db,
-            "dispatch-core-id",
-            "card-core-id",
-            "agent-1",
-            "implementation",
-            "Core with id",
-            &json!({}),
-        )
-        .unwrap();
-
-        assert_eq!(dispatch_id, "dispatch-core-id");
-        assert_eq!(old_status, "ready");
-        assert!(!reused);
-
-        let conn = db.separate_conn().unwrap();
-        assert_eq!(
-            count_notify_outbox(&conn, "dispatch-core-id"),
-            1,
-            "pre-assigned dispatch creation must also enqueue notify outbox inside the transaction"
-        );
-    }
-
-    #[test]
-    fn create_dispatch_core_with_id_and_skip_outbox_omits_notify_row() {
-        let db = test_db();
-        seed_card(&db, "card-core-id-skip", "ready");
-
-        let (dispatch_id, old_status, reused) = create_dispatch_core_with_id_and_options(
-            &db,
-            "dispatch-core-id-skip",
-            "card-core-id-skip",
-            "agent-1",
-            "implementation",
-            "Core with id skip outbox",
-            &json!({}),
-            DispatchCreateOptions {
-                skip_outbox: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(dispatch_id, "dispatch-core-id-skip");
-        assert_eq!(old_status, "ready");
-        assert!(!reused);
-
-        let conn = db.separate_conn().unwrap();
-        assert_eq!(
-            count_notify_outbox(&conn, "dispatch-core-id-skip"),
-            0,
-            "skip_outbox must suppress notify outbox insertion inside the transaction"
-        );
-    }
-
-    #[test]
     fn ensure_dispatch_notify_outbox_skips_completed_dispatch() {
         let db = test_db();
         seed_card(&db, "card-completed-notify", "done");
@@ -2045,160 +1831,6 @@ mod tests {
             0,
             "completed dispatches must not retain notify outbox rows"
         );
-    }
-
-    #[test]
-    fn create_dispatch_core_rejects_done_card() {
-        let db = test_db();
-        seed_card(&db, "card-done-core", "done");
-
-        let result = create_dispatch_core_test(
-            &db,
-            "card-done-core",
-            "agent-1",
-            "implementation",
-            "Should fail",
-            &json!({}),
-        );
-        assert!(result.is_err(), "core should reject done card dispatch");
-    }
-
-    #[test]
-    fn create_dispatch_core_rejects_missing_agent_before_insert() {
-        let db = test_db();
-        seed_card(&db, "card-missing-agent", "ready");
-
-        let result = create_dispatch_core_test(
-            &db,
-            "card-missing-agent",
-            "agent-missing",
-            "implementation",
-            "Should fail",
-            &json!({}),
-        );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("agent 'agent-missing' not found"));
-
-        let conn = db.separate_conn().unwrap();
-        let dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-missing-agent'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dispatch_count, 0, "missing agent must not persist rows");
-    }
-
-    #[test]
-    fn create_dispatch_core_rejects_missing_primary_channel_before_insert() {
-        let db = test_db();
-        seed_card(&db, "card-no-channel", "ready");
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "UPDATE agents
-             SET discord_channel_id = NULL,
-                 discord_channel_alt = NULL,
-                 discord_channel_cc = NULL,
-                 discord_channel_cdx = NULL
-             WHERE id = 'agent-1'",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let result = create_dispatch_core_test(
-            &db,
-            "card-no-channel",
-            "agent-1",
-            "implementation",
-            "Should fail",
-            &json!({}),
-        );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("no primary discord channel"));
-
-        let conn = db.separate_conn().unwrap();
-        let dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-no-channel'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dispatch_count, 0, "failed validation must not persist rows");
-    }
-
-    #[test]
-    fn create_dispatch_core_with_id_rejects_invalid_channel_alias_before_insert() {
-        let db = test_db();
-        seed_card(&db, "card-bad-channel", "ready");
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "UPDATE agents SET discord_channel_id = 'not-a-channel' WHERE id = 'agent-1'",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let result = create_dispatch_core_with_id(
-            &db,
-            "dispatch-bad-channel",
-            "card-bad-channel",
-            "agent-1",
-            "implementation",
-            "Should fail",
-            &json!({}),
-        );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("invalid primary discord channel"));
-
-        let conn = db.separate_conn().unwrap();
-        let dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches WHERE id = 'dispatch-bad-channel'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            dispatch_count, 0,
-            "invalid channels must fail before INSERT"
-        );
-    }
-
-    #[test]
-    fn create_dispatch_core_rejects_invalid_existing_thread_before_insert() {
-        let db = test_db();
-        seed_card(&db, "card-bad-thread", "ready");
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "UPDATE kanban_cards SET active_thread_id = 'thread-not-numeric' WHERE id = 'card-bad-thread'",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let result = create_dispatch_core_test(
-            &db,
-            "card-bad-thread",
-            "agent-1",
-            "implementation",
-            "Should fail",
-            &json!({}),
-        );
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("invalid thread"));
-
-        let conn = db.separate_conn().unwrap();
-        let dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-bad-thread'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dispatch_count, 0, "invalid thread must fail before INSERT");
     }
 
     #[test]
@@ -2973,24 +2605,26 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-flag", "ready");
 
-        let (id1, _, reused1) = create_dispatch_core_test(
+        let (id1, _, reused1) = create_dispatch_record_test(
             &db,
             "card-flag",
             "agent-1",
             "implementation",
             "First",
             &json!({}),
+            DispatchCreateOptions::default(),
         )
         .unwrap();
         assert!(!reused1, "first creation must not be reused");
 
-        let (id2, _, reused2) = create_dispatch_core_test(
+        let (id2, _, reused2) = create_dispatch_record_test(
             &db,
             "card-flag",
             "agent-1",
             "implementation",
             "Second",
             &json!({}),
+            DispatchCreateOptions::default(),
         )
         .unwrap();
         assert!(reused2, "duplicate must be flagged as reused");
@@ -3130,13 +2764,14 @@ mod tests {
         set_card_issue_number(&db, "card-missing-mapping", 515);
         set_card_repo_id(&db, "card-missing-mapping", "owner/missing");
 
-        let err = create_dispatch_core_test(
+        let err = create_dispatch_record_test(
             &db,
             "card-missing-mapping",
             "agent-1",
             "implementation",
             "Should fail",
             &json!({}),
+            DispatchCreateOptions::default(),
         )
         .expect_err("dispatch should fail when repo mapping is missing");
 
@@ -4542,13 +4177,14 @@ mod tests {
         // Invoke the real production path. The caller passes NO target_repo
         // override — `dispatch_create` will inject `card.repo_id`
         // (`card_repo_dir`) before calling `build_review_context`.
-        let (dispatch_id, _, _) = create_dispatch_core_test(
+        let (dispatch_id, _, _) = create_dispatch_record_test(
             &db,
             "card-review-762-a-core",
             "agent-1",
             "review",
             "Review dispatch for 762-a",
             &json!({}),
+            DispatchCreateOptions::default(),
         )
         .unwrap();
 

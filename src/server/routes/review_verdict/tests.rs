@@ -1511,13 +1511,14 @@ async fn new_review_decision_cancels_previous_pending() {
     }
 
     // Creating a new review-decision should cancel the old one
-    let result = crate::dispatch::create_dispatch_core_sqlite_test(
+    let result = crate::dispatch::create_dispatch_record_sqlite_test(
         &db,
         "card-dup",
         "agent-1",
         "review-decision",
         "[New RD]",
         &serde_json::json!({"verdict": "improve"}),
+        crate::dispatch::DispatchCreateOptions::default(),
     );
     assert!(
         result.is_ok(),
