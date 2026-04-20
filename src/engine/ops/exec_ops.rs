@@ -296,7 +296,10 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 Some("force-kill via agentdesk.session.kill()"),
                 None,
             );
-            match crate::services::platform::tmux::kill_session_output(tmux_name) {
+            match crate::services::platform::tmux::kill_session_output_with_reason(
+                tmux_name,
+                "force-kill via agentdesk.session.kill()",
+            ) {
                 Ok(out) if out.status.success() => {
                     format!(r#"{{"ok":true,"session":"{}"}}"#, session_key)
                 }

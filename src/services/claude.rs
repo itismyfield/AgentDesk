@@ -93,7 +93,7 @@ fn build_tmux_launch_env_lines(
 }
 
 #[cfg(unix)]
-use crate::services::tmux_common::{tmux_exact_target, tmux_owner_path, write_tmux_owner_marker};
+use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 /// Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var.
 static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1193,7 +1193,10 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session(tmux_session_name);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    tmux_session_name,
+                    &format!("followup failed, recreating: {}", error),
+                );
                 // Fall through to new session creation below
             }
             ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
@@ -1216,7 +1219,10 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("partial follow-up output already delivered: {}", error),
                 );
-                crate::services::platform::tmux::kill_session(tmux_session_name);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    tmux_session_name,
+                    &format!("partial follow-up output already delivered: {}", error),
+                );
                 emit_followup_restart_suppressed_notice(&sender, &notice);
                 return Ok(());
             }
@@ -1235,7 +1241,10 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session(tmux_session_name);
+        crate::services::platform::tmux::kill_session_with_reason(
+            tmux_session_name,
+            "stale local session cleanup before recreate",
+        );
     }
 
     // === Create new tmux session ===
@@ -1404,7 +1413,10 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     "stream retry after repeated tmux session death",
                 );
-                crate::services::platform::tmux::kill_session(tmux_session_name);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    tmux_session_name,
+                    "stream retry after repeated tmux session death",
+                );
 
                 // Clean up and recreate temp files
                 let _ = std::fs::remove_file(&output_path);
@@ -1796,10 +1808,10 @@ pub fn terminate_local_session(session_name: &str) {
     #[cfg(unix)]
     if tmux_session_exists(session_name) {
         record_tmux_exit_reason(session_name, "model change requested fresh session");
-        let exact_target = tmux_exact_target(session_name);
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &exact_target])
-            .status();
+        let _ = crate::services::platform::tmux::kill_session_with_reason(
+            session_name,
+            "model change requested fresh session",
+        );
     }
 }
 

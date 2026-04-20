@@ -896,7 +896,10 @@ pub fn handle_restart_dcserver(
     let tmux_session = "AgentDesk-dcserver";
 
     // Kill existing tmux session if it exists
-    crate::services::platform::tmux::kill_session(tmux_session);
+    crate::services::platform::tmux::kill_session_with_reason(
+        tmux_session,
+        "dcserver tmux launcher restart: replace existing AgentDesk-dcserver session",
+    );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let launcher_str = launcher_path.to_string_lossy();

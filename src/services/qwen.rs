@@ -1010,7 +1010,10 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session(tmux_session_name);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    tmux_session_name,
+                    &format!("followup failed, recreating: {}", error),
+                );
             }
         }
     } else if session_exists {
@@ -1018,7 +1021,10 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session(tmux_session_name);
+        crate::services::platform::tmux::kill_session_with_reason(
+            tmux_session_name,
+            "stale local session cleanup before recreate",
+        );
     }
 
     let _ = std::fs::remove_file(&output_path);

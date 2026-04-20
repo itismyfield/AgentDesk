@@ -183,6 +183,9 @@ pub(super) async fn reset_session_for_auto_retry(
             &name,
             &format!("forcing fresh session before auto-retry: {reason}"),
         );
-        crate::services::platform::tmux::kill_session(&name);
+        crate::services::platform::tmux::kill_session_with_reason(
+            &name,
+            &format!("forcing fresh session before auto-retry: {reason}"),
+        );
     }
 }

@@ -983,7 +983,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: prompt too long",
+                    );
                 }),
             )
             .await;
@@ -1047,7 +1050,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: authentication failed",
+                    );
                 }),
             )
             .await;
@@ -1155,7 +1161,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, &termination_detail);
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        &termination_detail,
+                    );
                 }),
             )
             .await;
@@ -1325,7 +1334,10 @@ pub(super) async fn tmux_output_watcher(
                 &tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
-            crate::services::platform::tmux::kill_session(&tmux_session_name);
+            crate::services::platform::tmux::kill_session_with_reason(
+                &tmux_session_name,
+                "stale session resume detected — forcing fresh session before auto-retry",
+            );
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id
@@ -1867,7 +1879,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: dead session after turn",
+                    );
                 }
             })
             .await;
@@ -2786,7 +2801,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     None,
                 );
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
-                crate::services::platform::tmux::kill_session(&sess);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    &sess,
+                    "startup cleanup: dead session",
+                );
             })
             .await;
             cleaned_dead_sessions += 1;
