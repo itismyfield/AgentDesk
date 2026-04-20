@@ -1,15 +1,19 @@
 use axum::{
     Json, Router, body,
     extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, patch},
 };
 use chrono::{DateTime, Duration, Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
-use std::collections::HashMap;
+use std::{collections::HashMap, convert::Infallible, time::Duration as StdDuration};
 
 use super::{
     ApiRouter, AppState, health_api, protected_api_domain,
@@ -98,6 +102,13 @@ struct CursorMarker {
     cursor_id: String,
 }
 
+#[derive(Debug, Clone)]
+struct StreamEnvelope {
+    id: String,
+    event: String,
+    data: Value,
+}
+
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
@@ -106,6 +117,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/v1/tokens", get(tokens))
             .route("/v1/kanban", get(kanban))
             .route("/v1/ops/health", get(ops_health))
+            .route("/v1/stream", get(stream))
             .route("/v1/activity", get(activity))
             .route("/v1/achievements", get(achievements))
             .route("/v1/settings", get(get_settings))
@@ -214,6 +226,66 @@ async fn ops_health(State(state): State<AppState>) -> Response {
     };
     payload["bottlenecks"] = Value::Array(build_bottlenecks(&payload));
     json_response(status, CACHE_OPS, payload)
+}
+
+async fn stream(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let replay = last_event_id
+        .as_deref()
+        .map(|last_id| state.broadcast_tx.replay_since(last_id))
+        .unwrap_or_default();
+    let snapshot = if last_event_id.is_some() && !replay.is_empty() {
+        Vec::new()
+    } else {
+        match build_stream_snapshot(state.clone()).await {
+            Ok(snapshot) => snapshot,
+            Err(response) => return response,
+        }
+    };
+    let live_stream = stream::unfold(state.broadcast_tx.subscribe(), |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Some(mapped) = map_live_stream_event(event) {
+                        break Some((Ok::<_, Infallible>(to_sse_event(mapped)), rx));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::debug!(skipped, "sse stream lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+            }
+        }
+    });
+    let initial_stream = stream::iter(
+        snapshot
+            .into_iter()
+            .chain(
+                replay
+                    .into_iter()
+                    .filter_map(map_live_stream_event)
+                    .collect::<Vec<_>>(),
+            )
+            .map(|event| Ok::<_, Infallible>(to_sse_event(event))),
+    );
+    let sse = Sse::new(initial_stream.chain(live_stream)).keep_alive(
+        KeepAlive::new()
+            .interval(StdDuration::from_secs(15))
+            .text("keepalive"),
+    );
+
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        sse,
+    )
+        .into_response()
 }
 
 async fn activity(State(state): State<AppState>, Query(query): Query<ActivityQuery>) -> Response {
@@ -367,6 +439,221 @@ async fn patch_setting(
     };
 
     json_response(StatusCode::OK, CACHE_SETTINGS, entry)
+}
+
+fn to_sse_event(event: StreamEnvelope) -> Event {
+    Event::default()
+        .id(event.id)
+        .event(event.event)
+        .data(event.data.to_string())
+}
+
+fn snapshot_envelope(
+    id: impl Into<String>,
+    event: impl Into<String>,
+    data: Value,
+) -> StreamEnvelope {
+    StreamEnvelope {
+        id: id.into(),
+        event: event.into(),
+        data,
+    }
+}
+
+async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, Response> {
+    let mut events = Vec::new();
+    let generated_at = utc_now_iso();
+
+    let agents = if let Some(pool) = state.pg_pool.as_ref() {
+        load_agents_pg(pool, None)
+            .await
+            .map_err(|error| internal_error("stream_agents_pg", &error))?
+    } else {
+        load_agents_sqlite(&state, None)
+            .map_err(|error| internal_error("stream_agents_sqlite", &error))?
+    };
+    for agent in &agents {
+        if let Some(agent_id) = agent["id"].as_str() {
+            events.push(snapshot_envelope(
+                format!("snapshot:agent-status:{agent_id}"),
+                "agent.status",
+                json!({
+                    "agent_id": agent_id,
+                    "status": agent["status"].as_str().unwrap_or("idle"),
+                    "task": compact_agent_task(agent),
+                    "snapshot": true,
+                    "generated_at": generated_at,
+                }),
+            ));
+            events.push(snapshot_envelope(
+                format!("snapshot:token:{agent_id}"),
+                "token.tick",
+                json!({
+                    "agent_id": agent_id,
+                    "delta_tokens": agent["stats_tokens"].as_i64().unwrap_or(0),
+                    "delta_cost_usd": "0",
+                    "snapshot": true,
+                    "generated_at": generated_at,
+                }),
+            ));
+        }
+    }
+
+    let (health_status, health_payload) = load_health_payload(state.clone()).await?;
+    events.push(snapshot_envelope(
+        "snapshot:ops-health",
+        "ops.health",
+        compact_ops_health_event(health_status, &health_payload, &generated_at),
+    ));
+
+    let achievements = if let Some(pool) = state.pg_pool.as_ref() {
+        build_achievements_pg(pool, None)
+            .await
+            .map_err(|error| internal_error("stream_achievements_pg", &error))?
+    } else {
+        build_achievements_sqlite(&state, None)
+            .map_err(|error| internal_error("stream_achievements_sqlite", &error))?
+    };
+    for achievement in achievements.achievements.iter().take(8) {
+        if let Some(achievement_id) = achievement["id"].as_str() {
+            events.push(snapshot_envelope(
+                format!("snapshot:achievement:{achievement_id}"),
+                "achievement.unlocked",
+                json!({
+                    "achievement_id": achievement_id,
+                    "xp": achievement["progress"]["current"].as_i64().unwrap_or(0),
+                    "snapshot": true,
+                    "generated_at": generated_at,
+                }),
+            ));
+        }
+    }
+
+    let activity_items = if let Some(pool) = state.pg_pool.as_ref() {
+        load_activity_items_pg(pool)
+            .await
+            .map_err(|error| internal_error("stream_activity_pg", &error))?
+    } else {
+        load_activity_items_sqlite(&state)
+            .map_err(|error| internal_error("stream_activity_sqlite", &error))?
+    };
+    for item in activity_items
+        .into_iter()
+        .filter(|item| item.body["kind"] == "kanban_transition")
+        .take(8)
+    {
+        if let Some(event) = compact_kanban_transition_snapshot(&item.body, &generated_at) {
+            events.push(event);
+        }
+    }
+
+    Ok(events)
+}
+
+fn compact_agent_task(agent: &Value) -> Value {
+    let Some(current_task) = agent.get("current_task") else {
+        return Value::Null;
+    };
+    if current_task.is_null() {
+        return Value::Null;
+    }
+    json!({
+        "dispatch_id": current_task["dispatch_id"],
+        "card_id": current_task["card_id"],
+        "card_title": current_task["card_title"],
+    })
+}
+
+fn compact_ops_health_event(status: StatusCode, payload: &Value, generated_at: &str) -> Value {
+    let providers = payload["providers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|provider| {
+            Some(json!({
+                "name": provider.get("name")?.as_str()?,
+                "healthy": provider.get("healthy").and_then(Value::as_bool).unwrap_or(false),
+            }))
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    let reasons = payload["reasons"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|reason| reason.as_str().map(str::to_string))
+        .take(6)
+        .collect::<Vec<_>>();
+    json!({
+        "status": if status.is_success() { "ok" } else { "degraded" },
+        "providers": providers,
+        "reasons": reasons,
+        "deferred_hooks": payload["deferred_hooks"].as_i64().unwrap_or(0),
+        "snapshot": true,
+        "generated_at": generated_at,
+    })
+}
+
+fn compact_kanban_transition_snapshot(body: &Value, generated_at: &str) -> Option<StreamEnvelope> {
+    let meta = body.get("meta")?;
+    let card_id = meta.get("card_id").and_then(Value::as_str)?;
+    Some(snapshot_envelope(
+        format!("snapshot:kanban:{card_id}"),
+        "kanban.transition",
+        json!({
+            "card_id": card_id,
+            "from": meta.get("from_status").and_then(Value::as_str).unwrap_or("unknown"),
+            "to": meta.get("to_status").and_then(Value::as_str).unwrap_or("unknown"),
+            "at": body["created_at"].as_str().unwrap_or(generated_at),
+            "snapshot": true,
+            "generated_at": generated_at,
+        }),
+    ))
+}
+
+fn map_live_stream_event(event: crate::server::ws::BroadcastEvent) -> Option<StreamEnvelope> {
+    let data = match event.event.as_str() {
+        "agent.status"
+        | "ops.health"
+        | "achievement.unlocked"
+        | "token.tick"
+        | "kanban.transition" => event.data,
+        "agent_status" => {
+            let agent_id = event.data["id"].as_str()?;
+            json!({
+                "agent_id": agent_id,
+                "status": event.data["status"].as_str().unwrap_or("idle"),
+                "task": {
+                    "dispatch_id": event.data["current_task_id"],
+                },
+            })
+        }
+        "dispatched_session_new" | "dispatched_session_update" => {
+            let agent_id = event.data["linked_agent_id"].as_str()?;
+            json!({
+                "agent_id": agent_id,
+                "status": event.data["status"].as_str().unwrap_or("idle"),
+                "task": {
+                    "dispatch_id": event.data["active_dispatch_id"],
+                    "session_key": event.data["session_key"],
+                },
+            })
+        }
+        _ => event.data,
+    };
+    let event_name = match event.event.as_str() {
+        "agent_status" | "dispatched_session_new" | "dispatched_session_update" => {
+            "agent.status".to_string()
+        }
+        other => other.to_string(),
+    };
+    Some(StreamEnvelope {
+        id: event.id,
+        event: event_name,
+        data,
+    })
 }
 
 fn json_response(status: StatusCode, cache_control: &str, body: Value) -> Response {
@@ -1400,6 +1687,8 @@ async fn load_activity_items_pg(pool: &sqlx::PgPool) -> Result<Vec<ActivityItem>
                 "meta": {
                     "card_id": row.try_get::<Option<String>, _>("card_id").ok().flatten(),
                     "card_title": card_title,
+                    "from_status": row.try_get::<Option<String>, _>("from_status").ok().flatten(),
+                    "to_status": row.try_get::<Option<String>, _>("to_status").ok().flatten(),
                     "source": row.try_get::<Option<String>, _>("source").ok().flatten(),
                     "result": row.try_get::<Option<String>, _>("result").ok().flatten(),
                 }
@@ -1533,6 +1822,8 @@ fn load_activity_items_sqlite(state: &AppState) -> Result<Vec<ActivityItem>, Str
                     .and_then(normalize_datetime_to_iso)
                     .unwrap_or_else(utc_now_iso);
                 let id = format!("kanban:{}", row.0);
+                let from_status = row.2.clone().unwrap_or_else(|| "unknown".to_string());
+                let to_status = row.3.clone().unwrap_or_else(|| "unknown".to_string());
                 items.push(ActivityItem {
                     timestamp_ms: iso_to_millis(&iso),
                     cursor_id: id.clone(),
@@ -1543,12 +1834,14 @@ fn load_activity_items_sqlite(state: &AppState) -> Result<Vec<ActivityItem>, Str
                         "summary": format!(
                             "{} {} -> {}",
                             row.8.map(|value| format!("#{value}")).unwrap_or_else(|| "card".to_string()),
-                            row.2.unwrap_or_else(|| "unknown".to_string()),
-                            row.3.unwrap_or_else(|| "unknown".to_string()),
+                            from_status,
+                            to_status,
                         ),
                         "meta": {
                             "card_id": row.1,
                             "card_title": row.7,
+                            "from_status": row.2,
+                            "to_status": row.3,
                             "source": row.4,
                             "result": row.5,
                         }
