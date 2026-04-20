@@ -1,5 +1,5 @@
 use super::*;
-use axum::body::Body;
+use axum::body::{Body, HttpBody as _};
 use axum::http::{Request, StatusCode};
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::MutexGuard;
@@ -71,6 +72,28 @@ fn test_api_router_with_pg(
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
     api_router_with_pg(db, engine, config, tx, buf, health_registry, Some(pg_pool))
+}
+
+async fn read_sse_body_until(body: &mut Body, needles: &[&str]) -> String {
+    let mut output = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+
+    while !needles.iter().all(|needle| output.contains(needle)) {
+        let frame = tokio::time::timeout_at(
+            deadline,
+            futures::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)),
+        )
+        .await
+        .expect("timed out waiting for SSE frame")
+        .expect("stream should still be open")
+        .expect("stream frame should be readable");
+
+        if let Ok(data) = frame.into_data() {
+            output.push_str(&String::from_utf8_lossy(&data));
+        }
+    }
+
+    output
 }
 
 struct TestPostgresDb {
@@ -20624,6 +20647,206 @@ async fn v1_routes_pg_surface_dashboard_contract() {
     assert_eq!(settings_patch_json["key"], json!("merge_strategy"));
     assert_eq!(settings_patch_json["value"], json!("rebase"));
     assert_eq!(settings_patch_json["live_override"]["active"], json!(true));
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("repo-v1-stream")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, provider, status, xp, avatar_emoji, discord_channel_id, discord_channel_alt
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8
+         )",
+    )
+    .bind("agent-v1-stream")
+    .bind("V1 Stream Agent")
+    .bind("claude")
+    .bind("working")
+    .bind(60_i64)
+    .bind("🤖")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, assigned_agent_id, github_issue_number, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+         )",
+    )
+    .bind("card-v1-stream")
+    .bind("repo-v1-stream")
+    .bind("Stream Card")
+    .bind("in_progress")
+    .bind("high")
+    .bind("agent-v1-stream")
+    .bind(792_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-v1-stream")
+    .bind("card-v1-stream")
+    .bind("agent-v1-stream")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("Stream dispatch")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+        .bind("dispatch-v1-stream")
+        .bind("card-v1-stream")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, active_dispatch_id, session_info, tokens,
+            last_heartbeat, thread_channel_id, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), $8, NOW()
+         )",
+    )
+    .bind("host:session-v1-stream")
+    .bind("agent-v1-stream")
+    .bind("claude")
+    .bind("working")
+    .bind("dispatch-v1-stream")
+    .bind("v1 stream session")
+    .bind(321_i64)
+    .bind("222000000000002")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind("card-v1-stream")
+    .bind("requested")
+    .bind("in_progress")
+    .bind("dispatch")
+    .bind("ok")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let tx = crate::server::ws::new_broadcast();
+    let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+    let app = axum::Router::new().nest(
+        "/api",
+        api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            tx.clone(),
+            buf,
+            None,
+            Some(pg_pool.clone()),
+        ),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"))
+    );
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+
+    let mut body = response.into_body();
+    let snapshot = read_sse_body_until(
+        &mut body,
+        &[
+            "event: agent.status",
+            "event: token.tick",
+            "event: achievement.unlocked",
+            "event: kanban.transition",
+            "event: ops.health",
+        ],
+    )
+    .await;
+
+    assert!(snapshot.contains("\"agent_id\":\"agent-v1-stream\""));
+    assert!(snapshot.contains("\"delta_tokens\":321"));
+    assert!(snapshot.contains("\"achievement_id\""));
+    assert!(snapshot.contains("\"from\":\"requested\""));
+    assert!(snapshot.contains("\"status\":\"ok\""));
+    drop(body);
+
+    crate::server::ws::emit_event(
+        &tx,
+        "agent.status",
+        json!({
+            "agent_id": "agent-v1-stream",
+            "status": "idle",
+            "task": null,
+        }),
+    );
+    crate::server::ws::emit_event(
+        &tx,
+        "token.tick",
+        json!({
+            "agent_id": "agent-v1-stream",
+            "delta_tokens": 7,
+            "delta_cost_usd": "0.12",
+        }),
+    );
+
+    let replay_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stream")
+                .header("Last-Event-ID", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_response.status(), StatusCode::OK);
+
+    let mut replay_body = replay_response.into_body();
+    let replay = read_sse_body_until(
+        &mut replay_body,
+        &["id: 2", "event: token.tick", "\"delta_tokens\":7"],
+    )
+    .await;
+    assert!(replay.contains("\"delta_cost_usd\":\"0.12\""));
 
     pg_pool.close().await;
     pg_db.drop().await;

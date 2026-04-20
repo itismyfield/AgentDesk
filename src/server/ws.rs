@@ -7,25 +7,114 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::{Mutex, broadcast};
 
 /// Shared broadcast sender for pushing events to all connected WS clients.
-pub type BroadcastTx = Arc<broadcast::Sender<String>>;
+pub type BroadcastTx = Arc<BroadcastBus>;
 
 /// Buffer for batched events — groups events by key, flushes periodically.
-pub type BatchBuffer = Arc<Mutex<HashMap<String, serde_json::Value>>>;
+pub type BatchBuffer = Arc<Mutex<HashMap<String, PendingEvent>>>;
+
+const BROADCAST_HISTORY_LIMIT: usize = 256;
+
+#[derive(Clone, Debug)]
+pub struct BroadcastEvent {
+    pub id: String,
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+impl BroadcastEvent {
+    fn as_ws_message(&self) -> String {
+        json!({
+            "id": self.id,
+            "type": self.event,
+            "data": self.data,
+        })
+        .to_string()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingEvent {
+    event: String,
+    data: serde_json::Value,
+}
+
+pub struct BroadcastBus {
+    tx: broadcast::Sender<BroadcastEvent>,
+    history: StdMutex<VecDeque<BroadcastEvent>>,
+    next_event_id: AtomicU64,
+}
+
+impl BroadcastBus {
+    fn new() -> Self {
+        let (tx, _) = broadcast::channel::<BroadcastEvent>(256);
+        Self {
+            tx,
+            history: StdMutex::new(VecDeque::with_capacity(BROADCAST_HISTORY_LIMIT)),
+            next_event_id: AtomicU64::new(1),
+        }
+    }
+
+    fn send(&self, event: &str, data: serde_json::Value) -> BroadcastEvent {
+        let envelope = BroadcastEvent {
+            id: self
+                .next_event_id
+                .fetch_add(1, Ordering::Relaxed)
+                .to_string(),
+            event: event.to_string(),
+            data,
+        };
+        if let Ok(mut history) = self.history.lock() {
+            if history.len() >= BROADCAST_HISTORY_LIMIT {
+                history.pop_front();
+            }
+            history.push_back(envelope.clone());
+        }
+        let _ = self.tx.send(envelope.clone());
+        envelope
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<BroadcastEvent> {
+        self.tx.subscribe()
+    }
+
+    pub fn replay_since(&self, last_event_id: &str) -> Vec<BroadcastEvent> {
+        let Ok(last_seen) = last_event_id.parse::<u64>() else {
+            return Vec::new();
+        };
+        self.history
+            .lock()
+            .map(|history| {
+                history
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .id
+                            .parse::<u64>()
+                            .ok()
+                            .is_some_and(|event_id| event_id > last_seen)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 
 pub fn new_broadcast() -> BroadcastTx {
-    let (tx, _) = broadcast::channel::<String>(256);
-    Arc::new(tx)
+    Arc::new(BroadcastBus::new())
 }
 
 /// Immediately emit an event to all connected WebSocket clients.
 pub fn emit_event(tx: &BroadcastTx, event_name: &str, payload: serde_json::Value) {
-    let msg = json!({"type": event_name, "data": payload}).to_string();
-    let _ = tx.send(msg);
+    tx.send(event_name, payload);
 }
 
 /// Queue a batched event — deduplicates by key, flushed periodically.
@@ -35,11 +124,17 @@ pub fn emit_batched_event(
     key: impl Into<String>,
     payload: serde_json::Value,
 ) {
-    let msg = json!({"type": event_name, "data": payload});
     let key = key.into();
+    let event_name = event_name.to_string();
     let buffer = buffer.clone();
     tokio::spawn(async move {
-        buffer.lock().await.insert(key, msg);
+        buffer.lock().await.insert(
+            key,
+            PendingEvent {
+                event: event_name,
+                data: payload,
+            },
+        );
     });
 }
 
@@ -55,8 +150,8 @@ pub fn spawn_batch_flusher(tx: BroadcastTx) -> BatchBuffer {
             if buf.is_empty() {
                 continue;
             }
-            for (_key, msg) in buf.drain() {
-                let _ = tx.send(msg.to_string());
+            for (_key, pending) in buf.drain() {
+                tx.send(&pending.event, pending.data);
             }
         }
     });
@@ -104,7 +199,7 @@ async fn handle_socket(socket: WebSocket, tx: BroadcastTx) {
                 result = rx.recv() => {
                     match result {
                         Ok(msg) => {
-                            if sender.send(Message::Text(msg.into())).await.is_err() {
+                            if sender.send(Message::Text(msg.as_ws_message().into())).await.is_err() {
                                 break;
                             }
                         }
