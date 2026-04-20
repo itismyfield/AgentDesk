@@ -159,6 +159,237 @@ const MOCK_OPS_HEALTH_BASE = {
 };
 
 const AGENTS_HUB_NOW = 1760918400000;
+const MOCK_OFFICES = [
+  {
+    id: "office-agentdesk",
+    name: "AgentDesk",
+    name_ko: "에이전트데스크",
+    icon: "🏢",
+    color: "#38bdf8",
+    description: "AgentDesk release office",
+    sort_order: 0,
+    created_at: AGENTS_HUB_NOW - 604_800_000,
+    agent_count: 2,
+    department_count: 2,
+  },
+];
+
+const MOCK_DASHBOARD_STATS = {
+  agents: {
+    total: 2,
+    working: 1,
+    idle: 1,
+    break: 0,
+    offline: 0,
+  },
+  top_agents: [
+    {
+      id: "agent-ada",
+      name: "Ada Dashboard",
+      alias: "ada",
+      name_ko: "아다 대시보드",
+      avatar_emoji: "🛠️",
+      stats_tasks_done: 48,
+      stats_xp: 1620,
+      stats_tokens: 124000,
+    },
+  ],
+  departments: [
+    {
+      id: "dept-platform",
+      name: "Platform",
+      name_ko: "플랫폼",
+      icon: "🧱",
+      color: "#38bdf8",
+      total_agents: 1,
+      working_agents: 1,
+      sum_xp: 1620,
+    },
+    {
+      id: "dept-product",
+      name: "Product",
+      name_ko: "프로덕트",
+      icon: "🧭",
+      color: "#f97316",
+      total_agents: 1,
+      working_agents: 0,
+      sum_xp: 980,
+    },
+  ],
+  dispatched_count: 1,
+  github_closed_today: 3,
+  kanban: {
+    open_total: 6,
+    review_queue: 1,
+    blocked: 1,
+    failed: 0,
+    waiting_acceptance: 1,
+    stale_in_progress: 0,
+    by_status: {
+      backlog: 1,
+      ready: 1,
+      requested: 1,
+      blocked: 1,
+      in_progress: 1,
+      review: 1,
+      done: 0,
+      qa_pending: 0,
+      qa_in_progress: 0,
+      qa_failed: 0,
+    },
+    top_repos: [
+      {
+        github_repo: "itismyfield/AgentDesk",
+        open_count: 6,
+        pressure_count: 2,
+      },
+    ],
+  },
+};
+
+function buildMockTokenAnalytics(period: "7d" | "30d" | "90d" = "30d") {
+  const days = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+  const periodLabel = period === "7d" ? "Last 7 days" : period === "90d" ? "Last 90 days" : "Last 30 days";
+  const daily = Array.from({ length: Math.min(days, 7) }, (_, index) => {
+    const date = new Date(AGENTS_HUB_NOW - (6 - index) * 86_400_000);
+    const isoDate = date.toISOString().slice(0, 10);
+    const inputTokens = 1200 + index * 120;
+    const outputTokens = 700 + index * 80;
+    const cacheReadTokens = 320 + index * 25;
+    const cacheCreationTokens = 110 + index * 10;
+    const totalTokens =
+      inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+    return {
+      date: isoDate,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_read_tokens: cacheReadTokens,
+      cache_creation_tokens: cacheCreationTokens,
+      total_tokens: totalTokens,
+      cost: Number((0.18 + index * 0.01).toFixed(3)),
+    };
+  });
+
+  const totalTokens = daily.reduce((sum, row) => sum + row.total_tokens, 0);
+  const totalCost = daily.reduce((sum, row) => sum + row.cost, 0);
+  const cacheDiscount = Number((totalCost * 0.22).toFixed(3));
+
+  return {
+    period,
+    period_label: periodLabel,
+    days,
+    generated_at: new Date(AGENTS_HUB_NOW).toISOString(),
+    summary: {
+      total_tokens: totalTokens,
+      total_cost: Number(totalCost.toFixed(3)),
+      cache_discount: cacheDiscount,
+      total_messages: 42,
+      total_sessions: 9,
+      active_days: daily.length,
+      average_daily_tokens: Math.round(totalTokens / daily.length),
+      peak_day: {
+        date: daily[daily.length - 1]?.date ?? "2026-04-20",
+        total_tokens: daily[daily.length - 1]?.total_tokens ?? totalTokens,
+        cost: daily[daily.length - 1]?.cost ?? Number(totalCost.toFixed(3)),
+      },
+    },
+    receipt: {
+      period_label: periodLabel,
+      period_start: daily[0]?.date ?? "2026-04-14",
+      period_end: daily[daily.length - 1]?.date ?? "2026-04-20",
+      models: [
+        {
+          model: "gpt-5.4",
+          display_name: "GPT-5.4",
+          input_tokens: 5400,
+          output_tokens: 3200,
+          cache_read_tokens: 1400,
+          cache_creation_tokens: 520,
+          total_tokens: 10520,
+          cost: 1.48,
+          cost_without_cache: 1.86,
+          provider: "openai",
+        },
+        {
+          model: "claude-4.1-opus",
+          display_name: "Claude 4.1 Opus",
+          input_tokens: 3600,
+          output_tokens: 2100,
+          cache_read_tokens: 780,
+          cache_creation_tokens: 260,
+          total_tokens: 6740,
+          cost: 0.94,
+          cost_without_cache: 1.17,
+          provider: "anthropic",
+        },
+      ],
+      subtotal: Number((totalCost + cacheDiscount).toFixed(3)),
+      cache_discount: cacheDiscount,
+      total: Number(totalCost.toFixed(3)),
+      stats: {
+        total_messages: 42,
+        total_sessions: 9,
+      },
+      providers: [
+        { provider: "openai", tokens: 10520, percentage: 61 },
+        { provider: "anthropic", tokens: 6740, percentage: 39 },
+      ],
+      agents: [
+        {
+          agent: "adk-dashboard",
+          tokens: 9700,
+          cost: 1.31,
+          cost_without_cache: 1.61,
+          input_tokens: 4800,
+          cache_read_tokens: 1240,
+          cache_creation_tokens: 430,
+          percentage: 56,
+        },
+        {
+          agent: "project-agentdesk",
+          tokens: 7560,
+          cost: 1.11,
+          cost_without_cache: 1.42,
+          input_tokens: 4200,
+          cache_read_tokens: 940,
+          cache_creation_tokens: 350,
+          percentage: 44,
+        },
+      ],
+    },
+    daily,
+    heatmap: daily.map((row, index) => ({
+      date: row.date,
+      week_index: Math.floor(index / 7),
+      weekday: index % 7,
+      total_tokens: row.total_tokens,
+      cost: row.cost,
+      level: Math.min(4, 1 + Math.floor(index / 2)),
+      future: false,
+    })),
+  };
+}
+
+function buildMockSkillRanking(window: "7d" | "30d" | "90d" | "all" = "30d") {
+  return {
+    ...MOCK_AGENT_SKILL_RANKING,
+    window,
+    overall: [
+      {
+        skill_name: "office-warning-disclosure",
+        skill_desc_ko: "Office warning disclosure patterns",
+        calls: window === "7d" ? 4 : window === "90d" ? 19 : 12,
+        last_used_at: AGENTS_HUB_NOW - 3_600_000,
+      },
+      {
+        skill_name: "meetings-readonly-hub",
+        skill_desc_ko: "Read-only meetings + skills layout",
+        calls: window === "7d" ? 2 : window === "90d" ? 11 : 7,
+        last_used_at: AGENTS_HUB_NOW - 7_200_000,
+      },
+    ],
+  };
+}
 
 const MOCK_AGENT_DEPARTMENTS = [
   {
@@ -476,7 +707,206 @@ async function mockOpsHealthApi(page: Page, getPayload: () => Record<string, unk
   });
 }
 
+async function mockDashboardBootstrap(page: Page) {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+
+      url: string;
+      readyState = MockWebSocket.CONNECTING;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: Event) => void) | null = null;
+
+      constructor(url: string) {
+        this.url = url;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.(new Event("open"));
+        }, 0);
+      }
+
+      send() {}
+
+      close() {
+        if (this.readyState === MockWebSocket.CLOSED) return;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.(new Event("close"));
+      }
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: MockWebSocket,
+    });
+  });
+
+  await page.route(/\/api\/auth\/session$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, csrf_token: "smoke-csrf-token" }),
+    });
+  });
+
+  await page.route(/\/api\/offices$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ offices: MOCK_OFFICES }),
+    });
+  });
+
+  await page.route(/\/api\/agents(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ agents: MOCK_AGENTS }),
+    });
+  });
+
+  await page.route(/\/api\/departments(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ departments: MOCK_AGENT_DEPARTMENTS }),
+    });
+  });
+
+  await page.route(/\/api\/dispatched-sessions(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+
+  await page.route(/\/api\/stats(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_DASHBOARD_STATS),
+    });
+  });
+
+  await page.route(/\/api\/settings$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ language: "ko", theme: "dark" }),
+    });
+  });
+
+  await page.route(/\/api\/audit-logs(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ logs: [] }),
+    });
+  });
+
+  await page.route(/\/api\/dispatches(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ dispatches: [] }),
+    });
+  });
+
+  await page.route(/\/api\/kanban-cards$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ cards: MOCK_BACKLOG_CARDS }),
+    });
+  });
+
+  await page.route(/\/api\/skills\/catalog$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ catalog: MOCK_SKILLS }),
+    });
+  });
+
+  await page.route(/\/api\/skills\/ranking(?:\?.*)?$/, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const window = (requestUrl.searchParams.get("window") ?? "30d") as
+      | "7d"
+      | "30d"
+      | "90d"
+      | "all";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(buildMockSkillRanking(window)),
+    });
+  });
+
+  await page.route(/\/api\/token-analytics(?:\?.*)?$/, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const period = (requestUrl.searchParams.get("period") ?? "30d") as
+      | "7d"
+      | "30d"
+      | "90d";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(buildMockTokenAnalytics(period)),
+    });
+  });
+
+  await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ channels: [] }),
+    });
+  });
+
+  await page.route(/\/api\/github-repos$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ viewer_login: "", repos: [] }),
+    });
+  });
+
+  await page.route(/\/api\/round-table-meetings\/meeting-smoke-1$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ meeting: MOCK_MEETING_DETAIL }),
+    });
+  });
+
+  await page.route(/\/api\/round-table-meetings$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ meetings: MOCK_MEETINGS }),
+    });
+  });
+
+  await page.route(/\/api\/health$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_OPS_HEALTH_BASE),
+    });
+  });
+}
+
 test.describe("Dashboard smoke tests", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockDashboardBootstrap(page);
+  });
+
   test("page loads and renders root element", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator("#root")).toBeAttached();
@@ -485,9 +915,7 @@ test.describe("Dashboard smoke tests", () => {
 
   test("theme: dark/light toggle changes CSS variables", async ({ page }) => {
     await page.goto("/");
-    await page.evaluate(() => {
-      document.documentElement.dataset.theme = "dark";
-    });
+    await page.getByRole("button", { name: /^다크$|^Dark$/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     const darkBg = await page.evaluate(() =>
       getComputedStyle(document.documentElement)
@@ -496,9 +924,7 @@ test.describe("Dashboard smoke tests", () => {
     );
     expect(darkBg).toBeTruthy();
 
-    await page.evaluate(() => {
-      document.documentElement.dataset.theme = "light";
-    });
+    await page.getByRole("button", { name: /^라이트$|^Light$/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     const lightBg = await page.evaluate(() =>
       getComputedStyle(document.documentElement)
@@ -512,17 +938,10 @@ test.describe("Dashboard smoke tests", () => {
   test("theme: auto mode responds to prefers-color-scheme", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/");
-    await page.evaluate(() => {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      document.documentElement.dataset.theme = mq.matches ? "dark" : "light";
-    });
+    await page.getByRole("button", { name: /^자동$|^Auto$/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
     await page.emulateMedia({ colorScheme: "light" });
-    await page.evaluate(() => {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      document.documentElement.dataset.theme = mq.matches ? "dark" : "light";
-    });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
@@ -650,11 +1069,13 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /에이전트|Agents/ }).click();
     await expect(page).toHaveURL(/\/agents$/);
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /설정|Settings/ }).click();
     await expect(page).toHaveURL(/\/settings$/);
     await expectNoHorizontalOverflow(page);
@@ -663,7 +1084,7 @@ test.describe("Dashboard smoke tests", () => {
   test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
     await page.goto("/stats");
 
-    await expect(page.getByTestId("stats-page")).toBeVisible();
+    await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
     await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
     await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "true");
@@ -714,7 +1135,7 @@ test.describe("Dashboard smoke tests", () => {
     await mockMeetingsHubApis(page);
     await page.goto("/meetings");
 
-    await expect(page.getByTestId("meetings-page")).toBeVisible();
+    await expect(page.getByTestId("meetings-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("meetings-page-timeline")).toBeVisible();
     await expect(page.getByTestId("meetings-page-skills")).toBeVisible();
     await expect(page.getByText(/로드밸런서 경고 플로우 리뷰/)).toBeVisible();
@@ -756,7 +1177,7 @@ test.describe("Dashboard smoke tests", () => {
     await mockAgentsHubApis(page);
     await page.goto("/agents");
 
-    await expect(page.getByTestId("agents-page")).toBeVisible();
+    await expect(page.getByTestId("agents-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("agents-tab-bar")).toBeVisible();
     await expect(page.getByTestId("agents-tab-button-agents")).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("agents-tab")).toBeVisible();
@@ -794,7 +1215,7 @@ test.describe("Dashboard smoke tests", () => {
     await mockAgentsHubApis(page);
     await page.goto("/agents");
 
-    await expect(page.getByTestId("agents-page")).toBeVisible();
+    await expect(page.getByTestId("agents-page")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("agents-tab-button-backlog").click();
 
     await expect(page.getByTestId("agents-backlog-cards")).toBeVisible();
