@@ -65,7 +65,7 @@
 | `db::builtin_pipeline` | `src/db/builtin_pipeline.rs` | 27 |  |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::postgres` | `src/db/postgres.rs` | 673 |  |
+| `db::postgres` | `src/db/postgres.rs` | 686 |  |
 | `db::schema` | `src/db/schema.rs` | 3063 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 262 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1200 | giant-file |
@@ -96,7 +96,7 @@
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 275 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 206 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 195 |  |
-| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 2574 | giant-file |
+| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 2576 | giant-file |
 | `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 676 |  |
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 106 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
@@ -221,7 +221,7 @@
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1081 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 424 |  |
-| `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 987 |  |
+| `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 989 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1407 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
