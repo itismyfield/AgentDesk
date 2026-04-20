@@ -188,23 +188,30 @@ fn fast_mode_reset_entry_matches_channel(entry: &str, channel_id: serenity::Chan
         .unwrap_or(false)
 }
 
+fn fast_mode_reset_entry_matches_provider(
+    entry: &str,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> bool {
+    parse_fast_mode_reset_pending_entry(entry)
+        .map(|(provider_id, entry_channel_id)| {
+            entry_channel_id == channel_id
+                && provider_id
+                    .map(|entry_provider| entry_provider.eq_ignore_ascii_case(provider.as_str()))
+                    .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
 pub(in crate::services::discord) fn fast_mode_reset_pending_for_provider(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
 ) -> bool {
-    shared.fast_mode_session_reset_pending.iter().any(|entry| {
-        parse_fast_mode_reset_pending_entry(entry.key())
-            .map(|(provider_id, entry_channel_id)| {
-                entry_channel_id == channel_id
-                    && provider_id
-                        .map(|entry_provider| {
-                            entry_provider.eq_ignore_ascii_case(provider.as_str())
-                        })
-                        .unwrap_or(true)
-            })
-            .unwrap_or(false)
-    })
+    shared
+        .fast_mode_session_reset_pending
+        .iter()
+        .any(|entry| fast_mode_reset_entry_matches_provider(entry.key(), channel_id, provider))
 }
 
 pub(in crate::services::discord) fn any_fast_mode_reset_pending(
@@ -422,7 +429,7 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     }
     settings
         .channel_fast_mode_reset_pending
-        .retain(|entry| !fast_mode_reset_entry_matches_channel(entry, channel_id));
+        .retain(|entry| !fast_mode_reset_entry_matches_provider(entry, channel_id, provider));
     settings
         .channel_fast_mode_reset_pending
         .insert(fast_mode_reset_pending_key(channel_id, provider));
@@ -1257,6 +1264,53 @@ mod tests {
             &ProviderKind::Claude
         ));
         assert!(shared.session_reset_pending.contains(&channel_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enabling_fast_mode_preserves_other_provider_reset_markers() {
+        let _env = TempAgentdeskRootGuard::new();
+        let shared = make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(188);
+        let claude_key = fast_mode_reset_pending_key(channel_id, &ProviderKind::Claude);
+        let codex_key = fast_mode_reset_pending_key(channel_id, &ProviderKind::Codex);
+        let legacy_key = channel_id.get().to_string();
+        {
+            let mut settings = shared.settings.write().await;
+            settings
+                .channel_fast_mode_reset_pending
+                .insert(claude_key.clone());
+            settings
+                .channel_fast_mode_reset_pending
+                .insert(legacy_key.clone());
+        }
+
+        assert!(
+            update_channel_fast_mode(
+                &shared,
+                "test-token",
+                channel_id,
+                &ProviderKind::Codex,
+                true,
+            )
+            .await
+        );
+
+        let settings = shared.settings.read().await;
+        assert!(
+            settings
+                .channel_fast_mode_reset_pending
+                .contains(&claude_key)
+        );
+        assert!(
+            settings
+                .channel_fast_mode_reset_pending
+                .contains(&codex_key)
+        );
+        assert!(
+            !settings
+                .channel_fast_mode_reset_pending
+                .contains(&legacy_key)
+        );
     }
 
     #[test]
