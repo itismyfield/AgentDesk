@@ -118,7 +118,7 @@ export default function AgentsTab({
   }, [agents, topSkillsByAgent]);
 
   return (
-    <>
+    <div data-testid="agents-tab" className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {[
           {
@@ -205,7 +205,7 @@ export default function AgentsTab({
             })}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div data-testid="agents-view-mode" className="flex items-center gap-2">
             <SurfaceSegmentButton
               active={viewMode === "grid"}
               onClick={() => setViewMode("grid")}
@@ -270,6 +270,7 @@ export default function AgentsTab({
         </SurfaceEmptyState>
       ) : (
         <div
+          data-testid={`agents-view-${viewMode}`}
           className={
             viewMode === "grid"
               ? "grid grid-cols-1 gap-3 lg:grid-cols-2"
@@ -303,6 +304,6 @@ export default function AgentsTab({
           })}
         </div>
       )}
-    </>
+    </div>
   );
 }

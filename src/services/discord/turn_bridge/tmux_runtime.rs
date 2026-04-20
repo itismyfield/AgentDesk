@@ -108,31 +108,12 @@ pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
 }
 
 pub(in crate::services::discord) fn stale_inflight_message(saved_response: &str) -> String {
-    inflight_recovery_message(saved_response, false)
-}
-
-pub(in crate::services::discord) fn planned_restart_inflight_message(
-    saved_response: &str,
-) -> String {
-    inflight_recovery_message(saved_response, true)
-}
-
-fn inflight_recovery_message(saved_response: &str, planned_restart: bool) -> String {
     let trimmed = saved_response.trim();
     if trimmed.is_empty() {
-        if planned_restart {
-            "♻️ AgentDesk가 재시작되었습니다. 진행 중이던 응답은 후속 턴에서 이어서 복구합니다."
-                .to_string()
-        } else {
-            "⚠️ AgentDesk가 재시작되어 진행 중이던 응답을 이어붙이지 못했습니다.".to_string()
-        }
+        "⚠️ AgentDesk가 재시작되어 진행 중이던 응답을 이어붙이지 못했습니다.".to_string()
     } else {
         let formatted = format_for_discord(trimmed);
-        if planned_restart {
-            format!("{}\n\n[재시작 후 복구 진행 중]", formatted)
-        } else {
-            format!("{}\n\n[Interrupted by restart]", formatted)
-        }
+        format!("{formatted}\n\n[Interrupted by restart]")
     }
 }
 
@@ -162,20 +143,7 @@ pub(super) fn should_resume_watcher_after_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{planned_restart_inflight_message, stale_inflight_message};
-
-    #[test]
-    fn planned_restart_message_uses_restart_recovery_wording() {
-        let empty = planned_restart_inflight_message("");
-        assert!(empty.contains("재시작"));
-        assert!(empty.contains("복구"));
-        assert!(!empty.contains("이어붙이지 못했습니다"));
-
-        let partial = planned_restart_inflight_message("partial response");
-        assert!(partial.contains("partial response"));
-        assert!(partial.contains("[재시작 후 복구 진행 중]"));
-        assert!(!partial.contains("[Interrupted by restart]"));
-    }
+    use super::stale_inflight_message;
 
     #[test]
     fn stale_message_keeps_generic_interrupted_wording() {

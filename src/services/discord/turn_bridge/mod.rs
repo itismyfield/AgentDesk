@@ -12,7 +12,6 @@ mod tmux_runtime;
 mod tests;
 
 use super::gateway::TurnGateway;
-use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
@@ -21,7 +20,6 @@ use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
-use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use completion_guard::{
@@ -34,7 +32,6 @@ pub(super) use recovery_text::{
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
 pub(super) use tmux_runtime::cancel_active_token;
-pub(super) use tmux_runtime::planned_restart_inflight_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 
 // Re-export pub(crate) items
@@ -52,8 +49,8 @@ use recall_feedback::{
     transcript_contains_explicit_memento_tool_call,
 };
 use retry_state::{
-    clear_local_session_state, clear_response_delivery_state, handle_gemini_retry_boundary,
-    reset_session_for_auto_retry, sync_response_delivery_state,
+    clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
+    sync_response_delivery_state,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
@@ -305,7 +302,6 @@ pub(super) fn spawn_turn_bridge(
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
         let mut resume_failure_detected = false;
         let mut terminal_session_reset_required = false;
-        let mut restart_recovery_handoff = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
         let mut current_msg_id = bridge.current_msg_id;
@@ -521,27 +517,7 @@ pub(super) fn spawn_turn_bridge(
                                 report.channel_name = adk_session_name.clone();
                                 if save_restart_report(&report).is_ok() {
                                     restart_followup_pending = true;
-
-                                    // Save durable handoff for post-restart follow-up
-                                    let handoff = HandoffRecord::new(
-                                        &provider,
-                                        channel_id.get(),
-                                        adk_session_name.clone(),
-                                        "재시작 후 수정 내용 확인 및 후속 작업 이어서 진행",
-                                        format!(
-                                            "재시작 전 사용자 요청: {}\n\n이전 턴의 응답 요약: {}",
-                                            user_text_owned,
-                                            tail_with_ellipsis(&full_response, 500),
-                                        ),
-                                        adk_cwd.clone(),
-                                        Some(user_msg_id.get()),
-                                    );
-                                    if let Err(e) = save_handoff(&handoff) {
-                                        let ts = chrono::Local::now().format("%H:%M:%S");
-                                        tracing::info!("  [{ts}] ⚠ failed to save handoff: {e}");
-                                    }
-
-                                    let handoff_text = "♻️ dcserver 재시작 중...\n\n새 dcserver가 이 메시지를 이어받는 중입니다.";
+                                    let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
                                     let _ = gateway
                                         .edit_message(channel_id, current_msg_id, handoff_text)
                                         .await;
@@ -614,14 +590,10 @@ pub(super) fn spawn_turn_bridge(
                             result,
                             session_id: sid,
                         } => {
-                            if result == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
-                                restart_recovery_handoff = true;
-                            } else if result == "__session_died_retry__" {
-                                // Legacy fallback: older recovery reporters used
-                                // auto-retry instead of the internal handoff
-                                // sentinel. Keep this branch for mixed-runtime
-                                // rollouts until every caller emits the new
-                                // sentinel consistently.
+                            if result == "__session_died_retry__" {
+                                // Recovery reader requests the generic
+                                // Discord-history auto-retry path when the
+                                // resumed session dies before completion.
                                 recovery_retry = true;
                             }
                             if let Some(resolved) = resolve_done_response(
@@ -637,9 +609,7 @@ pub(super) fn spawn_turn_bridge(
                                 new_session_id = Some(s.clone());
                                 inflight_state.session_id = Some(s);
                             }
-                            if result != super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL
-                                && result != "__session_died_retry__"
-                            {
+                            if result != "__session_died_retry__" {
                                 push_transcript_event(
                                     &mut transcript_events,
                                     SessionTranscriptEvent {
@@ -1141,80 +1111,7 @@ pub(super) fn spawn_turn_bridge(
             full_response = String::new();
         }
 
-        if restart_recovery_handoff {
-            #[cfg(unix)]
-            {
-                let best_response =
-                    if full_response == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
-                        String::new()
-                    } else {
-                        full_response.clone()
-                    };
-                let handed_off = if let Some(ctx) = shared_owned.cached_serenity_ctx.get() {
-                    let http = ctx.http.clone();
-                    super::tmux::start_restart_handoff_from_state(
-                        channel_id,
-                        &http,
-                        &shared_owned,
-                        &provider,
-                        inflight_state.clone(),
-                        &best_response,
-                    )
-                    .await
-                } else {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ cached serenity context missing; restart handoff unavailable (channel {})",
-                        channel_id
-                    );
-                    false
-                };
-                if handed_off {
-                    clear_response_delivery_state(
-                        &mut full_response,
-                        &mut response_sent_offset,
-                        &mut inflight_state,
-                    );
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ↻ Recovery session died — queued internal handoff instead of Discord auto-retry (channel {})",
-                        channel_id
-                    );
-                } else {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Recovery session died — internal handoff failed, falling back to auto-retry (channel {})",
-                        channel_id
-                    );
-                    reset_session_for_auto_retry(
-                        &shared_owned,
-                        channel_id,
-                        &cancel_token,
-                        adk_session_key.as_deref(),
-                        &mut new_session_id,
-                        &mut new_raw_provider_session_id,
-                        &mut inflight_state,
-                        "restart recovery handoff failed",
-                    )
-                    .await;
-                    let gateway_c = gateway.clone();
-                    let retry_text = user_text_owned.clone();
-                    tokio::spawn(async move {
-                        gateway_c
-                            .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
-                            .await;
-                    });
-                    let _ = gateway
-                        .edit_message(
-                            channel_id,
-                            current_msg_id,
-                            "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
-                        )
-                        .await;
-                    full_response = String::new();
-                }
-            }
-        } else if cancelled {
+        if cancelled {
             if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
                 crate::services::process::kill_pid_tree(pid);
             }
@@ -1568,7 +1465,6 @@ pub(super) fn spawn_turn_bridge(
         let should_record_final_turn = !(is_prompt_too_long
             || resume_failure_detected
             || recovery_retry
-            || restart_recovery_handoff
             || (rx_disconnected && tmux_handed_off && full_response.is_empty()))
             && !full_response.trim().is_empty();
 

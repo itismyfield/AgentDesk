@@ -32,6 +32,7 @@ interface Props {
   repo?: string;
   agents: Agent[];
   selectedAgentId?: string | null;
+  variant?: "advanced" | "fsm";
 }
 
 type EditLevel = "repo" | "agent";
@@ -65,6 +66,10 @@ interface PersistedFsmDraftStore {
   entries: Record<string, PersistedFsmDraftEntry>;
 }
 
+interface FsmEdgeBinding {
+  event: string;
+}
+
 const INPUT_CLASS =
   "w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none";
 const TEXTAREA_CLASS =
@@ -83,6 +88,34 @@ const EMPTY_FSM_DRAFT_STORE: PersistedFsmDraftStore = {
   version: 2,
   entries: {},
 };
+
+const FSM_VIEWBOX = {
+  width: 1100,
+  height: 420,
+} as const;
+
+const FSM_EDGE_BINDINGS_KEY = "fsm_edge_bindings";
+
+const FSM_EVENT_OPTIONS = [
+  "on_enqueue",
+  "on_dispatch",
+  "on_submit",
+  "on_approve",
+  "on_changes_request",
+  "on_error",
+  "on_recover",
+] as const;
+
+const FSM_HOOK_OPTIONS = [
+  "OnQueueReady",
+  "OnDispatchRequested",
+  "OnDispatchCompleted",
+  "OnReviewEnter",
+  "OnReviewApproved",
+  "OnChangesRequested",
+  "OnPipelineError",
+  "OnRecoverFromFailure",
+] as const;
 
 function cloneStageDrafts(stages: StageDraft[]) {
   return stages.map((stage) => ({ ...stage }));
@@ -213,6 +246,61 @@ function joinCommaSeparated(value: string[] | undefined) {
   return value && value.length > 0 ? value.join(", ") : "";
 }
 
+function downloadTextFile(filename: string, content: string) {
+  const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(href);
+}
+
+function buildFsmEdgeBindingKey(from: string, to: string) {
+  return `${from}->${to}`;
+}
+
+function normalizeFsmEdgeBindings(value: unknown): Record<string, FsmEdgeBinding> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
+      if (!entry || typeof entry !== "object" || typeof (entry as FsmEdgeBinding).event !== "string") {
+        return [];
+      }
+      return [[key, { event: (entry as FsmEdgeBinding).event }]];
+    }),
+  );
+}
+
+function inferFsmEventName(from: string, to: string) {
+  const key = `${from}->${to}`;
+  switch (key) {
+    case "backlog->ready":
+      return "on_enqueue";
+    case "ready->requested":
+    case "ready->in_progress":
+    case "requested->in_progress":
+      return "on_dispatch";
+    case "in_progress->review":
+      return "on_submit";
+    case "review->done":
+      return "on_approve";
+    case "review->in_progress":
+      return "on_changes_request";
+    default:
+      if (to === "failed") {
+        return "on_error";
+      }
+      if (from === "failed") {
+        return "on_recover";
+      }
+      return `on_${from}_to_${to}`.replace(/[^a-zA-Z0-9_]/g, "_");
+  }
+}
+
 function formatSelectionTitle(
   tr: Props["tr"],
   selection: Selection,
@@ -276,7 +364,9 @@ export default function PipelineVisualEditor({
   repo,
   agents,
   selectedAgentId,
+  variant = "advanced",
 }: Props) {
+  const isFsmVariant = variant === "fsm";
   const [level, setLevel] = useState<EditLevel>("repo");
   const [pipelineDraft, setPipelineDraft] = useState<PipelineConfigFull | null>(null);
   const [savedPipeline, setSavedPipeline] = useState<PipelineConfigFull | null>(null);
@@ -297,7 +387,7 @@ export default function PipelineVisualEditor({
   const [success, setSuccess] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [compactGraph, setCompactGraph] = useState(false);
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(!isFsmVariant);
   const [rawPersistedFsmDraftStore, setPersistedFsmDraftStore] = useLocalStorage<PersistedFsmDraftStore>(
     STORAGE_KEYS.fsmDraft,
     EMPTY_FSM_DRAFT_STORE,
@@ -348,6 +438,10 @@ export default function PipelineVisualEditor({
     const timeout = window.setTimeout(() => setSuccess(null), 2600);
     return () => window.clearTimeout(timeout);
   }, [success]);
+
+  useEffect(() => {
+    setCollapsed(!isFsmVariant);
+  }, [isFsmVariant, repo, selectedAgentId]);
 
   async function fetchSnapshot(nextLevel: EditLevel): Promise<EditorSnapshot> {
     if (!repo) {
@@ -405,6 +499,15 @@ export default function PipelineVisualEditor({
     setSelection((current) => {
       if (persistedSelection) {
         return persistedSelection;
+      }
+      if (isFsmVariant) {
+        if (draftPipeline.transitions[0]) {
+          return { kind: "transition", index: 0 };
+        }
+        if (draftPipeline.states[0]) {
+          return { kind: "state", stateId: draftPipeline.states[0].id };
+        }
+        return { kind: "phase_gate" };
       }
       if (current?.kind === "state") {
         return draftPipeline.states.some((state) => state.id === current.stateId)
@@ -478,6 +581,22 @@ export default function PipelineVisualEditor({
     () => (pipelineDraft ? buildPipelineGraph(pipelineDraft, compactGraph) : null),
     [compactGraph, pipelineDraft],
   );
+  const graphTransform = useMemo(() => {
+    if (!graph || !isFsmVariant) {
+      return null;
+    }
+    const scale = Math.min(
+      FSM_VIEWBOX.width / Math.max(graph.width, 1),
+      FSM_VIEWBOX.height / Math.max(graph.height, 1),
+    );
+    const scaledWidth = graph.width * scale;
+    const scaledHeight = graph.height * scale;
+    return {
+      scale,
+      translateX: (FSM_VIEWBOX.width - scaledWidth) / 2,
+      translateY: (FSM_VIEWBOX.height - scaledHeight) / 2,
+    };
+  }, [graph, isFsmVariant]);
   const selectedState =
     selection?.kind === "state" && pipelineDraft
       ? pipelineDraft.states.find((state) => state.id === selection.stateId) ?? null
@@ -508,12 +627,79 @@ export default function PipelineVisualEditor({
     savedPipelineSignature !== null &&
     pipelineDraftSignature !== savedPipelineSignature;
   const stagesChanged = stageDraftSignature !== savedStageDraftSignature;
+  const visibleStagesChanged = !isFsmVariant && stagesChanged;
+  const hasVisibleChanges = pipelineChanged || visibleStagesChanged;
   const activeLayers = [
     layers.default ? "default" : null,
     layers.repo ? "repo" : null,
     layers.agent ? "agent" : null,
   ].filter(Boolean) as string[];
   const preservedKeys = Object.keys(overrideExtras);
+  const fsmEdgeBindings = useMemo(
+    () => normalizeFsmEdgeBindings(overrideExtras[FSM_EDGE_BINDINGS_KEY]),
+    [overrideExtras],
+  );
+  const selectedFsmEvent = useMemo(() => {
+    if (!selectedTransition) {
+      return "";
+    }
+    const bindingKey = buildFsmEdgeBindingKey(selectedTransition.from, selectedTransition.to);
+    return (
+      fsmEdgeBindings[bindingKey]?.event
+      ?? inferFsmEventName(selectedTransition.from, selectedTransition.to)
+    );
+  }, [fsmEdgeBindings, selectedTransition]);
+  const selectedFsmHooks = useMemo(
+    () => (selectedFsmEvent && pipelineDraft ? pipelineDraft.events[selectedFsmEvent] ?? [] : []),
+    [pipelineDraft, selectedFsmEvent],
+  );
+  const selectedFsmHook = selectedFsmHooks[0] ?? "";
+  const fsmEventOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...FSM_EVENT_OPTIONS,
+          ...Object.keys(pipelineDraft?.events ?? {}),
+          selectedFsmEvent,
+        ].filter(Boolean)),
+      ).sort(),
+    [pipelineDraft, selectedFsmEvent],
+  );
+  const fsmHookOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...FSM_HOOK_OPTIONS,
+          ...Object.values(pipelineDraft?.events ?? {}).flat(),
+          ...selectedFsmHooks,
+        ].filter(Boolean)),
+      ).sort(),
+    [pipelineDraft, selectedFsmHooks],
+  );
+  const editorTitle = isFsmVariant
+    ? tr("FSM 비주얼 에디터", "FSM visual editor")
+    : tr("고급 / Agent별 파이프라인 편집기", "Advanced / agent-specific pipeline editor");
+  const editorHelpText = isFsmVariant
+    ? tr(
+        "엣지를 선택해 우측 280px 패널에서 event, hook, policy를 조정합니다. 기본 FSM 저장은 기존 파이프라인 override 엔드포인트를 사용합니다.",
+        "Select an edge and tune its event, hook, and policy from the 280px side panel. Saving uses the existing pipeline override endpoints.",
+      )
+    : tr(
+        "노드는 상태, 화살표는 전환입니다. 노드/전환을 눌러 우측 속성을 수정하고, 하단에서 스테이지를 함께 편집합니다.",
+        "Nodes are states, arrows are transitions. Click a node or edge to edit it, then adjust stages below in the same editor.",
+      );
+  const graphGridClass = isFsmVariant
+    ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_280px]"
+    : "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,0.95fr)]";
+  const graphPanelNote = isFsmVariant
+    ? tr(
+        "FSM 캔버스는 1100×420 viewBox로 고정되고, 좁은 화면에서는 패널이 아래로 떨어집니다.",
+        "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
+      )
+    : tr(
+        "그래프는 화면 폭에 맞춰 자동 압축됩니다. 모바일은 가로 스크롤 없이 1열 레이아웃을 사용합니다.",
+        "The graph automatically collapses to fit the screen width. Mobile uses a single-column layout without horizontal scrolling.",
+      );
 
   useEffect(() => {
     if (!repo || !fsmDraftScopeKey) {
@@ -879,6 +1065,62 @@ export default function PipelineVisualEditor({
     });
   }
 
+  function updateFsmTransitionEvent(index: number, nextEvent: string) {
+    const transition = pipelineDraft?.transitions[index];
+    if (!transition) {
+      return;
+    }
+
+    const bindingKey = buildFsmEdgeBindingKey(transition.from, transition.to);
+    const inferredEvent = inferFsmEventName(transition.from, transition.to);
+
+    setOverrideExtras((current) => {
+      const next = { ...current };
+      const bindings = normalizeFsmEdgeBindings(current[FSM_EDGE_BINDINGS_KEY]);
+
+      if (!nextEvent || nextEvent === inferredEvent) {
+        delete bindings[bindingKey];
+      } else {
+        bindings[bindingKey] = { event: nextEvent };
+      }
+
+      if (Object.keys(bindings).length === 0) {
+        delete next[FSM_EDGE_BINDINGS_KEY];
+      } else {
+        next[FSM_EDGE_BINDINGS_KEY] = bindings;
+      }
+      return next;
+    });
+
+    setPipelineDraft((current) => {
+      if (!current || !nextEvent || current.events[nextEvent]) {
+        return current;
+      }
+      const next = clonePipelineConfig(current);
+      next.events[nextEvent] = [];
+      return next;
+    });
+  }
+
+  function updateFsmEventHook(eventName: string, hookName: string) {
+    if (!eventName) {
+      return;
+    }
+
+    setPipelineDraft((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = clonePipelineConfig(current);
+      if (!hookName) {
+        delete next.events[eventName];
+      } else {
+        next.events[eventName] = [hookName];
+      }
+      return next;
+    });
+  }
+
   function addGate(index: number) {
     const transition = pipelineDraft?.transitions[index];
     if (!transition || !pipelineDraft) {
@@ -991,7 +1233,7 @@ export default function PipelineVisualEditor({
         }
       }
 
-      if (stagesChanged) {
+      if (!isFsmVariant && stagesChanged) {
         const payload = buildStageSavePayload(allRepoStages, stageDrafts, selectedAgentId);
         await api.savePipelineStages(repo, payload);
       }
@@ -1009,6 +1251,18 @@ export default function PipelineVisualEditor({
     } finally {
       setSaving(false);
     }
+  }
+
+  function handleExportJson() {
+    if (!pipelineDraft || !repo) {
+      return;
+    }
+    const payload = buildOverridePayload(pipelineDraft, overrideExtras);
+    const scope = level === "agent" && selectedAgentId ? selectedAgentId : "repo";
+    downloadTextFile(
+      `${repo.replace(/\//g, "__")}-${scope}-${variant}.json`,
+      JSON.stringify(payload, null, 2),
+    );
   }
 
   async function handleClearOverride() {
@@ -1082,7 +1336,7 @@ export default function PipelineVisualEditor({
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-              {tr("비주얼 파이프라인 에디터", "Visual Pipeline Editor")}
+              {editorTitle}
             </h3>
             {pipelineDraft && (
               <span
@@ -1093,8 +1347,13 @@ export default function PipelineVisualEditor({
                 }}
               >
                 {pipelineDraft.states.length} {tr("상태", "states")} /{" "}
-                {pipelineDraft.transitions.length} {tr("전환", "transitions")} /{" "}
-                {stageDrafts.length} {tr("스테이지", "stages")}
+                {pipelineDraft.transitions.length} {tr("전환", "transitions")}
+                {!isFsmVariant && (
+                  <>
+                    {" / "}
+                    {stageDrafts.length} {tr("스테이지", "stages")}
+                  </>
+                )}
               </span>
             )}
             {activeLayers.length > 1 && (
@@ -1123,10 +1382,7 @@ export default function PipelineVisualEditor({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-2">
           <p className="text-xs" style={MUTED_TEXT_STYLE}>
-            {tr(
-              "노드는 상태, 화살표는 전환입니다. 노드/전환을 눌러 우측 속성을 수정하고, 하단에서 스테이지를 함께 편집합니다.",
-              "Nodes are states, arrows are transitions. Click a node or edge to edit it, then adjust stages below in the same editor.",
-            )}
+            {editorHelpText}
           </p>
           {selectedAgentName && (
             <p className="text-xs" style={MUTED_TEXT_STYLE}>
@@ -1187,18 +1443,33 @@ export default function PipelineVisualEditor({
               opacity: saving || !overrideExists ? 0.45 : 1,
             }}
           >
-            {tr("오버라이드 상속", "Clear override")}
+            {isFsmVariant ? tr("기본값 복원", "Reset default") : tr("오버라이드 상속", "Clear override")}
           </button>
+
+          {isFsmVariant && (
+            <button
+              onClick={handleExportJson}
+              disabled={!pipelineDraft}
+              className="rounded-xl border px-3 py-1.5 text-xs"
+              style={{
+                borderColor: "rgba(56,189,248,0.3)",
+                color: "#38bdf8",
+                opacity: pipelineDraft ? 1 : 0.45,
+              }}
+            >
+              {tr("JSON 내보내기", "Export JSON")}
+            </button>
+          )}
 
           <button
             onClick={() => void handleSave()}
-            disabled={saving || (!pipelineChanged && !stagesChanged)}
+            disabled={saving || !hasVisibleChanges}
             className="rounded-xl px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
             style={{ backgroundColor: "#4f46e5" }}
           >
             {saving
               ? tr("저장 중…", "Saving…")
-              : pipelineChanged || stagesChanged
+              : hasVisibleChanges
                 ? tr("변경 저장", "Save changes")
                 : tr("변경 없음", "No changes")}
           </button>
@@ -1255,43 +1526,45 @@ export default function PipelineVisualEditor({
         </div>
       ) : (
         <>
-          <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,0.95fr)]">
+          <div className={graphGridClass}>
             <div className="min-w-0 rounded-2xl border p-3 sm:p-4 space-y-3" style={INPUT_STYLE}>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={addState}
-                  className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                  style={{
-                    borderColor: "rgba(56,189,248,0.35)",
-                    color: "#38bdf8",
-                    backgroundColor: "rgba(56,189,248,0.08)",
-                  }}
-                >
-                  + {tr("상태", "State")}
-                </button>
-                <button
-                  onClick={addTransition}
-                  className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                  style={{
-                    borderColor: "rgba(129,140,248,0.35)",
-                    color: "#a5b4fc",
-                    backgroundColor: "rgba(129,140,248,0.08)",
-                  }}
-                >
-                  + {tr("전환", "Transition")}
-                </button>
-                <button
-                  onClick={() => setSelection({ kind: "phase_gate" })}
-                  className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                  style={{
-                    borderColor: "rgba(245,158,11,0.35)",
-                    color: "#fbbf24",
-                    backgroundColor: "rgba(245,158,11,0.08)",
-                  }}
-                >
-                  {tr("Phase Gate", "Phase Gate")}
-                </button>
-              </div>
+              {!isFsmVariant && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={addState}
+                    className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                    style={{
+                      borderColor: "rgba(56,189,248,0.35)",
+                      color: "#38bdf8",
+                      backgroundColor: "rgba(56,189,248,0.08)",
+                    }}
+                  >
+                    + {tr("상태", "State")}
+                  </button>
+                  <button
+                    onClick={addTransition}
+                    className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                    style={{
+                      borderColor: "rgba(129,140,248,0.35)",
+                      color: "#a5b4fc",
+                      backgroundColor: "rgba(129,140,248,0.08)",
+                    }}
+                  >
+                    + {tr("전환", "Transition")}
+                  </button>
+                  <button
+                    onClick={() => setSelection({ kind: "phase_gate" })}
+                    className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                    style={{
+                      borderColor: "rgba(245,158,11,0.35)",
+                      color: "#fbbf24",
+                      backgroundColor: "rgba(245,158,11,0.08)",
+                    }}
+                  >
+                    {tr("Phase Gate", "Phase Gate")}
+                  </button>
+                </div>
+              )}
 
               <div
                 className="overflow-hidden rounded-2xl border p-2 sm:p-3"
@@ -1303,8 +1576,13 @@ export default function PipelineVisualEditor({
               >
                 <svg
                   ref={svgRef}
-                  viewBox={`0 0 ${graph.width} ${graph.height}`}
+                  viewBox={
+                    isFsmVariant
+                      ? `0 0 ${FSM_VIEWBOX.width} ${FSM_VIEWBOX.height}`
+                      : `0 0 ${graph.width} ${graph.height}`
+                  }
                   className="h-auto w-full select-none"
+                  preserveAspectRatio={isFsmVariant ? "xMidYMid meet" : undefined}
                   role="img"
                   aria-label={tr(
                     "파이프라인 상태와 전환 그래프",
@@ -1312,6 +1590,7 @@ export default function PipelineVisualEditor({
                   )}
                   onMouseDown={(event) => { if (event.target === svgRef.current) event.preventDefault(); }}
                   onMouseMove={(event) => {
+                    if (isFsmVariant) return;
                     if (!dragConnect) return;
                     const pt = svgPointFromEvent(event);
                     if (!pt) return;
@@ -1323,12 +1602,17 @@ export default function PipelineVisualEditor({
                     setDragConnect((prev) => prev ? { ...prev, cursorX: pt.x, cursorY: pt.y, hoverId: hovered?.id ?? null } : null);
                   }}
                   onMouseUp={() => {
+                    if (isFsmVariant) return;
                     if (dragConnect?.hoverId) {
                       addTransitionBetween(dragConnect.fromId, dragConnect.hoverId);
                     }
                     setDragConnect(null);
                   }}
-                  onMouseLeave={() => setDragConnect(null)}
+                  onMouseLeave={() => {
+                    if (!isFsmVariant) {
+                      setDragConnect(null);
+                    }
+                  }}
                 >
                   <defs>
                     <marker
@@ -1344,6 +1628,13 @@ export default function PipelineVisualEditor({
                     </marker>
                   </defs>
 
+                  <g
+                    transform={
+                      graphTransform
+                        ? `translate(${graphTransform.translateX} ${graphTransform.translateY}) scale(${graphTransform.scale})`
+                        : undefined
+                    }
+                  >
                   {graph.edges.map((edge) => {
                     const accent = transitionAccent(edge.type);
                     const isSelected =
@@ -1363,7 +1654,7 @@ export default function PipelineVisualEditor({
                           d={edge.path}
                           fill="none"
                           stroke="transparent"
-                          strokeWidth={18}
+                          strokeWidth={16}
                           onClick={() => setSelection({ kind: "transition", index: edge.index })}
                           className="cursor-pointer"
                         />
@@ -1449,8 +1740,13 @@ export default function PipelineVisualEditor({
                       <g
                         key={node.id}
                         transform={`translate(${node.x}, ${node.y})`}
-                        onClick={() => { if (!dragConnect) setSelection({ kind: "state", stateId: node.id }); }}
+                        onClick={() => {
+                          if (!dragConnect && !isFsmVariant) {
+                            setSelection({ kind: "state", stateId: node.id });
+                          }
+                        }}
                         onMouseDown={(event) => {
+                          if (isFsmVariant) return;
                           if (event.button !== 0) return;
                           event.preventDefault();
                           const pt = svgPointFromEvent(event);
@@ -1521,12 +1817,12 @@ export default function PipelineVisualEditor({
                       style={{ color: dragConnect.hoverId ? "#a5b4fc" : "#818cf8", pointerEvents: "none" }}
                     />
                   )}
+                  </g>
                 </svg>
               </div>
 
               <div className="flex flex-wrap gap-2 text-xs" style={MUTED_TEXT_STYLE}>
-                <span>{tr("그래프는 화면 폭에 맞춰 자동 압축됩니다.", "The graph automatically collapses to fit the screen width.")}</span>
-                <span>{tr("가로 스크롤 없이 모바일 1열 레이아웃을 사용합니다.", "Mobile uses a single-column layout without horizontal scrolling.")}</span>
+                <span>{graphPanelNote}</span>
               </div>
             </div>
 
@@ -1805,237 +2101,390 @@ export default function PipelineVisualEditor({
 
               {selectedTransition && (
                 <div className="space-y-3">
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                        {tr("시작 상태", "From")}
-                      </label>
-                      <select
-                        value={selectedTransition.from}
-                        onChange={(event) =>
-                          updateTransition(selectedTransitionIndex, {
-                            from: event.target.value,
-                          })
-                        }
-                        className={INPUT_CLASS}
-                        style={INPUT_STYLE}
-                      >
-                        {pipelineDraft.states.map((state) => (
-                          <option key={state.id} value={state.id}>
-                            {state.id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                        {tr("도착 상태", "To")}
-                      </label>
-                      <select
-                        value={selectedTransition.to}
-                        onChange={(event) =>
-                          updateTransition(selectedTransitionIndex, {
-                            to: event.target.value,
-                          })
-                        }
-                        className={INPUT_CLASS}
-                        style={INPUT_STYLE}
-                      >
-                        {pipelineDraft.states.map((state) => (
-                          <option key={state.id} value={state.id}>
-                            {state.id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                        {tr("전환 타입", "Transition type")}
-                      </label>
-                      <select
-                        value={selectedTransition.type}
-                        onChange={(event) =>
-                          updateTransition(selectedTransitionIndex, {
-                            type: event.target.value as PipelineConfigFull["transitions"][number]["type"],
-                          })
-                        }
-                        className={INPUT_CLASS}
-                        style={INPUT_STYLE}
-                      >
-                        <option value="free">free</option>
-                        <option value="gated">gated</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                        {tr("게이트 / 조건", "Gates / conditions")}
-                      </label>
-                      <div className="flex flex-wrap gap-1.5">
-                        {Array.from(new Set([
-                          ...Object.keys(pipelineDraft.gates),
-                          ...selectedTransitionGates,
-                        ])).map((name) => {
-                          const active = selectedTransitionGates.includes(name);
-                          return (
-                            <button
-                              key={name}
-                              type="button"
-                              onClick={() => {
-                                const next = active
-                                  ? selectedTransitionGates.filter((g) => g !== name)
-                                  : [...selectedTransitionGates, name];
-                                updateTransitionGates(selectedTransitionIndex, next.join(", "));
-                              }}
-                              className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
-                              style={{
-                                borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
-                                backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
-                                color: active ? "#fbbf24" : "var(--th-text-muted)",
-                              }}
-                            >
-                              {name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
-                          {tr("게이트 정의", "Gate definitions")}
-                        </h5>
-                        <p className="text-xs" style={MUTED_TEXT_STYLE}>
-                          {tr(
-                            "전환 클릭 시 조건과 트리거를 이 영역에서 편집합니다.",
-                            "Edit transition conditions and triggers here.",
-                          )}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => addGate(selectedTransitionIndex)}
-                        className="rounded-xl border px-3 py-1.5 text-xs"
-                        style={{
-                          borderColor: "rgba(245,158,11,0.35)",
-                          color: "#fbbf24",
-                        }}
-                      >
-                        + {tr("게이트", "Gate")}
-                      </button>
-                    </div>
-
-                    {selectedTransitionGates.length === 0 ? (
-                      <p className="text-xs" style={MUTED_TEXT_STYLE}>
-                        {tr(
-                          "이 전환에는 연결된 게이트가 없습니다. gated 타입이면 게이트를 추가하세요.",
-                          "This transition has no gates. Add one if the transition should be gated.",
-                        )}
-                      </p>
-                    ) : (
-                      selectedTransitionGates.map((gateName) => (
-                        <div
-                          key={gateName}
-                          className="rounded-xl border p-3 space-y-2"
-                          style={{
-                            borderColor: "rgba(148,163,184,0.18)",
-                            backgroundColor: "var(--th-overlay-subtle)",
-                          }}
-                        >
-                          <div
-                            className="text-xs font-mono"
-                            style={{ color: "var(--th-text-primary)" }}
-                          >
-                            {gateName}
+                  {isFsmVariant ? (
+                    <>
+                      <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
+                              {tr("선택된 전환", "Selected transition")}
+                            </h5>
+                            <p className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                              {selectedTransition.from} → {selectedTransition.to}
+                            </p>
                           </div>
-                          <div className="grid gap-3 sm:grid-cols-2">
-                            <div>
-                              <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                                {tr("게이트 타입", "Gate type")}
-                              </label>
-                              <select
-                                value={pipelineDraft.gates[gateName]?.type ?? ""}
-                                onChange={(event) =>
-                                  updateGate(gateName, { type: event.target.value })
+                          <label className="inline-flex items-center gap-2 text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                            <span>{tr("사용", "Enabled")}</span>
+                            <input
+                              type="checkbox"
+                              checked
+                              onChange={(event) => {
+                                if (!event.target.checked) {
+                                  removeTransition(selectedTransitionIndex);
                                 }
-                                className={INPUT_CLASS}
-                                style={INPUT_STYLE}
-                              >
-                                <option value="">-</option>
-                                {Array.from(new Set([
-                                  "builtin",
-                                  ...Object.values(pipelineDraft.gates).map((g) => g?.type).filter(Boolean) as string[],
-                                ])).map((opt) => (
-                                  <option key={opt} value={opt}>{opt}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                                {tr("체크", "Check")}
-                              </label>
-                              <select
-                                value={pipelineDraft.gates[gateName]?.check ?? ""}
-                                onChange={(event) =>
-                                  updateGate(gateName, {
-                                    check: event.target.value || undefined,
-                                  })
-                                }
-                                className={INPUT_CLASS}
-                                style={INPUT_STYLE}
-                              >
-                                <option value="">-</option>
-                                {Array.from(new Set([
-                                  "has_active_dispatch",
-                                  "review_verdict_pass",
-                                  "review_verdict_rework",
-                                  ...Object.values(pipelineDraft.gates).map((g) => g?.check).filter(Boolean) as string[],
-                                ])).map((opt) => (
-                                  <option key={opt} value={opt}>{opt}</option>
-                                ))}
-                              </select>
-                            </div>
-                          </div>
+                              }}
+                            />
+                          </label>
+                        </div>
+
+                        <div className="grid gap-3">
                           <div>
                             <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-                              {tr("설명", "Description")}
+                              {tr("Event", "Event")}
                             </label>
-                            <input
-                              value={pipelineDraft.gates[gateName]?.description ?? ""}
+                            <select
+                              value={selectedFsmEvent}
                               onChange={(event) =>
-                                updateGate(gateName, {
-                                  description: event.target.value || undefined,
+                                updateFsmTransitionEvent(selectedTransitionIndex, event.target.value)
+                              }
+                              className={INPUT_CLASS}
+                              style={INPUT_STYLE}
+                            >
+                              {fsmEventOptions.map((eventName) => (
+                                <option key={eventName} value={eventName}>
+                                  {eventName}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div>
+                            <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                              {tr("Hook", "Hook")}
+                            </label>
+                            <select
+                              value={selectedFsmHook}
+                              onChange={(event) =>
+                                updateFsmEventHook(selectedFsmEvent, event.target.value)
+                              }
+                              className={INPUT_CLASS}
+                              style={INPUT_STYLE}
+                            >
+                              <option value="">{tr("없음", "None")}</option>
+                              {fsmHookOptions.map((hookName) => (
+                                <option key={hookName} value={hookName}>
+                                  {hookName}
+                                </option>
+                              ))}
+                            </select>
+                            <p className="mt-1 text-[11px]" style={MUTED_TEXT_STYLE}>
+                              {tr(
+                                "FSM 모드에서는 선택된 event에 연결된 대표 hook 1개를 빠르게 편집합니다.",
+                                "FSM mode edits a single representative hook for the selected event.",
+                              )}
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                              {tr("Policy", "Policy")}
+                            </label>
+                            <select
+                              value={selectedTransition.type}
+                              onChange={(event) =>
+                                updateTransition(selectedTransitionIndex, {
+                                  type: event.target.value as PipelineConfigFull["transitions"][number]["type"],
                                 })
                               }
                               className={INPUT_CLASS}
                               style={INPUT_STYLE}
-                              placeholder={tr("게이트 설명", "Gate description")}
-                            />
+                            >
+                              <option value="free">free</option>
+                              <option value="gated">gated</option>
+                              <option value="force_only">force_only</option>
+                            </select>
+                          </div>
+
+                          {selectedTransition.type === "gated" && (
+                            <div>
+                              <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                                {tr("게이트 / 조건", "Gates / conditions")}
+                              </label>
+                              <div className="flex flex-wrap gap-1.5">
+                                {Array.from(new Set([
+                                  ...Object.keys(pipelineDraft.gates),
+                                  ...selectedTransitionGates,
+                                ])).map((name) => {
+                                  const active = selectedTransitionGates.includes(name);
+                                  return (
+                                    <button
+                                      key={name}
+                                      type="button"
+                                      onClick={() => {
+                                        const next = active
+                                          ? selectedTransitionGates.filter((gate) => gate !== name)
+                                          : [...selectedTransitionGates, name];
+                                        updateTransitionGates(selectedTransitionIndex, next.join(", "));
+                                      }}
+                                      className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
+                                      style={{
+                                        borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
+                                        backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
+                                        color: active ? "#fbbf24" : "var(--th-text-muted)",
+                                      }}
+                                    >
+                                      {name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                            {tr("시작 상태", "From")}
+                          </label>
+                          <select
+                            value={selectedTransition.from}
+                            onChange={(event) =>
+                              updateTransition(selectedTransitionIndex, {
+                                from: event.target.value,
+                              })
+                            }
+                            className={INPUT_CLASS}
+                            style={INPUT_STYLE}
+                          >
+                            {pipelineDraft.states.map((state) => (
+                              <option key={state.id} value={state.id}>
+                                {state.id}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                            {tr("도착 상태", "To")}
+                          </label>
+                          <select
+                            value={selectedTransition.to}
+                            onChange={(event) =>
+                              updateTransition(selectedTransitionIndex, {
+                                to: event.target.value,
+                              })
+                            }
+                            className={INPUT_CLASS}
+                            style={INPUT_STYLE}
+                          >
+                            {pipelineDraft.states.map((state) => (
+                              <option key={state.id} value={state.id}>
+                                {state.id}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                            {tr("전환 타입", "Transition type")}
+                          </label>
+                          <select
+                            value={selectedTransition.type}
+                            onChange={(event) =>
+                              updateTransition(selectedTransitionIndex, {
+                                type: event.target.value as PipelineConfigFull["transitions"][number]["type"],
+                              })
+                            }
+                            className={INPUT_CLASS}
+                            style={INPUT_STYLE}
+                          >
+                            <option value="free">free</option>
+                            <option value="gated">gated</option>
+                            <option value="force_only">force_only</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                            {tr("게이트 / 조건", "Gates / conditions")}
+                          </label>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Array.from(new Set([
+                              ...Object.keys(pipelineDraft.gates),
+                              ...selectedTransitionGates,
+                            ])).map((name) => {
+                              const active = selectedTransitionGates.includes(name);
+                              return (
+                                <button
+                                  key={name}
+                                  type="button"
+                                  onClick={() => {
+                                    const next = active
+                                      ? selectedTransitionGates.filter((g) => g !== name)
+                                      : [...selectedTransitionGates, name];
+                                    updateTransitionGates(selectedTransitionIndex, next.join(", "));
+                                  }}
+                                  className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
+                                  style={{
+                                    borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
+                                    backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
+                                    color: active ? "#fbbf24" : "var(--th-text-muted)",
+                                  }}
+                                >
+                                  {name}
+                                </button>
+                              );
+                            })}
                           </div>
                         </div>
-                      ))
-                    )}
-                  </div>
+                      </div>
 
-                  <button
-                    onClick={() => removeTransition(selectedTransitionIndex)}
-                    className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                    style={{
-                      borderColor: "rgba(248,113,113,0.28)",
-                      color: "#f87171",
-                      backgroundColor: "rgba(248,113,113,0.08)",
-                    }}
-                  >
-                    {tr("이 전환 삭제", "Delete transition")}
-                  </button>
+                      <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
+                              {tr("게이트 정의", "Gate definitions")}
+                            </h5>
+                            <p className="text-xs" style={MUTED_TEXT_STYLE}>
+                              {tr(
+                                "전환 클릭 시 조건과 트리거를 이 영역에서 편집합니다.",
+                                "Edit transition conditions and triggers here.",
+                              )}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => addGate(selectedTransitionIndex)}
+                            className="rounded-xl border px-3 py-1.5 text-xs"
+                            style={{
+                              borderColor: "rgba(245,158,11,0.35)",
+                              color: "#fbbf24",
+                            }}
+                          >
+                            + {tr("게이트", "Gate")}
+                          </button>
+                        </div>
+
+                        {selectedTransitionGates.length === 0 ? (
+                          <p className="text-xs" style={MUTED_TEXT_STYLE}>
+                            {tr(
+                              "이 전환에는 연결된 게이트가 없습니다. gated 타입이면 게이트를 추가하세요.",
+                              "This transition has no gates. Add one if the transition should be gated.",
+                            )}
+                          </p>
+                        ) : (
+                          selectedTransitionGates.map((gateName) => (
+                            <div
+                              key={gateName}
+                              className="rounded-xl border p-3 space-y-2"
+                              style={{
+                                borderColor: "rgba(148,163,184,0.18)",
+                                backgroundColor: "var(--th-overlay-subtle)",
+                              }}
+                            >
+                              <div
+                                className="text-xs font-mono"
+                                style={{ color: "var(--th-text-primary)" }}
+                              >
+                                {gateName}
+                              </div>
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                                    {tr("게이트 타입", "Gate type")}
+                                  </label>
+                                  <select
+                                    value={pipelineDraft.gates[gateName]?.type ?? ""}
+                                    onChange={(event) =>
+                                      updateGate(gateName, { type: event.target.value })
+                                    }
+                                    className={INPUT_CLASS}
+                                    style={INPUT_STYLE}
+                                  >
+                                    <option value="">-</option>
+                                    {Array.from(new Set([
+                                      "builtin",
+                                      ...Object.values(pipelineDraft.gates).map((g) => g?.type).filter(Boolean) as string[],
+                                    ])).map((opt) => (
+                                      <option key={opt} value={opt}>{opt}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                                    {tr("체크", "Check")}
+                                  </label>
+                                  <select
+                                    value={pipelineDraft.gates[gateName]?.check ?? ""}
+                                    onChange={(event) =>
+                                      updateGate(gateName, {
+                                        check: event.target.value || undefined,
+                                      })
+                                    }
+                                    className={INPUT_CLASS}
+                                    style={INPUT_STYLE}
+                                  >
+                                    <option value="">-</option>
+                                    {Array.from(new Set([
+                                      "has_active_dispatch",
+                                      "review_verdict_pass",
+                                      "review_verdict_rework",
+                                      ...Object.values(pipelineDraft.gates).map((g) => g?.check).filter(Boolean) as string[],
+                                    ])).map((opt) => (
+                                      <option key={opt} value={opt}>{opt}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+                                  {tr("설명", "Description")}
+                                </label>
+                                <input
+                                  value={pipelineDraft.gates[gateName]?.description ?? ""}
+                                  onChange={(event) =>
+                                    updateGate(gateName, {
+                                      description: event.target.value || undefined,
+                                    })
+                                  }
+                                  className={INPUT_CLASS}
+                                  style={INPUT_STYLE}
+                                  placeholder={tr("게이트 설명", "Gate description")}
+                                />
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <button
+                        onClick={() => removeTransition(selectedTransitionIndex)}
+                        className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                        style={{
+                          borderColor: "rgba(248,113,113,0.28)",
+                          color: "#f87171",
+                          backgroundColor: "rgba(248,113,113,0.08)",
+                        }}
+                      >
+                        {tr("이 전환 삭제", "Delete transition")}
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
 
-              {selection?.kind === "phase_gate" && pipelineDraft && (
+              {isFsmVariant && !selectedTransition && (
+                <div
+                  className="rounded-2xl border px-4 py-6 text-sm"
+                  style={{
+                    borderColor: "rgba(148,163,184,0.18)",
+                    backgroundColor: "var(--th-overlay-subtle)",
+                    color: "var(--th-text-muted)",
+                  }}
+                >
+                  {tr(
+                    "전환선을 선택하면 우측 280px 패널에서 event, hook, policy를 바로 편집할 수 있습니다.",
+                    "Select an edge to edit its event, hook, and policy in the 280px side panel.",
+                  )}
+                </div>
+              )}
+
+              {!isFsmVariant && selection?.kind === "phase_gate" && pipelineDraft && (
                 <div className="space-y-3">
                   <p className="text-xs" style={MUTED_TEXT_STYLE}>
                     {tr(
@@ -2125,6 +2574,7 @@ export default function PipelineVisualEditor({
             </div>
           </div>
 
+          {!isFsmVariant && (
           <div className="min-w-0 rounded-2xl border p-3 sm:p-4 space-y-3" style={INPUT_STYLE}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
@@ -2463,6 +2913,7 @@ export default function PipelineVisualEditor({
               </div>
             )}
           </div>
+          )}
         </>
       )}
       </>

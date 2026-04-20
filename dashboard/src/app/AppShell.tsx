@@ -76,6 +76,7 @@ import {
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const DashboardPageView = lazy(() => import("../components/DashboardPageView"));
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
+const OpsPageView = lazy(() => import("../components/OpsPageView"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const OfficeManagerView = lazy(() => import("../components/OfficeManagerView"));
@@ -1087,7 +1088,8 @@ export default function AppShell({
               <Route
                 path="/ops"
                 element={
-                  <OfficeManagerView
+                  <OpsPageView
+                    wsConnected={wsConnected}
                     offices={offices}
                     allAgents={allAgents}
                     selectedOfficeId={selectedOfficeId}

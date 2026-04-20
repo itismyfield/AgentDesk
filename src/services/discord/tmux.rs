@@ -29,7 +29,6 @@ use super::tmux_overload_retry::{
     PROVIDER_OVERLOAD_MAX_RETRIES, ProviderOverloadDecision, clear_provider_overload_retry_state,
     record_provider_overload_retry, schedule_provider_overload_retry,
 };
-pub(super) use super::tmux_restart_handoff::start_restart_handoff_from_state;
 use super::tmux_restart_handoff::{
     resolve_dispatched_thread_dispatch_from_db, resume_aborted_restart_turn,
 };

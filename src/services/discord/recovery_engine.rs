@@ -1,10 +1,9 @@
 use super::gateway::DiscordGateway;
-use super::handoff::{HandoffRecord, save_handoff};
 use super::settings::{
     load_last_remote_profile, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
-use super::turn_bridge::{planned_restart_inflight_message, stale_inflight_message};
+use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
@@ -38,8 +37,6 @@ fn tmux_session_alive_with_retry(name: &str) -> bool {
     false
 }
 
-pub(super) const RESTART_SESSION_DIED_HANDOFF_SENTINEL: &str = "__restart_session_died_handoff__";
-
 /// Retry-aware tmux has_session check.
 fn tmux_has_session_with_retry(name: &str) -> bool {
     if crate::services::platform::tmux::has_session(name) {
@@ -70,32 +67,19 @@ fn save_missing_session_handoff(
     best_response: &str,
 ) {
     let partial = best_response.trim();
-    let partial_context = if partial.is_empty() {
-        "(재시작 전까지 전달된 partial 응답 없음)".to_string()
+    let partial_summary = if partial.is_empty() {
+        "partial response unavailable".to_string()
     } else {
-        tail_with_ellipsis(partial, 1200)
+        tail_with_ellipsis(partial, 160)
     };
-    let context = format!(
-        "재시작 중 기존 tmux 세션이 사라져 동일 turn에 재연결하지 못했습니다.\n\n원래 사용자 요청:\n{}\n\n재시작 전 partial 응답:\n{}",
-        state.user_text.trim(),
-        partial_context,
-    );
-    let handoff = HandoffRecord::new(
-        provider,
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ recovery: suppressed auto post-restart handoff for channel {} (provider={}, user_msg_id={}, partial={})",
         state.channel_id,
-        state.channel_name.clone(),
-        "재시작 중 중단된 응답을 이어서 마무리",
-        context,
-        None,
-        Some(state.user_msg_id),
+        provider.as_str(),
+        state.user_msg_id,
+        partial_summary
     );
-    if let Err(e) = save_handoff(&handoff) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ failed to save recovery handoff for channel {}: {e}",
-            state.channel_id
-        );
-    }
 }
 
 /// Check whether a **successful** result record exists after the given offset.
@@ -1115,11 +1099,7 @@ pub(super) async fn restore_inflight_turns(
                 state.last_offset
             );
             let final_text = if state.full_response.trim().is_empty() {
-                if state.planned_restart {
-                    planned_restart_inflight_message("")
-                } else {
-                    stale_inflight_message("")
-                }
+                stale_inflight_message("")
             } else {
                 super::formatting::format_for_discord_with_provider(&state.full_response, provider)
             };
@@ -1153,37 +1133,6 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 state.full_response.clone()
             };
-            if state.planned_restart {
-                tracing::info!(
-                    "  [{ts}] ↻ cannot reattach inflight turn for channel {} after planned restart: starting post-restart handoff",
-                    state.channel_id
-                );
-                #[cfg(unix)]
-                let _ = super::tmux_restart_handoff::start_restart_handoff_from_state(
-                    channel_id,
-                    http,
-                    shared,
-                    provider,
-                    state,
-                    &best_response,
-                )
-                .await;
-                #[cfg(not(unix))]
-                {
-                    let stale_text = planned_restart_inflight_message(&best_response);
-                    let _ = super::formatting::replace_long_message_raw(
-                        http,
-                        channel_id,
-                        current_msg_id,
-                        &stale_text,
-                        shared,
-                    )
-                    .await;
-                    save_missing_session_handoff(provider, &state, &best_response);
-                    clear_inflight_state(provider, state.channel_id);
-                }
-                continue;
-            }
             let stale_text = stale_inflight_message(&best_response);
             let death_diag = tmux_session_name
                 .as_deref()
@@ -1520,15 +1469,15 @@ pub(super) async fn restore_inflight_turns(
                             last_offset: offset,
                         });
                     } else {
-                        // Session truly dead during restart recovery — hand off
-                        // to the internal post-restart follow-up path instead
-                        // of exposing Discord auto-retry history to the user.
+                        // Session truly died during restart recovery. Fall back
+                        // to the generic auto-retry path so restart handling
+                        // does not get a special handoff-only branch.
                         tracing::warn!(
-                            "  [{ts}] ↻ Recovery: session died, signaling internal handoff (channel {})",
+                            "  [{ts}] ↻ Recovery: session died, signaling generic auto-retry (channel {})",
                             retry_channel_id
                         );
                         let _ = tx.send(StreamMessage::Done {
-                            result: RESTART_SESSION_DIED_HANDOFF_SENTINEL.to_string(),
+                            result: "__session_died_retry__".to_string(),
                             session_id: recovery_session_id,
                         });
                     }
@@ -1845,7 +1794,6 @@ mod tests {
             session_key: Some("host:tmux-1".to_string()),
             dispatch_id: Some("dispatch-from-state".to_string()),
             last_watcher_relayed_offset: None,
-            planned_restart: false,
         };
 
         assert!(
@@ -1907,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_session_recovery_saves_handoff_for_followup_turn() {
+    fn missing_session_recovery_does_not_save_handoff_for_followup_turn() {
         let _lock = super::super::runtime_store::lock_test_env();
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("agentdesk-root");
@@ -1954,7 +1902,6 @@ mod tests {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
-            planned_restart: false,
         };
 
         save_missing_session_handoff(
@@ -1964,83 +1911,10 @@ mod tests {
         );
 
         let handoffs = crate::services::discord::handoff::load_handoffs(&ProviderKind::Codex);
-        assert_eq!(handoffs.len(), 1);
-        assert_eq!(handoffs[0].channel_id, state.channel_id);
-        assert_eq!(handoffs[0].user_msg_id, Some(state.user_msg_id));
-        assert!(handoffs[0].intent.contains("중단된 응답"));
-        assert!(handoffs[0].context.contains("원래 사용자 요청"));
-        assert!(handoffs[0].context.contains("partial 응답"));
         assert!(
-            handoffs[0]
-                .context
-                .contains("이어서 원인과 대응을 설명하겠습니다")
+            handoffs.is_empty(),
+            "automatic post-restart handoff files must no longer be created"
         );
-    }
-
-    #[test]
-    fn planned_restart_recovery_saves_handoff_for_non_unix_followup() {
-        let _lock = super::super::runtime_store::lock_test_env();
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path().join("agentdesk-root");
-        std::fs::create_dir_all(root.join("runtime")).unwrap();
-
-        struct EnvReset;
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-            }
-        }
-
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
-        let _reset = EnvReset;
-
-        let state = crate::services::discord::inflight::InflightTurnState {
-            version: 1,
-            provider: "codex".to_string(),
-            channel_id: 1486333430516945010,
-            channel_name: Some("adk-cdx-t1486333430516945010".to_string()),
-            logical_channel_id: Some(1479671301387059202),
-            thread_id: Some(1486333430516945010),
-            thread_title: Some("[AgentDesk] restart recovery".to_string()),
-            request_owner_user_id: 343742347365974026,
-            user_msg_id: 1487795113240559790,
-            current_msg_id: 1487799916758827140,
-            current_msg_len: 0,
-            user_text: "dcserver 재시작 후에도 이어서 마무리해줘.".to_string(),
-            session_id: Some("session-restart".to_string()),
-            tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945010".to_string()),
-            output_path: Some("/tmp/agentdesk-test-restart.jsonl".to_string()),
-            input_fifo_path: Some("/tmp/agentdesk-test-restart.input".to_string()),
-            last_offset: 77,
-            turn_start_offset: Some(77),
-            full_response: "재시작 전 답변을 정리하던 중이었습니다.".to_string(),
-            response_sent_offset: 0,
-            current_tool_line: None,
-            prev_tool_status: None,
-            started_at: "2026-03-29 22:10:34".to_string(),
-            updated_at: "2026-03-29 22:13:53".to_string(),
-            born_generation: 8,
-            any_tool_used: true,
-            has_post_tool_text: false,
-            session_key: None,
-            dispatch_id: None,
-            last_watcher_relayed_offset: None,
-            planned_restart: true,
-        };
-
-        save_missing_session_handoff(
-            &ProviderKind::Codex,
-            &state,
-            "새 dcserver가 올라오면 이어서 남은 설명을 마무리합니다.",
-        );
-
-        let handoffs = crate::services::discord::handoff::load_handoffs(&ProviderKind::Codex);
-        assert_eq!(handoffs.len(), 1);
-        assert_eq!(handoffs[0].channel_id, state.channel_id);
-        assert_eq!(handoffs[0].user_msg_id, Some(state.user_msg_id));
-        assert!(handoffs[0].intent.contains("중단된 응답"));
-        assert!(handoffs[0].context.contains("원래 사용자 요청"));
-        assert!(handoffs[0].context.contains("남은 설명을 마무리합니다"));
     }
 
     #[test]

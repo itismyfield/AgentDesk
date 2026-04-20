@@ -90,6 +90,7 @@ export default function AgentCard({
 
   return (
     <SurfaceCard
+      data-testid={`agents-card-${agent.id}`}
       onClick={onOpen}
       className={`group cursor-pointer rounded-[28px] p-4 transition-all hover:-translate-y-0.5 ${
         viewMode === "list" ? "flex flex-col gap-4 md:flex-row md:items-center" : ""

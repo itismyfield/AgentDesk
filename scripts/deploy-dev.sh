@@ -240,6 +240,12 @@ else
     echo "▸ [gate] Zero create-pr dispatches inflight — proceeding."
 fi
 
+# Prevent dev deploy from cutting active turns. The detached helper already
+# ensures the initiating turn can finish before this gate runs.
+if ! wait_for_live_turns_to_drain_or_fail "dev" "$PLIST" "$DEV_PORT" 120 2; then
+    exit 1
+fi
+
 # 2. Stop dev only — leave release untouched
 echo "▸ Stopping dev..."
 launchctl bootout "gui/$(id -u)/$PLIST" 2>/dev/null || true

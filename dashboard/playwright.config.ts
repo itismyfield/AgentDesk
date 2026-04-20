@@ -11,7 +11,7 @@ export default defineConfig({
     command: "npm run build && npm run preview",
     port: 4173,
     reuseExistingServer: true,
-    timeout: 10_000,
+    timeout: 30_000,
   },
   projects: [
     { name: "desktop", use: { viewport: { width: 1280, height: 720 } } },

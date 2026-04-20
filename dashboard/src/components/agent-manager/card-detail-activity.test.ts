@@ -75,6 +75,51 @@ describe("card-detail-activity helpers", () => {
     });
   });
 
+  it("prefers success status codes over freeform warning keywords", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({
+          status: "approved",
+          message: "blocked error keywords should not override approved status",
+        }),
+        tr,
+      ),
+    ).toEqual({
+      text: "blocked error keywords should not override approved status",
+      tone: "default",
+    });
+  });
+
+  it("keeps locale-specific warning text neutral when status is successful", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({
+          status: "approved",
+          message: "차단 또는 실패라는 단어가 있어도 승인 상태가 우선",
+        }),
+        trKo,
+      ),
+    ).toEqual({
+      text: "차단 또는 실패라는 단어가 있어도 승인 상태가 우선",
+      tone: "default",
+    });
+  });
+
+  it("keeps failure status codes dangerous even with neutral detail", () => {
+    expect(
+      formatAuditResult(
+        JSON.stringify({
+          status: "failed",
+          message: "Looks good on manual inspection",
+        }),
+        tr,
+      ),
+    ).toEqual({
+      text: "Looks good on manual inspection",
+      tone: "danger",
+    });
+  });
+
   it("humanizes cancellation reason codes", () => {
     expect(
       formatAuditResult(

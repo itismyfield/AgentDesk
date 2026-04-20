@@ -206,7 +206,8 @@ pub(super) fn dispatch_context_worktree_target(
     Ok(Some((path.to_string(), branch)))
 }
 
-pub(super) fn resolve_parent_dispatch_context(
+#[cfg(test)]
+pub(super) fn resolve_parent_dispatch_context_sqlite_test(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
     context: &serde_json::Value,
@@ -292,7 +293,7 @@ fn load_card_pr_number(db: &Db, card_id: &str) -> Option<i64> {
     })
 }
 
-pub(crate) fn inject_review_dispatch_identifiers(
+pub(crate) fn inject_review_dispatch_identifiers_sqlite_test(
     db: &Db,
     card_id: &str,
     dispatch_type: &str,
@@ -302,7 +303,7 @@ pub(crate) fn inject_review_dispatch_identifiers(
     let repo = json_string_field(&snapshot, "repo")
         .or_else(|| json_string_field(&snapshot, "target_repo"))
         .map(str::to_string)
-        .or_else(|| resolve_card_target_repo_ref(db, card_id, Some(&snapshot)));
+        .or_else(|| resolve_card_target_repo_ref_sqlite_test(db, card_id, Some(&snapshot)));
     if let Some(repo) = repo {
         obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
     }
@@ -329,7 +330,7 @@ pub(crate) fn inject_review_dispatch_identifiers(
         _ => {}
     }
 }
-pub(super) fn resolve_card_target_repo_ref(
+pub(super) fn resolve_card_target_repo_ref_sqlite_test(
     db: &Db,
     card_id: &str,
     context: Option<&serde_json::Value>,
@@ -359,7 +360,7 @@ fn resolve_card_repo_dir_with_context(
     context: Option<&serde_json::Value>,
     purpose: &str,
 ) -> Result<Option<String>> {
-    let target_repo = resolve_card_target_repo_ref(db, card_id, context);
+    let target_repo = resolve_card_target_repo_ref_sqlite_test(db, card_id, context);
     crate::services::platform::shell::resolve_repo_dir_for_target(target_repo.as_deref())
         .map_err(|e| anyhow::anyhow!("Cannot {purpose} for card {}: {}", card_id, e))
 }
@@ -535,7 +536,7 @@ fn refresh_review_target_worktree(
     };
 
     if let Some((wt_path, wt_branch, _wt_commit)) =
-        resolve_card_worktree(db, card_id, Some(resolve_context.as_ref()))?
+        resolve_card_worktree_sqlite_test(db, card_id, Some(resolve_context.as_ref()))?
     {
         // Use the exact-HEAD check here too — a worktree whose HEAD has
         // advanced past reviewed_commit still satisfies git_commit_exists
@@ -767,7 +768,7 @@ fn latest_completed_work_dispatch_target(
                 .and_then(|v| json_string_field(v, "target_repo"))
         })
         .map(str::to_string)
-        .or_else(|| resolve_card_target_repo_ref(db, kanban_card_id, None));
+        .or_else(|| resolve_card_target_repo_ref_sqlite_test(db, kanban_card_id, None));
 
     if let Some(reviewed_commit) = reviewed_commit {
         let fallback_repo_dir = target_repo
@@ -1072,7 +1073,7 @@ pub(super) fn inject_review_merge_base_context(
 /// canonical worktree. If the card points at a repo without a configured
 /// local mapping, this fails instead of silently falling back to the default
 /// repo.
-pub(crate) fn resolve_card_worktree(
+pub(crate) fn resolve_card_worktree_sqlite_test(
     db: &Db,
     card_id: &str,
     context: Option<&serde_json::Value>,
@@ -1128,7 +1129,7 @@ fn resolve_card_issue_commit_target(
         reviewed_commit,
         branch,
         worktree_path: Some(repo_dir),
-        target_repo: resolve_card_target_repo_ref(db, card_id, context),
+        target_repo: resolve_card_target_repo_ref_sqlite_test(db, card_id, context),
     }))
 }
 
@@ -1170,7 +1171,7 @@ fn resolve_repo_head_fallback_target(
     }
 
     Ok(execution_target_from_dir(&repo_dir).map(|mut target| {
-        target.target_repo = resolve_card_target_repo_ref(db, kanban_card_id, context);
+        target.target_repo = resolve_card_target_repo_ref_sqlite_test(db, kanban_card_id, context);
         target
     }))
 }
@@ -1228,7 +1229,7 @@ pub(crate) enum ReviewTargetTrust {
 /// callers (anyone reaching `POST /api/dispatches`) MUST pass `Untrusted`;
 /// internal callers that already have first-party review-target values may
 /// opt into `Trusted`.
-pub(super) fn build_review_context(
+pub(super) fn build_review_context_sqlite_test(
     db: &Db,
     kanban_card_id: &str,
     to_agent_id: &str,
@@ -1274,7 +1275,7 @@ pub(super) fn build_review_context(
         }
     }
 
-    let target_repo = resolve_card_target_repo_ref(db, kanban_card_id, Some(&ctx_val));
+    let target_repo = resolve_card_target_repo_ref_sqlite_test(db, kanban_card_id, Some(&ctx_val));
     if let Some(obj) = ctx_val.as_object_mut() {
         if let Some(target_repo) = target_repo.as_deref() {
             obj.entry("target_repo".to_string())
@@ -1389,7 +1390,7 @@ pub(super) fn build_review_context(
                         external_repo
                     );
                 } else if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
-                    resolve_card_worktree(db, kanban_card_id, Some(&ctx_snapshot))?
+                    resolve_card_worktree_sqlite_test(db, kanban_card_id, Some(&ctx_snapshot))?
                 {
                     apply_review_target_context(
                         &DispatchExecutionTarget {
@@ -1443,7 +1444,7 @@ pub(super) fn build_review_context(
 
         inject_review_merge_base_context(obj);
         inject_review_quality_context(obj);
-        inject_review_dispatch_identifiers(db, kanban_card_id, "review", obj);
+        inject_review_dispatch_identifiers_sqlite_test(db, kanban_card_id, "review", obj);
 
         if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
             if let Ok(conn) = db.separate_conn() {
@@ -1550,7 +1551,7 @@ async fn load_card_pr_number_pg(pool: &PgPool, card_id: &str) -> Option<i64> {
 /// Returns `(parent_dispatch_id, chain_depth)` after validating that the
 /// referenced parent dispatch exists and belongs to the same card.
 #[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
-pub(super) async fn resolve_parent_dispatch_context_pg(
+pub(super) async fn resolve_parent_dispatch_context(
     pool: &PgPool,
     card_id: &str,
     context: &serde_json::Value,
@@ -1606,7 +1607,7 @@ pub(super) async fn resolve_parent_dispatch_context_pg(
 ///
 /// Returns the same value the rusqlite variant would for the same input.
 /// **Do NOT compute provenance here** — see the module-level note above.
-pub(super) async fn resolve_card_target_repo_ref_pg(
+pub(super) async fn resolve_card_target_repo_ref(
     pool: &PgPool,
     card_id: &str,
     context: Option<&serde_json::Value>,
@@ -1636,7 +1637,7 @@ async fn resolve_card_repo_dir_with_context_pg(
     context: Option<&serde_json::Value>,
     purpose: &str,
 ) -> Result<Option<String>> {
-    let target_repo = resolve_card_target_repo_ref_pg(pool, card_id, context).await;
+    let target_repo = resolve_card_target_repo_ref(pool, card_id, context).await;
     crate::services::platform::shell::resolve_repo_dir_for_target(target_repo.as_deref())
         .map_err(|e| anyhow::anyhow!("Cannot {purpose} for card {}: {}", card_id, e))
 }
@@ -1645,7 +1646,7 @@ async fn resolve_card_repo_dir_with_context_pg(
 ///
 /// Returns `(worktree_path, worktree_branch, head_commit)` derived from the
 /// card's `github_issue_number` + resolved repo dir.
-pub(crate) async fn resolve_card_worktree_pg(
+pub(crate) async fn resolve_card_worktree(
     pool: &PgPool,
     card_id: &str,
     context: Option<&serde_json::Value>,
@@ -1672,7 +1673,7 @@ pub(crate) async fn resolve_card_worktree_pg(
 ///
 /// Mutates `obj` to add review-target identifiers (repo, issue/PR numbers,
 /// verdict/decision endpoints).
-pub(crate) async fn inject_review_dispatch_identifiers_pg(
+pub(crate) async fn inject_review_dispatch_identifiers(
     pool: &PgPool,
     card_id: &str,
     dispatch_type: &str,
@@ -1684,7 +1685,7 @@ pub(crate) async fn inject_review_dispatch_identifiers_pg(
         .map(str::to_string)
     {
         Some(value) => Some(value),
-        None => resolve_card_target_repo_ref_pg(pool, card_id, Some(&snapshot)).await,
+        None => resolve_card_target_repo_ref(pool, card_id, Some(&snapshot)).await,
     };
     if let Some(repo) = repo {
         obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
@@ -1833,7 +1834,7 @@ async fn refresh_review_target_worktree_pg(
     };
 
     if let Some((wt_path, wt_branch, _wt_commit)) =
-        resolve_card_worktree_pg(pool, card_id, Some(resolve_context.as_ref())).await?
+        resolve_card_worktree(pool, card_id, Some(resolve_context.as_ref())).await?
     {
         if worktree_head_matches_commit(&wt_path, &target.reviewed_commit) {
             let branch = resolve_review_target_branch_pg(
@@ -2041,7 +2042,7 @@ async fn latest_completed_work_dispatch_target_pg(
         .map(str::to_string)
     {
         Some(value) => Some(value),
-        None => resolve_card_target_repo_ref_pg(pool, kanban_card_id, None).await,
+        None => resolve_card_target_repo_ref(pool, kanban_card_id, None).await,
     };
 
     if let Some(reviewed_commit) = reviewed_commit {
@@ -2138,7 +2139,7 @@ async fn resolve_card_issue_commit_target_pg(
         reviewed_commit,
         branch,
         worktree_path: Some(repo_dir),
-        target_repo: resolve_card_target_repo_ref_pg(pool, card_id, context).await,
+        target_repo: resolve_card_target_repo_ref(pool, card_id, context).await,
     }))
 }
 
@@ -2183,7 +2184,7 @@ async fn resolve_repo_head_fallback_target_pg(
     let Some(mut target) = execution_target_from_dir(&repo_dir) else {
         return Ok(None);
     };
-    target.target_repo = resolve_card_target_repo_ref_pg(pool, kanban_card_id, context).await;
+    target.target_repo = resolve_card_target_repo_ref(pool, kanban_card_id, context).await;
     Ok(Some(target))
 }
 
@@ -2200,7 +2201,7 @@ async fn resolve_repo_head_fallback_target_pg(
 /// callers (anyone reaching `POST /api/dispatches`) MUST pass `Untrusted`;
 /// internal callers that already have first-party review-target values may
 /// opt into `Trusted`.
-pub(super) async fn build_review_context_pg(
+pub(super) async fn build_review_context(
     pool: &PgPool,
     kanban_card_id: &str,
     to_agent_id: &str,
@@ -2262,7 +2263,7 @@ pub(super) async fn build_review_context_pg(
         }
     }
 
-    let target_repo = resolve_card_target_repo_ref_pg(
+    let target_repo = resolve_card_target_repo_ref(
         pool,
         kanban_card_id,
         Some(&serde_json::Value::Object(obj.clone())),
@@ -2355,7 +2356,7 @@ pub(super) async fn build_review_context_pg(
                     external_repo
                 );
             } else if let Some((wt_path, wt_branch, wt_commit)) =
-                resolve_card_worktree_pg(pool, kanban_card_id, Some(&ctx_snapshot)).await?
+                resolve_card_worktree(pool, kanban_card_id, Some(&ctx_snapshot)).await?
             {
                 let reviewed_commit = wt_commit.clone();
                 apply_review_target_context(
@@ -2410,7 +2411,7 @@ pub(super) async fn build_review_context_pg(
 
     inject_review_merge_base_context(&mut obj);
     inject_review_quality_context(&mut obj);
-    inject_review_dispatch_identifiers_pg(pool, kanban_card_id, "review", &mut obj).await;
+    inject_review_dispatch_identifiers(pool, kanban_card_id, "review", &mut obj).await;
 
     if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
         if let Ok(Some(bindings)) = load_agent_channel_bindings_pg(pool, to_agent_id).await {
@@ -2750,7 +2751,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context = build_review_context(
+        let context = build_review_context_sqlite_test(
             &db,
             "card-review-identifiers",
             "agent-1",
@@ -3103,7 +3104,7 @@ mod tests {
 
         let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-happy" });
         let (parent_id, depth) =
-            resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-happy", &context)
+            resolve_parent_dispatch_context(&pool, "card-pg-parent-happy", &context)
                 .await
                 .expect("happy-path parent context");
 
@@ -3129,7 +3130,7 @@ mod tests {
         pg_seed_dispatch(&pool, "dispatch-pg-parent-cross", "card-pg-parent-b", 0).await;
 
         let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-cross" });
-        let err = resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &context)
+        let err = resolve_parent_dispatch_context(&pool, "card-pg-parent-a", &context)
             .await
             .expect_err("must reject parent that belongs to another card");
         assert!(
@@ -3139,7 +3140,7 @@ mod tests {
 
         // missing parent → bail
         let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-missing" });
-        let err = resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &context)
+        let err = resolve_parent_dispatch_context(&pool, "card-pg-parent-a", &context)
             .await
             .expect_err("must reject unknown parent_dispatch_id");
         assert!(
@@ -3149,7 +3150,7 @@ mod tests {
 
         // empty / missing parent → (None, 0)
         let (parent_id, depth) =
-            resolve_parent_dispatch_context_pg(&pool, "card-pg-parent-a", &json!({}))
+            resolve_parent_dispatch_context(&pool, "card-pg-parent-a", &json!({}))
                 .await
                 .unwrap();
         assert!(parent_id.is_none());
@@ -3180,11 +3181,10 @@ mod tests {
         .await;
 
         let context = json!({ "target_repo": "external/repo" });
-        let value =
-            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-happy", Some(&context)).await;
+        let value = resolve_card_target_repo_ref(&pool, "card-pg-tr-happy", Some(&context)).await;
         assert_eq!(value.as_deref(), Some("external/repo"));
 
-        let value = resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-happy", None).await;
+        let value = resolve_card_target_repo_ref(&pool, "card-pg-tr-happy", None).await;
         assert_eq!(value.as_deref(), Some("itismyfield/AgentDesk"));
 
         pool.close().await;
@@ -3201,7 +3201,7 @@ mod tests {
             return;
         };
 
-        let value = resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-missing", None).await;
+        let value = resolve_card_target_repo_ref(&pool, "card-pg-tr-missing", None).await;
         assert!(value.is_none());
 
         pool.close().await;
@@ -3238,7 +3238,7 @@ mod tests {
         };
         assert_eq!(provenance_caller, TargetRepoSource::CallerSupplied);
         let resolved =
-            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&caller_ctx)).await;
+            resolve_card_target_repo_ref(&pool, "card-pg-tr-prov", Some(&caller_ctx)).await;
         assert_eq!(resolved.as_deref(), Some("caller/explicit-repo"));
 
         // Case 2: Card-Scope-Default. No caller pin → CardScopeDefault and
@@ -3251,7 +3251,7 @@ mod tests {
         };
         assert_eq!(provenance_card, TargetRepoSource::CardScopeDefault);
         let resolved =
-            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&card_ctx)).await;
+            resolve_card_target_repo_ref(&pool, "card-pg-tr-prov", Some(&card_ctx)).await;
         assert_eq!(resolved.as_deref(), Some("card/scope-repo"));
 
         // Case 3: empty context → still CardScopeDefault, still card-scope value.
@@ -3263,7 +3263,7 @@ mod tests {
         };
         assert_eq!(provenance_empty, TargetRepoSource::CardScopeDefault);
         let resolved =
-            resolve_card_target_repo_ref_pg(&pool, "card-pg-tr-prov", Some(&empty_ctx)).await;
+            resolve_card_target_repo_ref(&pool, "card-pg-tr-prov", Some(&empty_ctx)).await;
         assert_eq!(resolved.as_deref(), Some("card/scope-repo"));
 
         pool.close().await;
@@ -3283,7 +3283,7 @@ mod tests {
         };
 
         pg_seed_card(&pool, "card-pg-wt-no-issue", None, None).await;
-        let resolved = resolve_card_worktree_pg(&pool, "card-pg-wt-no-issue", None)
+        let resolved = resolve_card_worktree(&pool, "card-pg-wt-no-issue", None)
             .await
             .expect("no-issue card returns Ok(None)");
         assert!(resolved.is_none());
@@ -3312,7 +3312,7 @@ mod tests {
 
         pg_seed_card(&pool, "card-pg-wt-happy", Some(847), None).await;
         let context = json!({ "target_repo": repo_dir });
-        let resolved = resolve_card_worktree_pg(&pool, "card-pg-wt-happy", Some(&context))
+        let resolved = resolve_card_worktree(&pool, "card-pg-wt-happy", Some(&context))
             .await
             .expect("happy-path worktree resolution");
         let (path, branch, _commit) = resolved.expect("worktree should be discoverable for issue");
@@ -3352,7 +3352,7 @@ mod tests {
         .expect("seed pr_tracking");
 
         let mut obj = serde_json::Map::new();
-        inject_review_dispatch_identifiers_pg(&pool, "card-pg-ids-happy", "review", &mut obj).await;
+        inject_review_dispatch_identifiers(&pool, "card-pg-ids-happy", "review", &mut obj).await;
 
         assert_eq!(
             obj.get("repo").and_then(|v| v.as_str()),
@@ -3383,13 +3383,8 @@ mod tests {
         pg_seed_card(&pool, "card-pg-ids-empty", None, None).await;
 
         let mut obj = serde_json::Map::new();
-        inject_review_dispatch_identifiers_pg(
-            &pool,
-            "card-pg-ids-empty",
-            "review-decision",
-            &mut obj,
-        )
-        .await;
+        inject_review_dispatch_identifiers(&pool, "card-pg-ids-empty", "review-decision", &mut obj)
+            .await;
 
         assert!(obj.get("repo").is_none(), "repo must remain unset");
         assert!(obj.get("issue_number").is_none());
@@ -3437,7 +3432,7 @@ mod tests {
             "worktree_path": "/tmp/agentdesk-bogus-review-path",
         });
 
-        let sqlite_context = build_review_context(
+        let sqlite_context = build_review_context_sqlite_test(
             &db,
             card_id,
             "agent-1",
@@ -3446,7 +3441,7 @@ mod tests {
             TargetRepoSource::CardScopeDefault,
         )
         .expect("sqlite review context");
-        let pg_context = build_review_context_pg(
+        let pg_context = build_review_context(
             &pool,
             card_id,
             "agent-1",
@@ -3463,7 +3458,10 @@ mod tests {
         assert_eq!(pg_parsed, sqlite_parsed);
         assert_eq!(pg_parsed["branch"], "wt/8481-live");
         assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
-        assert_eq!(pg_parsed["worktree_path"], wt_path);
+        assert_eq!(
+            canonicalize_path(pg_parsed["worktree_path"].as_str().unwrap()),
+            canonicalize_path(wt_path)
+        );
 
         pool.close().await;
         pg_db.drop().await;
@@ -3494,7 +3492,7 @@ mod tests {
         pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
         pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
 
-        let err = build_review_context_pg(
+        let err = build_review_context(
             &pool,
             card_id,
             "agent-1",
@@ -3545,7 +3543,7 @@ mod tests {
         pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
         pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
 
-        let sqlite_context = build_review_context(
+        let sqlite_context = build_review_context_sqlite_test(
             &db,
             card_id,
             "agent-1",
@@ -3554,7 +3552,7 @@ mod tests {
             TargetRepoSource::CardScopeDefault,
         )
         .expect("sqlite no-target_repo fallback");
-        let pg_context = build_review_context_pg(
+        let pg_context = build_review_context(
             &pool,
             card_id,
             "agent-1",
@@ -3572,7 +3570,10 @@ mod tests {
         assert_eq!(pg_parsed["target_repo"], repo_dir);
         assert_eq!(pg_parsed["branch"], "wt/8483-live");
         assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
-        assert_eq!(pg_parsed["worktree_path"], wt_path);
+        assert_eq!(
+            canonicalize_path(pg_parsed["worktree_path"].as_str().unwrap()),
+            canonicalize_path(wt_path)
+        );
         assert!(pg_parsed.get("review_target_reject_reason").is_none());
 
         pool.close().await;
@@ -3635,7 +3636,7 @@ mod tests {
             "pr_number": 4242,
         });
 
-        let sqlite_context = build_review_context(
+        let sqlite_context = build_review_context_sqlite_test(
             &db,
             card_id,
             "agent-1",
@@ -3644,7 +3645,7 @@ mod tests {
             TargetRepoSource::CallerSupplied,
         )
         .expect("sqlite trusted preserve");
-        let pg_context = build_review_context_pg(
+        let pg_context = build_review_context(
             &pool,
             card_id,
             "agent-1",

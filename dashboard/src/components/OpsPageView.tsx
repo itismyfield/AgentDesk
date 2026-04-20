@@ -367,6 +367,7 @@ export default function OpsPageView({
 
   return (
     <div
+      data-testid="ops-page"
       className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
@@ -431,11 +432,12 @@ export default function OpsPageView({
           </div>
         ) : null}
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div data-testid="ops-signal-grid" className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           {signals.length > 0 ? (
             signals.map((signal) => (
               <SurfaceCard
                 key={signal.key}
+                data-testid={`ops-signal-${signal.key}`}
                 className="min-w-0 rounded-3xl p-4"
                 style={{
                   borderColor:
@@ -493,7 +495,7 @@ export default function OpsPageView({
           )}
         >
           {bottlenecks.length > 0 ? (
-            <div className="mt-4 space-y-2">
+            <div data-testid="ops-bottlenecks" className="mt-4 space-y-2">
               <div
                 className="hidden items-center gap-3 rounded-2xl px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] md:grid"
                 style={{
@@ -509,6 +511,7 @@ export default function OpsPageView({
               {bottlenecks.map((row) => (
                 <div
                   key={`${row.kind}-${row.detail}`}
+                  data-testid={`ops-bottleneck-${row.kind}`}
                   className="grid gap-3 rounded-2xl border px-3 py-3 md:items-center"
                   style={{
                     gridTemplateColumns: "minmax(0, 1fr)",
@@ -558,7 +561,7 @@ export default function OpsPageView({
               ))}
             </div>
           ) : (
-            <SurfaceEmptyState className="mt-4 py-8">
+            <SurfaceEmptyState data-testid="ops-bottlenecks-empty" className="mt-4 py-8">
               <div className="flex flex-col items-center gap-2 text-center">
                 <Wifi size={20} style={{ color: "var(--th-text-muted)" }} />
                 <div className="text-sm font-semibold" style={{ color: "var(--th-text-primary)" }}>
@@ -579,8 +582,9 @@ export default function OpsPageView({
             "A compact side panel for WS connectivity and outbox/provider delivery status.",
           )}
         >
-          <div className="mt-4 space-y-3">
+          <div data-testid="ops-connection-panel" className="mt-4 space-y-3">
             <SurfaceCard
+              data-testid="ops-websocket-card"
               className="rounded-3xl p-4"
               style={{
                 borderColor: wsConnected ? "var(--color-info-border)" : "var(--color-danger-border)",
@@ -608,7 +612,7 @@ export default function OpsPageView({
             </SurfaceCard>
 
             <div className="grid gap-3 sm:grid-cols-2">
-              <SurfaceCard className="rounded-3xl p-4">
+              <SurfaceCard data-testid="ops-dispatch-outbox-card" className="rounded-3xl p-4">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
                   dispatch_outbox
                 </div>
@@ -623,7 +627,7 @@ export default function OpsPageView({
                 </div>
               </SurfaceCard>
 
-              <SurfaceCard className="rounded-3xl p-4">
+              <SurfaceCard data-testid="ops-providers-card" className="rounded-3xl p-4">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
                   providers
                 </div>

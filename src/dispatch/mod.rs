@@ -14,6 +14,8 @@ mod dispatch_status;
 
 #[cfg(test)]
 use dispatch_channel::provider_from_channel_suffix;
+#[cfg(test)]
+pub(crate) use dispatch_context::resolve_card_worktree_sqlite_test;
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
     DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
@@ -25,15 +27,22 @@ pub(crate) use dispatch_context::{
 };
 #[cfg(test)]
 use dispatch_context::{
-    ReviewTargetTrust, TargetRepoSource, build_review_context, inject_review_merge_base_context,
+    ReviewTargetTrust, TargetRepoSource, build_review_context_sqlite_test,
+    inject_review_merge_base_context,
 };
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_conn;
+pub(crate) use dispatch_create::query_dispatch_row_pg;
 #[allow(unused_imports)]
 pub use dispatch_create::{
     create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
     create_dispatch_core_with_id_and_options, create_dispatch_core_with_options,
     create_dispatch_with_options,
+};
+#[cfg(test)]
+pub(crate) use dispatch_create::{
+    create_dispatch_core_sqlite_test, create_dispatch_core_with_id_and_options_sqlite_test,
+    create_dispatch_core_with_id_sqlite_test,
 };
 #[allow(unused_imports)]
 pub use dispatch_status::{complete_dispatch, finalize_dispatch, mark_dispatch_completed};
@@ -697,6 +706,11 @@ pub fn drain_unified_thread_kill_signals() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::build_review_context_sqlite_test as build_review_context;
+    use super::create_dispatch_core_sqlite_test as create_dispatch_core_test;
+    use super::create_dispatch_core_with_id_and_options_sqlite_test as create_dispatch_core_with_id_and_options;
+    use super::create_dispatch_core_with_id_sqlite_test as create_dispatch_core_with_id;
+    use super::resolve_card_worktree_sqlite_test as resolve_card_worktree;
     use super::*;
     use std::process::Command;
     use std::sync::MutexGuard;
@@ -1390,8 +1404,8 @@ mod tests {
         let engine = test_engine(&db);
         seed_card(&db, "card-core", "ready");
 
-        // create_dispatch_core returns (dispatch_id, old_status, reused)
-        let (dispatch_id, old_status, _reused) = create_dispatch_core(
+        // sqlite dispatch-core helper returns (dispatch_id, old_status, reused)
+        let (dispatch_id, old_status, _reused) = create_dispatch_core_test(
             &db,
             "card-core",
             "agent-1",
@@ -1520,7 +1534,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-session-default", "ready");
 
-        let (dispatch_id, _, _) = create_dispatch_core(
+        let (dispatch_id, _, _) = create_dispatch_core_test(
             &db,
             "card-session-default",
             "agent-1",
@@ -1550,7 +1564,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-session-override", "ready");
 
-        let (dispatch_id, _, _) = create_dispatch_core(
+        let (dispatch_id, _, _) = create_dispatch_core_test(
             &db,
             "card-session-override",
             "agent-1",
@@ -1579,7 +1593,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-session-review-decision", "review");
 
-        let (dispatch_id, _, _) = create_dispatch_core(
+        let (dispatch_id, _, _) = create_dispatch_core_test(
             &db,
             "card-session-review-decision",
             "agent-1",
@@ -1704,7 +1718,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-done-core", "done");
 
-        let result = create_dispatch_core(
+        let result = create_dispatch_core_test(
             &db,
             "card-done-core",
             "agent-1",
@@ -1720,7 +1734,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-missing-agent", "ready");
 
-        let result = create_dispatch_core(
+        let result = create_dispatch_core_test(
             &db,
             "card-missing-agent",
             "agent-missing",
@@ -1759,7 +1773,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let result = create_dispatch_core(
+        let result = create_dispatch_core_test(
             &db,
             "card-no-channel",
             "agent-1",
@@ -1831,7 +1845,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let result = create_dispatch_core(
+        let result = create_dispatch_core_test(
             &db,
             "card-bad-thread",
             "agent-1",
@@ -2625,7 +2639,7 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-flag", "ready");
 
-        let (id1, _, reused1) = create_dispatch_core(
+        let (id1, _, reused1) = create_dispatch_core_test(
             &db,
             "card-flag",
             "agent-1",
@@ -2636,7 +2650,7 @@ mod tests {
         .unwrap();
         assert!(!reused1, "first creation must not be reused");
 
-        let (id2, _, reused2) = create_dispatch_core(
+        let (id2, _, reused2) = create_dispatch_core_test(
             &db,
             "card-flag",
             "agent-1",
@@ -2782,7 +2796,7 @@ mod tests {
         set_card_issue_number(&db, "card-missing-mapping", 515);
         set_card_repo_id(&db, "card-missing-mapping", "owner/missing");
 
-        let err = create_dispatch_core(
+        let err = create_dispatch_core_test(
             &db,
             "card-missing-mapping",
             "agent-1",
@@ -4116,7 +4130,7 @@ mod tests {
         assert_eq!(parsed["target_repo"], external_repo_dir);
     }
 
-    /// #762 round-2 (A): when `create_dispatch_core` pre-injects the card's
+    /// #762 round-2 (A): when the dispatch-core path pre-injects the card's
     /// `target_repo` into the context before calling `build_review_context`,
     /// the fail-closed filter for unrecoverable external target_repos must
     /// STILL engage. Previous behavior snapshotted `context["target_repo"]`
@@ -4194,7 +4208,7 @@ mod tests {
         // Invoke the real production path. The caller passes NO target_repo
         // override — `dispatch_create` will inject `card.repo_id`
         // (`card_repo_dir`) before calling `build_review_context`.
-        let (dispatch_id, _, _) = create_dispatch_core(
+        let (dispatch_id, _, _) = create_dispatch_core_test(
             &db,
             "card-review-762-a-core",
             "agent-1",
@@ -4240,11 +4254,11 @@ mod tests {
     /// filter.
     ///
     /// #761 merge note: under the merged design, the production
-    /// `create_dispatch_core` → `build_review_context` path always passes
+    /// the dispatch-core → `build_review_context` path always passes
     /// `ReviewTargetTrust::Untrusted`, which strips caller-supplied
     /// `target_repo` regardless of provenance. Trusted internal callers that
     /// legitimately pre-seed `target_repo` must therefore bypass
-    /// `create_dispatch_core` and invoke `build_review_context` directly with
+    /// the dispatch-core helper and invoke `build_review_context` directly with
     /// `ReviewTargetTrust::Trusted` + `TargetRepoSource::CallerSupplied`, which
     /// is exactly what this test now exercises.
     #[test]

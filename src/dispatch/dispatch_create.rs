@@ -3,25 +3,32 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row as SqlxRow};
 
 use crate::db::Db;
-use crate::db::agents::{
-    resolve_agent_dispatch_channel_on_conn, resolve_agent_dispatch_channel_pg,
-};
+#[cfg(test)]
+use crate::db::agents::resolve_agent_dispatch_channel_on_conn;
+use crate::db::agents::resolve_agent_dispatch_channel_pg;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
 use super::dispatch_context::{
-    ReviewTargetTrust, TargetRepoSource, build_review_context, build_review_context_pg,
+    ReviewTargetTrust, TargetRepoSource, build_review_context,
     dispatch_context_with_session_strategy, dispatch_context_worktree_target,
     inject_review_dispatch_identifiers, json_string_field, resolve_card_target_repo_ref,
     resolve_card_worktree, resolve_parent_dispatch_context,
+};
+#[cfg(test)]
+use super::dispatch_context::{
+    build_review_context_sqlite_test, inject_review_dispatch_identifiers_sqlite_test,
+    resolve_card_target_repo_ref_sqlite_test, resolve_card_worktree_sqlite_test,
+    resolve_parent_dispatch_context_sqlite_test,
 };
 use super::dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, record_dispatch_status_event_on_conn,
 };
 use super::{
-    DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_conn,
-    cancel_dispatch_and_reset_auto_queue_on_pg_tx, query_dispatch_row, summarize_dispatch_result,
+    DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_pg_tx, summarize_dispatch_result,
 };
+#[cfg(test)]
+use super::{cancel_dispatch_and_reset_auto_queue_on_conn, query_dispatch_row};
 
 fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
     context
@@ -34,6 +41,7 @@ fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
             .is_some()
 }
 
+#[cfg(test)]
 fn load_existing_thread_for_channel(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -132,6 +140,7 @@ async fn load_existing_thread_for_channel_pg(
     Ok(active_thread_id)
 }
 
+#[cfg(test)]
 fn lookup_active_dispatch_id(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -196,6 +205,7 @@ fn is_single_active_dispatch_violation_pg(error: &sqlx::Error) -> bool {
     )
 }
 
+#[cfg(test)]
 fn validate_dispatch_target_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -324,7 +334,10 @@ fn parse_dispatch_json_text_pg(raw: Option<&str>) -> Option<serde_json::Value> {
     raw.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
 }
 
-async fn query_dispatch_row_pg(pool: &PgPool, dispatch_id: &str) -> Result<serde_json::Value> {
+pub(crate) async fn query_dispatch_row_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<serde_json::Value> {
     let row = sqlx::query(
         "SELECT
             id,
@@ -400,9 +413,368 @@ async fn query_dispatch_row_pg(pool: &PgPool, dispatch_id: &str) -> Result<serde
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_dispatch_core_internal(
+async fn create_dispatch_core_internal(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    mut options: DispatchCreateOptions,
+) -> Result<(String, String, bool)> {
+    let (old_status, card_repo_id, card_agent_id) =
+        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT status, repo_id, assigned_agent_id
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(kanban_card_id)
+        .fetch_optional(pg_pool)
+        .await
+        .map_err(|error| anyhow::anyhow!("Card lookup error: {error}"))?
+        .ok_or_else(|| anyhow::anyhow!("Card not found: {kanban_card_id}"))?;
+
+    let agent_exists = sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+         FROM agents
+         WHERE id = $1
+         LIMIT 1",
+    )
+    .bind(to_agent_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("Agent lookup error: {error}"))?
+    .is_some();
+    if !agent_exists {
+        return Err(anyhow::anyhow!(
+            "Cannot create {} dispatch: agent '{}' not found (card {})",
+            dispatch_type,
+            to_agent_id,
+            kanban_card_id
+        ));
+    }
+
+    validate_dispatch_target_on_pg(pg_pool, kanban_card_id, to_agent_id, dispatch_type).await?;
+    if dispatch_context_requests_sidecar(context) {
+        options.sidecar_dispatch = true;
+    }
+
+    crate::pipeline::ensure_loaded();
+    let effective = crate::pipeline::resolve_for_card_pg(
+        pg_pool,
+        card_repo_id.as_deref(),
+        card_agent_id.as_deref(),
+    )
+    .await;
+    let is_terminal = effective.is_terminal(&old_status);
+    if is_terminal && !options.sidecar_dispatch {
+        return Err(anyhow::anyhow!(
+            "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
+            dispatch_type,
+            kanban_card_id,
+            old_status
+        ));
+    }
+
+    if dispatch_type != "review-decision"
+        && let Some(existing_id) =
+            lookup_active_dispatch_id_pg(pg_pool, kanban_card_id, dispatch_type).await
+    {
+        tracing::info!(
+            "DEDUP: reusing existing dispatch {} for card {} type {}",
+            existing_id,
+            kanban_card_id,
+            dispatch_type
+        );
+        return Ok((existing_id, old_status, true));
+    }
+
+    let (parent_dispatch_id, chain_depth) =
+        resolve_parent_dispatch_context(pg_pool, kanban_card_id, context).await?;
+
+    let caller_target_repo_source = if json_string_field(context, "target_repo").is_some() {
+        TargetRepoSource::CallerSupplied
+    } else {
+        TargetRepoSource::CardScopeDefault
+    };
+    let mut context_with_session_strategy =
+        dispatch_context_with_session_strategy(dispatch_type, context);
+    let target_repo = resolve_card_target_repo_ref(
+        pg_pool,
+        kanban_card_id,
+        Some(&context_with_session_strategy),
+    )
+    .await;
+    if let Some(target_repo) = target_repo.as_deref()
+        && let Some(obj) = context_with_session_strategy.as_object_mut()
+    {
+        obj.entry("target_repo".to_string())
+            .or_insert_with(|| json!(target_repo));
+    }
+    let context_str = if dispatch_type == "review" {
+        build_review_context(
+            pg_pool,
+            kanban_card_id,
+            to_agent_id,
+            &context_with_session_strategy,
+            ReviewTargetTrust::Untrusted,
+            caller_target_repo_source,
+        )
+        .await?
+    } else {
+        let mut base = serde_json::to_string(&context_with_session_strategy)?;
+        let phase_gate_sidecar = context_with_session_strategy
+            .get("phase_gate")
+            .and_then(|value| value.as_object())
+            .is_some();
+        let worktree_target = if let Some((wt_path, wt_branch)) =
+            dispatch_context_worktree_target(&context_with_session_strategy)?
+        {
+            Some((wt_path, wt_branch))
+        } else if phase_gate_sidecar {
+            None
+        } else {
+            resolve_card_worktree(
+                pg_pool,
+                kanban_card_id,
+                Some(&context_with_session_strategy),
+            )
+            .await?
+            .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
+        };
+
+        if let Some((wt_path, wt_branch)) = worktree_target
+            && let Ok(mut obj) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
+        {
+            obj.insert("worktree_path".to_string(), json!(wt_path.clone()));
+            if let Some(wt_branch) = wt_branch {
+                obj.insert("worktree_branch".to_string(), json!(wt_branch));
+            }
+            tracing::info!(
+                "[dispatch] {} dispatch for card {}: injecting worktree_path={}",
+                dispatch_type,
+                kanban_card_id,
+                wt_path
+            );
+            base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
+        }
+        if dispatch_type == "review-decision"
+            && let Ok(mut obj) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
+        {
+            inject_review_dispatch_identifiers(pg_pool, kanban_card_id, dispatch_type, &mut obj)
+                .await;
+            base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
+        }
+        base
+    };
+    let is_review_type = dispatch_type == "review"
+        || dispatch_type == "review-decision"
+        || dispatch_type == "rework"
+        || dispatch_type == "consultation";
+
+    let attach_result = apply_dispatch_attached_intents_pg(
+        pg_pool,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_id,
+        dispatch_type,
+        is_review_type,
+        &old_status,
+        &effective,
+        title,
+        &context_str,
+        parent_dispatch_id.as_deref(),
+        chain_depth,
+        options,
+    )
+    .await;
+
+    if let Err(error) = attach_result {
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
+            && error
+                .to_string()
+                .contains("concurrent race prevented by DB constraint")
+            && let Some(existing_id) =
+                lookup_active_dispatch_id_pg(pg_pool, kanban_card_id, dispatch_type).await
+        {
+            tracing::info!(
+                "DEDUP: reusing existing dispatch {} for card {} type {} after UNIQUE race",
+                existing_id,
+                kanban_card_id,
+                dispatch_type
+            );
+            return Ok((existing_id, old_status, true));
+        }
+        return Err(error);
+    }
+    Ok((dispatch_id.to_string(), old_status, false))
+}
+
+pub async fn create_dispatch_core(
+    pg_pool: &PgPool,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool)> {
+    create_dispatch_core_with_options(
+        pg_pool,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        DispatchCreateOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_dispatch_core_with_options(
+    pg_pool: &PgPool,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<(String, String, bool)> {
+    let dispatch_id = uuid::Uuid::new_v4().to_string();
+    create_dispatch_core_internal(
+        pg_pool,
+        &dispatch_id,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        options,
+    )
+    .await
+}
+
+pub async fn create_dispatch_core_with_id(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool)> {
+    create_dispatch_core_with_id_and_options(
+        pg_pool,
+        dispatch_id,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        DispatchCreateOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_dispatch_core_with_id_and_options(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<(String, String, bool)> {
+    create_dispatch_core_internal(
+        pg_pool,
+        dispatch_id,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        options,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_dispatch_core_sqlite_test(
     db: &Db,
-    pg_pool: Option<&PgPool>,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool)> {
+    create_dispatch_core_with_options_sqlite_test(
+        db,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        DispatchCreateOptions::default(),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_dispatch_core_with_options_sqlite_test(
+    db: &Db,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<(String, String, bool)> {
+    let dispatch_id = uuid::Uuid::new_v4().to_string();
+    create_dispatch_core_with_id_and_options_sqlite_test(
+        db,
+        &dispatch_id,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        options,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_dispatch_core_with_id_sqlite_test(
+    db: &Db,
+    dispatch_id: &str,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool)> {
+    create_dispatch_core_with_id_and_options_sqlite_test(
+        db,
+        dispatch_id,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        DispatchCreateOptions::default(),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_dispatch_core_with_id_and_options_sqlite_test(
+    db: &Db,
     dispatch_id: &str,
     kanban_card_id: &str,
     to_agent_id: &str,
@@ -436,44 +808,15 @@ fn create_dispatch_core_internal(
             kanban_card_id
         ));
     }
-    if let Some(pool) = pg_pool {
-        let card_id = kanban_card_id.to_string();
-        let target_agent_id = to_agent_id.to_string();
-        let dispatch_type_owned = dispatch_type.to_string();
-        // #846: keep dispatch creation synchronous for now and bridge into the
-        // PG leaf helpers. Fully promoting the public create_dispatch stack to
-        // async would spill across a much larger caller surface; #850 can
-        // remove this bridge once the rest of the stack is PG-native.
-        block_on_dispatch_pg(pool, move |pool| async move {
-            validate_dispatch_target_on_pg(&pool, &card_id, &target_agent_id, &dispatch_type_owned)
-                .await
-        })?;
-    } else {
-        validate_dispatch_target_on_conn(&conn, kanban_card_id, to_agent_id, dispatch_type)?;
-    }
+    validate_dispatch_target_on_conn(&conn, kanban_card_id, to_agent_id, dispatch_type)?;
     if dispatch_context_requests_sidecar(context) {
         options.sidecar_dispatch = true;
     }
 
     crate::pipeline::ensure_loaded();
-    let effective = if let Some(pool) = pg_pool {
-        let repo_id = card_repo_id.clone();
-        let agent_id = card_agent_id.clone();
-        block_on_dispatch_pg(pool, move |pool| async move {
-            Ok(
-                crate::pipeline::resolve_for_card_pg(
-                    &pool,
-                    repo_id.as_deref(),
-                    agent_id.as_deref(),
-                )
-                .await,
-            )
-        })?
-    } else {
-        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref())
-    };
-    let is_terminal = effective.is_terminal(&old_status);
-    if is_terminal && !options.sidecar_dispatch {
+    let effective =
+        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref());
+    if effective.is_terminal(&old_status) && !options.sidecar_dispatch {
         return Err(anyhow::anyhow!(
             "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
             dispatch_type,
@@ -482,36 +825,21 @@ fn create_dispatch_core_internal(
         ));
     }
 
-    if dispatch_type != "review-decision" {
-        let existing_id = if let Some(pool) = pg_pool {
-            let card_id = kanban_card_id.to_string();
-            let dispatch_type_owned = dispatch_type.to_string();
-            block_on_dispatch_pg(pool, move |pool| async move {
-                Ok(lookup_active_dispatch_id_pg(&pool, &card_id, &dispatch_type_owned).await)
-            })?
-        } else {
-            lookup_active_dispatch_id(&conn, kanban_card_id, dispatch_type)
-        };
-        if let Some(eid) = existing_id {
-            tracing::info!(
-                "DEDUP: reusing existing dispatch {} for card {} type {}",
-                eid,
-                kanban_card_id,
-                dispatch_type
-            );
-            return Ok((eid, old_status, true));
-        }
+    if dispatch_type != "review-decision"
+        && let Some(existing_id) = lookup_active_dispatch_id(&conn, kanban_card_id, dispatch_type)
+    {
+        tracing::info!(
+            "DEDUP: reusing existing dispatch {} for card {} type {}",
+            existing_id,
+            kanban_card_id,
+            dispatch_type
+        );
+        return Ok((existing_id, old_status, true));
     }
 
     let (parent_dispatch_id, chain_depth) =
-        resolve_parent_dispatch_context(&conn, kanban_card_id, context)?;
+        resolve_parent_dispatch_context_sqlite_test(&conn, kanban_card_id, context)?;
 
-    // #762 (A): Capture whether the caller explicitly supplied target_repo
-    // BEFORE we inject our card-scoped fallback below. Downstream
-    // `build_review_context` needs this provenance signal to decide whether
-    // an unrecoverable external target_repo can safely fall back to
-    // card-scoped recovery. Inferring from the post-injection context would
-    // make every dispatch look caller-supplied.
     let caller_target_repo_source = if json_string_field(context, "target_repo").is_some() {
         TargetRepoSource::CallerSupplied
     } else {
@@ -519,8 +847,11 @@ fn create_dispatch_core_internal(
     };
     let mut context_with_session_strategy =
         dispatch_context_with_session_strategy(dispatch_type, context);
-    let target_repo =
-        resolve_card_target_repo_ref(db, kanban_card_id, Some(&context_with_session_strategy));
+    let target_repo = resolve_card_target_repo_ref_sqlite_test(
+        db,
+        kanban_card_id,
+        Some(&context_with_session_strategy),
+    );
     if let Some(target_repo) = target_repo.as_deref()
         && let Some(obj) = context_with_session_strategy.as_object_mut()
     {
@@ -528,41 +859,14 @@ fn create_dispatch_core_internal(
             .or_insert_with(|| json!(target_repo));
     }
     let context_str = if dispatch_type == "review" {
-        // #761 (Codex round-2): `create_dispatch_core_internal` is the single
-        // funnel for every review dispatch that originates from the public
-        // HTTP API (POST /api/dispatches → dispatch_service::create_dispatch
-        // → here) as well as from JS policies
-        // (`agentdesk.dispatch.create(..., "review", ...)`). Neither of those
-        // call sites is entitled to pre-seed review-target fields, so this
-        // path is ALWAYS untrusted. Internal tests or future Rust callers that
-        // need to pre-populate review-target fields must NOT go through
-        // `create_dispatch*` — they must call `build_review_context` directly
-        // with `ReviewTargetTrust::Trusted`.
-        if let Some(pool) = pg_pool {
-            let card_id = kanban_card_id.to_string();
-            let target_agent_id = to_agent_id.to_string();
-            let review_context = context_with_session_strategy.clone();
-            block_on_dispatch_pg(pool, move |pool| async move {
-                build_review_context_pg(
-                    &pool,
-                    &card_id,
-                    &target_agent_id,
-                    &review_context,
-                    ReviewTargetTrust::Untrusted,
-                    caller_target_repo_source,
-                )
-                .await
-            })?
-        } else {
-            build_review_context(
-                db,
-                kanban_card_id,
-                to_agent_id,
-                &context_with_session_strategy,
-                ReviewTargetTrust::Untrusted,
-                caller_target_repo_source,
-            )?
-        }
+        build_review_context_sqlite_test(
+            db,
+            kanban_card_id,
+            to_agent_id,
+            &context_with_session_strategy,
+            ReviewTargetTrust::Untrusted,
+            caller_target_repo_source,
+        )?
     } else {
         let mut base = serde_json::to_string(&context_with_session_strategy)?;
         let phase_gate_sidecar = context_with_session_strategy
@@ -574,12 +878,14 @@ fn create_dispatch_core_internal(
         {
             Some((wt_path, wt_branch))
         } else if phase_gate_sidecar {
-            // Phase-gate sidecars can operate on the recorded gate context alone.
-            // Do not fail dispatch creation just because a repo_dir mapping is absent.
             None
         } else {
-            resolve_card_worktree(db, kanban_card_id, Some(&context_with_session_strategy))?
-                .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
+            resolve_card_worktree_sqlite_test(
+                db,
+                kanban_card_id,
+                Some(&context_with_session_strategy),
+            )?
+            .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch)))
         };
 
         if let Some((wt_path, wt_branch)) = worktree_target
@@ -602,17 +908,22 @@ fn create_dispatch_core_internal(
             && let Ok(mut obj) =
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
         {
-            inject_review_dispatch_identifiers(db, kanban_card_id, dispatch_type, &mut obj);
+            inject_review_dispatch_identifiers_sqlite_test(
+                db,
+                kanban_card_id,
+                dispatch_type,
+                &mut obj,
+            );
             base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
         }
         base
     };
-    let is_review_type = dispatch_type == "review"
-        || dispatch_type == "review-decision"
-        || dispatch_type == "rework"
-        || dispatch_type == "consultation";
+    let is_review_type = matches!(
+        dispatch_type,
+        "review" | "review-decision" | "rework" | "consultation"
+    );
 
-    if pg_pool.is_none() && dispatch_type == "review-decision" {
+    if dispatch_type == "review-decision" {
         let mut stmt = conn.prepare(
             "SELECT id FROM task_dispatches \
              WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' \
@@ -640,228 +951,40 @@ fn create_dispatch_core_internal(
         }
     }
 
-    let attach_result = if let Some(pool) = pg_pool {
-        let card_id = kanban_card_id.to_string();
-        let to_agent_id = to_agent_id.to_string();
-        let dispatch_id = dispatch_id.to_string();
-        let dispatch_type = dispatch_type.to_string();
-        let old_status = old_status.clone();
-        let effective = effective.clone();
-        let title = title.to_string();
-        let context_str = context_str.clone();
-        let parent_dispatch_id = parent_dispatch_id.clone();
-        block_on_dispatch_pg(pool, move |pool| async move {
-            let mut tx = pool.begin().await.map_err(|error| {
-                anyhow::anyhow!("begin postgres dispatch {dispatch_id}: {error}")
-            })?;
-            let result = async {
-                if dispatch_type == "review-decision" {
-                    let cancelled = cancel_stale_review_decisions_pg_tx(&mut tx, &card_id).await?;
-                    if cancelled > 0 {
-                        tracing::info!(
-                            "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
-                            cancelled,
-                            card_id
-                        );
-                    }
-                }
-
-                apply_dispatch_attached_intents_pg(
-                    &mut tx,
-                    &card_id,
-                    &to_agent_id,
-                    &dispatch_id,
-                    &dispatch_type,
-                    is_review_type,
-                    &old_status,
-                    &effective,
-                    &title,
-                    &context_str,
-                    parent_dispatch_id.as_deref(),
-                    chain_depth,
-                    options,
-                    is_single_active_dispatch_violation_pg,
-                )
-                .await
-            }
-            .await;
-
-            match result {
-                Ok(()) => tx.commit().await.map_err(|error| {
-                    anyhow::anyhow!("commit postgres dispatch {dispatch_id}: {error}")
-                }),
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    Err(error)
-                }
-            }
-        })
-    } else {
-        apply_dispatch_attached_intents(
-            &conn,
-            kanban_card_id,
-            to_agent_id,
-            dispatch_id,
-            dispatch_type,
-            is_review_type,
-            &old_status,
-            &effective,
-            title,
-            &context_str,
-            parent_dispatch_id.as_deref(),
-            chain_depth,
-            options,
-        )
-    };
-
-    if let Err(e) = attach_result {
-        // #743: include "create-pr" in the UNIQUE-race dedup recovery path.
-        // The commit 1 partial unique index idx_single_active_create_pr makes
-        // parallel create-pr inserts race the same way review/review-decision
-        // already does — the loser should reuse the winner's dispatch rather
-        // than surface a hard error.
+    if let Err(error) = apply_dispatch_attached_intents(
+        &conn,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_id,
+        dispatch_type,
+        is_review_type,
+        &old_status,
+        &effective,
+        title,
+        &context_str,
+        parent_dispatch_id.as_deref(),
+        chain_depth,
+        options,
+    ) {
         if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
-            && e.to_string()
+            && error
+                .to_string()
                 .contains("concurrent race prevented by DB constraint")
-        {
-            let existing_id = if let Some(pool) = pg_pool {
-                let card_id = kanban_card_id.to_string();
-                let dispatch_type_owned = dispatch_type.to_string();
-                block_on_dispatch_pg(pool, move |pool| async move {
-                    Ok(lookup_active_dispatch_id_pg(&pool, &card_id, &dispatch_type_owned).await)
-                })?
-            } else {
+            && let Some(existing_id) =
                 lookup_active_dispatch_id(&conn, kanban_card_id, dispatch_type)
-            };
-            if let Some(existing_id) = existing_id {
-                tracing::info!(
-                    "DEDUP: reusing existing dispatch {} for card {} type {} after UNIQUE race",
-                    existing_id,
-                    kanban_card_id,
-                    dispatch_type
-                );
-                return Ok((existing_id, old_status, true));
-            }
+        {
+            tracing::info!(
+                "DEDUP: reusing existing dispatch {} for card {} type {} after UNIQUE race",
+                existing_id,
+                kanban_card_id,
+                dispatch_type
+            );
+            return Ok((existing_id, old_status, true));
         }
-        return Err(e);
+        return Err(error);
     }
 
     Ok((dispatch_id.to_string(), old_status, false))
-}
-
-pub fn create_dispatch_core(
-    db: &Db,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-) -> Result<(String, String, bool)> {
-    create_dispatch_core_with_options(
-        db,
-        None,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        DispatchCreateOptions::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_dispatch_core_with_options(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-    options: DispatchCreateOptions,
-) -> Result<(String, String, bool)> {
-    let dispatch_id = uuid::Uuid::new_v4().to_string();
-    create_dispatch_core_internal(
-        db,
-        pg_pool,
-        &dispatch_id,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        options,
-    )
-}
-
-pub fn create_dispatch_core_with_id(
-    db: &Db,
-    dispatch_id: &str,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-) -> Result<(String, String, bool)> {
-    create_dispatch_core_with_id_and_options(
-        db,
-        dispatch_id,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        DispatchCreateOptions::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_dispatch_core_with_id_and_options(
-    db: &Db,
-    dispatch_id: &str,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-    options: DispatchCreateOptions,
-) -> Result<(String, String, bool)> {
-    create_dispatch_core_with_id_and_options_pg(
-        db,
-        None,
-        dispatch_id,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        options,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_dispatch_core_with_id_and_options_pg(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-    options: DispatchCreateOptions,
-) -> Result<(String, String, bool)> {
-    create_dispatch_core_internal(
-        db,
-        pg_pool,
-        dispatch_id,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        options,
-    )
 }
 
 pub fn create_dispatch(
@@ -902,9 +1025,114 @@ pub fn create_dispatch_with_options(
         sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
         ..options
     };
-    let (dispatch_id, old_status, reused) = create_dispatch_core_with_options(
+    let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        {
+            return create_dispatch_with_options_sqlite_test(
+                db,
+                engine,
+                kanban_card_id,
+                to_agent_id,
+                dispatch_type,
+                title,
+                context,
+                options,
+            );
+        }
+        #[cfg(not(test))]
+        {
+            return Err(anyhow::anyhow!(
+                "Postgres pool required for create_dispatch_with_options"
+            ));
+        }
+    };
+
+    let card_id_owned = kanban_card_id.to_string();
+    let agent_id_owned = to_agent_id.to_string();
+    let dispatch_type_owned = dispatch_type.to_string();
+    let title_owned = title.to_string();
+    let context_owned = context.clone();
+    let (dispatch_id, old_status, reused) = block_on_dispatch_pg(pool, move |pool| async move {
+        create_dispatch_core_with_options(
+            &pool,
+            &card_id_owned,
+            &agent_id_owned,
+            &dispatch_type_owned,
+            &title_owned,
+            &context_owned,
+            options,
+        )
+        .await
+    })?;
+
+    let dispatch = {
+        let dispatch_id = dispatch_id.clone();
+        block_on_dispatch_pg(pool, move |pool| async move {
+            query_dispatch_row_pg(&pool, &dispatch_id).await
+        })?
+    };
+    if reused {
+        let mut d = dispatch;
+        d["__reused"] = json!(true);
+        return Ok(d);
+    }
+    if options.sidecar_dispatch {
+        return Ok(dispatch);
+    }
+
+    crate::pipeline::ensure_loaded();
+    let old_status_for_kickoff = old_status.clone();
+    let card_id_for_kickoff = kanban_card_id.to_string();
+    let kickoff_owned = block_on_dispatch_pg(pool, move |pool| async move {
+        let (card_repo_id, card_agent_id): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT repo_id, assigned_agent_id
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(&card_id_for_kickoff)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "load postgres card pipeline context for {}: {}",
+                card_id_for_kickoff,
+                error
+            )
+        })?
+        .unwrap_or((None, None));
+        let effective = crate::pipeline::resolve_for_card_pg(
+            &pool,
+            card_repo_id.as_deref(),
+            card_agent_id.as_deref(),
+        )
+        .await;
+        Ok(effective
+            .kickoff_for(&old_status_for_kickoff)
+            .unwrap_or_else(|| {
+                tracing::error!("Pipeline has no kickoff state for hook firing");
+                effective.initial_state().to_string()
+            })
+            .to_string())
+    })?;
+    crate::kanban::fire_state_hooks(db, engine, kanban_card_id, &old_status, &kickoff_owned);
+
+    Ok(dispatch)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn create_dispatch_with_options_sqlite_test(
+    db: &Db,
+    engine: &PolicyEngine,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<serde_json::Value> {
+    let (dispatch_id, old_status, reused) = create_dispatch_core_with_options_sqlite_test(
         db,
-        pg_pool,
         kanban_card_id,
         to_agent_id,
         dispatch_type,
@@ -916,21 +1144,13 @@ pub fn create_dispatch_with_options(
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-    let dispatch = if let Some(pool) = pg_pool {
-        let dispatch_id = dispatch_id.clone();
-        block_on_dispatch_pg(pool, move |pool| async move {
-            query_dispatch_row_pg(&pool, &dispatch_id).await
-        })?
-    } else {
-        query_dispatch_row(&conn, &dispatch_id)?
-    };
+    let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
 
     if reused {
         let mut d = dispatch;
         d["__reused"] = json!(true);
         return Ok(d);
     }
-
     if options.sidecar_dispatch {
         drop(conn);
         return Ok(dispatch);
@@ -944,22 +1164,8 @@ pub fn create_dispatch_with_options(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap_or((None, None));
-    let effective = if let Some(pool) = pg_pool {
-        let repo_id = card_repo_id.clone();
-        let agent_id = card_agent_id.clone();
-        block_on_dispatch_pg(pool, move |pool| async move {
-            Ok(
-                crate::pipeline::resolve_for_card_pg(
-                    &pool,
-                    repo_id.as_deref(),
-                    agent_id.as_deref(),
-                )
-                .await,
-            )
-        })?
-    } else {
-        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref())
-    };
+    let effective =
+        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref());
     drop(conn);
     let kickoff_owned = effective.kickoff_for(&old_status).unwrap_or_else(|| {
         tracing::error!("Pipeline has no kickoff state for hook firing");
@@ -1141,7 +1347,71 @@ async fn cancel_stale_review_decisions_pg_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_dispatch_attached_intents_pg<F>(
+pub(crate) async fn apply_dispatch_attached_intents_pg(
+    pool: &PgPool,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_id: &str,
+    dispatch_type: &str,
+    is_review_type: bool,
+    old_status: &str,
+    effective: &crate::pipeline::PipelineConfig,
+    title: &str,
+    context_str: &str,
+    parent_dispatch_id: Option<&str>,
+    chain_depth: i64,
+    options: DispatchCreateOptions,
+) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin postgres dispatch {dispatch_id}: {error}"))?;
+
+    let result = async {
+        if dispatch_type == "review-decision" {
+            let cancelled = cancel_stale_review_decisions_pg_tx(&mut tx, card_id).await?;
+            if cancelled > 0 {
+                tracing::info!(
+                    "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
+                    cancelled,
+                    card_id
+                );
+            }
+        }
+
+        apply_dispatch_attached_intents_on_pg_tx(
+            &mut tx,
+            card_id,
+            to_agent_id,
+            dispatch_id,
+            dispatch_type,
+            is_review_type,
+            old_status,
+            effective,
+            title,
+            context_str,
+            parent_dispatch_id,
+            chain_depth,
+            options,
+        )
+        .await
+    }
+    .await;
+
+    match result {
+        Ok(()) => tx
+            .commit()
+            .await
+            .map_err(|error| anyhow::anyhow!("commit postgres dispatch {dispatch_id}: {error}")),
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_dispatch_attached_intents_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     card_id: &str,
     to_agent_id: &str,
@@ -1155,11 +1425,7 @@ pub(crate) async fn apply_dispatch_attached_intents_pg<F>(
     parent_dispatch_id: Option<&str>,
     chain_depth: i64,
     options: DispatchCreateOptions,
-    is_single_active_violation_check: F,
-) -> Result<()>
-where
-    F: Fn(&sqlx::Error) -> bool,
-{
+) -> Result<()> {
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionEvent, TransitionOutcome,
     };
@@ -1224,7 +1490,7 @@ where
     .await
     {
         if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
-            && is_single_active_violation_check(&error)
+            && is_single_active_dispatch_violation_pg(&error)
         {
             return Err(anyhow::anyhow!(
                 "{} already exists for card {} (concurrent race prevented by DB constraint)",
@@ -1377,10 +1643,76 @@ pub(crate) fn apply_dispatch_attached_intents_on_conn(
 
 #[cfg(test)]
 mod tests {
+    use super::apply_dispatch_attached_intents_on_pg_tx;
+    use super::create_dispatch_core_with_id_and_options as create_dispatch_core_with_id_and_options_async;
     use super::*;
 
     use crate::pipeline::ClockConfig;
     use std::collections::HashMap;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_dispatch_attached_intents_pg<F>(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        card_id: &str,
+        to_agent_id: &str,
+        dispatch_id: &str,
+        dispatch_type: &str,
+        is_review_type: bool,
+        old_status: &str,
+        effective: &crate::pipeline::PipelineConfig,
+        title: &str,
+        context_str: &str,
+        parent_dispatch_id: Option<&str>,
+        chain_depth: i64,
+        options: DispatchCreateOptions,
+        _is_single_active_violation_check: F,
+    ) -> Result<()>
+    where
+        F: Fn(&sqlx::Error) -> bool,
+    {
+        apply_dispatch_attached_intents_on_pg_tx(
+            tx,
+            card_id,
+            to_agent_id,
+            dispatch_id,
+            dispatch_type,
+            is_review_type,
+            old_status,
+            effective,
+            title,
+            context_str,
+            parent_dispatch_id,
+            chain_depth,
+            options,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_dispatch_core_with_id_and_options_pg(
+        _db: &Db,
+        pg_pool: Option<&PgPool>,
+        kanban_card_id: &str,
+        to_agent_id: &str,
+        dispatch_id: &str,
+        dispatch_type: &str,
+        title: &str,
+        context: &serde_json::Value,
+        options: DispatchCreateOptions,
+    ) -> Result<(String, String, bool)> {
+        let pool = pg_pool.ok_or_else(|| anyhow::anyhow!("Postgres pool required"))?;
+        create_dispatch_core_with_id_and_options_async(
+            pool,
+            dispatch_id,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context,
+            options,
+        )
+        .await
+    }
 
     struct TestPostgresDb {
         admin_url: String,
@@ -1962,6 +2294,7 @@ mod tests {
             &json!({}),
             DispatchCreateOptions::default(),
         )
+        .await
         .expect("review-decision create should cancel stale sibling");
 
         assert_eq!(dispatch_id, "dispatch-apply-review-decision-new");

@@ -133,185 +133,30 @@ fn spawn_startup_thread_map_validation(db: crate::db::Db, token: String) {
     });
 }
 
-/// Execute durable handoff turns saved before a restart.
+/// Suppress durable handoff turns saved before a restart.
 /// Runs after tmux watcher restore and pending queue restore, but before
-/// restart report flush. Skips channels that already have pending queue messages
-/// (user intent takes priority over automatic follow-up).
+/// restart report flush so stale handoff files do not synthesize a new turn.
 async fn execute_handoff_turns(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
+    _http: &Arc<serenity::Http>,
+    _shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
     let handoffs = load_handoffs(provider);
     if handoffs.is_empty() {
         return;
     }
-    let settings_snapshot = shared.settings.read().await.clone();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] 📎 Found {} handoff record(s) to process",
+        "  [{ts}] 📎 Found {} handoff record(s) to suppress",
         handoffs.len()
     );
 
-    let current_gen = runtime_store::load_generation();
-
     for record in handoffs {
-        let channel_id = ChannelId::new(record.channel_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
-
-        // Skip if from a different generation (stale)
-        if record.born_generation > current_gen {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (future generation {})",
-                record.channel_id,
-                record.born_generation
-            );
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Skip if already executed/skipped/failed
-        if record.state != "created" {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (state={})",
-                record.channel_id,
-                record.state
-            );
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        let is_dm = matches!(
-            channel_id.to_channel(http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
-        let (allowlist_channel_id, provider_channel_name) =
-            if let Some((pid, pname)) = resolve_thread_parent(http, channel_id).await {
-                (pid, pname.or(record.channel_name.clone()))
-            } else {
-                (channel_id, record.channel_name.clone())
-            };
-        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
-            &settings_snapshot,
-            provider,
-            allowlist_channel_id,
-            record.channel_name.as_deref(),
-            provider_channel_name.as_deref(),
-            is_dm,
-        ) {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} — {reason}",
-                record.channel_id
-            );
-            continue;
-        }
-
-        // Skip if pending queue messages exist (user intent takes priority)
-        let has_pending = !mailbox_snapshot(shared, channel_id)
-            .await
-            .intervention_queue
-            .is_empty();
-        if has_pending {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (pending queue has messages)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Skip if an active turn is already running
-        let has_active = mailbox_has_active_turn(shared, channel_id).await;
-        if has_active {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (active turn running)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Check session/path readiness
-        let has_session = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.current_path.as_ref())
-                .is_some()
-        };
-        if !has_session {
-            tracing::info!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (no active session)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Mark as executing
-        let _ = update_handoff_state(provider, record.channel_id, "executing");
-        tracing::info!(
-            "  [{ts}] ▶ Executing handoff for channel {} — {}",
-            record.channel_id,
-            record.intent
-        );
-
-        // Send a placeholder message in the channel
-        let handoff_prompt = format!(
-            "dcserver가 재시작되었습니다. 재시작 전 작업의 후속 조치를 이어서 진행해주세요.\n\n\
-             ## 재시작 전 컨텍스트\n{}\n\n\
-             ## 요청 사항\n{}",
-            record.context, record.intent
-        );
-
-        let placeholder = match channel_id
-            .send_message(
-                http,
-                serenity::CreateMessage::new().content(
-                    "📎 **Post-restart handoff** — 재시작 후속 작업을 자동으로 이어받습니다.",
-                ),
-            )
-            .await
-        {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::info!(
-                    "  [{ts}] ❌ Failed to send handoff placeholder for channel {}: {}",
-                    record.channel_id,
-                    e
-                );
-                let _ = update_handoff_state(provider, record.channel_id, "failed");
-                clear_handoff(provider, record.channel_id);
-                continue;
-            }
-        };
-
-        // Inject as an intervention so the next turn picks it up.
-        mailbox_enqueue_intervention(
-            shared,
-            provider,
-            channel_id,
-            Intervention {
-                author_id: serenity::UserId::new(1), // system-generated sentinel
-                message_id: placeholder.id,
-                source_message_ids: vec![placeholder.id],
-                text: handoff_prompt,
-                mode: InterventionMode::Soft,
-                created_at: Instant::now(),
-                reply_context: None,
-                has_reply_boundary: false,
-                merge_consecutive: false,
-            },
-        )
-        .await;
-
-        let _ = update_handoff_state(provider, record.channel_id, "completed");
+        let _ = update_handoff_state(provider, record.channel_id, "skipped");
         clear_handoff(provider, record.channel_id);
         tracing::info!(
-            "  [{ts}] ✓ Handoff queued for channel {} (injected as intervention)",
+            "  [{ts}] ⏭ Suppressed auto post-restart handoff for channel {}",
             record.channel_id
         );
     }
@@ -1164,7 +1009,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             }
                         }
 
-                        // Execute durable handoffs (post-restart follow-up work)
+                        // Suppress durable handoffs so restart does not synthesize a new turn.
                         execute_handoff_turns(
                             &http_for_restart_reports,
                             &shared_for_restart_reports,
@@ -1419,13 +1264,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // ── Inflight state preservation for silent re-attach ──
                 let inflight_states = inflight::load_inflight_states(&provider_for_shutdown);
                 if !inflight_states.is_empty() {
-                    let marked_for_restart =
-                        inflight::mark_all_inflight_states_planned_restart(&provider_for_shutdown);
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery (marked {} as planned_restart)",
-                        inflight_states.len(),
-                        marked_for_restart
+                        "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
+                        inflight_states.len()
                     );
                 }
 
