@@ -10175,6 +10175,117 @@ async fn auto_queue_restore_run_restores_skipped_entries_by_card_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_cancel_restore_reloads_user_cancelled_entries() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-restore-user-cancelled");
+    seed_auto_queue_card(
+        &db,
+        "card-restore-user-cancelled",
+        1810,
+        "in_progress",
+        "agent-restore-user-cancelled",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-restore-user-cancelled', 'test-repo', 'agent-restore-user-cancelled', 'paused', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+            ) VALUES (
+                'entry-restore-user-cancelled', 'run-restore-user-cancelled',
+                'card-restore-user-cancelled', 'agent-restore-user-cancelled',
+                'user_cancelled', 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let cancel_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel?run_id=run-restore-user-cancelled")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(cancel_response.status(), StatusCode::OK);
+    let cancel_body = axum::body::to_bytes(cancel_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cancel_json: serde_json::Value = serde_json::from_slice(&cancel_body).unwrap();
+    assert_eq!(cancel_json["cancelled_runs"], 1);
+    assert_eq!(cancel_json["cancelled_entries"], 1);
+
+    {
+        let conn = db.lock().unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-user-cancelled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            entry_status, "skipped",
+            "run cancel must sweep user_cancelled entries into the restorable skipped bucket"
+        );
+    }
+
+    let restore_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/runs/run-restore-user-cancelled/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restore_response.status(), StatusCode::OK);
+    let restore_body = axum::body::to_bytes(restore_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let restore_json: serde_json::Value = serde_json::from_slice(&restore_body).unwrap();
+    assert_eq!(restore_json["ok"], true);
+    assert_eq!(restore_json["run_status"], "active");
+    assert_eq!(restore_json["restored_pending"], 1);
+    assert_eq!(restore_json["restored_done"], 0);
+    assert_eq!(restore_json["restored_dispatched"], 0);
+
+    let conn = db.lock().unwrap();
+    let entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-restore-user-cancelled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        entry_status, "pending",
+        "restore must reload swept user_cancelled entries instead of leaving them stranded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_restore_run_rejects_active_run() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -16589,6 +16700,130 @@ async fn auto_queue_cancel_pg_includes_restoring_runs() {
                 "skipped".to_string(),
             ),
         ]
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn auto_queue_cancel_pg_sweeps_user_cancelled_entries() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("test-repo")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider)
+         VALUES ($1, $2, $3)",
+    )
+    .bind("agent-cancel-user-cancelled-pg")
+    .bind("Agent Cancel User Cancelled PG")
+    .bind("claude")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, assigned_agent_id, github_issue_number
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind("card-cancel-user-cancelled-pg")
+    .bind("test-repo")
+    .bind("Cancel user_cancelled PG")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("agent-cancel-user-cancelled-pg")
+    .bind(6600_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (
+            id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind("run-cancel-user-cancelled-pg")
+    .bind("test-repo")
+    .bind("agent-cancel-user-cancelled-pg")
+    .bind("paused")
+    .bind(1_i64)
+    .bind(1_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+    )
+    .bind("entry-cancel-user-cancelled-pg")
+    .bind("run-cancel-user-cancelled-pg")
+    .bind("card-cancel-user-cancelled-pg")
+    .bind("agent-cancel-user-cancelled-pg")
+    .bind("user_cancelled")
+    .bind(0_i64)
+    .bind(0_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/cancel?run_id=run-cancel-user-cancelled-pg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "auto_queue_cancel_pg_sweeps_user_cancelled_entries status={} body={}",
+        status,
+        body_text
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["cancelled_runs"], 1);
+    assert_eq!(json["cancelled_entries"], 1);
+
+    let run_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+            .bind("run-cancel-user-cancelled-pg")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(run_status, "cancelled");
+
+    let entry_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_entries WHERE id = $1")
+            .bind("entry-cancel-user-cancelled-pg")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        entry_status, "skipped",
+        "PG run cancel must sweep user_cancelled entries into skipped so restore semantics stay consistent"
     );
 
     pg_pool.close().await;

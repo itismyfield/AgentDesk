@@ -233,7 +233,7 @@ fn load_dispatched_card_ids_for_runs(
         "SELECT DISTINCT kanban_card_id
          FROM auto_queue_entries
          WHERE run_id IN ({placeholders})
-           AND status = 'dispatched'
+           AND status IN ('dispatched', 'user_cancelled')
            AND kanban_card_id IS NOT NULL
            AND TRIM(kanban_card_id) != ''"
     );
@@ -599,7 +599,7 @@ async fn load_dispatched_card_ids_for_runs_pg(
         "SELECT DISTINCT e.kanban_card_id
          FROM auto_queue_entries e
          WHERE e.run_id = ANY($1)
-           AND e.status = 'dispatched'
+           AND e.status IN ('dispatched', 'user_cancelled')
            AND e.kanban_card_id IS NOT NULL
            AND BTRIM(e.kanban_card_id) <> ''
          ORDER BY e.kanban_card_id",
@@ -721,7 +721,10 @@ async fn transition_entry_to_skipped_pg(
             .map_err(|error| format!("rollback missing postgres entry {entry_id}: {error}"))?;
         return Ok(false);
     };
-    if !matches!(current_status.as_str(), "pending" | "dispatched") {
+    if !matches!(
+        current_status.as_str(),
+        "pending" | "dispatched" | "user_cancelled"
+    ) {
         tx.rollback().await.map_err(|error| {
             format!("rollback non-skippable postgres entry {entry_id}: {error}")
         })?;
@@ -1145,7 +1148,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             "SELECT id
              FROM auto_queue_entries
              WHERE run_id = ANY($1)
-               AND status IN ('pending', 'dispatched')
+               AND status IN ('pending', 'dispatched', 'user_cancelled')
              ORDER BY id ASC",
         )
         .bind(target_run_ids)
@@ -1258,7 +1261,7 @@ pub(crate) fn cancel_selected_runs_with_conn(
         let sql = format!(
             "SELECT id FROM auto_queue_entries
              WHERE run_id IN ({placeholders})
-               AND status IN ('pending', 'dispatched')"
+               AND status IN ('pending', 'dispatched', 'user_cancelled')"
         );
         conn.prepare(&sql)
             .ok()
