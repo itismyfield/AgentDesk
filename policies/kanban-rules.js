@@ -319,7 +319,7 @@ var rules = {
   // ── Dispatch Completed — PM Decision Gate ─────────────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
-      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result, context FROM task_dispatches WHERE id = ?",
+      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result, context, status FROM task_dispatches WHERE id = ?",
       [payload.dispatch_id]
     );
     if (dispatches.length === 0) return;
@@ -328,6 +328,18 @@ var rules = {
     try { dispatchContext = JSON.parse(dispatch.context || "{}"); } catch (e) { dispatchContext = {}; }
     if (dispatchContext.phase_gate) return;
     if (!dispatch.kanban_card_id) return;
+    // #815: cancelled dispatches must not drive the card into the review
+    // state. A race can fire OnDispatchCompleted for a dispatch that was
+    // cancelled by the user between completion and hook fan-out; without
+    // this guard the card is force-transitioned to `review` and then
+    // marked `done` on the next terminal sweep, overriding the user's
+    // explicit stop.
+    if (dispatch.status === "cancelled") {
+      agentdesk.log.info(
+        "[kanban] onDispatchCompleted: skipping cancelled dispatch " + dispatch.id
+      );
+      return;
+    }
 
     var cards = agentdesk.db.query(
       "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",

@@ -7,6 +7,19 @@ pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";
 pub const ENTRY_STATUS_DONE: &str = "done";
 pub const ENTRY_STATUS_SKIPPED: &str = "skipped";
 pub const ENTRY_STATUS_FAILED: &str = "failed";
+/// Non-dispatchable terminal state used when the operator explicitly stopped
+/// the linked dispatch (#815). The auto-queue tick must NOT resurrect these
+/// entries back to `pending`; only a deliberate operator action (re-activate,
+/// pmd_reopen, etc.) should move them out of this state.
+pub const ENTRY_STATUS_USER_CANCELLED: &str = "user_cancelled";
+
+/// Returns true when an entry in `status` is eligible for the auto-queue
+/// tick to pick up and dispatch. Exposed as a small shim so callers can
+/// treat `user_cancelled` uniformly alongside other non-dispatchable states
+/// (#815).
+pub fn is_dispatchable_entry_status(status: &str) -> bool {
+    matches!(status.trim(), ENTRY_STATUS_PENDING)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct EntryStatusUpdateOptions {
@@ -505,7 +518,10 @@ pub async fn update_entry_status_on_pg(
                     || effective_slot_index != current.slot_index
                     || current.completed_at.is_some()
             }
-            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED => false,
+            ENTRY_STATUS_DONE
+            | ENTRY_STATUS_SKIPPED
+            | ENTRY_STATUS_FAILED
+            | ENTRY_STATUS_USER_CANCELLED => false,
             _ => false,
         };
         let changed = current.status != normalized || metadata_change;
@@ -609,6 +625,24 @@ pub async fn update_entry_status_on_pg(
             .await
             .map_err(|error| format!("update auto-queue entry {entry_id} -> failed: {error}"))?
             .rows_affected(),
+            ENTRY_STATUS_USER_CANCELLED => sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'user_cancelled',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NOW()
+                 WHERE id = $1
+                   AND status = $2",
+            )
+            .bind(entry_id)
+            .bind(&current.status)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("update auto-queue entry {entry_id} -> user_cancelled: {error}")
+            })?
+            .rows_affected(),
             _ => unreachable!(),
         };
 
@@ -688,6 +722,13 @@ pub async fn update_entry_status_on_pg(
         )
         .await?;
 
+        // #815 P1: `user_cancelled` is a NON-run-finalizing terminal status.
+        // The run must stay in its prior state (`active` / `paused`) so the
+        // operator can flip the entry back to `pending` (e.g. via the API) and
+        // a later tick can re-pick it up. Auto-completing the run would
+        // strand the entry — `restore` only accepts cancelled/restoring,
+        // `resume` only reopens paused, and `activate()` only promotes
+        // generated/pending, so no path could re-open the entry.
         if matches!(
             normalized,
             ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
@@ -707,6 +748,310 @@ pub async fn update_entry_status_on_pg(
             changed: true,
         });
     }
+}
+
+/// Transaction-scoped variant of [`update_entry_status_on_pg`].
+///
+/// Mirrors the pool-scoped helper's semantics — transition validation,
+/// dispatch-history bookkeeping, transition recording, and conditional run
+/// finalization — but operates inside a caller-owned transaction. Used by
+/// [`crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx`] (#815 P2)
+/// so the PG cancel path routes through the same shared helper as the SQLite
+/// path (`update_entry_status_on_conn`) instead of doing a raw
+/// `UPDATE auto_queue_entries`.
+///
+/// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch
+/// it returns `changed: false` rather than re-reading state and looping. The
+/// caller composes this into a wider atomic operation, so observed state is
+/// already a stable snapshot inside the transaction.
+pub async fn update_entry_status_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    options: &EntryStatusUpdateOptions,
+) -> Result<EntryStatusUpdateResult, String> {
+    let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
+    let current = load_entry_status_row_pg_tx(tx, entry_id).await?;
+
+    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
+        .run(&current.run_id)
+        .entry(entry_id)
+        .card(&current.card_id)
+        .maybe_dispatch(current.dispatch_id.as_deref())
+        .agent(&current.agent_id)
+        .thread_group(current.thread_group)
+        .batch_phase(current.batch_phase)
+        .maybe_slot_index(current.slot_index);
+
+    if !is_allowed_entry_transition(&current.status, normalized, trigger_source) {
+        crate::auto_queue_log!(
+            warn,
+            "entry_status_transition_blocked_pg_tx",
+            log_ctx,
+            "[auto-queue] blocked invalid PG entry transition (tx) {} {} -> {} (source: {})",
+            entry_id,
+            current.status,
+            normalized,
+            trigger_source
+        );
+        return Err(format!(
+            "invalid auto-queue entry transition for {entry_id}: {} -> {normalized}",
+            current.status
+        ));
+    }
+
+    let effective_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let effective_slot_index = options.slot_index.or(current.slot_index);
+    let metadata_change = match normalized {
+        ENTRY_STATUS_PENDING => {
+            current.dispatch_id.is_some()
+                || current.slot_index.is_some()
+                || current.completed_at.is_some()
+        }
+        ENTRY_STATUS_DISPATCHED => {
+            effective_dispatch_id != current.dispatch_id
+                || effective_slot_index != current.slot_index
+                || current.completed_at.is_some()
+        }
+        ENTRY_STATUS_DONE
+        | ENTRY_STATUS_SKIPPED
+        | ENTRY_STATUS_FAILED
+        | ENTRY_STATUS_USER_CANCELLED => false,
+        _ => false,
+    };
+    let changed = current.status != normalized || metadata_change;
+
+    if !changed {
+        return Ok(EntryStatusUpdateResult {
+            run_id: current.run_id,
+            from_status: current.status,
+            to_status: normalized.to_string(),
+            changed: false,
+        });
+    }
+
+    let rows_affected = match normalized {
+        ENTRY_STATUS_PENDING => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'pending',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NULL,
+                 retry_count = CASE
+                     WHEN $3 = 'failed' THEN 0
+                     ELSE retry_count
+                 END
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(entry_id)
+        .bind(&current.status)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> pending: {error}"))?
+        .rows_affected(),
+        ENTRY_STATUS_DISPATCHED => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = $1,
+                 slot_index = $2,
+                 dispatched_at = NOW(),
+                 completed_at = NULL
+             WHERE id = $3
+               AND status = $4",
+        )
+        .bind(effective_dispatch_id.as_deref())
+        .bind(effective_slot_index)
+        .bind(entry_id)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
+        .rows_affected(),
+        ENTRY_STATUS_DONE => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'done',
+                 completed_at = NOW()
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(entry_id)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> done: {error}"))?
+        .rows_affected(),
+        ENTRY_STATUS_SKIPPED => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'skipped',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NOW()
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(entry_id)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> skipped: {error}"))?
+        .rows_affected(),
+        ENTRY_STATUS_FAILED => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'failed',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NOW()
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(entry_id)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> failed: {error}"))?
+        .rows_affected(),
+        ENTRY_STATUS_USER_CANCELLED => sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'user_cancelled',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NOW()
+             WHERE id = $1
+               AND status = $2",
+        )
+        .bind(entry_id)
+        .bind(&current.status)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("update auto-queue entry {entry_id} -> user_cancelled: {error}"))?
+        .rows_affected(),
+        _ => unreachable!(),
+    };
+
+    if rows_affected == 0 {
+        // Stale snapshot — the row mutated between our load and update inside
+        // the same tx. Surface as a no-op; the caller already owns the tx
+        // boundary and decides whether to roll back.
+        return Ok(EntryStatusUpdateResult {
+            run_id: current.run_id,
+            from_status: current.status.clone(),
+            to_status: current.status,
+            changed: false,
+        });
+    }
+
+    if normalized == ENTRY_STATUS_DISPATCHED {
+        if let Some(previous_dispatch_id) = current
+            .dispatch_id
+            .as_deref()
+            .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
+        {
+            record_entry_dispatch_history_on_pg(tx, entry_id, previous_dispatch_id, trigger_source)
+                .await?;
+        }
+        if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+            record_entry_dispatch_history_on_pg(tx, entry_id, dispatch_id, trigger_source).await?;
+        }
+    }
+
+    record_entry_transition_on_pg(tx, entry_id, &current.status, normalized, trigger_source)
+        .await?;
+
+    // #815 P1: `user_cancelled` is intentionally NOT in this list — the run
+    // must stay in its prior state so the operator can flip the entry back to
+    // `pending` and a later tick can re-pick it up.
+    if matches!(
+        normalized,
+        ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
+    ) {
+        maybe_finalize_run_after_terminal_entry_pg(tx, &current.run_id, normalized).await?;
+    }
+
+    Ok(EntryStatusUpdateResult {
+        run_id: current.run_id,
+        from_status: current.status,
+        to_status: normalized.to_string(),
+        changed: true,
+    })
+}
+
+/// Transaction-scoped equivalent of [`load_entry_status_row_pg`] used by
+/// [`update_entry_status_on_pg_tx`].
+///
+/// Note: `agent_id` is nullable in the PG schema (see
+/// `migrations/postgres/0001_initial_schema.sql`) — older fixtures and
+/// mid-migration rows can carry NULL. The pool variant decodes it strictly,
+/// but this tx variant fans out to broader callers (the dispatch cancel path
+/// included), so we coalesce NULL to an empty string to avoid spuriously
+/// failing the cancel just because the entry was seeded without an agent.
+async fn load_entry_status_row_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+) -> Result<EntryStatusRow, String> {
+    let row = sqlx::query(
+        "SELECT run_id,
+                kanban_card_id,
+                agent_id,
+                status,
+                dispatch_id,
+                COALESCE(retry_count, 0)::BIGINT AS retry_count,
+                slot_index::BIGINT AS slot_index,
+                COALESCE(thread_group, 0)::BIGINT AS thread_group,
+                COALESCE(batch_phase, 0)::BIGINT AS batch_phase,
+                completed_at
+         FROM auto_queue_entries
+         WHERE id = $1",
+    )
+    .bind(entry_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load postgres auto-queue entry {entry_id}: {error}"))?
+    .ok_or_else(|| format!("auto-queue entry not found: {entry_id}"))?;
+
+    let agent_id_opt: Option<String> = row
+        .try_get("agent_id")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} agent_id: {error}"))?;
+
+    Ok(EntryStatusRow {
+        run_id: row
+            .try_get("run_id")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} run_id: {error}"))?,
+        card_id: row.try_get("kanban_card_id").map_err(|error| {
+            format!("decode auto-queue entry {entry_id} kanban_card_id: {error}")
+        })?,
+        agent_id: agent_id_opt.unwrap_or_default(),
+        status: row
+            .try_get("status")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} status: {error}"))?,
+        dispatch_id: row
+            .try_get("dispatch_id")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch_id: {error}"))?,
+        retry_count: row
+            .try_get("retry_count")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} retry_count: {error}"))?,
+        slot_index: row
+            .try_get("slot_index")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} slot_index: {error}"))?,
+        thread_group: row
+            .try_get("thread_group")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} thread_group: {error}"))?,
+        batch_phase: row
+            .try_get("batch_phase")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} batch_phase: {error}"))?,
+        completed_at: row
+            .try_get("completed_at")
+            .map_err(|error| format!("decode auto-queue entry {entry_id} completed_at: {error}"))?,
+    })
 }
 
 fn update_entry_status_with_current_on_conn(
@@ -762,7 +1107,10 @@ fn update_entry_status_with_current_on_conn(
                     || effective_slot_index != current.slot_index
                     || current.completed_at.is_some()
             }
-            ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED => false,
+            ENTRY_STATUS_DONE
+            | ENTRY_STATUS_SKIPPED
+            | ENTRY_STATUS_FAILED
+            | ENTRY_STATUS_USER_CANCELLED => false,
             _ => false,
         };
         let changed = current.status != normalized || metadata_change;
@@ -842,6 +1190,17 @@ fn update_entry_status_with_current_on_conn(
                            AND status = ?2",
                     libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
                 )?,
+                ENTRY_STATUS_USER_CANCELLED => conn.execute(
+                    "UPDATE auto_queue_entries
+                         SET status = 'user_cancelled',
+                             dispatch_id = NULL,
+                             slot_index = NULL,
+                             dispatched_at = NULL,
+                             completed_at = datetime('now')
+                         WHERE id = ?1
+                           AND status = ?2",
+                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+                )?,
                 _ => unreachable!(),
             };
 
@@ -880,6 +1239,9 @@ fn update_entry_status_with_current_on_conn(
                 trigger_source,
             )?;
 
+            // #815 P1: `user_cancelled` is a NON-run-finalizing terminal status —
+            // see the matching PG-side comment in `update_entry_status_on_pg` for
+            // the full rationale. Only system-terminal statuses finalize the run.
             if matches!(
                 normalized,
                 ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
@@ -3300,6 +3662,7 @@ fn normalize_entry_status(status: &str) -> Result<&str, EntryStatusUpdateError> 
         ENTRY_STATUS_DONE => Ok(ENTRY_STATUS_DONE),
         ENTRY_STATUS_SKIPPED => Ok(ENTRY_STATUS_SKIPPED),
         ENTRY_STATUS_FAILED => Ok(ENTRY_STATUS_FAILED),
+        ENTRY_STATUS_USER_CANCELLED => Ok(ENTRY_STATUS_USER_CANCELLED),
         other => Err(EntryStatusUpdateError::UnsupportedStatus {
             status: other.to_string(),
         }),
@@ -3323,15 +3686,19 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
         (ENTRY_STATUS_PENDING, ENTRY_STATUS_DISPATCHED)
             | (ENTRY_STATUS_PENDING, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_PENDING, ENTRY_STATUS_USER_CANCELLED)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_FAILED)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE)
             | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_SKIPPED)
+            | (ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_USER_CANCELLED)
             | (ENTRY_STATUS_FAILED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_PENDING)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DISPATCHED)
             | (ENTRY_STATUS_SKIPPED, ENTRY_STATUS_DONE)
+            | (ENTRY_STATUS_USER_CANCELLED, ENTRY_STATUS_PENDING)
+            | (ENTRY_STATUS_USER_CANCELLED, ENTRY_STATUS_SKIPPED)
     )
 }
 
@@ -3355,7 +3722,7 @@ fn entry_status_row_matches_target(
                 && row.completed_at.is_none()
         }
         ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED => true,
-        ENTRY_STATUS_FAILED => {
+        ENTRY_STATUS_FAILED | ENTRY_STATUS_USER_CANCELLED => {
             row.dispatch_id.is_none() && row.slot_index.is_none() && row.completed_at.is_some()
         }
         _ => false,
@@ -3371,6 +3738,11 @@ fn maybe_finalize_run_after_terminal_entry(
     // `done` completion is finalized by the policy-side OnCardTerminal flow so it
     // can always create or pass through a phase gate, even for single-phase runs.
     if new_status == ENTRY_STATUS_DONE {
+        return Ok(false);
+    }
+    // #815 P1: never finalize on `user_cancelled` — it must leave the run in a
+    // resumable state so the operator can flip the entry back to `pending`.
+    if new_status == ENTRY_STATUS_USER_CANCELLED {
         return Ok(false);
     }
     if run_has_blocking_phase_gate(conn, run_id) {
@@ -3397,6 +3769,11 @@ async fn maybe_finalize_run_after_terminal_entry_pg(
     new_status: &str,
 ) -> Result<bool, String> {
     if new_status == ENTRY_STATUS_DONE {
+        return Ok(false);
+    }
+    // #815 P1: never finalize on `user_cancelled` — it must leave the run in a
+    // resumable state so the operator can flip the entry back to `pending`.
+    if new_status == ENTRY_STATUS_USER_CANCELLED {
         return Ok(false);
     }
 

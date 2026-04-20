@@ -519,6 +519,10 @@ var autoQueue = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM auto_queue_entries e " +
       "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched')" +
+      ") " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_entries e " +
+      "  WHERE e.run_id = r.id AND e.status = 'user_cancelled'" +
       ")",
       []
     );
@@ -526,7 +530,10 @@ var autoQueue = {
       finalizeRunWithoutPhaseGate(finishedRuns[fr].id);
     }
 
-    // Find active runs with pending entries
+    // Find active runs with pending entries.
+    // #815: `user_cancelled` entries are deliberately excluded here — they
+    // represent an explicit operator stop and must never be resurrected by
+    // the tick. Only `pending` entries are re-dispatchable.
     var activeRuns = agentdesk.db.query(
       "SELECT DISTINCT r.id " +
       "FROM auto_queue_runs r " +
@@ -799,6 +806,16 @@ function finalizeRunWithoutPhaseGate(runId) {
 
   if (runHasBlockingPhaseGate(runId)) return false;
   if (remainingRunnableEntryCount(runId) > 0) return false;
+  // #815 P1: `user_cancelled` entries are operator-held terminal state.
+  // They are intentionally non-runnable, but they must still block the
+  // tick-side backstop from auto-completing the run; otherwise the next
+  // minute tick would strand a user-stopped run in `completed`.
+  if (runHasUserCancelledEntry(runId)) {
+    autoQueueLog("info", "Deferring finalize for run " + runId + " — user_cancelled entry still present", {
+      run_id: runId
+    });
+    return false;
+  }
   // Phase-gate race guard: the main engine's `onCardTerminal` may still be
   // in the middle of creating gate dispatches. Respect the grace window so
   // we never mark a run completed before phase gates get registered.
@@ -896,6 +913,15 @@ function remainingRunnableEntryCount(runId, phase) {
   }
   var rows = agentdesk.db.query(sql, params);
   return (rows.length > 0) ? rows[0].cnt : 0;
+}
+
+function runHasUserCancelledEntry(runId) {
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
+    "WHERE run_id = ? AND status = 'user_cancelled'",
+    [runId]
+  );
+  return (rows.length > 0) && rows[0].cnt > 0;
 }
 
 function _deployGateTitle(phase) {
