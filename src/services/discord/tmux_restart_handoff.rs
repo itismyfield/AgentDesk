@@ -83,6 +83,37 @@ pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     resolve_dispatched_thread_dispatch(db?, thread_channel_id)
 }
 
+async fn clear_restart_handoff_provider_session(
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider_kind: &ProviderKind,
+) {
+    let session_key =
+        super::adk_session::build_adk_session_key(shared, channel_id, provider_kind).await;
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+    }
+
+    if let Some(key) = session_key {
+        super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: cleared provider session before restart handoff for channel {} ({})",
+            channel_id.get(),
+            key
+        );
+    } else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: cleared in-memory provider session before restart handoff for channel {}",
+            channel_id.get()
+        );
+    }
+}
+
 pub(super) async fn start_restart_handoff_from_state(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
@@ -125,6 +156,8 @@ pub(super) async fn start_restart_handoff_from_state(
             serenity::MessageId::new(state.current_msg_id)
         }
     };
+
+    clear_restart_handoff_provider_session(channel_id, shared, provider_kind).await;
 
     let author_id = serenity::UserId::new(1);
     let mut started_immediately = false;
