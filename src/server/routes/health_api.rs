@@ -183,6 +183,40 @@ pub async fn send_handler(
     (status, Json(json)).into_response()
 }
 
+/// POST /api/send_to_agent — role_id-based agent routing.
+///
+/// See `send_handler` for the rationale on the mandatory
+/// `ConnectInfo<SocketAddr>` extractor.
+pub async fn send_to_agent_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
+    let Some(ref registry) = state.health_registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "Discord not available (standalone mode)"})),
+        )
+            .into_response();
+    };
+
+    let body_str = String::from_utf8_lossy(&body);
+    let (status_str, response_body) =
+        health::handle_send_to_agent(registry, &state.db, &body_str).await;
+    let status = parse_status_code(status_str);
+    let json: serde_json::Value =
+        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
+    (status, Json(json)).into_response()
+}
+
 /// POST /api/senddm — send a DM to a Discord user.
 ///
 /// See `send_handler` for the rationale on the mandatory

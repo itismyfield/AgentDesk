@@ -434,6 +434,10 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
                 axum::routing::post(|| async { StatusCode::CREATED }),
             )
             .route("/send", axum::routing::post(|| async { StatusCode::OK }))
+            .route(
+                "/send_to_agent",
+                axum::routing::post(|| async { StatusCode::OK }),
+            )
             .route("/senddm", axum::routing::post(|| async { StatusCode::OK }))
             .route("/settings", axum::routing::get(|| async { StatusCode::OK })),
         state.clone(),
@@ -490,6 +494,19 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
         .unwrap();
     assert_eq!(send_response.status(), StatusCode::UNAUTHORIZED);
 
+    let send_to_agent_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/send_to_agent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(send_to_agent_response.status(), StatusCode::UNAUTHORIZED);
+
     let senddm_response = app
         .oneshot(
             Request::builder()
@@ -520,9 +537,24 @@ async fn discord_control_endpoints_require_auth_token_on_non_loopback_host() {
         "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
     ));
 
-    let response = app.oneshot(request).await.unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let mut send_to_agent_request = Request::builder()
+        .method("POST")
+        .uri("/send_to_agent")
+        .body(Body::from(r#"{"role_id":"ch-pd","message":"hello"}"#))
+        .unwrap();
+    send_to_agent_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(
+            "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+
+    let send_to_agent_response = app.oneshot(send_to_agent_request).await.unwrap();
+
+    assert_eq!(send_to_agent_response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -545,6 +577,33 @@ async fn discord_control_endpoints_allow_loopback_without_auth_token() {
     let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn send_to_agent_returns_not_found_for_unknown_role_id() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let health_registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let app = test_api_router(db, engine, Some(health_registry));
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/send_to_agent")
+        .body(Body::from(r#"{"role_id":"missing","message":"hello"}"#))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"], "unknown agent target: missing");
 }
 
 #[tokio::test]
@@ -4164,6 +4223,41 @@ async fn api_docs_unknown_category_returns_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_docs_category_exposes_send_to_agent_endpoint() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/discord")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["category"], "discord");
+
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("discord detail must include endpoint array");
+    let send_to_agent = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/send_to_agent")
+        .expect("send_to_agent endpoint must be documented");
+    assert_eq!(send_to_agent["params"]["role_id"]["location"], "body");
+    assert_eq!(send_to_agent["params"]["message"]["type"], "string");
+    assert_eq!(send_to_agent["params"]["mode"]["type"], "string");
 }
 
 #[tokio::test]

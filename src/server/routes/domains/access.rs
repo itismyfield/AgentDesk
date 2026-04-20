@@ -10,6 +10,7 @@ pub(crate) fn router() -> ApiRouter {
         Router::new()
             .route("/health", get(health_api::health_handler))
             .route("/send", post(health_api::send_handler))
+            .route("/send_to_agent", post(health_api::send_to_agent_handler))
             .route("/senddm", post(health_api::senddm_handler))
             .route("/auth/session", get(auth::get_session)),
     )

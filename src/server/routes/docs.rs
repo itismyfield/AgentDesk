@@ -188,6 +188,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
     vec![
         ep("GET", "/api/health", "health", "Health check"),
         ep("POST", "/api/send", "discord", "Send a Discord channel message"),
+        ep(
+            "POST",
+            "/api/send_to_agent",
+            "discord",
+            "Send a Discord message by agent role_id",
+        )
+        .with_params([
+            ("role_id", body_param("string", true, "Target agent role_id")),
+            ("message", body_param("string", true, "Discord message content")),
+            (
+                "mode",
+                body_param(
+                    "string",
+                    false,
+                    "Delivery bot: announce (default) or notify",
+                )
+                .with_enum(&["announce", "notify"]),
+            ),
+        ]),
         ep("POST", "/api/senddm", "discord", "Send a Discord direct message"),
         ep("GET", "/api/agents", "agents", "List all agents"),
         ep("POST", "/api/agents", "agents", "Create an agent"),

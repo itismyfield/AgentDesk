@@ -1618,7 +1618,7 @@ pub async fn send_message(
     };
 
     match send_result {
-        Ok(_) => {
+        Ok(message) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let emoji = if bot == "notify" { "🔔" } else { "📨" };
             let delivery_tag = if use_attachment {
@@ -1634,8 +1634,11 @@ pub async fn send_message(
             let mut response = serde_json::json!({
                 "ok": true,
                 "target": format!("channel:{channel_id}"),
+                "channel_id": channel_id.get().to_string(),
+                "message_id": message.id.get().to_string(),
                 "source": source,
                 "bot": bot,
+                "sent_at": message.timestamp.to_string(),
             });
             if use_attachment {
                 response["delivery"] = serde_json::Value::String("summary+txt".to_string());
@@ -1679,6 +1682,80 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
     let summary = json.get("summary").and_then(|v| v.as_str());
 
     send_message(registry, db, target, content, source, bot, summary).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedSendToAgentRequest {
+    role_id: String,
+    message: String,
+    mode: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_send_to_agent_body(body: &str) -> Result<ParsedSendToAgentRequest, &'static str> {
+    let json: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid JSON")?;
+    let role_id = json
+        .get("role_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if role_id.is_empty() {
+        return Err("role_id is required");
+    }
+
+    let message = json
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if message.is_empty() {
+        return Err("message is required");
+    }
+
+    let mode = json
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("announce");
+    if !matches!(mode, "announce" | "notify") {
+        return Err("mode must be announce or notify");
+    }
+
+    Ok(ParsedSendToAgentRequest {
+        role_id,
+        message,
+        mode: mode.to_string(),
+    })
+}
+
+pub async fn handle_send_to_agent(
+    registry: &HealthRegistry,
+    db: &Db,
+    body: &str,
+) -> (&'static str, String) {
+    let request = match parse_send_to_agent_body(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"ok": false, "error": error}).to_string(),
+            );
+        }
+    };
+
+    let target = format!("agent:{}", request.role_id);
+    send_message(
+        registry,
+        db,
+        &target,
+        &request.message,
+        "system",
+        &request.mode,
+        None,
+    )
+    .await
 }
 
 /// Handle POST /api/senddm — send a DM to a Discord user.
@@ -1963,6 +2040,34 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_send_to_agent_body_defaults_mode_to_announce() {
+        let body = r#"{"role_id":"ch-pd","message":"hello"}"#;
+        let parsed = parse_send_to_agent_body(body).expect("send_to_agent body should parse");
+        assert_eq!(
+            parsed,
+            ParsedSendToAgentRequest {
+                role_id: "ch-pd".to_string(),
+                message: "hello".to_string(),
+                mode: "announce".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_send_to_agent_body_accepts_notify_mode() {
+        let body = r#"{"role_id":"ch-pd","message":"hello","mode":"notify"}"#;
+        let parsed = parse_send_to_agent_body(body).expect("send_to_agent body should parse");
+        assert_eq!(parsed.mode, "notify");
+    }
+
+    #[test]
+    fn test_parse_send_to_agent_body_rejects_invalid_mode() {
+        let body = r#"{"role_id":"ch-pd","message":"hello","mode":"codex"}"#;
+        let error = parse_send_to_agent_body(body).unwrap_err();
+        assert_eq!(error, "mode must be announce or notify");
+    }
+
+    #[test]
     fn test_parse_senddm_body_without_reply_tracking() {
         let body = r#"{"user_id":"123","content":"hello","bot":"claude"}"#;
         let parsed = parse_senddm_body(body).expect("senddm body should parse");
@@ -2042,6 +2147,17 @@ mod tests {
             err,
             SendTargetResolutionError::NotFound("unknown agent target: missing".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn handle_send_to_agent_returns_not_found_for_unknown_role() {
+        let registry = HealthRegistry::new();
+        let db = test_db();
+        let (status, body) =
+            handle_send_to_agent(&registry, &db, r#"{"role_id":"missing","message":"hello"}"#)
+                .await;
+        assert_eq!(status, "404 Not Found");
+        assert!(body.contains("unknown agent target: missing"));
     }
 
     #[tokio::test]
