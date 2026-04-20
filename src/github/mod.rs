@@ -194,11 +194,12 @@ fn comment_issue_with(
         .map(|_| ())
 }
 
-fn create_issue_with<'a>(
+fn create_issue_with_options<'a>(
     adapter: &'a dyn GitHubAdapter,
     repo: &'a str,
     title: &'a str,
     body: &'a str,
+    labels: &'a [String],
 ) -> GitHubFuture<'a, Result<CreatedIssue, String>> {
     Box::pin(async move {
         let repo = repo.trim();
@@ -213,19 +214,28 @@ fn create_issue_with<'a>(
 
         let body_file_path = write_issue_body_temp_file(body)?;
         let body_file_arg = body_file_path.to_string_lossy().to_string();
+        let mut args = vec![
+            "issue".to_string(),
+            "create".to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--title".to_string(),
+            title.to_string(),
+            "--body-file".to_string(),
+            body_file_arg,
+        ];
+        for label in labels
+            .iter()
+            .map(|label| label.trim())
+            .filter(|label| !label.is_empty())
+        {
+            args.push("--label".to_string());
+            args.push(label.to_string());
+        }
 
         let url = adapter
             .run_async(
-                vec![
-                    "issue".to_string(),
-                    "create".to_string(),
-                    "--repo".to_string(),
-                    repo.to_string(),
-                    "--title".to_string(),
-                    title.to_string(),
-                    "--body-file".to_string(),
-                    body_file_arg,
-                ],
+                args,
                 Duration::from_secs(10),
                 format!("gh issue create timed out after 10s: {repo}"),
             )
@@ -237,6 +247,15 @@ fn create_issue_with<'a>(
 
         Ok(CreatedIssue { number, url })
     })
+}
+
+fn create_issue_with<'a>(
+    adapter: &'a dyn GitHubAdapter,
+    repo: &'a str,
+    title: &'a str,
+    body: &'a str,
+) -> GitHubFuture<'a, Result<CreatedIssue, String>> {
+    create_issue_with_options(adapter, repo, title, body, &[])
 }
 
 fn write_issue_body_temp_file(body: &str) -> Result<PathBuf, String> {
@@ -487,6 +506,15 @@ pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
 
 pub async fn create_issue(repo: &str, title: &str, body: &str) -> Result<CreatedIssue, String> {
     create_issue_with(adapter(), repo, title, body).await
+}
+
+pub async fn create_issue_with_labels(
+    repo: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> Result<CreatedIssue, String> {
+    create_issue_with_options(adapter(), repo, title, body, labels).await
 }
 
 fn parse_issue_number_from_url(url: &str) -> Option<i64> {

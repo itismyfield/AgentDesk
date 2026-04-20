@@ -194,6 +194,12 @@ struct MockGhOverride {
     _env: EnvVarGuard,
 }
 
+impl MockGhOverride {
+    fn path(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+}
+
 #[cfg(unix)]
 fn install_mock_gh_pr_tracking(
     repo: &str,
@@ -257,6 +263,24 @@ fn install_mock_gh_issue_list(
     }
 }
 
+#[cfg(unix)]
+fn install_mock_gh_issue_create(repo: &str, issue_number: i64) -> MockGhOverride {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_path = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\nset -eu\ncapture_dir=\"$(dirname \"$0\")\"\nif [ \"${{1-}}\" = \"--version\" ]; then\n  echo 'gh mock 1.0'\n  exit 0\nfi\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"$capture_dir/issue-create-args.txt\"\n  body_file=''\n  prev=''\n  for arg in \"$@\"; do\n    if [ \"$prev\" = '--body-file' ]; then\n      body_file=\"$arg\"\n      break\n    fi\n    prev=\"$arg\"\n  done\n  if [ -n \"$body_file\" ]; then\n    cp \"$body_file\" \"$capture_dir/issue-create-body.md\"\n  fi\n  echo 'https://github.com/{repo}/issues/{issue_number}'\n  exit 0\nfi\necho 'gh mock: unexpected args: $*' >&2\nexit 1\n"
+    );
+    fs::write(&gh_path, script).unwrap();
+    let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh_path, perms).unwrap();
+    let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
+    MockGhOverride {
+        _dir: dir,
+        _env: env,
+    }
+}
+
 #[cfg(windows)]
 fn install_mock_gh_pr_tracking(
     repo: &str,
@@ -302,6 +326,21 @@ fn install_mock_gh_issue_list(
     let gh_path = dir.path().join("gh.ps1");
     let script = format!(
         "$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'issue' -and $args[1] -eq 'list' -and $joined.Contains('--repo {repo}')) {{\n  if ($joined.Contains('--state all')) {{\n@'\n{primary_json}\n'@ | Write-Output\n    exit 0\n  }}\n  if ($joined.Contains('--state closed')) {{\n@'\n{recent_closed_json}\n'@ | Write-Output\n    exit 0\n  }}\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
+    );
+    fs::write(&gh_path, script).unwrap();
+    let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
+    MockGhOverride {
+        _dir: dir,
+        _env: env,
+    }
+}
+
+#[cfg(windows)]
+fn install_mock_gh_issue_create(repo: &str, issue_number: i64) -> MockGhOverride {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_path = dir.path().join("gh.ps1");
+    let script = format!(
+        "$captureDir = $PSScriptRoot\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'issue' -and $args[1] -eq 'create') {{\n  $args | Set-Content -Path (Join-Path $captureDir 'issue-create-args.txt')\n  for ($i = 0; $i -lt $args.Count - 1; $i++) {{\n    if ($args[$i] -eq '--body-file') {{\n      Copy-Item -LiteralPath $args[$i + 1] -Destination (Join-Path $captureDir 'issue-create-body.md') -Force\n      break\n    }}\n  }}\n  'https://github.com/{repo}/issues/{issue_number}' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $($args -join ' ')\"\nexit 1\n"
     );
     fs::write(&gh_path, script).unwrap();
     let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
@@ -4098,6 +4137,152 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
 }
 
 #[tokio::test]
+async fn create_issue_route_builds_pmd_body_and_agent_label() {
+    let _env_lock = env_lock();
+    let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 819);
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "create-issue 스킬을 ADK API로 승격",
+                        "background": "AgentDesk 내부에서 PMD 포맷 이슈를 서버 API로 직접 생성해야 한다.",
+                        "content": [
+                            "POST /api/issues 엔드포인트를 추가한다.",
+                            "서버에서 PMD 마크다운 포맷을 강제한다."
+                        ],
+                        "dod": [
+                            "성공 시 issue URL과 번호를 반환한다",
+                            "DoD 항목은 체크리스트로 렌더링된다"
+                        ],
+                        "agent_id": "adk-backend"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["issue"]["number"], 819);
+    assert_eq!(
+        json["issue"]["url"],
+        "https://github.com/itismyfield/AgentDesk/issues/819"
+    );
+    assert_eq!(json["issue"]["repo"], "itismyfield/AgentDesk");
+    assert_eq!(json["applied_labels"], json!(["agent:adk-backend"]));
+    assert_eq!(json["pmd_format_version"], 1);
+
+    let args = fs::read_to_string(gh.path().join("issue-create-args.txt")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--repo", "itismyfield/AgentDesk"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--label", "agent:adk-backend"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--title", "create-issue 스킬을 ADK API로 승격"])
+    );
+
+    let issue_body = fs::read_to_string(gh.path().join("issue-create-body.md")).unwrap();
+    assert!(
+        issue_body
+            .contains("## 배경\nAgentDesk 내부에서 PMD 포맷 이슈를 서버 API로 직접 생성해야 한다.")
+    );
+    assert!(issue_body.contains("## 내용\n- POST /api/issues 엔드포인트를 추가한다.\n- 서버에서 PMD 마크다운 포맷을 강제한다."));
+    assert!(issue_body.contains("## DoD\n- [ ] 성공 시 issue URL과 번호를 반환한다\n- [ ] DoD 항목은 체크리스트로 렌더링된다"));
+    assert!(!issue_body.contains("## 의존성"));
+    assert!(!issue_body.contains("## 리스크"));
+}
+
+#[tokio::test]
+async fn create_issue_route_rejects_more_than_ten_dod_items() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+    let dod: Vec<String> = (0..11).map(|index| format!("item-{index}")).collect();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "invalid dod",
+                        "background": "background",
+                        "content": ["content"],
+                        "dod": dod,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "dod items must be 10 or fewer");
+}
+
+#[tokio::test]
+async fn github_docs_include_issue_creation_endpoint() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/github")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs/github must return endpoint array");
+    let create_issue = endpoints
+        .iter()
+        .find(|endpoint| endpoint["method"] == "POST" && endpoint["path"] == "/api/issues")
+        .expect("github docs must include POST /api/issues");
+    assert_eq!(json["category"], "github");
+    assert_eq!(create_issue["params"]["repo"]["required"], true);
+    assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
+    assert_eq!(create_issue["params"]["agent_id"]["required"], false);
+}
+
+#[tokio::test]
 async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -4130,6 +4315,7 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
         "/api/help",
         "/api/docs/{category}",
+        "/api/issues",
     ] {
         assert!(
             endpoints.iter().any(|ep| ep["path"] == path),

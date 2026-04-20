@@ -11,6 +11,7 @@ use super::super::{
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
+            .route("/issues", post(github::create_issue))
             .route(
                 "/github/repos",
                 get(github::list_repos).post(github::register_repo),

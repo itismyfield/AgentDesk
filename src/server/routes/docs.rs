@@ -143,7 +143,7 @@ fn category_description(category: &str) -> &'static str {
         "dispatches" => "Dispatch CRUD operations.",
         "dispatched-sessions" => "Persisted dispatched-session lifecycle and cleanup helpers.",
         "docs" => "API documentation discovery and category drill-down.",
-        "github" => "GitHub repository integration and sync entrypoints.",
+        "github" => "GitHub repository integration, issue creation, and sync entrypoints.",
         "github-dashboard" => "Dashboard-oriented GitHub read models and issue actions.",
         "health" => "Health and liveness endpoints.",
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
@@ -1044,6 +1044,112 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ]),
         ep("GET", "/api/github/repos", "github", "List GitHub repos"),
+        ep(
+            "POST",
+            "/api/issues",
+            "github",
+            "Create a GitHub issue with server-enforced PMD markdown format",
+        )
+        .with_params([
+            (
+                "repo",
+                body_param(
+                    "string",
+                    true,
+                    "Repository alias (`ADK`, `CH`) or `owner/repo`",
+                ),
+            ),
+            ("title", body_param("string", true, "Issue title")),
+            (
+                "background",
+                body_param("string", true, "Required `## 배경` body text"),
+            ),
+            (
+                "content",
+                body_param("array[string]", true, "Required bullet items for `## 내용`"),
+            ),
+            (
+                "dod",
+                body_param(
+                    "array[string]",
+                    true,
+                    "Required DoD checklist items (1-10 entries, emitted as `- [ ]`)",
+                ),
+            ),
+            (
+                "agent_id",
+                body_param(
+                    "string",
+                    false,
+                    "Optional agent id converted into the `agent:<id>` GitHub label",
+                ),
+            ),
+            (
+                "dependencies",
+                body_param(
+                    "array[number|string|object]",
+                    false,
+                    "Optional dependency references rendered into `## 의존성`",
+                ),
+            ),
+            (
+                "risks",
+                body_param(
+                    "array[string]",
+                    false,
+                    "Optional risk bullets rendered into `## 리스크`",
+                ),
+            ),
+            (
+                "hints",
+                body_param(
+                    "array[string]",
+                    false,
+                    "Optional kickoff hints rendered into `## 착수 힌트` with a warning banner",
+                ),
+            ),
+            (
+                "auto_dispatch",
+                body_param(
+                    "boolean",
+                    false,
+                    "Reserved for future dispatch automation; currently returns 501 when true",
+                ),
+            ),
+            (
+                "block_on",
+                body_param(
+                    "array[number]",
+                    false,
+                    "Reserved for dependency blocking; currently returns 501 when non-empty",
+                ),
+            ),
+        ])
+        .with_example(
+            json!({
+                "repo": "ADK",
+                "title": "create-issue 스킬을 ADK API로 승격",
+                "background": "AgentDesk 내부에서 PMD 포맷 이슈를 서버 API로 직접 생성해야 한다.",
+                "content": [
+                    "POST /api/issues 엔드포인트를 추가한다.",
+                    "서버에서 PMD 마크다운 포맷을 강제한다."
+                ],
+                "dod": [
+                    "성공 시 GitHub issue URL을 반환한다",
+                    "DoD는 서버에서 - [ ] 체크리스트로 변환된다"
+                ],
+                "agent_id": "adk-backend"
+            }),
+            json!({
+                "issue": {
+                    "number": 819,
+                    "url": "https://github.com/itismyfield/AgentDesk/issues/819",
+                    "repo": "itismyfield/AgentDesk"
+                },
+                "applied_labels": ["agent:adk-backend"],
+                "pmd_format_version": 1
+            }),
+        ),
         ep("POST", "/api/github/repos", "github", "Register GitHub repo"),
         ep(
             "POST",
