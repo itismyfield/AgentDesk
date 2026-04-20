@@ -3,10 +3,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::InflightRestartMode;
 use super::runtime_store::{atomic_write, discord_inflight_root};
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 3;
+const INFLIGHT_STATE_VERSION: u32 = 4;
+const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
+const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
+const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InflightTurnState {
@@ -60,6 +64,12 @@ pub(super) struct InflightTurnState {
     /// Persisted so that replacement watcher instances can skip already-delivered output.
     #[serde(default)]
     pub last_watcher_relayed_offset: Option<u64>,
+    /// Lifecycle-aware restart/handoff mode for recovery semantics.
+    #[serde(default)]
+    pub restart_mode: Option<InflightRestartMode>,
+    /// Generation that owns the planned restart/handoff lifecycle.
+    #[serde(default)]
+    pub restart_generation: Option<u64>,
 }
 
 impl InflightTurnState {
@@ -109,11 +119,23 @@ impl InflightTurnState {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
+            restart_mode: None,
+            restart_generation: None,
         }
     }
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
+    }
+
+    pub fn set_restart_mode(&mut self, restart_mode: InflightRestartMode) {
+        self.restart_mode = Some(restart_mode);
+        self.restart_generation = Some(super::runtime_store::load_generation());
+    }
+
+    pub fn clear_restart_mode(&mut self) {
+        self.restart_mode = None;
+        self.restart_generation = None;
     }
 }
 
@@ -195,6 +217,24 @@ pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
     cleared
 }
 
+pub(super) fn mark_all_inflight_states_restart_mode(
+    provider: &ProviderKind,
+    restart_mode: InflightRestartMode,
+) -> usize {
+    let Some(root) = inflight_runtime_root() else {
+        return 0;
+    };
+    let states = load_inflight_states_from_root(&root, provider);
+    let mut updated = 0usize;
+    for mut state in states {
+        state.set_restart_mode(restart_mode);
+        if save_inflight_state_in_root(&root, &state).is_ok() {
+            updated += 1;
+        }
+    }
+    updated
+}
+
 /// Load a single inflight state by provider + channel_id (returns None if missing).
 pub(super) fn load_inflight_state(
     provider: &ProviderKind,
@@ -229,37 +269,60 @@ pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Optio
         .map(|state| state.request_owner_user_id)
 }
 
-/// Maximum age for inflight state files before they are considered stale and removed.
-const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
+fn planned_restart_retention_secs(restart_mode: InflightRestartMode) -> u64 {
+    match restart_mode {
+        InflightRestartMode::DrainRestart => DRAIN_RESTART_MAX_AGE_SECS,
+        InflightRestartMode::HotSwapHandoff => HOT_SWAP_HANDOFF_MAX_AGE_SECS,
+    }
+}
+
+fn stale_removal_reason(
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+) -> Option<String> {
+    match state.restart_mode {
+        Some(restart_mode) => {
+            if state.restart_generation != Some(current_generation) {
+                return Some(format!(
+                    "removing {} inflight state from old generation {:?} (current generation {})",
+                    restart_mode.label(),
+                    state.restart_generation,
+                    current_generation
+                ));
+            }
+            let max_age = planned_restart_retention_secs(restart_mode);
+            if age_secs > max_age {
+                return Some(format!(
+                    "removing stale {} inflight state file ({age_secs}s old > {max_age}s)",
+                    restart_mode.label()
+                ));
+            }
+            None
+        }
+        None => {
+            if age_secs > INFLIGHT_MAX_AGE_SECS {
+                Some(format!(
+                    "removing stale inflight state file ({age_secs}s old > {INFLIGHT_MAX_AGE_SECS}s)"
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
 
 fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<InflightTurnState> {
     let dir = inflight_provider_dir(root, provider);
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-
     let mut states = Vec::new();
+    let current_generation = super::runtime_store::load_generation();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
-        }
-        // Check file age — remove files older than INFLIGHT_MAX_AGE_SECS
-        if let Ok(meta) = fs::metadata(&path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(age) = modified.elapsed() {
-                    if age.as_secs() > INFLIGHT_MAX_AGE_SECS {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⚠ removing stale inflight state file ({:.0}s old): {}",
-                            age.as_secs_f64(),
-                            path.display()
-                        );
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                }
-            }
         }
         let Ok(content) = fs::read_to_string(&path) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -287,6 +350,16 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             let _ = fs::remove_file(&path);
             continue;
         }
+        if let Ok(meta) = fs::metadata(&path)
+            && let Ok(modified) = meta.modified()
+            && let Ok(age) = modified.elapsed()
+            && let Some(reason) = stale_removal_reason(&state, age.as_secs(), current_generation)
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
+            let _ = fs::remove_file(&path);
+            continue;
+        }
         states.push(state);
     }
     states
@@ -295,9 +368,11 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 #[cfg(test)]
 mod tests {
     use super::{
-        InflightTurnState, latest_request_owner_user_id_for_channel,
-        load_inflight_states_from_root, save_inflight_state_in_root,
+        InflightTurnState, latest_request_owner_user_id_for_channel, load_inflight_states,
+        load_inflight_states_from_root, mark_all_inflight_states_restart_mode,
+        save_inflight_state_in_root, stale_removal_reason,
     };
+    use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
 
@@ -327,6 +402,36 @@ mod tests {
         assert_eq!(loaded[0].current_msg_id, 999);
         assert_eq!(loaded[0].last_offset, 42);
         assert_eq!(loaded[0].turn_start_offset, Some(42));
+    }
+
+    #[test]
+    fn planned_restart_state_uses_generation_aware_retention() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            123,
+            Some("adk-cdx".to_string()),
+            456,
+            789,
+            999,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            42,
+        );
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+
+        assert!(
+            stale_removal_reason(&state, 600, 7).is_none(),
+            "current-generation planned restart should survive the normal 300s cleanup window"
+        );
+        assert!(
+            stale_removal_reason(&state, 10, 8)
+                .expect("old generation planned restart should be removed")
+                .contains("old generation")
+        );
     }
 
     #[test]
@@ -377,5 +482,57 @@ mod tests {
         }
 
         assert_eq!(owner, Some(222));
+    }
+
+    #[test]
+    fn mark_all_inflight_states_restart_mode_marks_saved_states() {
+        let _lock = super::super::runtime_store::lock_test_env();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("agentdesk-root");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+        let _reset = EnvReset;
+
+        let inflight_root = root.join("runtime").join("discord_inflight");
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            123,
+            Some("adk-cdx".to_string()),
+            456,
+            789,
+            999,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            42,
+        );
+        save_inflight_state_in_root(&inflight_root, &state).unwrap();
+
+        assert_eq!(
+            mark_all_inflight_states_restart_mode(
+                &ProviderKind::Codex,
+                InflightRestartMode::DrainRestart,
+            ),
+            1
+        );
+
+        let states = load_inflight_states(&ProviderKind::Codex);
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+        assert_eq!(
+            states[0].restart_generation,
+            Some(super::super::runtime_store::load_generation())
+        );
     }
 }

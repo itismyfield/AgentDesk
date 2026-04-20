@@ -1269,6 +1269,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
                         inflight_states.len()
                     );
+                    let marked = inflight::mark_all_inflight_states_restart_mode(
+                        &provider_for_shutdown,
+                        crate::services::discord::InflightRestartMode::DrainRestart,
+                    );
+                    tracing::info!(
+                        "  [{ts2}] 🔖 marked {marked} inflight turn(s) as drain_restart"
+                    );
                 }
 
                 // ── Final state snapshot (belt-and-suspenders) ──

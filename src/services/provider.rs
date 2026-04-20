@@ -1,7 +1,7 @@
 use crate::services::platform::BinaryResolution;
 use crate::utils::format::safe_prefix;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -517,6 +517,8 @@ pub struct CancelToken {
     pub watchdog_deadline_ms: AtomicI64,
     /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
     pub watchdog_max_deadline_ms: AtomicI64,
+    /// Lifecycle-aware restart/handoff mode for inflight preservation.
+    pub restart_mode: AtomicU8,
 }
 
 impl CancelToken {
@@ -528,6 +530,7 @@ impl CancelToken {
             tmux_session: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
             watchdog_max_deadline_ms: AtomicI64::new(0),
+            restart_mode: AtomicU8::new(0),
         }
     }
 
@@ -551,6 +554,20 @@ impl CancelToken {
                 let _ = &name;
             }
         }
+    }
+
+    pub fn set_restart_mode(&self, mode: Option<crate::services::discord::InflightRestartMode>) {
+        self.restart_mode.store(
+            mode.map(crate::services::discord::InflightRestartMode::as_u8)
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn restart_mode(&self) -> Option<crate::services::discord::InflightRestartMode> {
+        crate::services::discord::InflightRestartMode::from_u8(
+            self.restart_mode.load(Ordering::Relaxed),
+        )
     }
 }
 

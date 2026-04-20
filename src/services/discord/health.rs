@@ -225,7 +225,7 @@ fn runtime_stop_wait_timeout() -> std::time::Duration {
     }
 }
 
-async fn stop_provider_channel_runtime_with_policy(
+pub(crate) async fn stop_provider_channel_runtime_with_policy(
     registry: &HealthRegistry,
     provider_name: &str,
     channel_id: ChannelId,
@@ -235,10 +235,7 @@ async fn stop_provider_channel_runtime_with_policy(
     let provider = ProviderKind::from_str(provider_name)?;
     let shared = shared_for_provider(registry, &provider).await?;
     let result = mailbox_cancel_active_turn(&shared, channel_id).await;
-    let cleanup_requested = matches!(
-        cleanup_policy,
-        super::TmuxCleanupPolicy::CleanupSession { .. }
-    );
+    let cleanup_requested = cleanup_policy.should_cleanup_tmux();
 
     if let Some(token) = result.token.as_ref() {
         let termination_recorded = if !result.already_stopping || cleanup_requested {
@@ -277,7 +274,9 @@ async fn stop_provider_channel_runtime_with_policy(
         .intervention_queue
         .len();
     mailbox_clear_recovery_marker(&shared, channel_id).await;
-    clear_inflight_state(&provider, channel_id.get());
+    if cleanup_policy.should_clear_inflight() {
+        clear_inflight_state(&provider, channel_id.get());
+    }
 
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",

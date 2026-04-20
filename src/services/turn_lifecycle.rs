@@ -31,7 +31,9 @@ pub(crate) async fn stop_turn_preserving_queue(
         health_registry,
         target,
         reason,
-        crate::services::discord::TmuxCleanupPolicy::PreserveSession,
+        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+            restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+        },
     )
     .await
 }
@@ -63,10 +65,7 @@ async fn stop_turn_with_policy(
     let mut queue_depth = None;
     let mut termination_recorded = false;
     let tmux_was_alive = crate::services::platform::tmux::has_session(&target.tmux_name);
-    let cleanup_tmux = matches!(
-        cleanup_policy,
-        crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. }
-    );
+    let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
 
     if let (Some(registry), Some(provider), Some(channel_id)) =
         (health_registry, target.provider.as_ref(), target.channel_id)
@@ -76,7 +75,10 @@ async fn stop_turn_with_policy(
                 crate::services::discord::TmuxCleanupPolicy::CleanupSession {
                     termination_reason_code,
                 } => termination_reason_code.unwrap_or("force_kill"),
-                crate::services::discord::TmuxCleanupPolicy::PreserveSession => "force_kill",
+                crate::services::discord::TmuxCleanupPolicy::PreserveSession
+                | crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    ..
+                } => "force_kill",
             };
             crate::services::discord::health::force_kill_provider_channel_runtime(
                 registry,
@@ -87,11 +89,12 @@ async fn stop_turn_with_policy(
             )
             .await
         } else {
-            crate::services::discord::health::stop_provider_channel_runtime(
+            crate::services::discord::health::stop_provider_channel_runtime_with_policy(
                 registry,
                 provider.as_str(),
                 channel_id,
                 reason,
+                cleanup_policy,
             )
             .await
         };
@@ -120,10 +123,11 @@ async fn stop_turn_with_policy(
         false
     };
 
-    let inflight_cleared = target
-        .provider
-        .as_ref()
-        .is_some_and(|provider| clear_inflight_by_tmux_name(provider, &target.tmux_name));
+    let inflight_cleared = cleanup_policy.should_clear_inflight()
+        && target
+            .provider
+            .as_ref()
+            .is_some_and(|provider| clear_inflight_by_tmux_name(provider, &target.tmux_name));
 
     TurnLifecycleStopResult {
         lifecycle_path,
@@ -168,4 +172,26 @@ pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn preserve_session_handoff_policy_keeps_inflight_metadata() {
+        assert!(
+            !crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+            }
+            .should_clear_inflight()
+        );
+        assert!(
+            crate::services::discord::TmuxCleanupPolicy::PreserveSession.should_clear_inflight()
+        );
+        assert!(
+            crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                termination_reason_code: None,
+            }
+            .should_clear_inflight()
+        );
+    }
 }

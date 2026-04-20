@@ -20,6 +20,7 @@ pub(crate) mod org_writer;
 mod prompt_builder;
 mod queue_io;
 mod recovery_engine;
+mod restart_mode;
 pub(crate) mod restart_report;
 mod role_map;
 mod router;
@@ -44,6 +45,7 @@ mod turn_bridge;
 
 pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use recovery_engine as recovery;
+pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::HeadlessTurnStartError;
 pub(crate) use turn_bridge::TmuxCleanupPolicy;
 

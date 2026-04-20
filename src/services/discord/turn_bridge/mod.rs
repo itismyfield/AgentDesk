@@ -32,6 +32,7 @@ pub(super) use recovery_text::{
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
 pub(super) use tmux_runtime::cancel_active_token;
+pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 
 // Re-export pub(crate) items
@@ -58,6 +59,21 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
+
+fn sync_inflight_restart_mode_from_cancel(
+    cancel_token: &crate::services::provider::CancelToken,
+    inflight_state: &mut InflightTurnState,
+) -> bool {
+    let new_mode = cancel_token.restart_mode();
+    if inflight_state.restart_mode == new_mode {
+        return false;
+    }
+    match new_mode {
+        Some(mode) => inflight_state.set_restart_mode(mode),
+        None => inflight_state.clear_restart_mode(),
+    }
+    true
+}
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -353,6 +369,12 @@ pub(super) fn spawn_turn_bridge(
             let mut state_dirty = false;
 
             if cancel_requested(Some(cancel_token.as_ref())) {
+                if sync_inflight_restart_mode_from_cancel(
+                    cancel_token.as_ref(),
+                    &mut inflight_state,
+                ) {
+                    let _ = save_inflight_state(&inflight_state);
+                }
                 cancelled = true;
                 break;
             }
@@ -360,6 +382,12 @@ pub(super) fn spawn_turn_bridge(
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
             if cancel_requested(Some(cancel_token.as_ref())) {
+                if sync_inflight_restart_mode_from_cancel(
+                    cancel_token.as_ref(),
+                    &mut inflight_state,
+                ) {
+                    let _ = save_inflight_state(&inflight_state);
+                }
                 cancelled = true;
                 break;
             }
@@ -517,6 +545,9 @@ pub(super) fn spawn_turn_bridge(
                                 report.channel_name = adk_session_name.clone();
                                 if save_restart_report(&report).is_ok() {
                                     restart_followup_pending = true;
+                                    inflight_state.set_restart_mode(
+                                        crate::services::discord::InflightRestartMode::DrainRestart,
+                                    );
                                     let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
                                     let _ = gateway
                                         .edit_message(channel_id, current_msg_id, handoff_text)
@@ -1141,9 +1172,12 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            let preserved_restart_mode = cancel_token.restart_mode();
             let remaining_response =
                 response_portion_after_offset(&full_response, response_sent_offset);
-            let terminal_response = if remaining_response.trim().is_empty() {
+            let terminal_response = if let Some(restart_mode) = preserved_restart_mode {
+                handoff_interrupted_message(restart_mode, remaining_response)
+            } else if remaining_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
                 let formatted = super::formatting::format_for_discord_with_provider(
@@ -1157,7 +1191,9 @@ pub(super) fn spawn_turn_bridge(
                 .replace_message(channel_id, current_msg_id, &terminal_response)
                 .await;
 
-            gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
+            if preserved_restart_mode.is_none() {
+                gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
+            }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ■ Stopped");
@@ -1842,9 +1878,14 @@ pub(super) fn spawn_turn_bridge(
             );
         }
 
-        clear_inflight_state(&provider, channel_id.get());
-        // Defuse the guard — cleanup already done above.
-        inflight_guard.provider.take();
+        if cancelled && cancel_token.restart_mode().is_some() {
+            let _ = save_inflight_state(&inflight_state);
+            inflight_guard.provider.take();
+        } else {
+            clear_inflight_state(&provider, channel_id.get());
+            // Defuse the guard — cleanup already done above.
+            inflight_guard.provider.take();
+        }
         super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
 
         // Dispatch thread sessions now stay alive after finalization so the next

@@ -61,6 +61,16 @@ fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Optio
     None
 }
 
+fn interrupted_recovery_message(
+    state: &inflight::InflightTurnState,
+    saved_response: &str,
+) -> String {
+    state
+        .restart_mode
+        .map(|mode| super::turn_bridge::handoff_interrupted_message(mode, saved_response))
+        .unwrap_or_else(|| stale_inflight_message(saved_response))
+}
+
 fn save_missing_session_handoff(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -1133,7 +1143,7 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 state.full_response.clone()
             };
-            let stale_text = stale_inflight_message(&best_response);
+            let stale_text = interrupted_recovery_message(&state, &best_response);
             let death_diag = tmux_session_name
                 .as_deref()
                 .and_then(|name| build_tmux_death_diagnostic(name, output_path.as_deref()));
@@ -1794,6 +1804,8 @@ mod tests {
             session_key: Some("host:tmux-1".to_string()),
             dispatch_id: Some("dispatch-from-state".to_string()),
             last_watcher_relayed_offset: None,
+            restart_mode: None,
+            restart_generation: None,
         };
 
         assert!(
@@ -1902,6 +1914,8 @@ mod tests {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
+            restart_mode: None,
+            restart_generation: None,
         };
 
         save_missing_session_handoff(
@@ -1915,6 +1929,30 @@ mod tests {
             handoffs.is_empty(),
             "automatic post-restart handoff files must no longer be created"
         );
+    }
+
+    #[test]
+    fn planned_restart_missing_session_uses_restart_specific_message() {
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            1486333430516945008,
+            Some("adk-cdx-t1486333430516945008".to_string()),
+            343742347365974026,
+            1487795113240559788,
+            1487799916758827138,
+            "릴리즈하다가 응답이 끊겼어. 이어서 설명해줘.".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
+            Some("/tmp/agentdesk-test.jsonl".to_string()),
+            Some("/tmp/agentdesk-test.input".to_string()),
+            123,
+        );
+        state.restart_mode = Some(crate::services::discord::InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+
+        let text = interrupted_recovery_message(&state, "");
+        assert!(text.contains("dcserver 재시작"));
+        assert!(!text.contains("이어붙이지 못했습니다"));
     }
 
     #[test]
