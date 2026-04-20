@@ -1158,6 +1158,7 @@ pub(super) async fn restore_inflight_turns(
                     "  [{ts}] ↻ cannot reattach inflight turn for channel {} after planned restart: starting post-restart handoff",
                     state.channel_id
                 );
+                #[cfg(unix)]
                 let _ = super::tmux_restart_handoff::start_restart_handoff_from_state(
                     channel_id,
                     http,
@@ -1167,6 +1168,19 @@ pub(super) async fn restore_inflight_turns(
                     &best_response,
                 )
                 .await;
+                #[cfg(not(unix))]
+                {
+                    let stale_text = planned_restart_inflight_message(&best_response);
+                    let _ = super::formatting::replace_long_message_raw(
+                        http,
+                        channel_id,
+                        current_msg_id,
+                        &stale_text,
+                        shared,
+                    )
+                    .await;
+                    clear_inflight_state(provider, state.channel_id);
+                }
                 continue;
             }
             let stale_text = stale_inflight_message(&best_response);

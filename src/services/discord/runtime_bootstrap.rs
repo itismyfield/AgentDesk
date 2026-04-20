@@ -15,6 +15,51 @@ pub(crate) struct RunBotContext {
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 
+fn restored_fast_mode_enabled_channels_for_provider(
+    bot_settings: &DiscordBotSettings,
+    _provider: &ProviderKind,
+) -> Vec<ChannelId> {
+    let mut channels: Vec<ChannelId> = bot_settings
+        .channel_fast_modes
+        .iter()
+        .filter_map(|(channel_id, enabled)| {
+            if !*enabled {
+                return None;
+            }
+            channel_id.parse::<u64>().ok().map(ChannelId::new)
+        })
+        .collect();
+    channels.sort_unstable_by_key(|channel_id| channel_id.get());
+    channels
+}
+
+fn restored_fast_mode_reset_entries(bot_settings: &DiscordBotSettings) -> Vec<String> {
+    let mut entries: Vec<String> = bot_settings
+        .channel_fast_mode_reset_pending
+        .iter()
+        .cloned()
+        .collect();
+    entries.sort_unstable();
+    entries
+}
+
+fn restored_fast_mode_reset_channels(bot_settings: &DiscordBotSettings) -> Vec<ChannelId> {
+    let mut channels: Vec<ChannelId> = bot_settings
+        .channel_fast_mode_reset_pending
+        .iter()
+        .filter_map(|entry| {
+            let raw_channel_id = entry
+                .split_once(':')
+                .map(|(_, channel_id)| channel_id)
+                .unwrap_or(entry.as_str());
+            raw_channel_id.parse::<u64>().ok().map(ChannelId::new)
+        })
+        .collect();
+    channels.sort_unstable_by_key(|channel_id| channel_id.get());
+    channels.dedup_by_key(|channel_id| channel_id.get());
+    channels
+}
+
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
     // so the first 16 chars we sample are actual hex; otherwise the `is_ascii_hexdigit`
@@ -620,6 +665,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 .map(|id| (ChannelId::new(id), model.clone()))
         })
         .collect();
+    let restored_fast_mode_channels =
+        restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
+    let restored_fast_mode_reset_entries = restored_fast_mode_reset_entries(&bot_settings);
+    let restored_fast_mode_reset_channels = restored_fast_mode_reset_channels(&bot_settings);
 
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
@@ -655,9 +704,33 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             }
             map
         },
+        fast_mode_channels: {
+            let set = dashmap::DashSet::new();
+            for channel_id in &restored_fast_mode_channels {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        fast_mode_session_reset_pending: {
+            let set = dashmap::DashSet::new();
+            for entry in &restored_fast_mode_reset_entries {
+                set.insert(entry.clone());
+            }
+            set
+        },
         model_session_reset_pending: {
             let set = dashmap::DashSet::new();
             for (channel_id, _) in &restored_model_overrides {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        session_reset_pending: {
+            let set = dashmap::DashSet::new();
+            for (channel_id, _) in &restored_model_overrides {
+                set.insert(*channel_id);
+            }
+            for channel_id in &restored_fast_mode_reset_channels {
                 set.insert(*channel_id);
             }
             set
@@ -689,6 +762,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 restored_model_overrides.len()
             );
         }
+        if !restored_fast_mode_channels.is_empty() {
+            tracing::info!(
+                "  [{ts}] ⚡ restored fast mode channels: {} channel(s)",
+                restored_fast_mode_channels.len()
+            );
+        }
     }
 
     // Register this provider with the health check registry
@@ -699,35 +778,40 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let token_owned = token.to_string();
     let shared_clone = shared.clone();
 
+    let mut slash_commands = vec![
+        commands::cmd_start(),
+        commands::cmd_pwd(),
+        commands::cmd_status(),
+        commands::cmd_inflight(),
+        commands::cmd_clear(),
+        commands::cmd_stop(),
+        commands::cmd_down(),
+        commands::cmd_shell(),
+        commands::cmd_cc(),
+        commands::cmd_metrics(),
+        commands::cmd_model(),
+        commands::cmd_fast(),
+    ];
+    slash_commands.extend([
+        commands::cmd_queue(),
+        commands::cmd_health(),
+        commands::cmd_sessions(),
+        commands::cmd_deletesession(),
+        commands::cmd_allowedtools(),
+        commands::cmd_allowed(),
+        commands::cmd_debug(),
+        commands::cmd_allowall(),
+        commands::cmd_adduser(),
+        commands::cmd_removeuser(),
+        commands::cmd_receipt(),
+        commands::cmd_help(),
+        commands::cmd_meeting(),
+        commands::cmd_mcp_reload(),
+    ]);
+
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::cmd_start(),
-                commands::cmd_pwd(),
-                commands::cmd_status(),
-                commands::cmd_inflight(),
-                commands::cmd_clear(),
-                commands::cmd_stop(),
-                commands::cmd_down(),
-                commands::cmd_shell(),
-                commands::cmd_cc(),
-                commands::cmd_metrics(),
-                commands::cmd_model(),
-                commands::cmd_queue(),
-                commands::cmd_health(),
-                commands::cmd_sessions(),
-                commands::cmd_deletesession(),
-                commands::cmd_allowedtools(),
-                commands::cmd_allowed(),
-                commands::cmd_debug(),
-                commands::cmd_allowall(),
-                commands::cmd_adduser(),
-                commands::cmd_removeuser(),
-                commands::cmd_receipt(),
-                commands::cmd_help(),
-                commands::cmd_meeting(),
-                commands::cmd_mcp_reload(),
-            ],
+            commands: slash_commands,
             command_check: Some(|ctx| {
                 Box::pin(async move {
                     let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
@@ -1459,6 +1543,43 @@ mod tests {
     use poise::serenity_prelude::{MessageId, UserId};
     use std::collections::HashSet;
     use std::time::Instant;
+
+    #[test]
+    fn restored_fast_mode_channels_restore_for_mixed_provider_runtimes() {
+        let mut settings = DiscordBotSettings::default();
+        settings.channel_fast_modes.insert("123".to_string(), true);
+        settings.channel_fast_modes.insert("456".to_string(), false);
+
+        let claude_channels =
+            restored_fast_mode_enabled_channels_for_provider(&settings, &ProviderKind::Claude);
+        assert_eq!(claude_channels, vec![ChannelId::new(123)]);
+
+        let gemini_channels =
+            restored_fast_mode_enabled_channels_for_provider(&settings, &ProviderKind::Gemini);
+        assert_eq!(gemini_channels, vec![ChannelId::new(123)]);
+    }
+
+    #[test]
+    fn restored_fast_mode_reset_channels_restore_pending_entries_for_all_providers() {
+        let mut settings = DiscordBotSettings::default();
+        settings.channel_fast_modes.insert("123".to_string(), true);
+        settings.channel_fast_modes.insert("456".to_string(), false);
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("codex:456".to_string());
+        settings
+            .channel_fast_mode_reset_pending
+            .insert("123".to_string());
+
+        assert_eq!(
+            restored_fast_mode_reset_entries(&settings),
+            vec!["123".to_string(), "codex:456".to_string()]
+        );
+        assert_eq!(
+            restored_fast_mode_reset_channels(&settings),
+            vec![ChannelId::new(123), ChannelId::new(456)]
+        );
+    }
 
     struct PgTestDatabase {
         admin_url: String,

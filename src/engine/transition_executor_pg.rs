@@ -216,14 +216,38 @@ mod tests {
         database_url: String,
     }
 
+    async fn connect_test_pool(database_url: &str, max_connections: u32, context: &str) -> PgPool {
+        let mut last_error = None;
+
+        for attempt in 1..=3 {
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(max_connections)
+                .acquire_timeout(std::time::Duration::from_secs(30))
+                .connect(database_url)
+                .await
+            {
+                Ok(pool) => return pool,
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+
+        panic!(
+            "{context} after retries: {}",
+            last_error.expect("postgres pool connect should capture final error")
+        );
+    }
+
     impl TestDatabase {
         async fn create() -> Self {
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
-            let admin_pool = sqlx::PgPool::connect(&admin_url)
-                .await
-                .expect("connect postgres admin db");
+            let admin_pool = connect_test_pool(&admin_url, 1, "connect postgres admin db").await;
             sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
                 .execute(&admin_pool)
                 .await
@@ -238,9 +262,7 @@ mod tests {
         }
 
         async fn migrate(&self) -> PgPool {
-            let pool = sqlx::PgPool::connect(&self.database_url)
-                .await
-                .expect("connect postgres test db");
+            let pool = connect_test_pool(&self.database_url, 2, "connect postgres test db").await;
             crate::db::postgres::migrate(&pool)
                 .await
                 .expect("migrate postgres test db");
@@ -248,9 +270,8 @@ mod tests {
         }
 
         async fn drop(self) {
-            let admin_pool = sqlx::PgPool::connect(&self.admin_url)
-                .await
-                .expect("reconnect postgres admin db");
+            let admin_pool =
+                connect_test_pool(&self.admin_url, 1, "reconnect postgres admin db").await;
             sqlx::query(
                 "SELECT pg_terminate_backend(pid)
                  FROM pg_stat_activity
@@ -380,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pg_transition_intent_variants_mutate_expected_rows() {
+    async fn postgres_transition_intent_variants_mutate_expected_rows() {
         let test_db = TestDatabase::create().await;
         let pool = test_db.migrate().await;
 

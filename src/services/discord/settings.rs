@@ -1124,6 +1124,59 @@ agents:
     }
 
     #[test]
+    fn test_load_bot_settings_reads_channel_fast_modes() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "channel_fast_modes": {
+                        "123": true,
+                        "456": false
+                    }
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.channel_fast_modes.get("123"), Some(&true));
+            assert_eq!(settings.channel_fast_modes.get("456"), Some(&false));
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_reads_channel_fast_mode_reset_pending() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "channel_fast_mode_reset_pending": ["123", "456"]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert!(settings.channel_fast_mode_reset_pending.contains("123"));
+            assert!(settings.channel_fast_mode_reset_pending.contains("456"));
+        });
+    }
+
+    #[test]
     fn test_load_bot_settings_reads_allowed_channel_ids() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
@@ -1359,6 +1412,36 @@ agents:
                     .map(String::as_str),
                 Some("sonnet")
             );
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_channel_fast_modes() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.channel_fast_modes.insert("123".to_string(), true);
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(loaded.channel_fast_modes.get("123"), Some(&true));
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_channel_fast_mode_reset_pending() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings
+                .channel_fast_mode_reset_pending
+                .insert("123".to_string());
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert!(loaded.channel_fast_mode_reset_pending.contains("123"));
         });
     }
 

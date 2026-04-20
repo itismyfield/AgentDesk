@@ -175,6 +175,7 @@ src/
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
 │   │   │   ├── diagnostics.rs
+│   │   │   ├── fast_mode.rs
 │   │   │   ├── help.rs
 │   │   │   ├── mcp_reload.rs
 │   │   │   ├── meeting_cmd.rs

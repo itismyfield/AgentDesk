@@ -7,9 +7,15 @@ use crate::services::provider::ProviderKind;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
+use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::cancel_active_token;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
+};
+use super::config::{
+    any_fast_mode_reset_pending, clear_fast_mode_reset_pending_for_channel,
+    clear_fast_mode_reset_pending_for_provider, fast_mode_reset_pending_for_provider,
+    fast_mode_reset_pending_key, sync_session_reset_pending,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +31,12 @@ enum ManagedSessionResetBehavior {
     Noop,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSessionResetPlan {
+    reset_source: &'static str,
+    recreate_tmux: bool,
+}
+
 fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClearBehavior {
     match provider {
         ProviderKind::Claude => ManagedSessionClearBehavior::NativeProviderClear,
@@ -37,12 +49,39 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
 
 fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionResetBehavior {
     match provider {
-        ProviderKind::Claude => ManagedSessionResetBehavior::Noop,
+        ProviderKind::Claude => ManagedSessionResetBehavior::ResetManagedProcess,
         ProviderKind::Codex | ProviderKind::Qwen => {
             ManagedSessionResetBehavior::ResetManagedProcess
         }
         ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
     }
+}
+
+fn pending_session_reset_plan(
+    provider: &ProviderKind,
+    fast_mode_reset_pending: bool,
+    model_reset_pending: bool,
+    legacy_session_reset_pending: bool,
+) -> Option<PendingSessionResetPlan> {
+    if fast_mode_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "fast mode reset pending",
+            recreate_tmux: matches!(provider, ProviderKind::Claude | ProviderKind::Codex),
+        });
+    }
+    if model_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "model session reset pending",
+            recreate_tmux: false,
+        });
+    }
+    if legacy_session_reset_pending {
+        return Some(PendingSessionResetPlan {
+            reset_source: "session reset pending",
+            recreate_tmux: false,
+        });
+    }
+    None
 }
 
 pub(in crate::services::discord) fn reset_managed_process_session(session_name: &str) -> bool {
@@ -214,25 +253,46 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
+    let fast_mode_reset_pending =
+        fast_mode_reset_pending_for_provider(shared, channel_id, provider);
+    let model_reset_pending = shared.model_session_reset_pending.contains(&channel_id);
+    let legacy_session_reset_pending = shared.session_reset_pending.contains(&channel_id)
+        && !any_fast_mode_reset_pending(shared, channel_id)
+        && !model_reset_pending;
+
+    let Some(plan) = pending_session_reset_plan(
+        provider,
+        fast_mode_reset_pending,
+        model_reset_pending,
+        legacy_session_reset_pending,
+    ) else {
+        sync_session_reset_pending(shared, channel_id);
         return;
-    }
+    };
 
     let _ = reset_channel_provider_state(
         http,
         shared,
         provider,
         channel_id,
-        "model session reset pending",
+        plan.reset_source,
         true,
         false,
-        false,
+        plan.recreate_tmux,
     )
     .await;
+
+    if fast_mode_reset_pending {
+        clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider);
+        persist_fast_mode_reset_marker(shared, channel_id, provider, false).await;
+    }
+    if model_reset_pending {
+        shared.model_session_reset_pending.remove(&channel_id);
+    }
+    if legacy_session_reset_pending {
+        shared.session_reset_pending.remove(&channel_id);
+    }
+    sync_session_reset_pending(shared, channel_id);
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(
@@ -270,7 +330,10 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
 
     shared.dispatch_role_overrides.remove(&channel_id);
 
+    clear_fast_mode_reset_pending_for_channel(shared, channel_id);
     shared.model_session_reset_pending.remove(&channel_id);
+    shared.session_reset_pending.remove(&channel_id);
+    clear_all_fast_mode_reset_markers(shared, channel_id).await;
 
     if let Some(token) = cleared.removed_token {
         cancel_active_token(
@@ -471,9 +534,9 @@ pub(in crate::services::discord) async fn cmd_down(
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedSessionClearBehavior, ManagedSessionResetBehavior,
+        ManagedSessionClearBehavior, ManagedSessionResetBehavior, PendingSessionResetPlan,
         build_fallback_session_key_for_clear, fallback_channel_name_for_clear,
-        managed_session_clear_behavior, managed_session_reset_behavior,
+        managed_session_clear_behavior, managed_session_reset_behavior, pending_session_reset_plan,
     };
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::ChannelId;
@@ -502,7 +565,7 @@ mod tests {
     fn managed_session_reset_behavior_matches_provider_transport() {
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Claude),
-            ManagedSessionResetBehavior::Noop
+            ManagedSessionResetBehavior::ResetManagedProcess
         );
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Codex),
@@ -515,6 +578,46 @@ mod tests {
         assert_eq!(
             managed_session_reset_behavior(&ProviderKind::Gemini),
             ManagedSessionResetBehavior::Noop
+        );
+    }
+
+    #[test]
+    fn pending_session_reset_plan_recreates_claude_and_codex_tmux_for_fast_mode() {
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Claude, true, false, false),
+            Some(PendingSessionResetPlan {
+                reset_source: "fast mode reset pending",
+                recreate_tmux: true,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Codex, true, false, false),
+            Some(PendingSessionResetPlan {
+                reset_source: "fast mode reset pending",
+                recreate_tmux: true,
+            })
+        );
+    }
+
+    #[test]
+    fn pending_session_reset_plan_prefers_specific_flags_and_keeps_legacy_fallback() {
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Claude, false, true, true),
+            Some(PendingSessionResetPlan {
+                reset_source: "model session reset pending",
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Gemini, false, false, true),
+            Some(PendingSessionResetPlan {
+                reset_source: "session reset pending",
+                recreate_tmux: false,
+            })
+        );
+        assert_eq!(
+            pending_session_reset_plan(&ProviderKind::Gemini, false, false, false),
+            None
         );
     }
 
@@ -637,4 +740,52 @@ pub(in crate::services::discord) async fn cmd_shell(
     send_long_message_ctx(ctx, &response).await?;
     tracing::info!("  [{ts}] ▶ [{user_name}] Shell done");
     Ok(())
+}
+
+async fn persist_fast_mode_reset_marker(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    pending: bool,
+) {
+    let Some(token) = shared.cached_bot_token.get() else {
+        return;
+    };
+
+    let channel_key = channel_id.get().to_string();
+    let provider_key = fast_mode_reset_pending_key(channel_id, provider);
+    let mut settings = shared.settings.write().await;
+    if pending {
+        settings
+            .channel_fast_mode_reset_pending
+            .remove(&channel_key);
+        settings
+            .channel_fast_mode_reset_pending
+            .insert(provider_key);
+    } else {
+        settings
+            .channel_fast_mode_reset_pending
+            .remove(&channel_key);
+        settings
+            .channel_fast_mode_reset_pending
+            .remove(&provider_key);
+    }
+    save_bot_settings(token, &settings);
+}
+
+async fn clear_all_fast_mode_reset_markers(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) {
+    let Some(token) = shared.cached_bot_token.get() else {
+        return;
+    };
+
+    let channel_key = channel_id.get().to_string();
+    let suffix = format!(":{channel_key}");
+    let mut settings = shared.settings.write().await;
+    settings
+        .channel_fast_mode_reset_pending
+        .retain(|entry| entry != &channel_key && !entry.ends_with(&suffix));
+    save_bot_settings(token, &settings);
 }

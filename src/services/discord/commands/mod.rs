@@ -1,6 +1,7 @@
 mod config;
 mod control;
 mod diagnostics;
+mod fast_mode;
 mod help;
 mod mcp_reload;
 mod meeting_cmd;
@@ -16,9 +17,10 @@ pub(in crate::services::discord) use super::model_catalog::{
 };
 pub(in crate::services::discord) use config::{
     ModelPickerAction, build_model_picker_components_from_snapshot,
-    build_model_picker_embed_from_snapshot, clear_model_picker_pending, current_working_dir,
-    effective_model_snapshot, model_picker_pending_to_override, parse_model_picker_custom_id,
-    resolve_model_for_turn, update_channel_model_override, would_channel_model_override_change,
+    build_model_picker_embed_from_snapshot, channel_fast_mode_setting, clear_model_picker_pending,
+    current_working_dir, effective_model_snapshot, model_picker_pending_to_override,
+    parse_model_picker_custom_id, resolve_model_for_turn, update_channel_model_override,
+    would_channel_model_override_change,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{
@@ -33,6 +35,7 @@ pub(super) use diagnostics::{
     cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_sessions,
     cmd_status,
 };
+pub(super) use fast_mode::cmd_fast;
 pub(super) use help::cmd_help;
 pub(super) use mcp_reload::cmd_mcp_reload;
 pub(super) use meeting_cmd::cmd_meeting;

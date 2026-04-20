@@ -41,6 +41,15 @@ fn append_claude_mcp_config_arg(args: &mut Vec<String>) {
     }
 }
 
+fn append_claude_fast_mode_arg(args: &mut Vec<String>, fast_mode_enabled: Option<bool>) {
+    let Some(enabled) = fast_mode_enabled else {
+        return;
+    };
+
+    args.push("--settings".to_string());
+    args.push(format!(r#"{{"fastMode":{enabled}}}"#));
+}
+
 fn build_tmux_launch_env_lines(
     exec_path: Option<&str>,
     report_channel_id: Option<u64>,
@@ -440,6 +449,7 @@ pub fn execute_command_streaming(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
+    fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
 ) -> Result<(), String> {
     debug_log("========================================");
@@ -492,6 +502,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         "stream-json".to_string(),
     ];
     append_claude_mcp_config_arg(&mut args);
+    append_claude_fast_mode_arg(&mut args, fast_mode_enabled);
 
     // Apply model override if specified (e.g. "opus", "sonnet", "haiku")
     if let Some(model) = model_override {
@@ -1834,16 +1845,25 @@ mod tests {
     #[test]
     fn test_append_claude_mcp_config_arg_skips_when_no_runtime_config() {
         let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let previous_config = std::env::var_os("AGENTDESK_CONFIG");
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_memento_access_key = std::env::var_os("MEMENTO_ACCESS_KEY");
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") };
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("agentdesk.yaml");
+        crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+        unsafe { std::env::set_var("AGENTDESK_CONFIG", &config_path) };
 
         let mut args = vec!["-p".to_string()];
         append_claude_mcp_config_arg(&mut args);
 
         assert_eq!(args, vec!["-p".to_string()]);
 
+        match previous_config {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_CONFIG", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_CONFIG") },
+        }
         match previous_root {
             Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
@@ -1852,6 +1872,33 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("MEMENTO_ACCESS_KEY", value) },
             None => unsafe { std::env::remove_var("MEMENTO_ACCESS_KEY") },
         }
+    }
+
+    #[test]
+    fn test_append_claude_fast_mode_arg_sets_explicit_state() {
+        let mut args = Vec::new();
+        append_claude_fast_mode_arg(&mut args, Some(true));
+        assert_eq!(
+            args,
+            vec!["--settings".to_string(), r#"{"fastMode":true}"#.to_string(),]
+        );
+
+        let mut disabled_args = Vec::new();
+        append_claude_fast_mode_arg(&mut disabled_args, Some(false));
+        assert_eq!(
+            disabled_args,
+            vec![
+                "--settings".to_string(),
+                r#"{"fastMode":false}"#.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_append_claude_fast_mode_arg_skips_when_unset() {
+        let mut args = Vec::new();
+        append_claude_fast_mode_arg(&mut args, None);
+        assert!(args.is_empty());
     }
 
     #[test]

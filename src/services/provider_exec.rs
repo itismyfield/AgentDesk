@@ -100,6 +100,7 @@ pub async fn execute_structured(
                 None,
                 model_ref,
                 None,
+                None,
             ),
             ProviderKind::Codex => codex::execute_command_streaming(
                 &prompt,
@@ -114,6 +115,7 @@ pub async fn execute_structured(
                 None,
                 None,
                 model_ref,
+                None,
                 None,
             ),
             ProviderKind::Gemini => gemini::execute_command_streaming(

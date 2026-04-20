@@ -340,6 +340,10 @@ pub(super) struct DiscordBotSettings {
     pub(super) require_mention_channel_ids: Vec<u64>,
     /// channel_id (string) → persisted model override
     pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
+    /// channel_id (string) → native fast mode enabled
+    pub(super) channel_fast_modes: std::collections::HashMap<String, bool>,
+    /// channel_id (string) → pending native fast mode reset on the next turn
+    pub(super) channel_fast_mode_reset_pending: std::collections::HashSet<String>,
     /// Discord user ID of the registered owner (must be configured explicitly)
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
@@ -362,6 +366,8 @@ impl Default for DiscordBotSettings {
             allowed_channel_ids: Vec::new(),
             require_mention_channel_ids: Vec::new(),
             channel_model_overrides: std::collections::HashMap::new(),
+            channel_fast_modes: std::collections::HashMap::new(),
+            channel_fast_mode_reset_pending: std::collections::HashSet::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
             allow_all_users: false,
@@ -468,9 +474,17 @@ pub(super) struct SharedData {
     /// Per-channel model override, independent of session lifecycle.
     /// Takes priority over role-map model. Cleared via the `/model` picker default option.
     pub(super) model_overrides: dashmap::DashMap<ChannelId, String>,
+    /// Per-channel native fast mode enablement for providers that support it.
+    pub(super) fast_mode_channels: dashmap::DashSet<ChannelId>,
+    /// Provider-scoped pending native fast-mode resets, encoded as
+    /// `provider:channel_id` strings for mixed-provider dispatch safety.
+    pub(super) fast_mode_session_reset_pending: dashmap::DashSet<String>,
     /// Channels that must start a fresh provider session on the next turn
     /// because the effective model override changed.
     pub(super) model_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Channels that must start a fresh provider session on the next turn
+    /// because a persisted runtime execution setting changed.
+    pub(super) session_reset_pending: dashmap::DashSet<ChannelId>,
     /// Per-message staged model picker selection.
     /// Key: picker message id. Value tracks owner, target channel, and staged model until submit.
     pub(super) model_picker_pending: dashmap::DashMap<MessageId, ModelPickerPendingState>,
@@ -548,7 +562,10 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         model_overrides: dashmap::DashMap::new(),
+        fast_mode_channels: dashmap::DashSet::new(),
+        fast_mode_session_reset_pending: dashmap::DashSet::new(),
         model_session_reset_pending: dashmap::DashSet::new(),
+        session_reset_pending: dashmap::DashSet::new(),
         model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),

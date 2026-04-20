@@ -143,15 +143,38 @@ fn save_runtime_bot_settings_checked(
             .map(|existing_token| existing_token != token)
             .unwrap_or(true)
     });
+    let mut sorted_fast_mode_reset_pending: Vec<_> = settings
+        .channel_fast_mode_reset_pending
+        .iter()
+        .cloned()
+        .collect();
+    sorted_fast_mode_reset_pending.sort();
 
     if yaml_manages_bot {
-        if !settings.channel_model_overrides.is_empty() {
-            obj.insert(
-                key,
-                serde_json::json!({
-                    "channel_model_overrides": settings.channel_model_overrides,
-                }),
-            );
+        if !settings.channel_model_overrides.is_empty()
+            || !settings.channel_fast_modes.is_empty()
+            || !sorted_fast_mode_reset_pending.is_empty()
+        {
+            let mut runtime_entry = serde_json::Map::new();
+            if !settings.channel_model_overrides.is_empty() {
+                runtime_entry.insert(
+                    "channel_model_overrides".to_string(),
+                    serde_json::json!(settings.channel_model_overrides),
+                );
+            }
+            if !settings.channel_fast_modes.is_empty() {
+                runtime_entry.insert(
+                    "channel_fast_modes".to_string(),
+                    serde_json::json!(settings.channel_fast_modes),
+                );
+            }
+            if !sorted_fast_mode_reset_pending.is_empty() {
+                runtime_entry.insert(
+                    "channel_fast_mode_reset_pending".to_string(),
+                    serde_json::json!(sorted_fast_mode_reset_pending),
+                );
+            }
+            obj.insert(key, serde_json::Value::Object(runtime_entry));
         }
     } else {
         let mut entry = legacy_metadata.unwrap_or_default();
@@ -235,6 +258,22 @@ fn save_runtime_bot_settings_checked(
             entry.insert(
                 "channel_model_overrides".to_string(),
                 serde_json::json!(settings.channel_model_overrides),
+            );
+        }
+        if settings.channel_fast_modes.is_empty() {
+            entry.remove("channel_fast_modes");
+        } else {
+            entry.insert(
+                "channel_fast_modes".to_string(),
+                serde_json::json!(settings.channel_fast_modes),
+            );
+        }
+        if sorted_fast_mode_reset_pending.is_empty() {
+            entry.remove("channel_fast_mode_reset_pending");
+        } else {
+            entry.insert(
+                "channel_fast_mode_reset_pending".to_string(),
+                serde_json::json!(sorted_fast_mode_reset_pending),
             );
         }
         obj.insert(key, serde_json::Value::Object(entry));
