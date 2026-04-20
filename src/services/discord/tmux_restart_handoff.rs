@@ -83,13 +83,58 @@ pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     resolve_dispatched_thread_dispatch(db?, thread_channel_id)
 }
 
+fn build_restart_handoff_session_key(
+    state: &super::inflight::InflightTurnState,
+    token_hash: &str,
+    provider_kind: &ProviderKind,
+) -> Option<String> {
+    state
+        .session_key
+        .as_ref()
+        .filter(|key| !key.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            state
+                .tmux_session_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|tmux_name| {
+                    super::adk_session::build_namespaced_session_key(
+                        token_hash,
+                        provider_kind,
+                        tmux_name,
+                    )
+                })
+        })
+        .or_else(|| {
+            state
+                .channel_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|channel_name| {
+                    let tmux_name = provider_kind.build_tmux_session_name(channel_name);
+                    super::adk_session::build_namespaced_session_key(
+                        token_hash,
+                        provider_kind,
+                        &tmux_name,
+                    )
+                })
+        })
+}
+
 async fn clear_restart_handoff_provider_session(
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
     provider_kind: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
 ) {
     let session_key =
-        super::adk_session::build_adk_session_key(shared, channel_id, provider_kind).await;
+        match build_restart_handoff_session_key(state, &shared.token_hash, provider_kind) {
+            Some(key) => Some(key),
+            None => {
+                super::adk_session::build_adk_session_key(shared, channel_id, provider_kind).await
+            }
+        };
     {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -157,7 +202,7 @@ pub(super) async fn start_restart_handoff_from_state(
         }
     };
 
-    clear_restart_handoff_provider_session(channel_id, shared, provider_kind).await;
+    clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 
     let author_id = serenity::UserId::new(1);
     let mut started_immediately = false;
@@ -296,7 +341,9 @@ pub(super) async fn resume_aborted_restart_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{RestartHandoffScope, resolve_restart_handoff_scope};
+    use super::{
+        RestartHandoffScope, build_restart_handoff_session_key, resolve_restart_handoff_scope,
+    };
     use crate::config::Config;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
@@ -347,6 +394,33 @@ mod tests {
             "/tmp/new-output.jsonl",
         );
         assert_eq!(scope, RestartHandoffScope::ProviderChannelScopedFallback);
+    }
+
+    #[test]
+    fn restart_handoff_session_key_prefers_persisted_inflight_key() {
+        let mut state = sample_inflight_state();
+        state.session_key = Some("claude/token-hash/host:AgentDesk-claude-adk-cc".to_string());
+
+        let resolved =
+            build_restart_handoff_session_key(&state, "other-token-hash", &ProviderKind::Claude);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("claude/token-hash/host:AgentDesk-claude-adk-cc")
+        );
+    }
+
+    #[test]
+    fn restart_handoff_session_key_falls_back_to_tmux_name() {
+        let mut state = sample_inflight_state();
+        state.session_key = None;
+        let hostname = crate::services::platform::hostname_short();
+        let expected = format!("claude/token-hash/{hostname}:AgentDesk-claude-adk-cc");
+
+        let resolved =
+            build_restart_handoff_session_key(&state, "token-hash", &ProviderKind::Claude);
+
+        assert_eq!(resolved.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
