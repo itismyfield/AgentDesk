@@ -155,6 +155,30 @@ test.describe("Dashboard smoke tests", () => {
     expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
   });
 
+  test("responsive: mobile tab bar stays below modal overlays", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+
+    const bottomNav = page.getByTestId("app-mobile-tabbar");
+    await expect(bottomNav).toBeVisible();
+
+    const tabbarZIndex = await bottomNav.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true }));
+    });
+
+    const shortcutHelpModal = page.getByTestId("shortcut-help-modal");
+    await expect(shortcutHelpModal).toBeVisible();
+
+    const modalZIndex = await shortcutHelpModal.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+    expect(modalZIndex).toBeGreaterThan(tabbarZIndex);
+  });
+
   test("responsive: mobile routes avoid horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
