@@ -509,6 +509,7 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
 
   return (
     <div
+      data-testid="stats-page"
       className="mx-auto h-full w-full max-w-7xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
@@ -598,12 +599,13 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
             </div>
 
             <div className="flex flex-col gap-3 xl:items-end">
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2" data-testid="stats-range-controls">
                 {PERIOD_OPTIONS.map((option) => {
                   const active = option === period;
                   return (
                     <button
                       key={option}
+                      data-testid={`stats-range-${option}`}
                       type="button"
                       className={cx(dashboardButton.sm, "min-w-[4.5rem] justify-center")}
                       onClick={() => setPeriod(option)}
@@ -666,133 +668,151 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
           </div>
         ) : null}
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <SummaryMetricCard
-            icon={<BarChart3 size={18} />}
-            label={t({ ko: "총 토큰", en: "Total Tokens", ja: "総トークン", zh: "总代币" })}
-            value={summary ? formatTokens(summary.total_tokens) : "…"}
-            sub={analytics?.period_label ?? t({ ko: "기간 집계 대기", en: "Waiting for range data", ja: "範囲集計待ち", zh: "等待区间数据" })}
-            accent="#f59e0b"
-          />
-          <SummaryMetricCard
-            icon={<Coins size={18} />}
-            label={t({ ko: "API 비용", en: "API Spend", ja: "API コスト", zh: "API 成本" })}
-            value={summary ? formatCurrency(summary.total_cost) : "…"}
-            sub={
-              summary
-                ? t({
-                    ko: `메시지 ${numberFormatter.format(summary.total_messages)} / 세션 ${numberFormatter.format(summary.total_sessions)}`,
-                    en: `${numberFormatter.format(summary.total_messages)} messages / ${numberFormatter.format(summary.total_sessions)} sessions`,
-                    ja: `${numberFormatter.format(summary.total_messages)} メッセージ / ${numberFormatter.format(summary.total_sessions)} セッション`,
-                    zh: `${numberFormatter.format(summary.total_messages)} 消息 / ${numberFormatter.format(summary.total_sessions)} 会话`,
-                  })
-                : t({ ko: "비용 집계 대기", en: "Waiting for spend data", ja: "コスト集計待ち", zh: "等待成本数据" })
-            }
-            accent="#22c55e"
-          />
-          <SummaryMetricCard
-            icon={<Sparkles size={18} />}
-            label={t({ ko: "캐시 절감", en: "Cache Saved", ja: "キャッシュ節約", zh: "缓存节省" })}
-            value={summary ? formatCurrency(summary.cache_discount) : "…"}
-            sub={
-              summary
-                ? t({
-                    ko: `uncached 기준 ${formatCurrency(uncachedBaseline)}`,
-                    en: `${formatCurrency(uncachedBaseline)} uncached baseline`,
-                    ja: `uncached 基準 ${formatCurrency(uncachedBaseline)}`,
-                    zh: `uncached 基线 ${formatCurrency(uncachedBaseline)}`,
-                  })
-                : t({ ko: "절감액 계산 대기", en: "Waiting for savings data", ja: "節約額計算待ち", zh: "等待节省数据" })
-            }
-            accent="#14b8a6"
-          />
-          <SummaryMetricCard
-            icon={<Gauge size={18} />}
-            label={t({ ko: "캐시 히트율", en: "Cache Hit Rate", ja: "キャッシュヒット率", zh: "缓存命中率" })}
-            value={summary ? formatPercent(cacheHitRate) : "…"}
-            sub={
-              summary
-                ? t({
-                    ko: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
-                    en: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
-                    ja: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
-                    zh: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
-                  })
-                : t({ ko: "히트율 계산 대기", en: "Waiting for cache hit data", ja: "ヒット率計算待ち", zh: "等待命中率数据" })
-            }
-            accent="#8b5cf6"
-          />
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,0.85fr)]">
-          <DailyTokenChartCard
-            t={t}
-            localeTag={localeTag}
-            numberFormatter={numberFormatter}
-            loading={analyticsLoading}
-            daily={analytics?.daily ?? []}
-            series={series}
-            summary={summary}
-          />
-
-          <div className="grid gap-4">
-            <DistributionCard
-              icon={<Cpu size={18} />}
-              title={t({ ko: "모델 점유율", en: "Model Share", ja: "モデル比率", zh: "模型占比" })}
-              description={t({
-                ko: "선택한 범위에서 어떤 모델이 토큰을 가장 많이 처리했는지 보여줍니다.",
-                en: "Shows which models processed the most tokens in the selected window.",
-                ja: "選択範囲でどのモデルが最も多くのトークンを処理したかを示します。",
-                zh: "显示所选范围内处理 Token 最多的模型。",
-              })}
-              emptyLabel={t({
-                ko: "표시할 모델 분포가 없습니다.",
-                en: "No model distribution available.",
-                ja: "表示するモデル分布がありません。",
-                zh: "没有可显示的模型分布。",
-              })}
-              loading={analyticsLoading}
-              segments={modelSegments}
-              centerLabel={t({ ko: "모델", en: "Models", ja: "モデル", zh: "模型" })}
-              centerValue={summary ? formatTokens(summary.total_tokens) : "0"}
-              centerSub={
-                analytics
-                  ? t({
-                      ko: `${analytics.receipt.models.length}개 추적`,
-                      en: `${analytics.receipt.models.length} tracked`,
-                      ja: `${analytics.receipt.models.length}件追跡`,
-                      zh: `追踪 ${analytics.receipt.models.length} 个`,
-                    })
-                  : t({ ko: "데이터 대기", en: "Waiting for data", ja: "データ待ち", zh: "等待数据" })
-              }
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-testid="stats-summary-grid">
+          <div data-testid="stats-summary-total-tokens">
+            <SummaryMetricCard
+              icon={<BarChart3 size={18} />}
+              label={t({ ko: "총 토큰", en: "Total Tokens", ja: "総トークン", zh: "总代币" })}
+              value={summary ? formatTokens(summary.total_tokens) : "…"}
+              sub={analytics?.period_label ?? t({ ko: "기간 집계 대기", en: "Waiting for range data", ja: "範囲集計待ち", zh: "等待区间数据" })}
+              accent="#f59e0b"
             />
-
-            <ProviderShareCard
-              t={t}
-              loading={analyticsLoading}
-              segments={providerSegments}
+          </div>
+          <div data-testid="stats-summary-api-spend">
+            <SummaryMetricCard
+              icon={<Coins size={18} />}
+              label={t({ ko: "API 비용", en: "API Spend", ja: "API コスト", zh: "API 成本" })}
+              value={summary ? formatCurrency(summary.total_cost) : "…"}
+              sub={
+                summary
+                  ? t({
+                      ko: `메시지 ${numberFormatter.format(summary.total_messages)} / 세션 ${numberFormatter.format(summary.total_sessions)}`,
+                      en: `${numberFormatter.format(summary.total_messages)} messages / ${numberFormatter.format(summary.total_sessions)} sessions`,
+                      ja: `${numberFormatter.format(summary.total_messages)} メッセージ / ${numberFormatter.format(summary.total_sessions)} セッション`,
+                      zh: `${numberFormatter.format(summary.total_messages)} 消息 / ${numberFormatter.format(summary.total_sessions)} 会话`,
+                    })
+                  : t({ ko: "비용 집계 대기", en: "Waiting for spend data", ja: "コスト集計待ち", zh: "等待成本数据" })
+              }
+              accent="#22c55e"
+            />
+          </div>
+          <div data-testid="stats-summary-cache-saved">
+            <SummaryMetricCard
+              icon={<Sparkles size={18} />}
+              label={t({ ko: "캐시 절감", en: "Cache Saved", ja: "キャッシュ節約", zh: "缓存节省" })}
+              value={summary ? formatCurrency(summary.cache_discount) : "…"}
+              sub={
+                summary
+                  ? t({
+                      ko: `uncached 기준 ${formatCurrency(uncachedBaseline)}`,
+                      en: `${formatCurrency(uncachedBaseline)} uncached baseline`,
+                      ja: `uncached 基準 ${formatCurrency(uncachedBaseline)}`,
+                      zh: `uncached 基线 ${formatCurrency(uncachedBaseline)}`,
+                    })
+                  : t({ ko: "절감액 계산 대기", en: "Waiting for savings data", ja: "節約額計算待ち", zh: "等待节省数据" })
+              }
+              accent="#14b8a6"
+            />
+          </div>
+          <div data-testid="stats-summary-cache-hit">
+            <SummaryMetricCard
+              icon={<Gauge size={18} />}
+              label={t({ ko: "캐시 히트율", en: "Cache Hit Rate", ja: "キャッシュヒット率", zh: "缓存命中率" })}
+              value={summary ? formatPercent(cacheHitRate) : "…"}
+              sub={
+                summary
+                  ? t({
+                      ko: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
+                      en: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
+                      ja: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
+                      zh: `${formatTokens(cacheReadTokens)} cache read / ${formatTokens(totalPromptTokens)} prompt`,
+                    })
+                  : t({ ko: "히트율 계산 대기", en: "Waiting for cache hit data", ja: "ヒット率計算待ち", zh: "等待命中率数据" })
+              }
+              accent="#8b5cf6"
             />
           </div>
         </div>
 
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
-          <SkillUsageSection
-            t={t}
-            localeTag={localeTag}
-            loading={skillLoading || catalogLoading}
-            skillRows={skillRows}
-            byAgentRows={byAgentSkillRows}
-            activeSkillCount={activeSkillCount}
-            catalogCount={catalog.length}
-            catalogUsedCount={catalogUsedCount}
-            windowCalls={windowCalls}
-          />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,0.85fr)]">
+          <div data-testid="stats-daily-token-chart">
+            <DailyTokenChartCard
+              t={t}
+              localeTag={localeTag}
+              numberFormatter={numberFormatter}
+              loading={analyticsLoading}
+              daily={analytics?.daily ?? []}
+              series={series}
+              summary={summary}
+            />
+          </div>
 
-          <AgentLeaderboardCard
-            t={t}
-            loading={analyticsLoading}
-            rows={agentLeaderboard}
-          />
+          <div className="grid gap-4">
+            <div data-testid="stats-model-share">
+              <DistributionCard
+                icon={<Cpu size={18} />}
+                title={t({ ko: "모델 점유율", en: "Model Share", ja: "モデル比率", zh: "模型占比" })}
+                description={t({
+                  ko: "선택한 범위에서 어떤 모델이 토큰을 가장 많이 처리했는지 보여줍니다.",
+                  en: "Shows which models processed the most tokens in the selected window.",
+                  ja: "選択範囲でどのモデルが最も多くのトークンを処理したかを示します。",
+                  zh: "显示所选范围内处理 Token 最多的模型。",
+                })}
+                emptyLabel={t({
+                  ko: "표시할 모델 분포가 없습니다.",
+                  en: "No model distribution available.",
+                  ja: "表示するモデル分布がありません。",
+                  zh: "没有可显示的模型分布。",
+                })}
+                loading={analyticsLoading}
+                segments={modelSegments}
+                centerLabel={t({ ko: "모델", en: "Models", ja: "モデル", zh: "模型" })}
+                centerValue={summary ? formatTokens(summary.total_tokens) : "0"}
+                centerSub={
+                  analytics
+                    ? t({
+                        ko: `${analytics.receipt.models.length}개 추적`,
+                        en: `${analytics.receipt.models.length} tracked`,
+                        ja: `${analytics.receipt.models.length}件追跡`,
+                        zh: `追踪 ${analytics.receipt.models.length} 个`,
+                      })
+                    : t({ ko: "데이터 대기", en: "Waiting for data", ja: "データ待ち", zh: "等待数据" })
+                }
+              />
+            </div>
+
+            <div data-testid="stats-provider-share">
+              <ProviderShareCard
+                t={t}
+                loading={analyticsLoading}
+                segments={providerSegments}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+          <div data-testid="stats-skill-usage">
+            <SkillUsageSection
+              t={t}
+              localeTag={localeTag}
+              loading={skillLoading || catalogLoading}
+              skillRows={skillRows}
+              byAgentRows={byAgentSkillRows}
+              activeSkillCount={activeSkillCount}
+              catalogCount={catalog.length}
+              catalogUsedCount={catalogUsedCount}
+              windowCalls={windowCalls}
+            />
+          </div>
+
+          <div data-testid="stats-agent-leaderboard">
+            <AgentLeaderboardCard
+              t={t}
+              loading={analyticsLoading}
+              rows={agentLeaderboard}
+            />
+          </div>
         </div>
       </section>
     </div>
