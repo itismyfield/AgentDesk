@@ -2973,4 +2973,50 @@ mod tests {
             Some(("owner/allowed".to_string(), 101))
         );
     }
+
+    /// #821 (5): `onDispatchCompleted` (kanban-rules.js) must skip cancelled
+    /// dispatches. A race can fire the hook after the user cancels a
+    /// dispatch; without the guard the policy would force-transition the
+    /// card to `review` and the terminal sweep would then push it to `done`,
+    /// overriding the user's explicit stop. #815 added the guard —
+    /// `if (dispatch.status === "cancelled") return;` — and this test locks
+    /// the behaviour.
+    #[test]
+    fn cancelled_dispatch_does_not_enter_review() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        // Seed a card currently in `in_progress` with a cancelled
+        // implementation dispatch. Absent the #815 guard the policy would
+        // drive the card into `review` on hook fan-out.
+        seed_card(&db, "card-821-no-review", "in_progress");
+        let dispatch_id = "dispatch-821-no-review";
+        seed_dispatch_with_type(
+            &db,
+            dispatch_id,
+            "card-821-no-review",
+            "implementation",
+            "cancelled",
+        );
+
+        // Fire the hook the same way the real runtime would.
+        engine
+            .try_fire_hook_by_name("OnDispatchCompleted", json!({ "dispatch_id": dispatch_id }))
+            .expect("fire OnDispatchCompleted");
+
+        // The card must remain in its prior status — NOT `review`, NOT `done`.
+        let status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-821-no-review'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            status, "in_progress",
+            "kanban-rules.onDispatchCompleted must skip cancelled dispatches"
+        );
+    }
 }

@@ -2573,4 +2573,150 @@ mod tests {
         pool.close().await;
         test_db.drop().await;
     }
+
+    /// #821 (1+2, PG variant): the PostgreSQL `cancel_dispatch_and_reset_*`
+    /// path must honour the same user-cancel invariants as the SQLite path
+    /// (src/dispatch/mod.rs tests):
+    ///   - entry transitions to `user_cancelled` (NOT `pending`).
+    ///   - card status stays `in_progress` (NOT forced into `done`).
+    ///   - the next auto-queue tick query (`active` run + `pending` entry)
+    ///     does not surface this entry, so no re-dispatch can fire.
+    ///
+    /// This locks the behaviour that #815 P2 landed for the PG branch
+    /// (routing through `update_entry_status_on_pg_tx` with the
+    /// `ENTRY_STATUS_USER_CANCELLED` target).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_stop_does_not_redispatch_or_mark_done_pg() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let card_id = "card-821-user-pg";
+        let dispatch_id = format!("dispatch-{}", uuid::Uuid::new_v4().simple());
+        let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
+        let entry_id = format!("entry-{}", uuid::Uuid::new_v4().simple());
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, repo_id)
+             VALUES ($1, 'User cancel PG', 'in_progress', 'repo-1')",
+        )
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed kanban card");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, dispatch_type, status, created_at, updated_at
+             ) VALUES ($1, $2, 'implementation', 'dispatched', NOW(), NOW())",
+        )
+        .bind(&dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed dispatched task dispatch");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count,
+                created_at
+             ) VALUES ($1, 'itismyfield/AgentDesk', 'project-agentdesk', 'active', 1, 1, NOW())",
+        )
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .expect("seed active auto_queue run");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, status, dispatch_id, slot_index,
+                batch_phase, thread_group, dispatched_at, created_at
+             ) VALUES ($1, $2, $3, 'dispatched', $4, 0, 0, 0, NOW(), NOW())",
+        )
+        .bind(&entry_id)
+        .bind(&run_id)
+        .bind(card_id)
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed dispatched auto_queue entry");
+
+        // User stop via the PG cancel path with the canonical reaction-stop
+        // reason. Uses the pool-scoped helper so the test exercises the
+        // commit path (not the rollback path that the sibling test covers).
+        let changed = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            &pool,
+            &dispatch_id,
+            Some("turn_bridge_cancelled"),
+        )
+        .await
+        .expect("PG cancel with user reason must succeed");
+        assert_eq!(changed, 1);
+
+        // (1) Entry must be `user_cancelled`, dispatch pointer cleared,
+        // completed_at stamped — and the next tick query must NOT see it.
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = $1")
+                .bind(&entry_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load entry status");
+        assert_eq!(
+            entry_status, "user_cancelled",
+            "PG user cancel must move the entry to user_cancelled (not pending)"
+        );
+        let entry_dispatch_id: Option<String> =
+            sqlx::query_scalar("SELECT dispatch_id FROM auto_queue_entries WHERE id = $1")
+                .bind(&entry_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load entry dispatch_id");
+        assert!(
+            entry_dispatch_id.is_none(),
+            "PG user cancel must detach the entry from its dispatch"
+        );
+
+        let tick_visible: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON e.run_id = r.id
+             WHERE r.status = 'active' AND e.status = 'pending' AND e.id = $1",
+        )
+        .bind(&entry_id)
+        .fetch_one(&pool)
+        .await
+        .expect("tick-visibility query");
+        assert_eq!(
+            tick_visible, 0,
+            "user-cancelled entry must not be visible to the PG tick"
+        );
+
+        // Run must stay active so the operator can flip the entry back to
+        // pending if they want to restart — see the SQLite
+        // `user_cancelled_entry_can_be_restarted_via_pending_flip` test.
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load run status");
+        assert_eq!(
+            run_status, "active",
+            "PG user cancel must leave the run active for operator restart"
+        );
+
+        // (2) Card must remain `in_progress` — the cancel path must NOT
+        // force-transition it into `done` / `review` / any terminal state.
+        let card_status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card status");
+        assert_eq!(
+            card_status, "in_progress",
+            "PG user cancel must not mark the card done"
+        );
+
+        pool.close().await;
+        test_db.drop().await;
+    }
 }

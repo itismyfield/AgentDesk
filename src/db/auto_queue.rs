@@ -5712,4 +5712,122 @@ mod tests {
         assert_eq!(phase_two_count, 0);
         assert_eq!(phase_three_count, 1);
     }
+
+    /// #821 (4): `done` entries must not reactivate without an explicit
+    /// operator rerun. The shared `update_entry_status_on_conn` helper gates
+    /// `done -> dispatched` behind the `pmd_reopen` / `rereview_dispatch`
+    /// trigger sources (see `is_allowed_entry_transition`), and `done ->
+    /// pending` is simply not in the allowlist. The only authorized entry
+    /// point that can legally flip a `done` row back to `dispatched` is
+    /// `reactivate_done_entry_on_conn` itself, invoked from the PMD reopen
+    /// route in `src/server/routes/kanban.rs` (the `pmd_reopen` /
+    /// `rereview_dispatch` call sites). The auto-queue tick and the
+    /// kanban-rules / auto-queue policy hooks do NOT call it.
+    ///
+    /// Authorized callers of `reactivate_done_entry_on_conn` at the time of
+    /// writing (audit via grep — update this list if call sites move):
+    ///   - `src/server/routes/kanban.rs` (PMD reopen fall-through from a
+    ///     failed `update_entry_status_on_conn(done -> dispatched)`).
+    ///   - this test module (regression coverage).
+    ///
+    /// The test below locks the invariant by proving the tick-style trigger
+    /// sources cannot sneak through: `auto_queue_tick` and `tick` attempts
+    /// on a `done` entry are rejected as invalid transitions, and a follow-up
+    /// explicit `reactivate_done_entry_on_conn` call from the operator path
+    /// succeeds. If anyone adds a non-operator caller of
+    /// `reactivate_done_entry_on_conn`, the grep audit above should flag it.
+    #[test]
+    fn done_entry_cannot_reactivate_without_explicit_operator_rerun() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-821-rea', 'repo-1', 'agent-1', 'completed')",
+            [],
+        )
+        .expect("seed completed run");
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, status, thread_group, completed_at
+             ) VALUES (
+                 'entry-821-rea', 'run-821-rea', 'card-821-rea', 'agent-1',
+                 'done', 0, datetime('now')
+             )",
+            [],
+        )
+        .expect("seed done entry");
+
+        // Any non-operator trigger source attempting `done -> dispatched` via
+        // the shared helper must be rejected. This is what protects against
+        // the tick or a policy hook silently re-opening completed work.
+        for bogus_source in &[
+            "auto_queue_tick",
+            "tick",
+            "policy_hook",
+            "onDispatchCompleted",
+            "review_automation",
+        ] {
+            let err = update_entry_status_on_conn(
+                &conn,
+                "entry-821-rea",
+                ENTRY_STATUS_DISPATCHED,
+                bogus_source,
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-sneak".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .expect_err("non-operator source must not resurrect a done entry");
+            assert!(
+                matches!(err, EntryStatusUpdateError::InvalidTransition { .. }),
+                "source `{bogus_source}` unexpectedly permitted done -> dispatched (got {:?})",
+                err
+            );
+        }
+
+        // `done -> pending` is not in the transition allowlist at all — no
+        // trigger source may perform it via the shared helper.
+        let err = update_entry_status_on_conn(
+            &conn,
+            "entry-821-rea",
+            ENTRY_STATUS_PENDING,
+            "pmd_reopen",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect_err("done -> pending must not be a valid transition at all");
+        assert!(matches!(
+            err,
+            EntryStatusUpdateError::InvalidTransition { .. }
+        ));
+
+        // Sanity: the entry is still `done` and the run is still `completed`.
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-821-rea'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("entry row");
+        assert_eq!(entry_status, "done");
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-821-rea'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run row");
+        assert_eq!(run_status, "completed");
+
+        // Only the explicit operator-rerun entry point (authorized caller in
+        // `server/routes/kanban.rs`) can reactivate a done entry.
+        let restored = reactivate_done_entry_on_conn(
+            &conn,
+            "entry-821-rea",
+            "pmd_reopen",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .expect("operator-authorized reactivate must succeed");
+        assert!(restored.changed);
+        assert_eq!(restored.from_status, ENTRY_STATUS_DONE);
+        assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+    }
 }

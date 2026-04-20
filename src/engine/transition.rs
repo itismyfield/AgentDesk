@@ -1461,4 +1461,67 @@ mod tests {
             Some("pending")
         );
     }
+
+    /// #821 (6): `decide_pipeline_transition` must refuse a transition that
+    /// has no matching pipeline rule unless the caller passes the explicit
+    /// `force` flag. This locks the behaviour proven at
+    /// `decide_pipeline_transition` around the `None if force { ... }`
+    /// branch — without the flag, the `None` arm must return `Blocked` with
+    /// a `BLOCKED: no transition rule` audit entry. Companion to the
+    /// existing `no_rule_blocks_transition` and `force_bypasses_missing_rule`
+    /// tests: this one asserts the audit payload on the blocked path plus
+    /// the allowed-with-force symmetric case in a single guard, so a refactor
+    /// that relaxes the no-rule check without also flipping the audit must
+    /// break this test.
+    #[test]
+    fn force_transition_without_rule_requires_explicit_flag() {
+        // No transition rule exists from `backlog` to `done` in the test
+        // pipeline. Without force: blocked + audited as "no transition rule".
+        let ctx = test_ctx("backlog", false);
+        let blocked = decide_status_transition(&ctx, "done", "api", false);
+        assert!(
+            matches!(blocked.outcome, TransitionOutcome::Blocked(_)),
+            "no-rule transition must block without force (got {:?})",
+            blocked.outcome
+        );
+        let audited_no_rule = blocked.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                TransitionIntent::AuditLog { message, .. }
+                    if message.contains("no transition rule")
+            )
+        });
+        assert!(
+            audited_no_rule,
+            "blocked no-rule transition must emit a `no transition rule` audit log entry \
+             (intents: {:?})",
+            blocked.intents
+        );
+        // Blocked decisions must not produce an UpdateStatus intent.
+        assert!(
+            !blocked
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, TransitionIntent::UpdateStatus { .. })),
+            "blocked no-rule transition must not emit an UpdateStatus intent"
+        );
+
+        // With the explicit force flag: allowed, and at least one
+        // UpdateStatus intent is emitted. This mirrors the PMD/admin
+        // override path (the only legal way to move a card across a
+        // missing rule).
+        let allowed = decide_status_transition(&ctx, "done", "pmd", true);
+        assert_eq!(
+            allowed.outcome,
+            TransitionOutcome::Allowed,
+            "force flag must unblock the no-rule transition"
+        );
+        assert!(
+            allowed.intents.iter().any(|intent| matches!(
+                intent,
+                TransitionIntent::UpdateStatus { to, .. } if to == "done"
+            )),
+            "force-allowed no-rule transition must emit UpdateStatus to the target"
+        );
+    }
 }

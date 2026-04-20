@@ -4973,4 +4973,164 @@ mod tests {
         );
         assert_eq!(dispatch["result"]["decision"], "accept");
     }
+
+    // ── #821 invariants: cancel / terminal / done / reactivate ───────────
+    //
+    // These tests lock the runtime invariants protected by #815 (user cancel
+    // intent preservation) and related prior work. They are intentionally
+    // narrow regression guards that can be audited quickly rather than full
+    // integration tests. See `docs/FEATURES.md` for the broader state flow.
+
+    /// #821 (1): A user stop (reason `turn_bridge_cancelled`) must move the
+    /// linked auto-queue entry to `user_cancelled`, NOT reset it to `pending`.
+    /// The next auto-queue tick query (active run + pending entry) must not
+    /// find this entry, so no re-dispatch can fire.
+    #[test]
+    fn user_stop_does_not_redispatch() {
+        let db = test_db();
+        seed_user_cancel_fixture(&db, "card-821-nore", "dispatch-821-nore", "entry-821-nore");
+
+        let conn = db.separate_conn().unwrap();
+        cancel_dispatch_and_reset_auto_queue_on_conn(
+            &conn,
+            "dispatch-821-nore",
+            Some("turn_bridge_cancelled"),
+        )
+        .unwrap();
+
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-821-nore'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            entry_status, "user_cancelled",
+            "user stop must mark the entry non-dispatchable"
+        );
+
+        // Model the auto-queue tick's pick query: `active` run + `pending`
+        // entry. A re-dispatch would require the entry to surface here.
+        let pending_visible: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entries e \
+                 JOIN auto_queue_runs r ON e.run_id = r.id \
+                 WHERE r.status = 'active' AND e.status = 'pending' \
+                   AND e.id = 'entry-821-nore'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_visible, 0,
+            "user-cancelled entries must not be seen by the next auto-queue tick"
+        );
+        assert!(
+            !crate::db::auto_queue::is_dispatchable_entry_status("user_cancelled"),
+            "user_cancelled must be a non-dispatchable terminal status"
+        );
+    }
+
+    /// #821 (2): A user stop must leave the card's kanban status as-is
+    /// (`in_progress`). The cancel path must NOT force-transition the card
+    /// into `done` — that would bypass review and strand the user's explicit
+    /// stop as a silent auto-completion.
+    #[test]
+    fn user_stop_does_not_mark_done() {
+        let db = test_db();
+        seed_user_cancel_fixture(&db, "card-821-nd", "dispatch-821-nd", "entry-821-nd");
+
+        let conn = db.separate_conn().unwrap();
+        cancel_dispatch_and_reset_auto_queue_on_conn(
+            &conn,
+            "dispatch-821-nd",
+            Some("turn_bridge_cancelled"),
+        )
+        .unwrap();
+
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-821-nd'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            card_status, "in_progress",
+            "user cancel must NOT force the card into a terminal status"
+        );
+        assert_ne!(card_status, "done");
+        assert_ne!(card_status, "review");
+    }
+
+    /// #821 (3): When a PMD/admin force-transitions a card back to a
+    /// non-terminal state (or terminal, via a different path), live dispatches
+    /// for that card must be cancelled WITHOUT resetting the linked auto-queue
+    /// entry to `pending`. `cancel_active_dispatches_for_card_on_conn` is the
+    /// helper that enforces this: it cancels dispatches in bulk but never
+    /// touches `auto_queue_entries`. A re-queue on terminal transition would
+    /// cause the run to redispatch work the operator just abandoned.
+    #[test]
+    fn terminal_card_cancels_live_dispatch_without_requeue() {
+        let db = test_db();
+        seed_user_cancel_fixture(&db, "card-821-tc", "dispatch-821-tc", "entry-821-tc");
+
+        let conn = db.separate_conn().unwrap();
+        let cancelled = cancel_active_dispatches_for_card_on_conn(
+            &conn,
+            "card-821-tc",
+            Some("auto_cancelled_on_terminal_card"),
+        )
+        .unwrap();
+        assert_eq!(cancelled, 1, "live dispatch must be cancelled");
+
+        // Live dispatch moves to cancelled.
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-821-tc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "cancelled");
+
+        // The auto-queue entry must NOT have been reset to `pending` by the
+        // terminal-cancel helper. It remains in its prior state (`dispatched`)
+        // with its dispatch_id pointer intact. Re-queueing here would let the
+        // next auto-queue tick re-pick the abandoned work.
+        let (entry_status, entry_dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-821-tc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            entry_status, "dispatched",
+            "terminal cancel must NOT reset the auto-queue entry to pending"
+        );
+        assert_eq!(
+            entry_dispatch_id.as_deref(),
+            Some("dispatch-821-tc"),
+            "terminal cancel must leave the entry's dispatch pointer intact"
+        );
+
+        // Modeled tick query: the run is still active but no pending entry
+        // surfaces, so nothing re-dispatches.
+        let pending_visible: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entries e \
+                 JOIN auto_queue_runs r ON e.run_id = r.id \
+                 WHERE r.status = 'active' AND e.status = 'pending' \
+                   AND e.kanban_card_id = 'card-821-tc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_visible, 0,
+            "terminal cancel must not make the entry pick-able by the tick"
+        );
+    }
 }
