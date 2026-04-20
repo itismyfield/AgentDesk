@@ -1,19 +1,61 @@
-name: CI
+name: CI PR
 
 on:
   push:
+    branches-ignore:
+      - main
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ci-pr-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            dashboard:
+              - 'dashboard/**'
+              - 'scripts/verify-dashboard.sh'
+            high_risk_recovery:
+              - '.github/workflows/**'
+              - 'policies/auto-queue.js'
+              - 'policies/kanban-rules.js'
+              - 'policies/timeouts.js'
+              - 'src/db/**'
+              - 'src/dispatch/**'
+              - 'src/engine/**'
+              - 'src/integration_tests.rs'
+              - 'src/integration_tests/tests/high_risk_recovery.rs'
+              - 'src/reconcile.rs'
+              - 'src/server/routes/auto_queue.rs'
+              - 'src/server/routes/dispatched_sessions.rs'
+              - 'src/server/routes/dispatches/**'
+              - 'src/services/auto_queue/**'
+              - 'src/services/discord/**'
+              - 'src/services/platform/tmux.rs'
+              - 'src/services/tmux_common.rs'
+
   dashboard:
     name: Dashboard (Node 22)
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,13 +70,9 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
-  check:
-    name: Fast check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+  check_fast:
+    name: Fast check (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -57,45 +95,9 @@ jobs:
       - name: cargo check
         run: cargo check --all-targets
 
-      - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
-        env:
-          RUST_BACKTRACE: 1
-
-      - name: CLI smoke test (help)
-        run: cargo run -- --help
-
-      - name: CLI smoke test (doctor — no config)
-        run: cargo run -- doctor || true
-        env:
-          AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-smoke
-
-  postgres:
-    name: PostgreSQL tests
+  test_fast:
+    name: Fast targeted tests (ubuntu-latest)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      RUST_BACKTRACE: 1
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
-      POSTGRES_TEST_ADMIN_DB: postgres
-      PGHOST: 127.0.0.1
-      PGPORT: "5432"
-      PGUSER: postgres
-      PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -111,20 +113,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-fast-tests-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-postgres-
+            ${{ runner.os }}-cargo-fast-tests-
 
-      - name: cargo test (postgres bootstrap)
-        timeout-minutes: 15
-        run: cargo test postgres_ -- --nocapture --test-threads=1
-
-      - name: cargo test (PG routes)
-        timeout-minutes: 15
-        run: cargo test _pg_ -- --nocapture --test-threads=1
+      - name: Targeted fast test subset
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test transition --all-targets -- --skip _pg_ --skip postgres_
+          cargo test auto_queue --all-targets -- --skip _pg_ --skip postgres_
+          cargo test cancel --all-targets -- --skip _pg_ --skip postgres_
+          cargo test pg_decision --all-targets -- --skip _pg_ --skip postgres_
+          cargo test invariant --all-targets -- --skip _pg_ --skip postgres_
+        env:
+          RUST_BACKTRACE: 1
 
   high-risk-recovery:
     name: High-risk recovery
+    needs: changes
+    if: needs.changes.outputs.high_risk_recovery == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -189,19 +197,21 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: shellcheck scripts
+        shell: bash
         run: |
+          set -euo pipefail
           FAILED=0
           while IFS= read -r f; do
             shellcheck -S warning "$f" || FAILED=1
           done < <(find . -name '*.sh' -not -path './target/*' -not -path './.git/*')
           exit $FAILED
-        shell: bash
 
       - name: Check hardcoded port/path drift
+        shell: bash
         run: |
+          set -euo pipefail
           FAIL=0
           echo "=== Checking for hardcoded ports ==="
-          # List port references for visibility (informational — ports are expected in config/defaults)
           grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
             --exclude-dir=target --exclude-dir=.git \
             | grep -v 'Cargo.lock' \
@@ -219,17 +229,17 @@ jobs:
           exit $FAIL
 
       - name: Path integrity check
+        shell: bash
         run: |
+          set -euo pipefail
           FAIL=0
           echo "=== Checking Cargo.toml paths ==="
-          # Ensure no absolute paths in Cargo.toml
           if grep -n '/Users/\|/home/' Cargo.toml 2>/dev/null; then
             echo "ERROR: Absolute paths found in Cargo.toml"
             FAIL=1
           fi
 
           echo "=== Checking policies/ exist ==="
-          # Core policy files must be present
           for f in policies/default-pipeline.yaml policies/kanban-rules.js policies/timeouts.js policies/auto-queue.js policies/review-automation.js; do
             if [ ! -f "$f" ]; then
               echo "ERROR: Required policy file missing: $f"
@@ -239,5 +249,11 @@ jobs:
 
           exit $FAIL
 
-      - name: Generated docs and architecture drift check
+      - name: Generated docs drift (warning only)
+        id: generated_docs
+        continue-on-error: true
         run: python3 scripts/generate_inventory_docs.py --check
+
+      - name: Report generated docs drift warning
+        if: steps.generated_docs.outcome == 'failure'
+        run: echo "::warning title=Generated docs drift::generated docs are stale; hard enforcement runs on main/nightly workflows."

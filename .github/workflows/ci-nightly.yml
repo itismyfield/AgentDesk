@@ -1,0 +1,243 @@
+name: CI Nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-nightly-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full_macos:
+    name: Full tests (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: cargo test (non-PG)
+        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        env:
+          RUST_BACKTRACE: 1
+
+  full_windows:
+    name: Full tests (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: cargo test (non-PG)
+        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        env:
+          RUST_BACKTRACE: 1
+
+  postgres_full:
+    name: PostgreSQL full tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RUST_BACKTRACE: 1
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-postgres-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-postgres-nightly-
+
+      - name: cargo test (postgres bootstrap)
+        timeout-minutes: 15
+        run: cargo test postgres_ -- --nocapture --test-threads=1
+
+      - name: cargo test (PG routes)
+        timeout-minutes: 15
+        run: cargo test _pg_ -- --nocapture --test-threads=1
+
+  high_risk_recovery_full:
+    name: High-risk recovery full
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-recovery-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-recovery-nightly-
+
+      - name: High-risk recovery lane
+        run: "cargo test --bin agentdesk high_risk_recovery::"
+        env:
+          RUST_BACKTRACE: 1
+
+  scripts:
+    name: Script checks nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: shellcheck scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          FAILED=0
+          while IFS= read -r f; do
+            shellcheck -S warning "$f" || FAILED=1
+          done < <(find . -name '*.sh' -not -path './target/*' -not -path './.git/*')
+          exit $FAILED
+
+      - name: Check hardcoded port/path drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          FAIL=0
+          echo "=== Checking for hardcoded ports ==="
+          grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
+            --exclude-dir=target --exclude-dir=.git \
+            | grep -v 'Cargo.lock' \
+            | grep -v '// port' \
+            | grep -v '# port' || true
+
+          echo ""
+          echo "=== Checking for hardcoded home paths (informational — see #100) ==="
+          if grep -rn 'env!("HOME")' --include='*.rs' \
+            --exclude-dir=target --exclude-dir=.git 2>/dev/null; then
+            echo "NOTE: env!(\"HOME\") found — tracked in #100"
+          else
+            echo "OK: No env!(\"HOME\") found"
+          fi
+          exit $FAIL
+
+      - name: Path integrity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          FAIL=0
+          echo "=== Checking Cargo.toml paths ==="
+          if grep -n '/Users/\|/home/' Cargo.toml 2>/dev/null; then
+            echo "ERROR: Absolute paths found in Cargo.toml"
+            FAIL=1
+          fi
+
+          echo "=== Checking policies/ exist ==="
+          for f in policies/default-pipeline.yaml policies/kanban-rules.js policies/timeouts.js policies/auto-queue.js policies/review-automation.js; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required policy file missing: $f"
+              FAIL=1
+            fi
+          done
+
+          exit $FAIL
+
+      - name: Generated docs and architecture drift check
+        run: python3 scripts/generate_inventory_docs.py --check
+
+  cli_smoke:
+    name: CLI smoke and doctor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cli-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cli-nightly-
+
+      - name: CLI smoke test (help)
+        run: cargo run -- --help
+
+      - name: CLI doctor
+        run: cargo run -- doctor --json
+        env:
+          AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-doctor
