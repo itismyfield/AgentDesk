@@ -45,6 +45,29 @@ fn codex_skill_file(path: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) {
+    sync_skills_from_disk_with_prune(conn, true);
+}
+
+/// Syncs the `skills` catalog rows with what is currently on disk.
+///
+/// When `prune_missing` is `true` (the default behavior), any row whose `id`
+/// is not present on disk after the upsert pass is hard-deleted so the
+/// catalog/ranking endpoints stop surfacing skills that have been removed
+/// from disk (#816).
+///
+/// Pruning is skipped when **none** of the configured skill roots could be
+/// enumerated, to avoid wiping the entire table just because the home
+/// directory or runtime root is temporarily unavailable.
+///
+/// Hard delete (rather than soft delete) is used because the `skills` table
+/// has no `deleted_at` / `is_active` column today, and `skill_usage.skill_id`
+/// has no `FOREIGN KEY ... ON DELETE CASCADE`, so historical usage rows
+/// remain intact and the catalog endpoint already surfaces usage-only ids
+/// via its existing fallback path.
+pub(super) fn sync_skills_from_disk_with_prune(
+    conn: &libsql_rusqlite::Connection,
+    prune_missing: bool,
+) {
     let mut roots = Vec::new();
     if let Some(runtime_root) = crate::config::runtime_root() {
         let _ = crate::runtime_layout::sync_managed_skills(&runtime_root);
@@ -56,6 +79,7 @@ pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) {
     }
 
     let mut seen = HashSet::new();
+    let mut any_root_enumerated = false;
     for root in roots {
         if !root.is_dir() {
             continue;
@@ -63,6 +87,7 @@ pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) {
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
         };
+        any_root_enumerated = true;
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
@@ -117,6 +142,37 @@ pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) {
                 libsql_rusqlite::params![name, name, description, source_path, updated_at],
             );
         }
+    }
+
+    if !prune_missing || !any_root_enumerated {
+        return;
+    }
+
+    prune_missing_skills(conn, &seen);
+}
+
+/// Hard-delete `skills` rows whose `id` is not in `seen`.
+///
+/// `skill_usage` rows are left untouched because there is no FK CASCADE; the
+/// catalog endpoint will continue to expose those entries via its
+/// usage-only fallback so analytics aren't lost.
+fn prune_missing_skills(conn: &libsql_rusqlite::Connection, seen: &HashSet<String>) {
+    let existing_ids: Vec<String> = match conn.prepare("SELECT id FROM skills") {
+        Ok(mut stmt) => match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.filter_map(|row| row.ok()).collect(),
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+
+    for id in existing_ids {
+        if seen.contains(&id) {
+            continue;
+        }
+        let _ = conn.execute(
+            "DELETE FROM skills WHERE id = ?1",
+            libsql_rusqlite::params![id],
+        );
     }
 }
 
@@ -427,4 +483,151 @@ pub async fn ranking(
             "byAgent": by_agent,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_skills_conn() -> libsql_rusqlite::Connection {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                description TEXT,
+                source_path TEXT,
+                trigger_patterns TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE skill_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_id TEXT NOT NULL,
+                agent_id TEXT,
+                session_key TEXT,
+                used_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_skill(conn: &libsql_rusqlite::Connection, id: &str, description: &str) {
+        conn.execute(
+            "INSERT INTO skills (id, name, description, source_path) VALUES (?1, ?1, ?2, ?3)",
+            libsql_rusqlite::params![id, description, format!("/tmp/skills/{id}/SKILL.md")],
+        )
+        .unwrap();
+    }
+
+    fn skill_ids(conn: &libsql_rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT id FROM skills ORDER BY id").unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    #[test]
+    fn prune_removes_rows_not_present_on_disk() {
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "alive-skill", "still on disk");
+        insert_skill(&conn, "deleted-skill", "removed from disk");
+
+        let mut seen = HashSet::new();
+        seen.insert("alive-skill".to_string());
+
+        prune_missing_skills(&conn, &seen);
+
+        assert_eq!(skill_ids(&conn), vec!["alive-skill".to_string()]);
+    }
+
+    #[test]
+    fn prune_keeps_skills_still_on_disk_unchanged() {
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "skill-a", "a");
+        insert_skill(&conn, "skill-b", "b");
+        insert_skill(&conn, "skill-c", "c");
+
+        let mut seen = HashSet::new();
+        seen.insert("skill-a".to_string());
+        seen.insert("skill-b".to_string());
+        seen.insert("skill-c".to_string());
+
+        prune_missing_skills(&conn, &seen);
+
+        assert_eq!(
+            skill_ids(&conn),
+            vec![
+                "skill-a".to_string(),
+                "skill-b".to_string(),
+                "skill-c".to_string()
+            ]
+        );
+
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM skills WHERE id = 'skill-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(description, "b");
+    }
+
+    #[test]
+    fn prune_preserves_skill_usage_history_for_deleted_skills() {
+        // Hard-delete should NOT touch skill_usage (no FK CASCADE), so historical
+        // analytics aren't broken when a skill is removed from disk.
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "deleted-skill", "removed from disk");
+        conn.execute(
+            "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
+            libsql_rusqlite::params!["deleted-skill", "agent-x", "sess-1"],
+        )
+        .unwrap();
+
+        prune_missing_skills(&conn, &HashSet::new());
+
+        assert!(skill_ids(&conn).is_empty());
+        let usage_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skill_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(usage_count, 1);
+    }
+
+    #[test]
+    fn load_skill_metadata_excludes_pruned_rows() {
+        // Regression for #816: after sync, /api/skills/catalog and
+        // /api/skills/ranking pull names from `skills` via load_skill_metadata,
+        // so a pruned row must not appear in the metadata map.
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "alive", "alive desc");
+        insert_skill(&conn, "stale", "stale desc");
+
+        let mut seen = HashSet::new();
+        seen.insert("alive".to_string());
+        prune_missing_skills(&conn, &seen);
+
+        let metadata = load_skill_metadata(&conn).unwrap();
+        assert!(metadata.contains_key("alive"));
+        assert!(
+            !metadata.contains_key("stale"),
+            "pruned skill should not surface in catalog/ranking metadata"
+        );
+    }
+
+    #[test]
+    fn prune_with_empty_seen_when_disk_unavailable_is_handled_by_caller() {
+        // Sanity check: prune_missing_skills itself trusts the caller; the
+        // safety check (skip pruning if no root could be enumerated) lives in
+        // sync_skills_from_disk_with_prune. Verify the helper behaves
+        // predictably when given an empty set.
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "only-skill", "only");
+
+        prune_missing_skills(&conn, &HashSet::new());
+
+        assert!(skill_ids(&conn).is_empty());
+    }
 }
