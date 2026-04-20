@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use sqlx::PgPool;
 use std::net::SocketAddr;
 
 use crate::services::discord::health;
@@ -59,7 +60,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
-    let outbox_stats = load_dispatch_outbox_stats(&state.db);
+    let outbox_stats = load_dispatch_outbox_stats(&state.db, state.pg_pool.as_ref()).await;
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
             "pending": stats.pending,
@@ -261,7 +262,59 @@ fn parse_status_code(s: &str) -> StatusCode {
     }
 }
 
-fn load_dispatch_outbox_stats(db: &crate::db::Db) -> Option<DispatchOutboxStats> {
+async fn load_dispatch_outbox_stats(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+) -> Option<DispatchOutboxStats> {
+    if let Some(pool) = pg_pool {
+        if let Some(stats) = load_dispatch_outbox_stats_pg(pool).await {
+            return Some(stats);
+        }
+        tracing::warn!(
+            "[health] failed to load dispatch_outbox stats from PostgreSQL; falling back to SQLite"
+        );
+    }
+
+    load_dispatch_outbox_stats_sqlite(db)
+}
+
+async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxStats> {
+    let pending = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()?;
+    let retrying = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()?;
+    let failed = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()?;
+    let oldest_pending_age = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(CAST(EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) AS BIGINT), 0)
+         FROM dispatch_outbox
+         WHERE status = 'pending'",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()?;
+
+    Some(DispatchOutboxStats {
+        pending,
+        retrying,
+        permanent_failures: failed,
+        oldest_pending_age,
+    })
+}
+
+fn load_dispatch_outbox_stats_sqlite(db: &crate::db::Db) -> Option<DispatchOutboxStats> {
     db.lock().ok().map(|conn| {
         let pending: i64 = conn
             .query_row(

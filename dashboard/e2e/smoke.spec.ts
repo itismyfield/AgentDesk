@@ -155,6 +155,30 @@ test.describe("Dashboard smoke tests", () => {
     expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
   });
 
+  test("responsive: mobile tab bar stays below modal overlays", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+
+    const bottomNav = page.getByTestId("app-mobile-tabbar");
+    await expect(bottomNav).toBeVisible();
+
+    const tabbarZIndex = await bottomNav.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true }));
+    });
+
+    const shortcutHelpModal = page.getByTestId("shortcut-help-modal");
+    await expect(shortcutHelpModal).toBeVisible();
+
+    const modalZIndex = await shortcutHelpModal.evaluate((element) =>
+      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+    );
+    expect(modalZIndex).toBeGreaterThan(tabbarZIndex);
+  });
+
   test("responsive: mobile routes avoid horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
@@ -182,6 +206,55 @@ test.describe("Dashboard smoke tests", () => {
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /설정|Settings/ }).click();
     await expect(page).toHaveURL(/\/settings$/);
     await expectNoHorizontalOverflow(page);
+  });
+
+  test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
+    await page.goto("/stats");
+
+    await expect(page.getByTestId("stats-page")).toBeVisible();
+    await expect(page.getByTestId("stats-range-controls")).toBeVisible();
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
+
+    await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
+    await expect(page.getByTestId("stats-summary-api-spend")).toBeVisible();
+    await expect(page.getByTestId("stats-summary-cache-saved")).toBeVisible();
+    await expect(page.getByTestId("stats-summary-cache-hit")).toBeVisible();
+    await expect(page.getByTestId("stats-daily-token-chart")).toBeVisible();
+    await expect(page.getByTestId("stats-model-share")).toBeVisible();
+    await expect(page.getByTestId("stats-provider-share")).toBeVisible();
+    await expect(page.getByTestId("stats-skill-usage")).toBeVisible();
+    await expect(page.getByTestId("stats-agent-leaderboard")).toBeVisible();
+
+    await page.getByTestId("stats-range-7d").click();
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
+
+    await page.getByTestId("stats-range-90d").click();
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("stats: mobile stacks summary cards vertically", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/stats");
+
+    const totalTokensCard = page.getByTestId("stats-summary-total-tokens");
+    const apiSpendCard = page.getByTestId("stats-summary-api-spend");
+
+    await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
+    await expect(totalTokensCard).toBeVisible({ timeout: 15000 });
+    await expect(apiSpendCard).toBeVisible({ timeout: 15000 });
+
+    const [firstBox, secondBox] = await Promise.all([
+      totalTokensCard.boundingBox(),
+      apiSpendCard.boundingBox(),
+    ]);
+
+    expect(firstBox).not.toBeNull();
+    expect(secondBox).not.toBeNull();
+    expect(secondBox!.y).toBeGreaterThan(firstBox!.y + firstBox!.height - 1);
   });
 
   test("settings button routes to settings page", async ({ page }, testInfo) => {

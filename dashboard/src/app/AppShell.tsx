@@ -1796,6 +1796,7 @@ function ShortcutHelpModal({
 }) {
   return (
     <div
+      data-testid="shortcut-help-modal"
       className="fixed inset-0 flex items-center justify-center px-4"
       style={{ zIndex: SHELL_MODAL_Z_INDEX }}
       onClick={onClose}

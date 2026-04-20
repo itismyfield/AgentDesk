@@ -541,7 +541,10 @@ impl CancelToken {
                     &name,
                     "턴 취소에 의한 tmux 세션 정리",
                 );
-                crate::services::platform::tmux::kill_session(&name);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    &name,
+                    "턴 취소에 의한 tmux 세션 정리",
+                );
             }
             #[cfg(not(unix))]
             {

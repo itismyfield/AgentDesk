@@ -4,7 +4,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::db::Db;
-use crate::db::agents::load_agent_channel_bindings;
+use crate::db::agents::{load_agent_channel_bindings, load_agent_channel_bindings_pg};
 use crate::services::provider::ProviderKind;
 
 use super::dispatch_channel::provider_from_channel_suffix;
@@ -1211,6 +1211,7 @@ pub(crate) enum ReviewTargetTrust {
     /// passed through to the downstream validation/refresh chain. Only use
     /// this from internal call sites where the fields came from a
     /// first-party source (not user-controlled JSON).
+    #[allow(dead_code)]
     Trusted,
 }
 
@@ -1481,14 +1482,13 @@ pub(super) fn build_review_context(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// #847 (Phase B+): PG-native (sqlx) variants of dispatch-context helpers.
+// #847 / #848 (Phase B+): PG-native (sqlx) variants of dispatch-context helpers.
 //
 // Additive only — the rusqlite originals above remain in use until #850 lands
-// the final swap. Routing from `create_dispatch_core_internal` is deferred:
-// `Db` does not currently carry an `Option<PgPool>`, and threading `&PgPool`
-// through every dispatch entry point would touch >15 caller files (the
-// documented stop condition in this issue). Tracked under #850 / #843. See PR
-// body for the full rationale.
+// the final swap. `create_dispatch_core_internal` now prefers
+// `build_review_context_pg` for review dispatches when a `PgPool` is present,
+// but the rest of the rusqlite stack stays live until #850 / #843 complete the
+// broader `Db`/caller cleanup.
 //
 // ## TargetRepoSource preservation (#762, #847)
 //
@@ -1606,7 +1606,6 @@ pub(super) async fn resolve_parent_dispatch_context_pg(
 ///
 /// Returns the same value the rusqlite variant would for the same input.
 /// **Do NOT compute provenance here** — see the module-level note above.
-#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
 pub(super) async fn resolve_card_target_repo_ref_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1631,7 +1630,6 @@ pub(super) async fn resolve_card_target_repo_ref_pg(
     info.repo_id
 }
 
-#[allow(dead_code)] // Used by resolve_card_worktree_pg.
 async fn resolve_card_repo_dir_with_context_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1647,7 +1645,6 @@ async fn resolve_card_repo_dir_with_context_pg(
 ///
 /// Returns `(worktree_path, worktree_branch, head_commit)` derived from the
 /// card's `github_issue_number` + resolved repo dir.
-#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
 pub(crate) async fn resolve_card_worktree_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1675,7 +1672,6 @@ pub(crate) async fn resolve_card_worktree_pg(
 ///
 /// Mutates `obj` to add review-target identifiers (repo, issue/PR numbers,
 /// verdict/decision endpoints).
-#[allow(dead_code)] // Wired into create_dispatch_core_internal / build_review_context under #850.
 pub(crate) async fn inject_review_dispatch_identifiers_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1718,6 +1714,736 @@ pub(crate) async fn inject_review_dispatch_identifiers_pg(
         }
         _ => {}
     }
+}
+
+async fn resolve_review_target_branch_pg(
+    pool: &PgPool,
+    card_id: &str,
+    dir: &str,
+    reviewed_commit: &str,
+    preferred_branch: Option<&str>,
+) -> Option<String> {
+    let issue_branch_hint = load_card_issue_repo_pg(pool, card_id)
+        .await
+        .and_then(|(issue_number, _)| issue_number.map(|value| value.to_string()));
+    crate::services::platform::shell::git_branch_containing_commit(
+        dir,
+        reviewed_commit,
+        preferred_branch,
+        issue_branch_hint.as_deref(),
+    )
+    .or_else(|| preferred_branch.map(str::to_string))
+    .or_else(|| crate::services::platform::shell::git_branch_name(dir))
+}
+
+pub(crate) async fn commit_belongs_to_card_issue_pg(
+    pool: &PgPool,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> bool {
+    let issue_number = load_card_issue_repo_pg(pool, card_id)
+        .await
+        .and_then(|(issue_number, _)| issue_number);
+    let Some(issue_number) = issue_number else {
+        return true;
+    };
+    let repo_dir_result =
+        match crate::services::platform::shell::resolve_repo_dir_for_target(target_repo) {
+            Ok(value) => Ok(value),
+            Err(_) => resolve_card_repo_dir_with_context_pg(
+                pool,
+                card_id,
+                None,
+                "validate reviewed commit",
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        };
+    let repo_dir = match repo_dir_result {
+        Ok(Some(repo_dir)) => repo_dir,
+        Ok(None) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: repo dir unavailable for card {} — rejecting to fallback",
+                card_id
+            );
+            return false;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: {} — rejecting to fallback",
+                err
+            );
+            return false;
+        }
+    };
+    let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--format=%s", "-n", "1", commit_sha])
+        .current_dir(&repo_dir)
+        .output()
+    else {
+        tracing::warn!(
+            "[dispatch] commit_belongs_to_card_issue: git log failed — rejecting to fallback"
+        );
+        return false;
+    };
+    if !output.status.success() {
+        tracing::warn!(
+            "[dispatch] commit_belongs_to_card_issue: commit {} not reachable — rejecting to fallback",
+            &commit_sha[..8.min(commit_sha.len())]
+        );
+        return false;
+    }
+    let subject = String::from_utf8_lossy(&output.stdout);
+    let pattern = format!("(#{})", issue_number);
+    subject.contains(&pattern)
+}
+
+async fn refresh_review_target_worktree_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: &serde_json::Value,
+    target: &DispatchExecutionTarget,
+) -> Result<Option<DispatchExecutionTarget>> {
+    if let Some(recorded) = target.worktree_path.as_deref() {
+        if std::path::Path::new(recorded).is_dir()
+            && worktree_head_matches_commit(recorded, &target.reviewed_commit)
+        {
+            return Ok(Some(target.clone()));
+        }
+    }
+
+    if let Some(stale_path) = target.worktree_path.as_deref() {
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: latest work target path '{}' no longer holds commit {} — attempting fallback",
+            card_id,
+            stale_path,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+    }
+
+    let resolve_context = if let Some(tr) = target.target_repo.as_deref() {
+        let mut merged = context.clone();
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("target_repo".to_string(), json!(tr));
+        }
+        std::borrow::Cow::Owned(merged)
+    } else {
+        std::borrow::Cow::Borrowed(context)
+    };
+
+    if let Some((wt_path, wt_branch, _wt_commit)) =
+        resolve_card_worktree_pg(pool, card_id, Some(resolve_context.as_ref())).await?
+    {
+        if worktree_head_matches_commit(&wt_path, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch_pg(
+                pool,
+                card_id,
+                &wt_path,
+                &target.reviewed_commit,
+                target.branch.as_deref().or(Some(wt_branch.as_str())),
+            )
+            .await
+            .or(Some(wt_branch));
+            tracing::info!(
+                "[dispatch] Review dispatch for card {}: refreshed worktree path to active issue worktree '{}' for commit {}",
+                card_id,
+                wt_path,
+                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: Some(wt_path),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: active issue worktree HEAD does not match reviewed commit {} — skipping path refresh",
+            card_id,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+    }
+
+    let fallback_repo_dir = if let Some(value) = target.target_repo.as_deref() {
+        crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let fallback_repo_dir = match fallback_repo_dir {
+        Some(repo_dir) => Some(repo_dir),
+        None => resolve_card_repo_dir_with_context_pg(
+            pool,
+            card_id,
+            Some(context),
+            "recover review target repo",
+        )
+        .await
+        .ok()
+        .flatten(),
+    };
+
+    if let Some(repo_dir) = fallback_repo_dir {
+        if worktree_head_matches_commit(&repo_dir, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch_pg(
+                pool,
+                card_id,
+                &repo_dir,
+                &target.reviewed_commit,
+                target.branch.as_deref(),
+            )
+            .await;
+            tracing::info!(
+                "[dispatch] Review dispatch for card {}: falling back to repo dir '{}' for commit {} after stale worktree cleanup",
+                card_id,
+                repo_dir,
+                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+            );
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: Some(repo_dir),
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: repo_dir '{}' HEAD does not match reviewed commit {} — emitting reviewed_commit without worktree_path",
+            card_id,
+            repo_dir,
+            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+        );
+        if git_commit_exists(&repo_dir, &target.reviewed_commit) {
+            let branch = resolve_review_target_branch_pg(
+                pool,
+                card_id,
+                &repo_dir,
+                &target.reviewed_commit,
+                target.branch.as_deref(),
+            )
+            .await;
+            return Ok(Some(DispatchExecutionTarget {
+                reviewed_commit: target.reviewed_commit.clone(),
+                branch,
+                worktree_path: None,
+                target_repo: target.target_repo.clone(),
+            }));
+        }
+    }
+
+    tracing::warn!(
+        "[dispatch] Review dispatch for card {}: no usable worktree or repo path contains commit {} after stale worktree cleanup",
+        card_id,
+        &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+    );
+    Ok(None)
+}
+
+async fn latest_completed_work_dispatch_target_pg(
+    pool: &PgPool,
+    kanban_card_id: &str,
+) -> Option<DispatchExecutionTarget> {
+    let (result_raw, context_raw): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT result, context
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('implementation', 'rework')
+           AND status = 'completed'
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(kanban_card_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+
+    let result_json = result_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let context_json = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+
+    let raw_path = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_worktree_path"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_path"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_path"))
+        });
+    let raw_branch = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_branch"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_branch"))
+        })
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "branch"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_branch"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "branch"))
+        })
+        .map(str::to_string);
+
+    let (path, branch) = match raw_path {
+        Some(candidate) if std::path::Path::new(candidate).is_dir() => {
+            (Some(candidate), raw_branch)
+        }
+        Some(stale) => {
+            tracing::warn!(
+                "[dispatch] Card {}: dropping stale completed-work worktree metadata — recorded path '{}' no longer exists; clearing branch '{}' and falling back to fresh worktree resolution",
+                kanban_card_id,
+                stale,
+                raw_branch.as_deref().unwrap_or("<none>")
+            );
+            (None, None)
+        }
+        None => (None, raw_branch),
+    };
+    let reviewed_commit = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_commit"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
+        .map(str::to_string);
+    let target_repo = match context_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "target_repo"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "target_repo"))
+        })
+        .map(str::to_string)
+    {
+        Some(value) => Some(value),
+        None => resolve_card_target_repo_ref_pg(pool, kanban_card_id, None).await,
+    };
+
+    if let Some(reviewed_commit) = reviewed_commit {
+        let fallback_repo_dir = if let Some(value) = target_repo.as_deref() {
+            crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let fallback_repo_dir = match fallback_repo_dir {
+            Some(repo_dir) => Some(repo_dir),
+            None => resolve_card_repo_dir_with_context_pg(
+                pool,
+                kanban_card_id,
+                None,
+                "recover completed work repo",
+            )
+            .await
+            .ok()
+            .flatten(),
+        };
+        let worktree_path = path.map(str::to_string).or(fallback_repo_dir);
+        let issue_branch_hint = load_card_issue_repo_pg(pool, kanban_card_id)
+            .await
+            .and_then(|(issue_number, _)| issue_number.map(|value| value.to_string()));
+        let branch = branch
+            .or_else(|| {
+                worktree_path.as_deref().and_then(|path| {
+                    crate::services::platform::shell::git_branch_containing_commit(
+                        path,
+                        &reviewed_commit,
+                        None,
+                        issue_branch_hint.as_deref(),
+                    )
+                })
+            })
+            .or_else(|| {
+                worktree_path
+                    .as_deref()
+                    .and_then(crate::services::platform::shell::git_branch_name)
+            });
+        return Some(DispatchExecutionTarget {
+            reviewed_commit,
+            branch,
+            worktree_path,
+            target_repo,
+        });
+    }
+
+    let trusted_path =
+        path.filter(|candidate| is_card_scoped_worktree_path(candidate, branch.as_deref()));
+
+    trusted_path
+        .and_then(execution_target_from_dir)
+        .map(|mut target| {
+            target.target_repo = target_repo;
+            target
+        })
+}
+
+async fn resolve_card_issue_commit_target_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<Option<DispatchExecutionTarget>> {
+    let Some((issue_number, _repo_id)) = load_card_issue_repo_pg(pool, card_id).await else {
+        return Ok(None);
+    };
+    let Some(issue_number) = issue_number else {
+        return Ok(None);
+    };
+    let Some(repo_dir) =
+        resolve_card_repo_dir_with_context_pg(pool, card_id, context, "resolve commit target repo")
+            .await?
+    else {
+        return Ok(None);
+    };
+    let Some(reviewed_commit) =
+        crate::services::platform::find_latest_commit_for_issue(&repo_dir, issue_number)
+    else {
+        return Ok(None);
+    };
+    let issue_branch_hint = issue_number.to_string();
+    let branch = crate::services::platform::shell::git_branch_containing_commit(
+        &repo_dir,
+        &reviewed_commit,
+        None,
+        Some(&issue_branch_hint),
+    )
+    .or_else(|| crate::services::platform::shell::git_branch_name(&repo_dir))
+    .or(Some("main".to_string()));
+    Ok(Some(DispatchExecutionTarget {
+        reviewed_commit,
+        branch,
+        worktree_path: Some(repo_dir),
+        target_repo: resolve_card_target_repo_ref_pg(pool, card_id, context).await,
+    }))
+}
+
+async fn resolve_repo_head_fallback_target_pg(
+    pool: &PgPool,
+    kanban_card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<Option<DispatchExecutionTarget>> {
+    let Some(repo_dir) = resolve_card_repo_dir_with_context_pg(
+        pool,
+        kanban_card_id,
+        context,
+        "resolve repo-root HEAD fallback target",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let dirty_paths =
+        crate::services::platform::shell::git_tracked_change_paths(&repo_dir).unwrap_or_default();
+    if !dirty_paths.is_empty() {
+        let sample = dirty_paths
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Cannot create review dispatch for card {}: repo-root HEAD fallback is unsafe while tracked changes exist{}",
+            kanban_card_id,
+            if sample.is_empty() {
+                String::new()
+            } else if dirty_paths.len() > 3 {
+                format!(" ({sample}, +{} more)", dirty_paths.len() - 3)
+            } else {
+                format!(" ({sample})")
+            }
+        );
+    }
+
+    let Some(mut target) = execution_target_from_dir(&repo_dir) else {
+        return Ok(None);
+    };
+    target.target_repo = resolve_card_target_repo_ref_pg(pool, kanban_card_id, context).await;
+    Ok(Some(target))
+}
+
+/// PG-native variant of [`build_review_context`].
+///
+/// Injects `reviewed_commit`, `branch`, `worktree_path`, and provider info.
+/// Prefers worktree branch (if found for this card's issue) over main HEAD.
+///
+/// #761 (Codex round-2): `trust` is an out-of-band parameter. `Untrusted`
+/// unconditionally strips `reviewed_commit` / `worktree_path` / `branch` /
+/// `target_repo` from the incoming context before the validation/refresh
+/// chain runs. No JSON field on `context` can toggle this behavior — the
+/// previous `_trusted_review_target` sentinel has been removed. API-sourced
+/// callers (anyone reaching `POST /api/dispatches`) MUST pass `Untrusted`;
+/// internal callers that already have first-party review-target values may
+/// opt into `Trusted`.
+pub(super) async fn build_review_context_pg(
+    pool: &PgPool,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    context: &serde_json::Value,
+    trust: ReviewTargetTrust,
+    target_repo_source: TargetRepoSource,
+) -> Result<String> {
+    // #762 (A): the caller tells us explicitly whether `target_repo` in
+    // `context` originated from their request or from our own fallback
+    // injection. Inferring this from `context["target_repo"].is_some()` is
+    // unreliable because upstream (`dispatch_create.rs`) pre-injects
+    // `target_repo` into the context from the card's scope BEFORE calling
+    // this function — which would make every dispatch look caller-supplied
+    // and silently disable the `external_target_repo_unrecoverable` filter.
+    let caller_supplied_target_repo =
+        matches!(target_repo_source, TargetRepoSource::CallerSupplied)
+            && json_string_field(context, "target_repo").is_some();
+    let caller_supplied_unrecoverable_target_repo =
+        if matches!(trust, ReviewTargetTrust::Untrusted) && caller_supplied_target_repo {
+            json_string_field(context, "target_repo").and_then(|value| {
+                match crate::services::platform::shell::resolve_repo_dir_for_target(Some(value)) {
+                    Ok(Some(_)) => None,
+                    _ => Some(value.to_string()),
+                }
+            })
+        } else {
+            None
+        };
+    if let Some(external_repo) = caller_supplied_unrecoverable_target_repo.as_deref() {
+        anyhow::bail!(
+            "external_target_repo_unrecoverable: 리뷰 대상 커밋을 원래 외부 target_repo에서 복구할 수 없습니다. 카드 기본 레포로 폴백하면 무관한 코드가 리뷰되므로 중단합니다. ({})",
+            external_repo
+        );
+    }
+    let ctx_val = dispatch_context_with_session_strategy("review", context);
+    let mut obj = ctx_val.as_object().cloned().unwrap_or_default();
+
+    // #761: Strip untrusted review-target fields before any downstream code
+    // consumes them. The trust decision is out-of-band (the `trust` parameter
+    // on this function's signature, not a JSON field), so a malicious or buggy
+    // POST /api/dispatches body cannot opt out of stripping. Any legacy
+    // `_trusted_review_target` key in the payload is also removed so it
+    // cannot leak into the persisted dispatch context and mislead future
+    // readers into thinking it carries meaning.
+    obj.remove("_trusted_review_target");
+    if matches!(trust, ReviewTargetTrust::Untrusted) {
+        let mut stripped: Vec<&str> = Vec::new();
+        for field in UNTRUSTED_REVIEW_TARGET_FIELDS {
+            if obj.remove(*field).is_some() {
+                stripped.push(field);
+            }
+        }
+        if !stripped.is_empty() {
+            tracing::warn!(
+                "[dispatch] Review dispatch for card {}: stripped untrusted review-target fields from input context ({}) — validation/refresh chain will resolve them from card history",
+                kanban_card_id,
+                stripped.join(", ")
+            );
+        }
+    }
+
+    let target_repo = resolve_card_target_repo_ref_pg(
+        pool,
+        kanban_card_id,
+        Some(&serde_json::Value::Object(obj.clone())),
+    )
+    .await;
+    if let Some(target_repo) = target_repo.as_deref() {
+        obj.entry("target_repo".to_string())
+            .or_insert_with(|| json!(target_repo));
+    }
+    let ctx_snapshot = serde_json::Value::Object(obj.clone());
+    let is_noop_verification =
+        obj.get("review_mode").and_then(|v| v.as_str()) == Some("noop_verification");
+    let card_issue_repo = load_card_issue_repo_pg(pool, kanban_card_id).await;
+    let card_issue_number = card_issue_repo
+        .as_ref()
+        .and_then(|(issue_number, _)| *issue_number);
+
+    if !is_noop_verification && !obj.contains_key("reviewed_commit") {
+        let latest_work_target =
+            latest_completed_work_dispatch_target_pg(pool, kanban_card_id).await;
+        let validated_work_target = if let Some(target) = latest_work_target.as_ref() {
+            let valid = card_issue_number.is_none()
+                || commit_belongs_to_card_issue_pg(
+                    pool,
+                    kanban_card_id,
+                    &target.reviewed_commit,
+                    target.target_repo.as_deref().or(target_repo.as_deref()),
+                )
+                .await;
+            if !valid {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: work target commit {} doesn't match card issue — skipping to next fallback",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            }
+            if valid {
+                refresh_review_target_worktree_pg(pool, kanban_card_id, &ctx_snapshot, target)
+                    .await?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(target) = validated_work_target {
+            apply_review_target_context(&target, &mut obj);
+            tracing::info!(
+                "[dispatch] Review dispatch for card {}: reusing latest work target (commit {}, branch: {:?}, path: {:?})",
+                kanban_card_id,
+                &target.reviewed_commit[..8.min(target.reviewed_commit.len())],
+                target.branch.as_deref(),
+                target.worktree_path.as_deref()
+            );
+        } else {
+            if let Some(target) = latest_work_target.as_ref() {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: rejecting latest work target commit {} and skipping worktree refresh fallback",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            }
+
+            let card_repo_id = card_issue_repo
+                .as_ref()
+                .and_then(|(_, repo_id)| repo_id.clone());
+            let historical_external_repo_unrecoverable = latest_work_target
+                .as_ref()
+                .filter(|_| validated_work_target.is_none())
+                .filter(|_| !caller_supplied_target_repo)
+                .and_then(|target| target.target_repo.as_deref())
+                .filter(|work_repo| {
+                    historical_target_repo_differs_from_card(
+                        Some(work_repo),
+                        card_repo_id.as_deref(),
+                    )
+                })
+                .map(|value| value.to_string());
+
+            if let Some(external_repo) = historical_external_repo_unrecoverable {
+                apply_review_target_warning(
+                    &mut obj,
+                    "external_target_repo_unrecoverable",
+                    "리뷰 대상 커밋을 원래 외부 target_repo에서 복구할 수 없습니다. 카드 기본 레포로 폴백하면 무관한 코드가 리뷰되므로 중단합니다.",
+                );
+                obj.insert("target_repo".to_string(), json!(external_repo.clone()));
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: historical external target_repo '{}' is unrecoverable — suppressing card-scoped fallback",
+                    kanban_card_id,
+                    external_repo
+                );
+            } else if let Some((wt_path, wt_branch, wt_commit)) =
+                resolve_card_worktree_pg(pool, kanban_card_id, Some(&ctx_snapshot)).await?
+            {
+                let reviewed_commit = wt_commit.clone();
+                apply_review_target_context(
+                    &DispatchExecutionTarget {
+                        reviewed_commit: wt_commit,
+                        branch: Some(wt_branch.clone()),
+                        worktree_path: Some(wt_path.clone()),
+                        target_repo: target_repo.clone(),
+                    },
+                    &mut obj,
+                );
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: using canonical worktree branch '{}' (commit {}, path: {})",
+                    kanban_card_id,
+                    wt_branch,
+                    &reviewed_commit[..8.min(reviewed_commit.len())],
+                    wt_path
+                );
+            } else if let Some(target) =
+                resolve_card_issue_commit_target_pg(pool, kanban_card_id, Some(&ctx_snapshot))
+                    .await?
+            {
+                apply_review_target_context(&target, &mut obj);
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: recovered issue commit target ({})",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            } else if latest_work_target.is_some() && validated_work_target.is_none() {
+                apply_review_target_warning(
+                    &mut obj,
+                    "latest_work_target_issue_mismatch",
+                    "브랜치 정보 없음 — 직접 확인 필요. 최근 완료 작업 커밋이 현재 카드 이슈와 일치하지 않아 repo HEAD 폴백을 생략했습니다.",
+                );
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: latest work target was rejected, downstream worktree recovery failed, and repo HEAD fallback is disabled",
+                    kanban_card_id
+                );
+            } else if let Some(target) =
+                resolve_repo_head_fallback_target_pg(pool, kanban_card_id, Some(&ctx_snapshot))
+                    .await?
+            {
+                apply_review_target_context(&target, &mut obj);
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            }
+        }
+    }
+
+    inject_review_merge_base_context(&mut obj);
+    inject_review_quality_context(&mut obj);
+    inject_review_dispatch_identifiers_pg(pool, kanban_card_id, "review", &mut obj).await;
+
+    if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
+        if let Ok(Some(bindings)) = load_agent_channel_bindings_pg(pool, to_agent_id).await {
+            let primary_provider = bindings
+                .provider
+                .as_deref()
+                .and_then(ProviderKind::from_str);
+            if !obj.contains_key("from_provider") {
+                if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
+                    obj.insert("from_provider".to_string(), json!(fp));
+                } else if let Some(fp) = bindings
+                    .primary_channel()
+                    .as_deref()
+                    .and_then(provider_from_channel_suffix)
+                {
+                    obj.insert("from_provider".to_string(), json!(fp));
+                }
+            }
+            if !obj.contains_key("target_provider") {
+                if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
+                    obj.insert("target_provider".to_string(), json!(tp.as_str()));
+                } else if let Some(tp) = bindings
+                    .counter_model_channel()
+                    .as_deref()
+                    .and_then(provider_from_channel_suffix)
+                {
+                    obj.insert("target_provider".to_string(), json!(tp));
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
 }
 
 #[cfg(test)]
@@ -2338,6 +3064,28 @@ mod tests {
         .expect("seed task_dispatches");
     }
 
+    async fn pg_seed_agent(
+        pool: &PgPool,
+        agent_id: &str,
+        discord_channel_id: Option<&str>,
+        discord_channel_alt: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE
+             SET discord_channel_id = EXCLUDED.discord_channel_id,
+                 discord_channel_alt = EXCLUDED.discord_channel_alt",
+        )
+        .bind(agent_id)
+        .bind(format!("Agent {agent_id}"))
+        .bind(discord_channel_id)
+        .bind(discord_channel_alt)
+        .execute(pool)
+        .await
+        .expect("seed agents");
+    }
+
     // ── resolve_parent_dispatch_context_pg ────────────────────────────────
 
     #[tokio::test]
@@ -2650,6 +3398,272 @@ mod tests {
             obj.get("decision_endpoint").and_then(|v| v.as_str()),
             Some("POST /api/review-decision")
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_build_review_context_untrusted_strips_bogus_branch_and_reresolves() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let db = test_db();
+        let card_id = "card-pg-review-untrusted-branch";
+        let issue_number = 8481;
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let wt_dir = repo.path().join("wt-8481-live");
+        let wt_path = wt_dir.to_str().unwrap();
+        run_git(
+            repo_dir,
+            &["worktree", "add", "-b", "wt/8481-live", wt_path],
+        );
+        let reviewed_commit = git_commit(wt_path, "fix: pg review branch recovery (#8481)");
+
+        seed_card(&db, card_id, issue_number, "review");
+        set_card_repo_id(&db, card_id, repo_dir);
+        pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
+        pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
+
+        let input = json!({
+            "branch": "bogus/pr-branch",
+            "reviewed_commit": "1111111111111111111111111111111111111111",
+            "worktree_path": "/tmp/agentdesk-bogus-review-path",
+        });
+
+        let sqlite_context = build_review_context(
+            &db,
+            card_id,
+            "agent-1",
+            &input,
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .expect("sqlite review context");
+        let pg_context = build_review_context_pg(
+            &pool,
+            card_id,
+            "agent-1",
+            &input,
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .await
+        .expect("pg review context");
+
+        let sqlite_parsed: serde_json::Value = serde_json::from_str(&sqlite_context).unwrap();
+        let pg_parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+
+        assert_eq!(pg_parsed, sqlite_parsed);
+        assert_eq!(pg_parsed["branch"], "wt/8481-live");
+        assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(pg_parsed["worktree_path"], wt_path);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_build_review_context_untrusted_caller_supplied_unrecoverable_target_repo_errors() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let card_id = "card-pg-review-untrusted-target-repo-error";
+        let issue_number = 8482;
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let wt_dir = repo.path().join("wt-8482-live");
+        let wt_path = wt_dir.to_str().unwrap();
+        run_git(
+            repo_dir,
+            &["worktree", "add", "-b", "wt/8482-live", wt_path],
+        );
+        let _reviewed_commit = git_commit(wt_path, "fix: pg target repo error guard (#8482)");
+
+        pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
+        pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
+
+        let err = build_review_context_pg(
+            &pool,
+            card_id,
+            "agent-1",
+            &json!({
+                "target_repo": "/tmp/agentdesk-pg-review-missing-target-repo-8482"
+            }),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CallerSupplied,
+        )
+        .await
+        .expect_err("untrusted caller-supplied unrecoverable target_repo must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("external_target_repo_unrecoverable"),
+            "unexpected error: {err:#}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_build_review_context_untrusted_without_target_repo_falls_back_silently() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let db = test_db();
+        let card_id = "card-pg-review-no-target-repo";
+        let issue_number = 8483;
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let wt_dir = repo.path().join("wt-8483-live");
+        let wt_path = wt_dir.to_str().unwrap();
+        run_git(
+            repo_dir,
+            &["worktree", "add", "-b", "wt/8483-live", wt_path],
+        );
+        let reviewed_commit = git_commit(wt_path, "fix: pg no target repo fallback (#8483)");
+
+        seed_card(&db, card_id, issue_number, "review");
+        set_card_repo_id(&db, card_id, repo_dir);
+        pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
+        pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
+
+        let sqlite_context = build_review_context(
+            &db,
+            card_id,
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .expect("sqlite no-target_repo fallback");
+        let pg_context = build_review_context_pg(
+            &pool,
+            card_id,
+            "agent-1",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .await
+        .expect("pg no-target_repo fallback");
+
+        let sqlite_parsed: serde_json::Value = serde_json::from_str(&sqlite_context).unwrap();
+        let pg_parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+
+        assert_eq!(pg_parsed, sqlite_parsed);
+        assert_eq!(pg_parsed["target_repo"], repo_dir);
+        assert_eq!(pg_parsed["branch"], "wt/8483-live");
+        assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(pg_parsed["worktree_path"], wt_path);
+        assert!(pg_parsed.get("review_target_reject_reason").is_none());
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_build_review_context_trusted_preserves_preseeded_fields() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let db = test_db();
+        let card_id = "card-pg-review-trusted-preserve";
+        let issue_number = 8484;
+        let (repo, _repo_override) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let reviewed_commit = git_commit(repo_dir, "fix: pg trusted preserve (#8484)");
+
+        seed_card(&db, card_id, issue_number, "review");
+        set_card_repo_id(&db, card_id, repo_dir);
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO pr_tracking (
+                card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, 'wt/sqlite-db-value', 7001, ?4, 'review', datetime('now'), datetime('now')
+             )",
+            libsql_rusqlite::params![card_id, repo_dir, repo_dir, reviewed_commit],
+        )
+        .unwrap();
+        drop(conn);
+
+        pg_seed_card(&pool, card_id, Some(issue_number), Some(repo_dir)).await;
+        pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
+        sqlx::query(
+            "INSERT INTO pr_tracking (
+                card_id, repo_id, worktree_path, branch, pr_number, head_sha, state
+             ) VALUES (
+                $1, $2, $3, 'wt/pg-db-value', 7001, $4, 'review'
+             )",
+        )
+        .bind(card_id)
+        .bind(repo_dir)
+        .bind(repo_dir)
+        .bind(&reviewed_commit)
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        let input = json!({
+            "target_repo": "caller/preseeded-repo",
+            "worktree_path": repo_dir,
+            "branch": "trusted/preseeded-branch",
+            "reviewed_commit": reviewed_commit,
+            "pr_number": 4242,
+        });
+
+        let sqlite_context = build_review_context(
+            &db,
+            card_id,
+            "agent-1",
+            &input,
+            ReviewTargetTrust::Trusted,
+            TargetRepoSource::CallerSupplied,
+        )
+        .expect("sqlite trusted preserve");
+        let pg_context = build_review_context_pg(
+            &pool,
+            card_id,
+            "agent-1",
+            &input,
+            ReviewTargetTrust::Trusted,
+            TargetRepoSource::CallerSupplied,
+        )
+        .await
+        .expect("pg trusted preserve");
+
+        let sqlite_parsed: serde_json::Value = serde_json::from_str(&sqlite_context).unwrap();
+        let pg_parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+
+        assert_eq!(pg_parsed, sqlite_parsed);
+        assert_eq!(pg_parsed["target_repo"], "caller/preseeded-repo");
+        assert_eq!(pg_parsed["repo"], "caller/preseeded-repo");
+        assert_eq!(pg_parsed["branch"], "trusted/preseeded-branch");
+        assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(pg_parsed["pr_number"], 4242);
 
         pool.close().await;
         pg_db.drop().await;

@@ -88,6 +88,18 @@ fn watcher_ready_for_input_turn_completed(
     tracker.observe_idle(current_offset > data_start_offset, ready_for_input, now)
 }
 
+fn build_monitor_completion_message(response: &str) -> String {
+    let response = response.trim();
+    if response.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\n{}",
+        response
+    )
+}
+
 fn watcher_should_yield_to_active_bridge_turn(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -971,7 +983,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: prompt too long",
+                    );
                 }),
             )
             .await;
@@ -1035,7 +1050,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: authentication failed",
+                    );
                 }),
             )
             .await;
@@ -1143,7 +1161,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, &termination_detail);
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        &termination_detail,
+                    );
                 }),
             )
             .await;
@@ -1313,7 +1334,10 @@ pub(super) async fn tmux_output_watcher(
                 &tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
-            crate::services::platform::tmux::kill_session(&tmux_session_name);
+            crate::services::platform::tmux::kill_session_with_reason(
+                &tmux_session_name,
+                "stale session resume detected — forcing fresh session before auto-retry",
+            );
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id
@@ -1367,7 +1391,7 @@ pub(super) async fn tmux_output_watcher(
                 current_response,
                 &watcher_provider,
             );
-            let prefixed = formatted.to_string();
+            let prefixed = build_monitor_completion_message(&formatted);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {})",
@@ -1855,7 +1879,10 @@ pub(super) async fn tmux_output_watcher(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                    crate::services::platform::tmux::kill_session(&sess);
+                    crate::services::platform::tmux::kill_session_with_reason(
+                        &sess,
+                        "watcher cleanup: dead session after turn",
+                    );
                 }
             })
             .await;
@@ -2774,7 +2801,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     None,
                 );
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
-                crate::services::platform::tmux::kill_session(&sess);
+                crate::services::platform::tmux::kill_session_with_reason(
+                    &sess,
+                    "startup cleanup: dead session",
+                );
             })
             .await;
             cleaned_dead_sessions += 1;
@@ -2793,8 +2823,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadSessionCleanupPlan, WatcherToolState, dead_session_cleanup_plan,
-        load_restored_provider_session_id, process_watcher_lines,
+        DeadSessionCleanupPlan, WatcherToolState, build_monitor_completion_message,
+        dead_session_cleanup_plan, load_restored_provider_session_id, process_watcher_lines,
         refresh_session_heartbeat_from_tmux_output, watcher_ready_for_input_turn_completed,
         watcher_should_yield_to_inflight_state,
     };
@@ -2824,6 +2854,23 @@ mod tests {
                 .as_deref(),
             Some("persisted-sid-1")
         );
+    }
+
+    #[test]
+    fn monitor_completion_message_adds_clear_banner() {
+        let response = "**CI 전부 ✅ SUCCESS!**\n세부 결과";
+        let wrapped = build_monitor_completion_message(response);
+
+        assert!(wrapped.starts_with("**✅ 모니터 완료**"));
+        assert!(
+            wrapped.contains("백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.")
+        );
+        assert!(wrapped.ends_with(response));
+    }
+
+    #[test]
+    fn monitor_completion_message_skips_blank_response() {
+        assert!(build_monitor_completion_message("   \n").is_empty());
     }
 
     #[test]

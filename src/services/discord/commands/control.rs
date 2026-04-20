@@ -109,7 +109,10 @@ fn recreate_tmux_session(session_name: &str, reset_source: &str) -> bool {
         session_name,
         &format!("hard reset via {reset_source}"),
     );
-    crate::services::platform::tmux::kill_session(session_name)
+    crate::services::platform::tmux::kill_session_with_reason(
+        session_name,
+        &format!("hard reset via {reset_source}"),
+    )
 }
 
 #[cfg(not(unix))]
