@@ -20204,3 +20204,427 @@ async fn auto_queue_reset_without_agent_id_preserves_active_runs() {
     assert_eq!(active_entries, 1);
     assert_eq!(remaining_entries, 1);
 }
+
+#[tokio::test]
+async fn v1_routes_pg_surface_dashboard_contract() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("repo-v1")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, name_ko, provider, status, xp, avatar_emoji, discord_channel_id, discord_channel_alt
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9
+         )",
+    )
+    .bind("agent-v1")
+    .bind("V1 Agent")
+    .bind("브이원 에이전트")
+    .bind("claude")
+    .bind("working")
+    .bind(60_i64)
+    .bind("🤖")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skills (id, name, description, source_path, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("live-skill")
+    .bind("Live Skill")
+    .bind("Live skill description")
+    .bind("/tmp/live-skill/SKILL.md")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind("live-skill")
+    .bind("agent-v1")
+    .bind("session-v1")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, assigned_agent_id, github_issue_number, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+         )",
+    )
+    .bind("card-v1-current")
+    .bind("repo-v1")
+    .bind("Current V1 Card")
+    .bind("in_progress")
+    .bind("high")
+    .bind("agent-v1")
+    .bind(791_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, assigned_agent_id, github_issue_number, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+         )",
+    )
+    .bind("card-v1-review")
+    .bind("repo-v1")
+    .bind("Review Queue Card")
+    .bind("review")
+    .bind("medium")
+    .bind("agent-v1")
+    .bind(792_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-current")
+    .bind("card-v1-current")
+    .bind("agent-v1")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("Current dispatch")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+        .bind("dispatch-current")
+        .bind("card-v1-current")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    for index in 0..5_i64 {
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6,
+                NOW() - ($7::BIGINT || ' hours')::INTERVAL,
+                NOW() - ($7::BIGINT || ' hours')::INTERVAL
+             )",
+        )
+        .bind(format!("dispatch-completed-{index}"))
+        .bind("card-v1-review")
+        .bind("agent-v1")
+        .bind("implementation")
+        .bind("completed")
+        .bind(format!("Completed dispatch {index}"))
+        .bind(index + 1)
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, active_dispatch_id, session_info, tokens,
+            last_heartbeat, thread_channel_id, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), $8, NOW()
+         )",
+    )
+    .bind("host:session-v1")
+    .bind("agent-v1")
+    .bind("claude")
+    .bind("working")
+    .bind("dispatch-current")
+    .bind("v1 session")
+    .bind(321_i64)
+    .bind("222000000000001")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind("card-v1-current")
+    .bind("requested")
+    .bind("in_progress")
+    .bind("dispatch")
+    .bind("ok")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO audit_logs (entity_type, entity_id, action, actor, timestamp)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("provider")
+    .bind("claude")
+    .bind("provider_restart_pending")
+    .bind("system")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("run-v1")
+    .bind("repo-v1")
+    .bind("agent-v1")
+    .bind("active")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6
+         )",
+    )
+    .bind("entry-v1")
+    .bind("run-v1")
+    .bind("card-v1-current")
+    .bind("agent-v1")
+    .bind("pending")
+    .bind(0_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            None,
+            pg_pool.clone(),
+        ),
+    );
+
+    let overview = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/overview")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overview.status(), StatusCode::OK);
+    assert_eq!(
+        overview.headers().get("cache-control").unwrap(),
+        "max-age=30"
+    );
+    let overview_body = axum::body::to_bytes(overview.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let overview_json: serde_json::Value = serde_json::from_slice(&overview_body).unwrap();
+    assert_eq!(overview_json["session_count"], json!(1));
+    assert_eq!(overview_json["metrics"]["agents"]["total"], json!(1));
+    assert_eq!(overview_json["metrics"]["kanban"]["review_queue"], json!(1));
+    assert!(overview_json["spark_14d"].as_array().is_some());
+
+    let agents = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agents.status(), StatusCode::OK);
+    assert_eq!(agents.headers().get("cache-control").unwrap(), "max-age=10");
+    let agents_body = axum::body::to_bytes(agents.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let agents_json: serde_json::Value = serde_json::from_slice(&agents_body).unwrap();
+    assert_eq!(
+        agents_json["agents"][0]["current_task"]["dispatch_id"],
+        json!("dispatch-current")
+    );
+    assert_eq!(
+        agents_json["agents"][0]["skills_7d"][0]["id"],
+        json!("live-skill")
+    );
+
+    let tokens = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/tokens?range=7d")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tokens.status(), StatusCode::OK);
+    assert_eq!(tokens.headers().get("cache-control").unwrap(), "max-age=60");
+    let tokens_body = axum::body::to_bytes(tokens.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tokens_json: serde_json::Value = serde_json::from_slice(&tokens_body).unwrap();
+    assert!(tokens_json["summary"]["total_cost"].is_string());
+    assert!(tokens_json["daily"].is_array());
+
+    let kanban = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/kanban")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kanban.status(), StatusCode::OK);
+    assert_eq!(kanban.headers().get("cache-control").unwrap(), "max-age=5");
+    let kanban_body = axum::body::to_bytes(kanban.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let kanban_json: serde_json::Value = serde_json::from_slice(&kanban_body).unwrap();
+    assert_eq!(kanban_json["auto_queue"]["run"]["id"], json!("run-v1"));
+    assert!(kanban_json.get("wip_limit").is_some());
+
+    let ops = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ops/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ops.status(), StatusCode::OK);
+    assert_eq!(ops.headers().get("cache-control").unwrap(), "max-age=5");
+    let ops_body = axum::body::to_bytes(ops.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ops_json: serde_json::Value = serde_json::from_slice(&ops_body).unwrap();
+    assert!(ops_json["bottlenecks"].is_array());
+
+    let activity = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/activity?limit=8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(activity.status(), StatusCode::OK);
+    let activity_body = axum::body::to_bytes(activity.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let activity_json: serde_json::Value = serde_json::from_slice(&activity_body).unwrap();
+    let kinds = activity_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["kind"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(kinds.contains("dispatch"));
+    assert!(kinds.contains("kanban_transition"));
+    assert!(kinds.contains("provider_event"));
+    assert!(activity_json["next_cursor"].is_string() || activity_json["next_cursor"].is_null());
+
+    let achievements = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/achievements")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(achievements.status(), StatusCode::OK);
+    assert_eq!(
+        achievements.headers().get("cache-control").unwrap(),
+        "max-age=300"
+    );
+    let achievements_body = axum::body::to_bytes(achievements.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let achievements_json: serde_json::Value = serde_json::from_slice(&achievements_body).unwrap();
+    assert_eq!(
+        achievements_json["achievements"][0]["rarity"],
+        json!("common")
+    );
+    assert!(achievements_json["achievements"][0]["progress"].is_object());
+    assert_eq!(
+        achievements_json["daily_missions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let settings_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(settings_get.status(), StatusCode::OK);
+    assert_eq!(
+        settings_get.headers().get("cache-control").unwrap(),
+        "no-store"
+    );
+    let settings_get_body = axum::body::to_bytes(settings_get.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let settings_get_json: serde_json::Value = serde_json::from_slice(&settings_get_body).unwrap();
+    assert!(settings_get_json["entries"].as_array().is_some());
+
+    let settings_patch = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/settings/merge_strategy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"rebase"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(settings_patch.status(), StatusCode::OK);
+    let settings_patch_body = axum::body::to_bytes(settings_patch.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let settings_patch_json: serde_json::Value =
+        serde_json::from_slice(&settings_patch_body).unwrap();
+    assert_eq!(settings_patch_json["key"], json!("merge_strategy"));
+    assert_eq!(settings_patch_json["value"], json!("rebase"));
+    assert_eq!(settings_patch_json["live_override"]["active"], json!(true));
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
