@@ -40,6 +40,7 @@ pub(super) fn register_dispatch_ops<'js>(
                     }
                     dispatch_create_sync(
                         &db_d,
+                        pg_create.as_ref(),
                         &card_id,
                         &agent_id,
                         &dispatch_type,
@@ -255,6 +256,7 @@ pub(super) fn register_dispatch_ops<'js>(
 /// `create_dispatch_core`, so no JS-side outbox buffering is needed.
 fn dispatch_create_sync(
     db: &Db,
+    pg_pool: Option<&PgPool>,
     card_id: &str,
     agent_id: &str,
     dispatch_type: &str,
@@ -283,6 +285,7 @@ fn dispatch_create_sync(
     };
     match crate::dispatch::create_dispatch_core_with_options(
         db,
+        pg_pool,
         card_id,
         agent_id,
         dispatch_type,

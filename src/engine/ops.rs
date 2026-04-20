@@ -39,6 +39,7 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     register_globals_with_supervisor_and_pg(ctx, db, None, BridgeHandle::new())
 }
 
+#[allow(dead_code)]
 pub fn register_globals_with_supervisor(
     ctx: &Ctx<'_>,
     db: Db,
