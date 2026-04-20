@@ -17,7 +17,7 @@
 
 use crate::db::Db;
 use crate::dispatch::{DispatchCreateOptions, apply_dispatch_attached_intents_on_conn};
-use libsql_rusqlite::OptionalExtension; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{OptionalExtension, TransactionBehavior}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde::Deserialize;
 use serde_json::json;
@@ -672,7 +672,9 @@ fn handoff_create_pr_tx(db: &Db, payload: &HandoffPayload) -> anyhow::Result<ser
     let mut conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-    let tx = conn.transaction()?;
+    // Take the SQLite write lock up front so the reuse path does not fail with
+    // a deferred read->write upgrade when another WAL writer commits first.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     // 1. Read current review_round early so reuse and fresh handoff paths keep
     //    pr_tracking aligned with the currently active dispatch.
