@@ -96,7 +96,7 @@
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 275 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 206 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 195 |  |
-| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 1637 | giant-file |
+| `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 2574 | giant-file |
 | `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 676 |  |
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 106 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
@@ -225,7 +225,7 @@
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1407 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
-| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 2007 | giant-file |
+| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 2074 | giant-file |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 488 |  |
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 908 |  |
