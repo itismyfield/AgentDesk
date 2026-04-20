@@ -30,7 +30,6 @@ export default function DepartmentsTab({
   tr,
   locale,
   agents,
-  departments,
   deptOrder,
   deptOrderDirty,
   reorderSaving,
@@ -69,7 +68,7 @@ export default function DepartmentsTab({
         </SurfaceNotice>
       )}
 
-      <div className="space-y-2">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {deptOrder.map((dept, index) => {
           const members = agents
             .filter((agent) => agent.department_id === dept.id)
@@ -88,12 +87,17 @@ export default function DepartmentsTab({
             <SurfaceCard
               data-testid={`agents-department-card-${dept.id}`}
               key={dept.id}
-              className={`group relative px-4 py-4 transition-all hover:shadow-md ${isDragging ? "opacity-60" : ""}`}
-              style={{ cursor: "grab" }}
+              className={`group relative flex h-full flex-col px-4 py-4 transition-all hover:shadow-md ${isDragging ? "opacity-60" : ""}`}
               onDragStart={(e) => onDragStart(dept.id, e)}
               onDragOver={(e) => onDragOver(dept.id, e)}
               onDrop={(e) => onDrop(dept.id, e)}
               onDragEnd={onDragEnd}
+              style={{
+                cursor: "grab",
+                borderColor: `color-mix(in srgb, ${dept.color} 22%, var(--th-border) 78%)`,
+                background:
+                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+              }}
               // SurfaceCard renders a div, so drag attributes stay here.
               // eslint-disable-next-line react/no-unknown-property
               draggable
@@ -105,15 +109,102 @@ export default function DepartmentsTab({
                 <div className="pointer-events-none absolute left-2 right-2 bottom-0 h-0.5 rounded bg-blue-400" />
               )}
 
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+              <div className="flex h-full flex-col">
                 <div className="flex items-start gap-3">
-                  <div className="flex flex-col gap-0.5">
+                  <div
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-xl"
+                    style={{ background: `${dept.color}1f`, color: dept.color }}
+                  >
+                    {dept.icon}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
+                        {localeName(locale, dept)}
+                      </span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                        style={{ background: `${dept.color}22`, color: dept.color }}
+                      >
+                        {agentCountForDept} {tr("명", "agents")}
+                      </span>
+                    </div>
+                    <div
+                      className="mt-1 text-[11px]"
+                      style={{ color: "var(--th-text-muted)", fontFamily: "var(--font-mono)" }}
+                    >
+                      id: {dept.id} · {tr("순서", "Order")} {index + 1}
+                    </div>
+                    {dept.description && (
+                      <div className="mt-2 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+                        {dept.description}
+                      </div>
+                    )}
+                  </div>
+
+                  <SurfaceActionButton onClick={() => onEditDept(dept)} tone="neutral" compact>
+                    {tr("편집", "Edit")}
+                  </SurfaceActionButton>
+                </div>
+
+                <div className="mt-4 flex-1 space-y-2">
+                  {members.length > 0 ? (
+                    members.slice(0, 4).map((member) => (
+                      <div
+                        key={member.id}
+                        className="flex items-center gap-2 rounded-2xl border px-3 py-2"
+                        style={{
+                          borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                          background:
+                            "color-mix(in srgb, var(--th-bg-surface) 82%, var(--th-card-bg) 18%)",
+                        }}
+                      >
+                        <AgentAvatar agent={member} size={24} rounded="xl" />
+                        <span className="min-w-0 flex-1 truncate text-xs" style={{ color: "var(--th-text-primary)" }}>
+                          {localeName(locale, member)}
+                        </span>
+                        <span
+                          className="rounded-full px-2 py-0.5 text-[10px]"
+                          style={{
+                            background: "color-mix(in srgb, var(--th-bg-surface) 70%, transparent)",
+                            color: "var(--th-text-muted)",
+                          }}
+                        >
+                          {member.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <div
+                      className="rounded-2xl border border-dashed px-3 py-4 text-center text-xs"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)",
+                        color: "var(--th-text-muted)",
+                      }}
+                    >
+                      {tr("소속 에이전트 없음", "No agents assigned")}
+                    </div>
+                  )}
+
+                  {members.length > 4 ? (
+                    <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      +{members.length - 4} {tr("명 더 있음", "more members")}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div
+                  className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-3"
+                  style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}
+                >
+                  <div className="flex items-center gap-1.5">
                     <SurfaceActionButton
                       onClick={() => onMoveDept(index, -1)}
                       disabled={index === 0}
                       tone="neutral"
                       compact
-                      className="h-5 w-6 px-0 py-0"
+                      className="h-7 min-w-7 px-0 py-0"
                     >
                       ▲
                     </SurfaceActionButton>
@@ -122,93 +213,15 @@ export default function DepartmentsTab({
                       disabled={index === deptOrder.length - 1}
                       tone="neutral"
                       compact
-                      className="h-5 w-6 px-0 py-0"
+                      className="h-7 min-w-7 px-0 py-0"
                     >
                       ▼
                     </SurfaceActionButton>
                   </div>
 
-                  <div
-                    className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold"
-                    style={{ background: `${dept.color}22`, color: dept.color }}
-                  >
-                    {index + 1}
-                  </div>
-
-                  <span className="pt-1 text-2xl">{dept.icon}</span>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                        {localeName(locale, dept)}
-                      </span>
-                      <span className="inline-block h-3 w-3 rounded-full" style={{ background: dept.color }}></span>
-                      <span
-                        className="rounded-full px-2 py-0.5 text-xs"
-                        style={{ background: `${dept.color}22`, color: dept.color }}
-                      >
-                        {agentCountForDept} {tr("명", "agents")}
-                      </span>
-                    </div>
-                    {dept.description && (
-                      <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                        {dept.description}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {members.slice(0, 4).map((member) => (
-                      <div
-                        key={member.id}
-                        className="inline-flex min-w-0 items-center gap-2 rounded-full border px-2 py-1"
-                        style={{
-                          borderColor:
-                            "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                          background:
-                            "color-mix(in srgb, var(--th-bg-surface) 82%, var(--th-card-bg) 18%)",
-                        }}
-                      >
-                        <AgentAvatar agent={member} size={24} rounded="xl" />
-                        <span className="max-w-[7rem] truncate text-xs" style={{ color: "var(--th-text-primary)" }}>
-                          {localeName(locale, member)}
-                        </span>
-                      </div>
-                    ))}
-                    {members.length > 4 ? (
-                      <span
-                        className="rounded-full border px-2 py-1 text-xs"
-                        style={{
-                          borderColor:
-                            "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                          color: "var(--th-text-muted)",
-                        }}
-                      >
-                        +{members.length - 4}
-                      </span>
-                    ) : null}
-                    {members.length === 0 ? (
-                      <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        {tr("소속 에이전트 없음", "No agents assigned")}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3" style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}>
-                  <code className="rounded px-2 py-0.5 text-xs opacity-60" style={{ background: "var(--th-input-bg)" }}>
-                    {dept.id}
-                  </code>
-
-                  <SurfaceActionButton
-                    onClick={() => onEditDept(dept)}
-                    tone="neutral"
-                    className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100"
-                  >
-                    {tr("편집", "Edit")}
-                  </SurfaceActionButton>
+                  <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("드래그로 순서 변경", "Drag to reorder")}
+                  </span>
                 </div>
               </div>
             </SurfaceCard>

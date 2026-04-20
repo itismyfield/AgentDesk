@@ -33,8 +33,10 @@ import {
 import {
   SurfaceActionButton,
   SurfaceCard,
+  SurfaceMetricPill,
   SurfaceNotice,
   SurfaceSection,
+  SurfaceSubsection,
 } from "./common/SurfacePrimitives";
 
 interface OfficeViewProps {
@@ -98,6 +100,16 @@ function computeMeetingPresence(
   return result.length > 0 ? result : undefined;
 }
 
+function formatOfficeClock(language: UiLanguage): string {
+  const locale = language === "ko" ? "ko-KR" : "en-US";
+  return new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date());
+}
+
 export default function OfficeView({
   agents,
   departments,
@@ -117,6 +129,10 @@ export default function OfficeView({
     if (typeof window === "undefined") return false;
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [officeMode, setOfficeMode] = useState<"office" | "list" | "flow">("office");
+  const sceneSectionRef = useRef<HTMLDivElement | null>(null);
+  const railSectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const media = window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY);
@@ -212,6 +228,10 @@ export default function OfficeView({
     () => new Set(manualInterventionByAgent.keys()),
     [manualInterventionByAgent],
   );
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
+    [agents, selectedAgentId],
+  );
   dataRef.current = {
     departments,
     agents,
@@ -223,6 +243,29 @@ export default function OfficeView({
     activeIssueByAgent,
     blockedAgentIds,
   };
+
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (!agents.some((agent) => agent.id === selectedAgentId)) {
+      setSelectedAgentId(null);
+    }
+  }, [agents, selectedAgentId]);
+
+  const handleSelectAgent = useCallback((agent: Agent) => {
+    setSelectedAgentId(agent.id);
+    setOfficeMode("list");
+    onSelectAgent?.(agent);
+  }, [onSelectAgent]);
+
+  const handleModeChange = useCallback((mode: "office" | "list" | "flow") => {
+    setOfficeMode(mode);
+    if (mode === "flow") {
+      onNavigateToKanban?.();
+      return;
+    }
+    const target = mode === "office" ? sceneSectionRef.current : railSectionRef.current;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [onNavigateToKanban]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -272,11 +315,11 @@ export default function OfficeView({
   }, []);
 
   const cbRef = useRef<CallbackSnapshot>({
-    onSelectAgent: onSelectAgent ?? (() => {}),
+    onSelectAgent: handleSelectAgent,
     onSelectDepartment: onSelectDepartment ?? (() => {}),
   });
   cbRef.current = {
-    onSelectAgent: onSelectAgent ?? (() => {}),
+    onSelectAgent: handleSelectAgent,
     onSelectDepartment: onSelectDepartment ?? (() => {}),
   };
 
@@ -448,53 +491,194 @@ export default function OfficeView({
         ),
     [agents, manualInterventionByAgent, sceneRevision],
   );
+  const workingSeatCount = useMemo(
+    () => Array.from(seatStatusByAgent.values()).filter((status) => status === "working").length,
+    [seatStatusByAgent],
+  );
+  const reviewSeatCount = useMemo(
+    () => Array.from(seatStatusByAgent.values()).filter((status) => status === "review").length,
+    [seatStatusByAgent],
+  );
+  const manualCount = manualInterventionByAgent.size;
+  const liveClockLabel = useMemo(
+    () => formatOfficeClock(language),
+    [elapsedTick, language],
+  );
+  const selectedAgentLabel = selectedAgent?.alias || selectedAgent?.name_ko || selectedAgent?.name;
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col sm:flex-row sm:gap-3">
-      <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-        {/* Mobile: status-only Office Lite */}
-        <div className="sm:hidden">
-          <OfficeInsightPanel
-            agents={agents}
-            notifications={notifications}
-            auditLogs={auditLogs}
-            kanbanCards={kanbanCards}
-            onNavigateToKanban={onNavigateToKanban}
-            isKo={isKo}
-            onSelectAgent={onSelectAgent}
-          />
-          <MobileAgentStatusGrid
-            agents={agents}
-            isKo={isKo}
-            onSelectAgent={onSelectAgent}
-            manualInterventionByAgent={manualInterventionByAgent}
-            primaryCardByAgent={primaryCardByAgent}
-            seatStatusByAgent={seatStatusByAgent}
-          />
+    <div
+      className="mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
+      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+    >
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <h2 className="text-[1.65rem] font-semibold tracking-tight" style={{ color: "var(--th-text)" }}>
+              {isKo ? "오피스" : "Office"}
+            </h2>
+            <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+              {isKo
+                ? "에이전트가 지금 하고 있는 일을 공간적으로 확인합니다."
+                : "See what agents are working on in a spatial office view."}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+                background: "color-mix(in srgb, var(--th-badge-emerald-bg) 54%, var(--th-card-bg) 46%)",
+                color: "var(--th-text-primary)",
+              }}
+            >
+              <span className="h-2 w-2 rounded-full" style={{ background: "var(--th-accent-primary)" }} />
+              {`live · ${liveClockLabel}`}
+            </span>
+            <div
+              className="inline-flex items-center rounded-[14px] border p-1"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+              }}
+            >
+              <OfficeModeButton
+                active={officeMode === "office"}
+                onClick={() => handleModeChange("office")}
+              >
+                {isKo ? "오피스" : "Office"}
+              </OfficeModeButton>
+              <OfficeModeButton
+                active={officeMode === "list"}
+                onClick={() => handleModeChange("list")}
+              >
+                {isKo ? "리스트" : "List"}
+              </OfficeModeButton>
+              <OfficeModeButton
+                active={officeMode === "flow"}
+                disabled={!onNavigateToKanban}
+                onClick={() => handleModeChange("flow")}
+              >
+                {isKo ? "플로우" : "Flow"}
+              </OfficeModeButton>
+            </div>
+          </div>
         </div>
-        {/* Desktop: full Pixi office */}
-        <div className="relative hidden w-full min-h-full pb-40 sm:block">
-          <div ref={containerRef} className="w-full min-h-full" style={{ imageRendering: "pixelated" }} />
-          <OfficeManualWarningOverlay
-            entries={manualWarningEntries}
-            isKo={isKo}
-            onSelectAgent={onSelectAgent}
-          />
+
+        <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+          <div ref={sceneSectionRef} className="min-w-0">
+            <SurfaceCard
+              className="overflow-hidden rounded-[28px] p-0"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                background:
+                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 72%, #0d1420 28%) 0%, color-mix(in srgb, var(--th-bg-surface) 82%, #090d16 18%) 100%)",
+              }}
+            >
+              {isMobileLite ? (
+                <div className="px-3 pb-3 pt-4">
+                  <MobileAgentStatusGrid
+                    agents={agents}
+                    isKo={isKo}
+                    onSelectAgent={handleSelectAgent}
+                    manualInterventionByAgent={manualInterventionByAgent}
+                    primaryCardByAgent={primaryCardByAgent}
+                    seatStatusByAgent={seatStatusByAgent}
+                  />
+                </div>
+              ) : (
+                <div className="relative min-h-[28.75rem] overflow-hidden">
+                  <div ref={containerRef} className="min-h-[28.75rem] w-full" style={{ imageRendering: "pixelated" }} />
+                  <OfficeManualWarningOverlay
+                    entries={manualWarningEntries}
+                    isKo={isKo}
+                    onSelectAgent={handleSelectAgent}
+                  />
+                </div>
+              )}
+              <div
+                className="flex flex-wrap items-center gap-4 border-t px-4 py-3 text-[11px]"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
+                  color: "var(--th-text-muted)",
+                }}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-primary)" }} />
+                  {isKo ? "작업 중" : "Working"}
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-warn)" }} />
+                  {isKo ? "리뷰" : "Review"}
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-text-muted)" }} />
+                  {isKo ? "대기" : "Idle"}
+                </span>
+                {activeMeeting ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-info)" }} />
+                    {isKo ? `회의 · ${activeMeeting.agenda}` : `Meeting · ${activeMeeting.agenda}`}
+                  </span>
+                ) : null}
+                <span className="ml-auto text-right" style={{ color: "var(--th-text-faint)" }}>
+                  {selectedAgentLabel
+                    ? (isKo ? `${selectedAgentLabel} 상세 보기` : `${selectedAgentLabel} selected`)
+                    : (isKo ? "클릭해서 상세 보기" : "Click to inspect details")}
+                </span>
+              </div>
+            </SurfaceCard>
+          </div>
+
+          <div ref={railSectionRef} className="min-w-0">
+            <OfficeInsightPanel
+              agents={agents}
+              notifications={notifications}
+              auditLogs={auditLogs}
+              kanbanCards={kanbanCards}
+              onNavigateToKanban={onNavigateToKanban}
+              isKo={isKo}
+              onSelectAgent={handleSelectAgent}
+              selectedAgent={selectedAgent}
+              onClearSelectedAgent={() => setSelectedAgentId(null)}
+              activeMeeting={activeMeeting}
+              manualInterventionByAgent={manualInterventionByAgent}
+              primaryCardByAgent={primaryCardByAgent}
+              seatStatusByAgent={seatStatusByAgent}
+              docked
+            />
+          </div>
         </div>
-      </div>
-      <div className="hidden min-h-0 sm:block sm:h-full sm:w-[min(22rem,calc(100vw-1.5rem))] sm:shrink-0 sm:overflow-y-auto">
-        <OfficeInsightPanel
-          agents={agents}
-          notifications={notifications}
-          auditLogs={auditLogs}
-          kanbanCards={kanbanCards}
-          onNavigateToKanban={onNavigateToKanban}
-          isKo={isKo}
-          onSelectAgent={onSelectAgent}
-          docked
-        />
       </div>
     </div>
+  );
+}
+
+function OfficeModeButton({
+  active,
+  disabled = false,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-[10px] px-3 py-1.5 text-[12px] font-medium transition-colors"
+      style={{
+        background: active ? "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)" : "transparent",
+        color: active ? "var(--th-text)" : "var(--th-text-muted)",
+        opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -503,36 +687,40 @@ export default function OfficeView({
 function getSeatStatusMeta(
   status: OfficeSeatStatus,
   isKo: boolean,
-): { label: string; color: string; background: string; border: string } {
+): { label: string; accent: string; textColor: string; background: string; border: string } {
   switch (status) {
     case "working":
       return {
         label: isKo ? "작업 중" : "Working",
-        color: "var(--ok)",
-        background: "color-mix(in oklch, var(--ok) 12%, var(--bg-2) 88%)",
-        border: "color-mix(in oklch, var(--ok) 28%, var(--line) 72%)",
+        accent: "var(--th-accent-primary)",
+        textColor: "var(--th-text-primary)",
+        background: "color-mix(in srgb, var(--th-badge-emerald-bg) 62%, var(--th-card-bg) 38%)",
+        border: "color-mix(in srgb, var(--th-accent-primary) 22%, var(--th-border) 78%)",
       };
     case "review":
       return {
         label: isKo ? "검토 중" : "In review",
-        color: "var(--warn)",
-        background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
-        border: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
+        accent: "var(--th-accent-warn)",
+        textColor: "var(--th-accent-warn)",
+        background: "color-mix(in srgb, var(--th-badge-amber-bg) 62%, var(--th-card-bg) 38%)",
+        border: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
       };
     case "offline":
       return {
         label: isKo ? "오프라인" : "Offline",
-        color: "var(--fg-faint)",
-        background: "color-mix(in oklch, var(--fg-faint) 12%, var(--bg-2) 88%)",
-        border: "color-mix(in oklch, var(--fg-faint) 24%, var(--line) 76%)",
+        accent: "var(--th-text-muted)",
+        textColor: "var(--th-text-muted)",
+        background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+        border: "color-mix(in srgb, var(--th-border) 72%, transparent)",
       };
     case "idle":
     default:
       return {
         label: isKo ? "대기" : "Idle",
-        color: "var(--fg-muted)",
-        background: "color-mix(in oklch, var(--fg-muted) 12%, var(--bg-2) 88%)",
-        border: "color-mix(in oklch, var(--fg-muted) 24%, var(--line) 76%)",
+        accent: "var(--th-text-muted)",
+        textColor: "var(--th-text-muted)",
+        background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+        border: "color-mix(in srgb, var(--th-border) 72%, transparent)",
       };
   }
 }
@@ -572,6 +760,7 @@ function OfficeManualWarningOverlay({
     <div className="pointer-events-none absolute inset-0 z-10">
       {entries.map(({ agent, warning, position }) => {
         const isOpen = hoveredWarningId === warning.cardId || expandedWarningId === warning.cardId;
+        const agentLabel = agent.alias || agent.name_ko || agent.name;
         return (
           <div
             key={warning.cardId}
@@ -597,16 +786,16 @@ function OfficeManualWarningOverlay({
           >
           <button
             type="button"
-            className="relative flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm transition hover:scale-[1.04] focus:outline-none focus:ring-2"
+            className="relative inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors focus:outline-none focus:ring-2"
             style={{
-              color: "var(--warn)",
-              borderColor: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
-              background: "color-mix(in oklch, var(--warn) 14%, var(--bg-2) 86%)",
+              color: "var(--th-accent-warn)",
+              borderColor: "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)",
+              background: "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)",
             }}
             aria-label={
               isKo
-                ? `${agent.alias || agent.name_ko || agent.name} 수동 개입 경고`
-                : `${agent.alias || agent.name} manual intervention warning`
+                ? `${agentLabel} 수동 개입 경고`
+                : `${agentLabel} manual intervention warning`
             }
             aria-expanded={isOpen}
             onClick={() =>
@@ -617,39 +806,26 @@ function OfficeManualWarningOverlay({
               aria-hidden="true"
               className="absolute -bottom-1 left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 border-b border-r"
               style={{
-                borderColor: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
-                background: "color-mix(in oklch, var(--warn) 14%, var(--bg-2) 86%)",
+                borderColor: "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)",
+                background: "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)",
               }}
             />
-            <span aria-hidden="true">&lt;!&gt;</span>
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: "var(--th-accent-warn)" }}
+            />
+            <span>{isKo ? "수동" : "Manual"}</span>
           </button>
           {isOpen && (
-            <SurfaceCard
-              className="absolute bottom-[calc(100%+0.55rem)] left-1/2 z-10 w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-[22px] px-3 py-3 shadow-xl"
-              style={{
-                borderColor: "color-mix(in oklch, var(--warn) 26%, var(--line) 74%)",
-                background: "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)",
-              }}
-            >
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
-                {isKo ? "수동 개입" : "Manual intervention"}
-              </div>
-              <div className="mt-1 text-sm font-semibold" style={{ color: "var(--fg)" }}>
-                {warning.title}
-              </div>
-              <div
-                className="mt-2 break-words whitespace-pre-wrap text-xs leading-5"
-                style={{ color: "var(--fg-muted)" }}
-              >
-                {warning.reason
-                  ?? (isKo
-                    ? "구체 사유는 카드 상세에서 확인할 수 있습니다."
-                    : "Open the detail drawer to inspect the full reason.")}
-              </div>
-              <div className="mt-3 flex items-center justify-between gap-2">
-                <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
-                  {warning.issueNumber ? `#${warning.issueNumber}` : warning.status}
-                </span>
+            <SurfaceSubsection
+              title={warning.title}
+              description={
+                isKo
+                  ? `${agentLabel}에게 연결된 카드에서 수동 개입이 필요합니다.`
+                  : `Manual intervention is required for the card assigned to ${agentLabel}.`
+              }
+              actions={(
                 <SurfaceActionButton
                   tone="warn"
                   compact
@@ -658,8 +834,47 @@ function OfficeManualWarningOverlay({
                 >
                   {isKo ? "세부 보기" : "Open detail"}
                 </SurfaceActionButton>
+              )}
+              className="absolute bottom-[calc(100%+0.65rem)] left-1/2 z-10 w-[min(19rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-[24px] p-3 sm:p-3"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
+                background: "linear-gradient(180deg, color-mix(in srgb, var(--th-badge-amber-bg) 52%, var(--th-card-bg) 48%) 0%, color-mix(in srgb, var(--th-card-bg) 90%, transparent) 100%)",
+              }}
+            >
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span
+                    className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
+                    style={{
+                      color: "var(--th-accent-warn)",
+                      borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
+                      background: "color-mix(in srgb, var(--th-badge-amber-bg) 68%, var(--th-card-bg) 32%)",
+                    }}
+                  >
+                    {isKo ? "수동 개입" : "Manual intervention"}
+                  </span>
+                  <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    {warning.issueNumber ? `#${warning.issueNumber}` : warning.status}
+                  </span>
+                </div>
+                <SurfaceNotice tone="warn" compact className="items-start rounded-[18px]">
+                  <div className="text-[11px] leading-5">
+                    {isKo
+                      ? "카드 상세에서 원인과 후속 조치를 확인할 수 있습니다."
+                      : "Open the card detail to inspect the cause and next action."}
+                  </div>
+                </SurfaceNotice>
               </div>
-            </SurfaceCard>
+              <div
+                className="mt-3 break-words whitespace-pre-wrap text-xs leading-5"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {warning.reason
+                  ?? (isKo
+                    ? "구체 사유는 카드 상세에서 확인할 수 있습니다."
+                    : "Open the detail drawer to inspect the full reason.")}
+              </div>
+            </SurfaceSubsection>
           )}
           </div>
         );
@@ -716,16 +931,45 @@ function MobileAgentStatusGrid({
 
   return (
     <div className="mt-3 px-3 pb-6">
-      <SurfaceSection
-        eyebrow="Office Lite"
+      <SurfaceSubsection
         title={isKo ? "에이전트 현황" : "Agent Status"}
         description={
           isKo
             ? "수동 개입, 좌석 상태, 대표 작업을 모바일 카드로 빠르게 확인합니다."
             : "Review manual interventions, seat state, and the primary task in compact mobile cards."
         }
-        badge={isKo ? `${sorted.length}명` : `${sorted.length} agents`}
-        className="rounded-[30px] p-4 sm:p-5"
+        actions={(
+          <div className="flex flex-wrap gap-2">
+            <span
+              className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+                color: "var(--th-text-muted)",
+              }}
+            >
+              {isKo ? `${sorted.length}명` : `${sorted.length} agents`}
+            </span>
+            {manualCount > 0 && (
+              <span
+                className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)",
+                  background: "color-mix(in srgb, var(--th-badge-amber-bg) 60%, var(--th-card-bg) 40%)",
+                  color: "var(--th-accent-warn)",
+                }}
+              >
+                {isKo ? `경고 ${manualCount}` : `Warnings ${manualCount}`}
+              </span>
+            )}
+          </div>
+        )}
+        className="rounded-[28px] p-4"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-border) 66%, transparent)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        }}
       >
         {manualCount > 0 && (
           <SurfaceNotice tone="warn" compact className="mt-4">
@@ -736,12 +980,15 @@ function MobileAgentStatusGrid({
             </div>
           </SurfaceNotice>
         )}
-        <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="mt-4 grid grid-cols-1 gap-2.5 min-[520px]:grid-cols-2">
         {sorted.map((agent) => {
           const status = seatStatusByAgent.get(agent.id) ?? "idle";
           const statusMeta = getSeatStatusMeta(status, isKo);
           const manualIntervention = manualInterventionByAgent.get(agent.id) ?? null;
           const primaryCard = primaryCardByAgent.get(agent.id) ?? null;
+          const agentLabel = agent.alias || agent.name_ko || agent.name;
+          const sessionLabel =
+            agent.session_info && agent.session_info !== statusMeta.label ? agent.session_info : null;
           const preview = manualIntervention?.reason
             ? previewManualReason(manualIntervention.reason)
             : previewCardTitle(primaryCard?.title ?? null);
@@ -750,11 +997,11 @@ function MobileAgentStatusGrid({
           return (
             <SurfaceCard
               key={agent.id}
-              className="rounded-[24px] px-3 py-3 text-left"
+              className="rounded-[26px] px-3.5 py-3.5 text-left"
               style={{
                 background: manualIntervention
-                  ? "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)"
-                  : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                  ? "linear-gradient(180deg, color-mix(in srgb, var(--th-badge-amber-bg) 54%, var(--th-card-bg) 46%) 0%, color-mix(in srgb, var(--th-card-bg) 90%, transparent) 100%)"
+                  : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
                 borderColor: manualIntervention
                   ? "color-mix(in srgb, var(--th-accent-warn) 26%, var(--th-border) 74%)"
                   : "color-mix(in srgb, var(--th-border) 68%, transparent)",
@@ -762,38 +1009,64 @@ function MobileAgentStatusGrid({
             >
               <button type="button" onClick={() => onSelectAgent?.(agent)} className="w-full text-left">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="text-base">{agent.avatar_emoji}</span>
-                    <span className="truncate text-xs font-medium" style={{ color: "var(--th-text)" }}>
-                      {agent.alias || agent.name_ko || agent.name}
+                  <div className="flex min-w-0 items-start gap-2.5">
+                    <span
+                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border text-base"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                        background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+                      }}
+                    >
+                      {agent.avatar_emoji}
                     </span>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                        {agentLabel}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
+                          style={{
+                            color: statusMeta.textColor,
+                            background: statusMeta.background,
+                            border: `1px solid ${statusMeta.border}`,
+                          }}
+                        >
+                          <span
+                            className="h-1.5 w-1.5 rounded-full"
+                            style={{ background: statusMeta.accent }}
+                          />
+                          {statusMeta.label}
+                        </span>
+                        {sessionLabel && (
+                          <span
+                            className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium"
+                            style={{
+                              borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                              background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+                              color: "var(--th-text-muted)",
+                            }}
+                          >
+                            <span className="truncate">{sessionLabel}</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   {manualIntervention && (
                     <span
                       className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
                       style={{
-                        color: "var(--warn)",
-                        background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
+                        color: "var(--th-accent-warn)",
+                        background: "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)",
                       }}
                     >
                       {isKo ? "수동 개입" : "Manual"}
                     </span>
                   )}
                 </div>
-                <div className="mt-2 flex items-center gap-1.5">
-                  <span
-                    className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ background: statusMeta.color }}
-                  />
-                  <span
-                    className="truncate text-xs"
-                    style={{ color: statusMeta.color }}
-                  >
-                    {agent.session_info || statusMeta.label}
-                  </span>
-                </div>
                 {preview && (
-                  <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="mt-3 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
                     {preview}
                   </div>
                 )}
@@ -802,7 +1075,7 @@ function MobileAgentStatusGrid({
                     <span
                       className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
                       style={{
-                        color: statusMeta.color,
+                        color: statusMeta.textColor,
                         background: statusMeta.background,
                         border: `1px solid ${statusMeta.border}`,
                       }}
@@ -838,7 +1111,7 @@ function MobileAgentStatusGrid({
                     )}
                   >
                     <div className="min-w-0">
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-accent-warn)" }}>
                         {isKo ? "경고" : "Warning"}
                       </div>
                       <div className="mt-1 text-[11px] font-semibold leading-5" style={{ color: "var(--th-text)" }}>
@@ -871,7 +1144,7 @@ function MobileAgentStatusGrid({
           );
         })}
         </div>
-      </SurfaceSection>
+      </SurfaceSubsection>
     </div>
   );
 }

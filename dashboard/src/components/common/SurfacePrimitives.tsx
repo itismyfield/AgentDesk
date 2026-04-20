@@ -363,15 +363,12 @@ export function SurfaceMetricPill({
   );
 }
 
-interface SurfaceTabCardProps {
+interface SurfaceTabCardProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "title"> {
   title: string;
   description: string;
   count?: ReactNode;
   active?: boolean;
   tone?: SurfaceTone;
-  onClick?: () => void;
-  className?: string;
-  style?: CSSProperties;
 }
 
 export function SurfaceTabCard({
@@ -383,6 +380,7 @@ export function SurfaceTabCard({
   onClick,
   className,
   style,
+  ...buttonProps
 }: SurfaceTabCardProps) {
   const chrome = getToneChrome(tone);
 
@@ -390,6 +388,7 @@ export function SurfaceTabCard({
     <button
       type="button"
       onClick={onClick}
+      {...buttonProps}
       className={joinClasses(
         "w-full min-w-0 rounded-2xl border px-4 py-3 text-left transition-colors sm:w-auto sm:min-w-[180px]",
         className,
@@ -550,7 +549,7 @@ export function SurfaceListItem({
   );
 }
 
-interface SurfaceMetaBadgeProps {
+interface SurfaceMetaBadgeProps extends HTMLAttributes<HTMLSpanElement> {
   children: ReactNode;
   tone?: SurfaceTone;
   className?: string;
@@ -562,11 +561,13 @@ export function SurfaceMetaBadge({
   tone = "neutral",
   className,
   style,
+  ...rest
 }: SurfaceMetaBadgeProps) {
   const chrome = getToneChrome(tone);
 
   return (
     <span
+      {...rest}
       className={joinClasses(
         "inline-flex items-center rounded-full border px-2 py-1 text-[11px] leading-none",
         className,

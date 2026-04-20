@@ -1,6 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import type { Notification } from "../NotificationCenter";
-import type { Agent, AuditLogEntry, KanbanCard } from "../../types";
+import type { Agent, AuditLogEntry, KanbanCard, RoundTableMeeting } from "../../types";
 import { getAgentWarnings } from "../../agent-insights";
 import { getFontFamilyForText } from "../../lib/fonts";
 import AgentAvatar from "../AgentAvatar";
@@ -8,6 +8,10 @@ import {
   getProviderLevelColors,
   getProviderMeta,
 } from "../../app/providerTheme";
+import type {
+  OfficeManualIntervention,
+  OfficeSeatStatus,
+} from "./officeAgentState";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -15,7 +19,13 @@ import {
   SurfaceMetricPill,
   SurfaceNotice,
   SurfaceSection,
+  SurfaceSubsection,
 } from "../common/SurfacePrimitives";
+
+const SURFACE_FIELD_STYLE = {
+  background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+} as const;
 
 interface OfficeInsightPanelProps {
   agents: Agent[];
@@ -25,6 +35,12 @@ interface OfficeInsightPanelProps {
   onNavigateToKanban?: () => void;
   isKo: boolean;
   onSelectAgent?: (agent: Agent) => void;
+  selectedAgent?: Agent | null;
+  onClearSelectedAgent?: () => void;
+  activeMeeting?: RoundTableMeeting | null;
+  manualInterventionByAgent?: Map<string, OfficeManualIntervention>;
+  primaryCardByAgent?: Map<string, KanbanCard>;
+  seatStatusByAgent?: Map<string, OfficeSeatStatus>;
   docked?: boolean;
 }
 
@@ -60,6 +76,12 @@ export default function OfficeInsightPanel({
   onNavigateToKanban,
   isKo,
   onSelectAgent,
+  selectedAgent = null,
+  onClearSelectedAgent,
+  activeMeeting = null,
+  manualInterventionByAgent,
+  primaryCardByAgent,
+  seatStatusByAgent,
   docked = false,
 }: OfficeInsightPanelProps) {
   const [mobileExpanded, setMobileExpanded] = useState(false);
@@ -100,6 +122,8 @@ export default function OfficeInsightPanel({
     } catch { /* ignore */ }
   };
   const warningCount = agents.filter((agent) => getAgentWarnings(agent).length > 0).length;
+  const workingCount = Array.from(seatStatusByAgent?.values() ?? []).filter((status) => status === "working").length;
+  const meetingCount = activeMeeting ? 1 : 0;
   const warningAgents = agents
     .map((agent) => ({ agent, warnings: getAgentWarnings(agent) }))
     .filter((entry) => entry.warnings.length > 0);
@@ -128,14 +152,41 @@ export default function OfficeInsightPanel({
       : fallbackNotifications.length > 0
         ? fallbackNotifications
         : changeFallbackNotifications;
-  const rootClassName = docked
-    ? "relative z-20 w-full pointer-events-auto"
-    : "relative z-20 mb-3 px-3 pt-3 pointer-events-auto sm:absolute sm:left-auto sm:right-3 sm:top-3 sm:mb-0 sm:w-[min(22rem,calc(100vw-1.5rem))] sm:px-0 sm:pt-0";
   const sectionEyebrow = isKo ? "오피스 상황판" : "Office pulse";
   const sectionTitle = isKo ? "오피스 운영 신호" : "Office operations";
   const sectionDescription = isKo
     ? "리뷰, 완료, 열린 이슈, 경고 에이전트를 같은 표면에서 빠르게 확인합니다."
     : "Review, closed issues, open work, and warning agents from one surface.";
+  const selectedCard = selectedAgent ? primaryCardByAgent?.get(selectedAgent.id) ?? null : null;
+  const selectedManual = selectedAgent ? manualInterventionByAgent?.get(selectedAgent.id) ?? null : null;
+  const selectedSeatStatus = selectedAgent
+    ? seatStatusByAgent?.get(selectedAgent.id) ?? inferSeatStatus(selectedAgent)
+    : null;
+  const rootClassName = docked
+    ? "relative z-20 flex w-full flex-col gap-3 pointer-events-auto"
+    : "relative z-20 mb-3 flex flex-col gap-3 px-3 pt-3 pointer-events-auto sm:absolute sm:left-auto sm:right-3 sm:top-3 sm:mb-0 sm:w-[min(22rem,calc(100vw-1.5rem))] sm:px-0 sm:pt-0";
+  const heroSection = selectedAgent ? (
+    <SelectedAgentCard
+      agent={selectedAgent}
+      seatStatus={selectedSeatStatus}
+      selectedCard={selectedCard}
+      selectedManual={selectedManual}
+      activeMeeting={activeMeeting}
+      isKo={isKo}
+      onNavigateToKanban={onNavigateToKanban}
+      onClear={onClearSelectedAgent}
+    />
+  ) : (
+    <OfficeSummaryCard
+      reviewCount={reviewCount}
+      openIssueCount={openIssueCount}
+      warningCount={warningCount}
+      workingCount={workingCount}
+      meetingCount={meetingCount}
+      isKo={isKo}
+    />
+  );
+  const providerHealthCard = <ProviderHealthCard isKo={isKo} />;
   const situationBody = (
     <>
       <div className="mt-4 grid grid-cols-3 gap-2">
@@ -183,9 +234,12 @@ export default function OfficeInsightPanel({
 
   return (
     <div className={rootClassName}>
+      {heroSection}
+      {providerHealthCard}
+
       <div className="sm:hidden">
         <SurfaceSection
-          eyebrow={sectionEyebrow}
+          eyebrow={isKo ? "확장" : "Extension"}
           title={sectionTitle}
           description={sectionDescription}
           className="rounded-[24px] p-4"
@@ -266,7 +320,7 @@ export default function OfficeInsightPanel({
 
       <div className="hidden sm:flex sm:flex-col sm:gap-3">
         <SurfaceSection
-          eyebrow={sectionEyebrow}
+          eyebrow={isKo ? "확장" : "Extension"}
           title={sectionTitle}
           description={sectionDescription}
           className="rounded-[24px] p-4"
@@ -333,6 +387,232 @@ export default function OfficeInsightPanel({
   );
 }
 
+function inferSeatStatus(agent: Agent): OfficeSeatStatus {
+  if (agent.status === "offline") return "offline";
+  if (agent.status === "working") return "working";
+  return "idle";
+}
+
+function seatStatusLabel(status: OfficeSeatStatus | null, isKo: boolean): string {
+  switch (status) {
+    case "working":
+      return isKo ? "작업 중" : "Working";
+    case "review":
+      return isKo ? "리뷰 중" : "Review";
+    case "offline":
+      return isKo ? "오프라인" : "Offline";
+    case "idle":
+    default:
+      return isKo ? "대기" : "Idle";
+  }
+}
+
+function statusTone(status: OfficeSeatStatus | null): "neutral" | "info" | "success" | "warn" {
+  switch (status) {
+    case "working":
+      return "success";
+    case "review":
+      return "warn";
+    case "offline":
+      return "neutral";
+    case "idle":
+    default:
+      return "info";
+  }
+}
+
+function formatCompactNumber(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function SelectedAgentCard({
+  agent,
+  seatStatus,
+  selectedCard,
+  selectedManual,
+  activeMeeting,
+  isKo,
+  onNavigateToKanban,
+  onClear,
+}: {
+  agent: Agent;
+  seatStatus: OfficeSeatStatus | null;
+  selectedCard: KanbanCard | null;
+  selectedManual: OfficeManualIntervention | null;
+  activeMeeting: RoundTableMeeting | null;
+  isKo: boolean;
+  onNavigateToKanban?: () => void;
+  onClear?: () => void;
+}) {
+  const provider = getProviderMeta(agent.cli_provider ?? null);
+  const displayName = agent.alias || agent.name_ko || agent.name;
+  const departmentName = agent.department_name_ko || agent.department_name || (isKo ? "미배정" : "Unassigned");
+  const currentTask = selectedCard?.title || agent.session_info || (isKo ? "현재 작업 없음" : "No active task");
+
+  return (
+    <SurfaceSection
+      eyebrow={isKo ? "선택된 에이전트" : "Selected agent"}
+      title={displayName}
+      description={`${departmentName} · ${agent.role_id ?? provider.label}`}
+      className="rounded-[24px] p-4"
+      actions={(
+        <div className="flex items-center gap-2">
+          <SurfaceMetricPill
+            label={isKo ? "상태" : "Status"}
+            value={seatStatusLabel(seatStatus, isKo)}
+            tone={statusTone(seatStatus)}
+          />
+          <SurfaceActionButton tone="neutral" compact onClick={onClear}>
+            {isKo ? "닫기" : "Close"}
+          </SurfaceActionButton>
+        </div>
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${provider.color} 22%, var(--th-border) 78%)`,
+        background:
+          `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, ${provider.bg} 6%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)`,
+      }}
+    >
+      <div className="mt-2 flex items-start gap-3">
+        <AgentAvatar agent={agent} size={44} rounded="2xl" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
+              style={{
+                borderColor: provider.border,
+                background: provider.bg,
+                color: provider.color,
+              }}
+            >
+              {provider.label}
+            </span>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {agent.stats_tokens ? `${formatCompactNumber(agent.stats_tokens)} tokens` : (isKo ? "토큰 집계 대기" : "Token metrics pending")}
+            </span>
+          </div>
+          <div className="mt-3 rounded-2xl border px-3 py-3" style={SURFACE_FIELD_STYLE}>
+            <div className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-faint)" }}>
+              {isKo ? "지금 작업" : "Current work"}
+            </div>
+            <div className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-primary)" }}>
+              {currentTask}
+            </div>
+            {selectedCard?.github_issue_number ? (
+              <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                #{selectedCard.github_issue_number} · {selectedCard.github_repo ?? "GitHub"}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <SurfaceMetricPill
+          label={isKo ? "XP" : "XP"}
+          value={formatCompactNumber(agent.stats_xp)}
+          tone="accent"
+        />
+        <SurfaceMetricPill
+          label={isKo ? "작업 수" : "Tasks"}
+          value={String(agent.stats_tasks_done)}
+          tone="info"
+        />
+      </div>
+
+      {selectedManual ? (
+        <SurfaceNotice className="mt-3" tone="warn">
+          <div className="text-xs font-medium">
+            {isKo ? "수동 개입 필요" : "Manual intervention required"}
+          </div>
+          <div className="mt-1 text-xs leading-relaxed">
+            {selectedManual.reason || selectedManual.title}
+          </div>
+        </SurfaceNotice>
+      ) : null}
+
+      {activeMeeting ? (
+        <SurfaceNotice className="mt-3" tone="info">
+          <div className="text-xs font-medium">
+            {isKo ? "회의 진행 중" : "Meeting in progress"}
+          </div>
+          <div className="mt-1 text-xs leading-relaxed">
+            {activeMeeting.agenda}
+          </div>
+        </SurfaceNotice>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {selectedCard && onNavigateToKanban ? (
+          <SurfaceActionButton compact onClick={onNavigateToKanban}>
+            {isKo ? "칸반 열기" : "Open Kanban"}
+          </SurfaceActionButton>
+        ) : null}
+      </div>
+    </SurfaceSection>
+  );
+}
+
+function OfficeSummaryCard({
+  reviewCount,
+  openIssueCount,
+  warningCount,
+  workingCount,
+  meetingCount,
+  isKo,
+}: {
+  reviewCount: number;
+  openIssueCount: number;
+  warningCount: number;
+  workingCount: number;
+  meetingCount: number;
+  isKo: boolean;
+}) {
+  return (
+    <SurfaceSection
+      eyebrow={isKo ? "오피스" : "Office"}
+      title={isKo ? "오피스 운영 신호" : "Office pulse"}
+      description={isKo ? "선택된 에이전트가 없을 때 전체 상황을 먼저 보여줍니다." : "Show the room summary when no agent is selected."}
+      className="rounded-[24px] p-4"
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-accent-primary) 14%, var(--th-border) 86%)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-accent-primary-soft) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+      }}
+    >
+      <div className="mt-1 grid grid-cols-2 gap-2">
+        <SurfaceMetricPill label={isKo ? "작업 중" : "Working"} value={String(workingCount)} tone="success" />
+        <SurfaceMetricPill label={isKo ? "리뷰" : "Review"} value={String(reviewCount)} tone="warn" />
+        <SurfaceMetricPill label={isKo ? "열린 이슈" : "Open"} value={String(openIssueCount)} tone="info" />
+        <SurfaceMetricPill label={isKo ? "경고" : "Warnings"} value={String(warningCount)} tone={warningCount > 0 ? "warn" : "neutral"} />
+      </div>
+      <div className="mt-3 rounded-2xl border px-3 py-3" style={SURFACE_FIELD_STYLE}>
+        <div className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-faint)" }}>
+          {isKo ? "회의 상태" : "Meeting status"}
+        </div>
+        <div className="mt-1 text-sm" style={{ color: "var(--th-text-primary)" }}>
+          {meetingCount > 0 ? (isKo ? `${meetingCount}개 진행 중` : `${meetingCount} active`) : (isKo ? "진행 중인 회의 없음" : "No active meeting")}
+        </div>
+      </div>
+    </SurfaceSection>
+  );
+}
+
+function ProviderHealthCard({ isKo }: { isKo: boolean }) {
+  return (
+    <SurfaceSubsection
+      title={isKo ? "프로바이더 상태" : "Provider health"}
+      description={isKo ? "버킷 사용량과 stale 상태를 같은 톤으로 확인합니다." : "Check bucket utilization and stale telemetry in one place."}
+      className="rounded-[24px]"
+    >
+      <MiniRateLimitBar isKo={isKo} />
+    </SurfaceSubsection>
+  );
+}
+
 function InsightCard({
   title,
   count,
@@ -343,23 +623,24 @@ function InsightCard({
   children: ReactNode;
 }) {
   return (
-    <SurfaceCard
-      className="rounded-[24px] p-4"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-border) 66%, transparent)",
-        background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-      }}
-    >
-      <div className="flex items-center justify-between">
-        <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
-          {title}
-        </div>
-        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+    <SurfaceSubsection
+      title={title}
+      className="rounded-[24px]"
+      actions={(
+        <span
+          className="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+            background: "color-mix(in srgb, var(--th-card-bg) 82%, transparent)",
+            color: "var(--th-text-muted)",
+          }}
+        >
           {count}
         </span>
-      </div>
+      )}
+    >
       {children}
-    </SurfaceCard>
+    </SurfaceSubsection>
   );
 }
 
@@ -405,10 +686,11 @@ function WarningList({
   onSelectAgent?: (agent: Agent) => void;
 }) {
   return (
-    <SurfaceCard className="mt-3 p-3">
-      <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-        {isKo ? "문제 agent" : "Warning agents"}
-      </div>
+    <SurfaceSubsection
+      title={isKo ? "문제 agent" : "Warning agents"}
+      description={isKo ? "주의 신호가 있는 에이전트를 바로 열 수 있습니다." : "Open agents with active warning signals."}
+      className="mt-3"
+    >
       {items.length === 0 ? (
         <SurfaceNotice className="mt-2" compact>
           {isKo ? "현재 경고가 없습니다" : "No warnings right now"}
@@ -450,7 +732,7 @@ function WarningList({
           ))}
         </div>
       )}
-    </SurfaceCard>
+    </SurfaceSubsection>
   );
 }
 
@@ -507,13 +789,12 @@ interface ClosedIssueItem {
 function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[]; isKo: boolean; onClose: () => void }) {
   const repoShort = (repo: string) => repo.split("/").pop() || repo;
   return (
-    <SurfaceCard className="mt-3 p-3">
-      <div className="flex items-center justify-between">
-        <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-          {isKo ? `오늘 완료 (${issues.length})` : `Closed today (${issues.length})`}
-        </div>
-        <SurfaceActionButton tone="neutral" compact onClick={onClose}>✕</SurfaceActionButton>
-      </div>
+    <SurfaceSubsection
+      title={isKo ? "오늘 완료" : "Closed today"}
+      description={isKo ? "오늘 GitHub에서 닫힌 이슈를 빠르게 훑습니다." : "Quick scan of GitHub issues closed today."}
+      className="mt-3"
+      actions={<SurfaceActionButton tone="neutral" compact onClick={onClose}>✕</SurfaceActionButton>}
+    >
       {issues.length === 0 ? (
         <SurfaceNotice className="mt-2" compact>
           {isKo ? "오늘 완료된 이슈가 없습니다" : "No issues closed today"}
@@ -550,7 +831,7 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
           ))}
         </div>
       )}
-    </SurfaceCard>
+    </SurfaceSubsection>
   );
 }
 

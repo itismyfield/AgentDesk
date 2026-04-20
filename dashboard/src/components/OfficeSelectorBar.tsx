@@ -26,18 +26,25 @@ export default function OfficeSelectorBar({
 
   return (
     <div
-      className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto shrink-0"
+      className="flex items-center gap-1.5 overflow-x-auto px-4 py-2 shrink-0"
       style={{
-        borderBottom: "1px solid var(--th-card-border)",
-        background: "var(--th-bg-surface)",
+        borderBottom:
+          "1px solid color-mix(in srgb, var(--th-border) 68%, transparent)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 88%, transparent) 100%)",
       }}
     >
       <button
         onClick={() => onSelectOffice(null)}
-        className="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all"
+        className="whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium transition-all"
         style={
           selectedOfficeId === null
-            ? { background: "var(--th-accent-primary)", color: "white" }
+            ? {
+                background: "var(--th-accent-primary-soft)",
+                color: "var(--th-accent-primary)",
+                border:
+                  "1px solid color-mix(in srgb, var(--th-accent-primary) 28%, var(--th-border) 72%)",
+              }
             : inactiveButtonStyle
         }
       >
@@ -48,10 +55,14 @@ export default function OfficeSelectorBar({
         <button
           key={o.id}
           onClick={() => onSelectOffice(o.id)}
-          className="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1"
+          className="flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium transition-all"
           style={
             selectedOfficeId === o.id
-              ? { background: o.color }
+              ? {
+                  background: `color-mix(in srgb, ${o.color} 18%, var(--th-card-bg) 82%)`,
+                  color: o.color,
+                  border: `1px solid color-mix(in srgb, ${o.color} 28%, var(--th-border) 72%)`,
+                }
               : inactiveButtonStyle
           }
         >
@@ -74,10 +85,10 @@ export default function OfficeSelectorBar({
 
       <button
         onClick={onManageOffices}
-        className="ml-auto p-1.5 rounded-md transition-colors shrink-0"
+        className="ml-auto shrink-0 rounded-full p-1.5 transition-colors"
         style={{
           color: "var(--th-text-muted)",
-          background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+          background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
           border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
         }}
         title={isKo ? "오피스 관리" : "Manage Offices"}

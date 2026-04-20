@@ -1,3 +1,4 @@
+import { Check, Eye, Info, Search } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { CompanySettings, Agent } from "../types";
 import * as api from "../api";
@@ -8,14 +9,11 @@ import {
   writeLocalStorageValue,
 } from "../lib/useLocalStorage";
 import {
-  SettingsCallout,
-  SettingsCard,
-  SettingsEmptyState,
-  SettingsSection,
-  SettingsSubsection,
-} from "./common/SettingsPrimitives";
-import {
-  SurfaceSection,
+  SurfaceCallout as SettingsCallout,
+  SurfaceCard as SettingsCard,
+  SurfaceEmptyState as SettingsEmptyState,
+  SurfaceSection as SettingsSection,
+  SurfaceSubsection as SettingsSubsection,
 } from "./common/SurfacePrimitives";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
@@ -538,7 +536,7 @@ function readStoredSettingsPanel(): SettingsPanel {
   if (panelFromUrl) {
     return panelFromUrl;
   }
-  return readLocalStorageValue<SettingsPanel>(STORAGE_KEYS.settingsPanel, "general", {
+  return readLocalStorageValue<SettingsPanel>(STORAGE_KEYS.settingsPanel, "pipeline", {
     validate: (value): value is SettingsPanel => typeof value === "string" && isSettingsPanel(value),
     legacy: (raw) => (isSettingsPanel(raw) ? raw : null),
   });
@@ -721,36 +719,46 @@ function PanelNavButton({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       aria-controls={ariaControls}
-      className="w-full rounded-2xl border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-card-bg)]"
+      className="w-full rounded-xl px-2.5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-card-bg)]"
       style={{
-        borderColor: active
-          ? "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)"
-          : "color-mix(in srgb, var(--th-border) 72%, transparent)",
+        borderColor: "transparent",
         background: active
-          ? "color-mix(in srgb, var(--th-accent-primary-soft) 68%, transparent)"
-          : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+          ? "color-mix(in srgb, var(--th-overlay-medium) 92%, transparent)"
+          : "transparent",
       }}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            {title}
+      <div className="flex items-start gap-3">
+        <span
+          className="mt-1 h-2 w-2 shrink-0 rounded-full"
+          style={{
+            background: active ? "var(--th-accent-primary)" : "color-mix(in srgb, var(--th-text-muted) 50%, transparent)",
+          }}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div
+              className="text-sm font-semibold"
+              style={{ color: active ? "var(--th-accent-primary)" : "var(--th-text-heading)" }}
+            >
+              {title}
+            </div>
+            {count && (
+              <span
+                className="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                  background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                  color: active ? "var(--th-text)" : "var(--th-text-muted)",
+                }}
+              >
+                {count}
+              </span>
+            )}
           </div>
-          <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
             {detail}
           </div>
         </div>
-        {count && (
-          <span
-            className="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-              color: active ? "var(--th-text)" : "var(--th-text-muted)",
-            }}
-          >
-            {count}
-          </span>
-        )}
       </div>
     </button>
   );
@@ -870,7 +878,10 @@ function StorageSurfaceCard({
   return (
     <SettingsCard
       className="rounded-2xl p-4"
-      style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+      }}
     >
       <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
         {title}
@@ -878,7 +889,7 @@ function StorageSurfaceCard({
       <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
         {body}
       </p>
-      <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-secondary)" }}>
+      <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
         {footer}
       </div>
     </SettingsCard>
@@ -889,7 +900,10 @@ function AuditNoteCard({ note, isKo }: { note: AuditNote; isKo: boolean }) {
   return (
     <SettingsCard
       className="rounded-2xl p-4"
-      style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+      }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -909,7 +923,11 @@ function AuditNoteCard({ note, isKo }: { note: AuditNote; isKo: boolean }) {
           <span
             key={key}
             className="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px]"
-            style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+              background: "color-mix(in srgb, var(--th-overlay-medium) 84%, transparent)",
+              color: "var(--th-text-muted)",
+            }}
           >
             {key}
           </span>
@@ -1333,15 +1351,8 @@ export default function SettingsView({
   };
 
   const renderGeneralPanel = () => (
-    <SettingsSection
-      eyebrow={tr("일반", "General")}
-      title={tr("브랜드와 표시 환경", "Brand and display")}
-      description={tr(
-        "브랜드 정보와 화면 표시 옵션을 한 폼에서 저장합니다.",
-        "Save brand identity and display preferences in one form.",
-      )}
-    >
-      <form className="mt-5 space-y-5" onSubmit={handleSave} noValidate>
+    <div className="space-y-5">
+      <form className="space-y-5" onSubmit={handleSave} noValidate>
         <fieldset className="space-y-3">
           <legend className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
             {tr("브랜드 정보", "Brand identity")}
@@ -1487,7 +1498,6 @@ export default function SettingsView({
       </form>
 
       <SettingsSubsection
-        className="mt-5"
         title={tr("저장 경로", "Storage surfaces")}
         description={tr(
           "이 화면의 값이 어디에 저장되는지 먼저 보여줍니다. 저장면을 숨기면 운영자가 설정의 실제 영향 범위를 오해하게 됩니다.",
@@ -1529,24 +1539,17 @@ export default function SettingsView({
           />
         </div>
       </SettingsSubsection>
-    </SettingsSection>
+    </div>
   );
 
   const renderRuntimePanel = () => (
-    <SettingsSection
-      eyebrow={tr("런타임", "Runtime")}
-      title={tr("운영 리듬과 캐시", "Cadence and cache")}
-      description={tr(
-        "재시작 없이 바로 반영되는 값만 모았습니다.",
-        "Only the values that apply without restart are shown here.",
-      )}
-    >
+    <div className="space-y-4">
       {!rcLoaded ? (
-        <SettingsEmptyState className="mt-5 text-sm">
+        <SettingsEmptyState className="text-sm">
           {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
         </SettingsEmptyState>
       ) : (
-        <div className="mt-5 space-y-4">
+        <div className="space-y-4">
           <div className="flex flex-wrap gap-2">
             {CATEGORIES.map((category) => (
               <button
@@ -1648,7 +1651,7 @@ export default function SettingsView({
               >
                 {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 저장", "Save runtime")}
               </button>
-            )}
+              )}
           >
             <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
               {tr(
@@ -1659,7 +1662,7 @@ export default function SettingsView({
           </SettingsCallout>
         </div>
       )}
-    </SettingsSection>
+    </div>
   );
 
   const renderPipelineCategory = (categoryKey: keyof typeof SYSTEM_CATEGORY_META) => {
@@ -1791,22 +1794,14 @@ export default function SettingsView({
   };
 
   const renderPipelinePanel = () => (
-    <SettingsSection
-      eyebrow={tr("파이프라인", "Pipeline")}
-      title={tr("리뷰와 상태 전환 정책", "Review and transition policy")}
-      description={tr(
-        "개별 `kv_meta` 키로 저장되는 정책 값을 편집하고, 저장 레이어와 read-only 조건도 같이 노출합니다.",
-        "Edit policy values stored as individual `kv_meta` keys and expose storage-layer/read-only metadata alongside them.",
-      )}
-    >
+    <div className="space-y-5">
       {configEntries.length === 0 ? (
-        <SettingsEmptyState className="mt-5 text-sm">
+        <SettingsEmptyState className="text-sm">
           {tr("파이프라인 설정을 불러오는 중...", "Loading pipeline config...")}
         </SettingsEmptyState>
       ) : (
-        <div className="mt-5 space-y-5">
+        <div className="space-y-5">
           <SettingsCallout
-            className="mt-0"
             action={(
               <button
                 onClick={handleConfigSave}
@@ -1969,28 +1964,11 @@ export default function SettingsView({
           </div>
         </div>
       )}
-    </SettingsSection>
+    </div>
   );
 
   const renderOnboardingPanel = () => (
-    <SettingsSection
-      eyebrow={tr("온보딩", "Onboarding")}
-      title={tr("초기 연결과 기본 세팅", "Initial wiring and defaults")}
-      description={tr(
-        "Discord 연결, owner/provider, 기본 파이프라인 같은 첫 세팅은 전용 위저드에서 다시 수행합니다.",
-        "Re-run Discord wiring, owner/provider setup, and first-run defaults from the dedicated wizard.",
-      )}
-      actions={(
-        <button
-          onClick={openOnboarding}
-          className={secondaryActionClass}
-          style={secondaryActionStyle}
-        >
-          {tr("온보딩 다시 실행", "Re-run onboarding")}
-        </button>
-      )}
-    >
-      <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
+    <div className="grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
         <SettingsCard
           className="rounded-3xl p-5"
           style={{
@@ -2025,7 +2003,6 @@ export default function SettingsView({
           </div>
         </SettingsCard>
       </div>
-    </SettingsSection>
   );
 
   const renderActivePanel = () => {
@@ -2067,6 +2044,7 @@ export default function SettingsView({
             className={secondaryActionClass}
             style={secondaryActionStyle}
           >
+            <Eye size={12} />
             {tr("audit 노트", "Audit notes")}
           </button>
           <button
@@ -2075,6 +2053,7 @@ export default function SettingsView({
             className={primaryActionClass}
             style={primaryActionStyle}
           >
+            <Check size={12} />
             {configSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
           </button>
         </>
@@ -2089,6 +2068,7 @@ export default function SettingsView({
           className={primaryActionClass}
           style={primaryActionStyle}
         >
+          <Check size={12} />
           {rcSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
         </button>
       );
@@ -2101,156 +2081,150 @@ export default function SettingsView({
         className={primaryActionClass}
         style={primaryActionStyle}
       >
+        <Check size={12} />
         {saving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
       </button>
     );
   };
-  const renderHeaderMeta = () => {
-    if (activePanel === "pipeline") {
-      return (
-        <div className="mt-4 flex flex-wrap gap-2">
-          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
-            {tr(`키 ${visibleConfigEntries.length}개`, `${visibleConfigEntries.length} keys`)}
-          </span>
-          <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1 text-[11px] font-medium text-amber-100">
-            {tr(`live override ${pipelineLiveOverrideCount}개`, `${pipelineLiveOverrideCount} live overrides`)}
-          </span>
-          <span className="inline-flex items-center rounded-full border border-slate-400/30 bg-slate-400/10 px-3 py-1 text-[11px] font-medium text-slate-200">
-            {tr(`read only ${pipelineReadOnlyCount}개`, `${pipelineReadOnlyCount} read-only`)}
-          </span>
-          <span className="inline-flex items-center rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-[11px] font-medium text-sky-100">
-            {tr(`audit 노트 ${AUDIT_NOTES.length}개`, `${AUDIT_NOTES.length} audit notes`)}
-          </span>
-        </div>
-      );
-    }
-
-    if (activePanel === "runtime") {
-      return (
-        <div className="mt-4 flex flex-wrap gap-2">
-          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
-            {tr(`현재 카테고리 ${tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}`, `Current category ${tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}`)}
-          </span>
-          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: rcDirty ? "var(--th-text)" : "var(--th-text-muted)" }}>
-            {rcDirty ? tr("저장되지 않은 변경 있음", "Unsaved changes") : tr("모든 변경 저장됨", "All changes saved")}
-          </span>
-        </div>
-      );
-    }
-
-    if (activePanel === "general") {
-      return (
-        <div className="mt-4 flex flex-wrap gap-2">
-          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
-            {tr(`기본 필드 ${generalFieldCount}개`, `${generalFieldCount} base fields`)}
-          </span>
-          <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: companyDirty ? "var(--th-text)" : "var(--th-text-muted)" }}>
-            {companyDirty ? tr("변경 감지됨", "Changes detected") : tr("동기화됨", "In sync")}
-          </span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="mt-4 flex flex-wrap gap-2">
-        <span className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}>
-          {tr("Discord 연결과 초기 세팅 전용", "Dedicated to Discord wiring and first-run setup")}
-        </span>
+  const settingsInfoNotice = (
+    <div
+      className="flex items-start gap-3 rounded-[18px] border px-4 py-4 sm:px-5"
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+      }}
+    >
+      <div
+        className="grid h-7 w-7 shrink-0 place-items-center rounded-[10px]"
+        style={{
+          background: "var(--th-accent-primary-soft)",
+          color: "var(--th-accent-primary)",
+        }}
+      >
+        <Info size={14} />
       </div>
-    );
-  };
+      <div className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+        {tr("whitelist된 ", "Only whitelisted ")}
+        <code
+          className="rounded px-1.5 py-0.5 text-[12px]"
+          style={{
+            fontFamily: "var(--font-mono)",
+            color: "var(--th-text)",
+            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+          }}
+        >
+          kv_meta
+        </code>{" "}
+        {tr(
+          "키만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 그대로 보여줍니다.",
+          "keys are editable. Read-only items stay visible so the current state remains explicit.",
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div
-      className="mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
+      className="page fade-in mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <div className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+      <div className="page-header">
+        <div className="min-w-0">
+          <div className="page-title">{tr("설정", "Settings")}</div>
+          <div className="page-sub">
+            {tr(
+              "카탈로그에서 꺼내 쓰는 kv_meta 설정",
+              "Catalog-driven kv_meta configuration",
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">{renderHeaderActions()}</div>
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
         <aside className="min-w-0 md:sticky md:top-4 md:self-start">
-          <SettingsCard
-            className="rounded-[28px] p-4 sm:p-5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            }}
-          >
-            <div
-              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+          <div className="relative mb-3">
+            <Search
+              size={13}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2"
               style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("설정 그룹", "Settings groups")}
-            </div>
-            <div className="mt-2 text-lg font-semibold" style={{ color: "var(--th-text)" }}>
-              {tr("220px 그룹 내비", "220px group nav")}
-            </div>
-            <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "좌측에서 그룹을 고르고, 우측에서 실제 설정 카드와 저장 상태를 확인합니다.",
-                "Pick a group on the left, then inspect cards and save state on the right.",
-              )}
-            </p>
+            />
+            <input
+              type="search"
+              value={panelQuery}
+              onChange={(event) => setPanelQuery(event.target.value)}
+              placeholder={tr("설정 검색", "Search settings")}
+              className="w-full rounded-xl py-2.5 pl-9 pr-3 text-sm"
+              style={inputStyle}
+            />
+          </div>
 
-            <div className="mt-4">
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
-                {tr("검색", "Search")}
-              </label>
-              <input
-                type="search"
-                value={panelQuery}
-                onChange={(event) => setPanelQuery(event.target.value)}
-                placeholder={tr("그룹 이름 검색", "Search groups")}
-                className="mt-2 w-full rounded-2xl px-3 py-2.5 text-sm"
-                style={inputStyle}
-              />
-            </div>
-
-            <div className="mt-4 space-y-2">
-              {filteredNavItems.length > 0 ? (
-                filteredNavItems.map((item) => (
-                  <PanelNavButton
-                    key={item.id}
-                    id={`settings-tab-${item.id}`}
-                    active={activePanel === item.id}
-                    title={item.title}
-                    detail={item.detail}
-                    count={item.count}
-                    ariaControls="settings-panel-content"
-                    onClick={() => handlePanelChange(item.id)}
-                  />
-                ))
-              ) : (
-                <SettingsEmptyState className="text-sm">
-                  {tr("검색 결과가 없습니다.", "No groups match the search.")}
-                </SettingsEmptyState>
-              )}
-            </div>
-          </SettingsCard>
+          <div
+            role="tablist"
+            aria-label={tr("설정 패널", "Settings panels")}
+            className="space-y-1"
+          >
+            {filteredNavItems.length > 0 ? (
+              filteredNavItems.map((item) => (
+                <PanelNavButton
+                  key={item.id}
+                  id={`settings-tab-${item.id}`}
+                  active={activePanel === item.id}
+                  title={item.title}
+                  detail={item.detail}
+                  count={item.count}
+                  ariaControls="settings-panel-content"
+                  onClick={() => handlePanelChange(item.id)}
+                />
+              ))
+            ) : (
+              <SettingsEmptyState className="text-sm">
+                {tr("검색 결과가 없습니다.", "No groups match the search.")}
+              </SettingsEmptyState>
+            )}
+          </div>
         </aside>
 
         <div className="min-w-0 space-y-4">
-          <SurfaceSection
-            eyebrow={tr("설정", "Settings")}
-            title={activeNavItem.title}
-            description={activeNavItem.detail}
-            actions={renderHeaderActions()}
-            className="rounded-[28px] p-4 sm:p-5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            }}
-          >
-            {renderHeaderMeta()}
-          </SurfaceSection>
+          {settingsInfoNotice}
 
-          <div
+          <SettingsCard
             id="settings-panel-content"
             role="tabpanel"
             aria-labelledby={`settings-tab-${activePanel}`}
             tabIndex={-1}
-            className="min-w-0"
+            className="min-w-0 rounded-[28px] border px-4 py-4 outline-none sm:px-5 sm:py-5"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+              background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+            }}
           >
-            {renderActivePanel()}
-          </div>
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                  {activeNavItem.title}
+                </div>
+                <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  {activeNavItem.detail}
+                </div>
+              </div>
+              {activeNavItem.count ? (
+                <span
+                  className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                    background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                    color: "var(--th-text-muted)",
+                  }}
+                >
+                  {activeNavItem.count}
+                </span>
+              ) : null}
+            </div>
+            <div className="mt-5 min-w-0">
+              {renderActivePanel()}
+            </div>
+          </SettingsCard>
         </div>
       </div>
 

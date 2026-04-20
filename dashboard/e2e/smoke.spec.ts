@@ -915,6 +915,9 @@ test.describe("Dashboard smoke tests", () => {
 
   test("theme: dark/light toggle changes CSS variables", async ({ page }) => {
     await page.goto("/");
+    await page
+      .getByRole("button", { name: /^디자인 설정 열기$|^Open tweaks$/ })
+      .click();
     await page.getByRole("button", { name: /^다크$|^Dark$/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     const darkBg = await page.evaluate(() =>
@@ -938,6 +941,9 @@ test.describe("Dashboard smoke tests", () => {
   test("theme: auto mode responds to prefers-color-scheme", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/");
+    await page
+      .getByRole("button", { name: /^디자인 설정 열기$|^Open tweaks$/ })
+      .click();
     await page.getByRole("button", { name: /^자동$|^Auto$/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
@@ -1136,10 +1142,13 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/meetings");
 
     await expect(page.getByTestId("meetings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("meetings-page-timeline")).toBeVisible();
-    await expect(page.getByTestId("meetings-page-skills")).toBeVisible();
-    await expect(page.getByText(/로드밸런서 경고 플로우 리뷰/)).toBeVisible();
-    await expect(page.getByText(/office-warning-disclosure/)).toBeVisible();
+    const timelinePane = page.getByTestId("meetings-page-timeline");
+    const skillsPane = page.getByTestId("meetings-page-skills");
+
+    await expect(timelinePane).toBeVisible();
+    await expect(skillsPane).toBeVisible();
+    await expect(timelinePane.getByText(/로드밸런서 경고 플로우 리뷰/).first()).toBeVisible();
+    await expect(skillsPane.getByText(/office-warning-disclosure/).first()).toBeVisible();
   });
 
   test("meetings: mobile switches between timeline and skills", async ({ page }, testInfo) => {
@@ -1307,11 +1316,14 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
   });
 
-  test("settings button routes to settings page", async ({ page }, testInfo) => {
+  test("settings route is reachable from the desktop shell", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
     await page.goto("/home");
 
-    await page.getByRole("button", { name: /설정으로 이동|Open settings/ }).click();
+    await page
+      .getByTestId("app-sidebar-nav")
+      .getByRole("button", { name: /^설정$|^Settings$/ })
+      .click();
     await expect(page).toHaveURL(/\/settings(\?.*)?$/);
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });

@@ -1,4 +1,4 @@
-export type AppSectionId = "workspace" | "knowledge" | "me";
+export type AppSectionId = "workspace" | "extensions" | "me";
 
 export type AppRouteId =
   | "home"
@@ -33,7 +33,7 @@ export interface AppRouteSection {
 
 export const APP_ROUTE_SECTIONS: AppRouteSection[] = [
   { id: "workspace", labelKo: "워크스페이스", labelEn: "Workspace" },
-  { id: "knowledge", labelKo: "지식", labelEn: "Knowledge" },
+  { id: "extensions", labelKo: "확장", labelEn: "Extensions" },
   { id: "me", labelKo: "나", labelEn: "Me" },
 ];
 
@@ -49,7 +49,6 @@ export const APP_ROUTES: AppRouteEntry[] = [
     descriptionEn: "See today's overview and quick entry points.",
     paletteIcon: "🏠",
     shortcutKey: "1",
-    showOfficeSelector: true,
   },
   {
     id: "office",
@@ -64,16 +63,16 @@ export const APP_ROUTES: AppRouteEntry[] = [
     showOfficeSelector: true,
   },
   {
-    id: "agents",
-    path: "/agents",
+    id: "stats",
+    path: "/stats",
+    aliases: ["/pulse"],
     section: "workspace",
-    labelKo: "에이전트",
-    labelEn: "Agents",
-    descriptionKo: "에이전트, 부서, 파견 세션을 관리합니다.",
-    descriptionEn: "Manage agents, departments, and dispatched sessions.",
-    paletteIcon: "👥",
+    labelKo: "통계",
+    labelEn: "Stats",
+    descriptionKo: "운영 지표와 대시보드 위젯을 봅니다.",
+    descriptionEn: "Review operational metrics and dashboard widgets.",
+    paletteIcon: "📈",
     shortcutKey: "3",
-    showOfficeSelector: true,
   },
   {
     id: "kanban",
@@ -87,19 +86,6 @@ export const APP_ROUTES: AppRouteEntry[] = [
     shortcutKey: "4",
   },
   {
-    id: "stats",
-    path: "/stats",
-    aliases: ["/pulse"],
-    section: "workspace",
-    labelKo: "통계",
-    labelEn: "Stats",
-    descriptionKo: "운영 지표와 대시보드 위젯을 봅니다.",
-    descriptionEn: "Review operational metrics and dashboard widgets.",
-    paletteIcon: "📈",
-    shortcutKey: "5",
-    showOfficeSelector: true,
-  },
-  {
     id: "ops",
     path: "/ops",
     aliases: ["/control"],
@@ -109,12 +95,24 @@ export const APP_ROUTES: AppRouteEntry[] = [
     descriptionKo: "오피스와 운영 표면을 관리합니다.",
     descriptionEn: "Manage offices and operational surfaces.",
     paletteIcon: "🛠️",
+    shortcutKey: "5",
+  },
+  {
+    id: "agents",
+    path: "/agents",
+    section: "extensions",
+    labelKo: "에이전트",
+    labelEn: "Agents",
+    descriptionKo: "에이전트, 부서, 파견 세션을 관리합니다.",
+    descriptionEn: "Manage agents, departments, and dispatched sessions.",
+    paletteIcon: "👥",
     shortcutKey: "6",
+    showOfficeSelector: true,
   },
   {
     id: "meetings",
     path: "/meetings",
-    section: "knowledge",
+    section: "extensions",
     labelKo: "회의",
     labelEn: "Meetings",
     descriptionKo: "회의 기록과 후속 이슈를 정리합니다.",
@@ -125,7 +123,7 @@ export const APP_ROUTES: AppRouteEntry[] = [
   {
     id: "achievements",
     path: "/achievements",
-    section: "knowledge",
+    section: "me",
     labelKo: "업적",
     labelEn: "Achievements",
     descriptionKo: "성과와 랭킹 흐름을 확인합니다.",
