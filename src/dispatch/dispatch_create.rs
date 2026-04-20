@@ -1647,6 +1647,7 @@ mod tests {
     }
 
     async fn pg_default_pipeline(pool: &PgPool) -> crate::pipeline::PipelineConfig {
+        crate::pipeline::ensure_loaded();
         crate::pipeline::resolve_for_card_pg(pool, None, None).await
     }
 
