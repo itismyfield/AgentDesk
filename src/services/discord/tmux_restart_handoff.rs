@@ -8,6 +8,60 @@ use crate::utils::format::tail_with_ellipsis;
 
 use super::SharedData;
 
+fn seed_restart_handoff_session_metadata(
+    sessions: &mut std::collections::HashMap<ChannelId, super::DiscordSession>,
+    channel_id: ChannelId,
+    state: &super::inflight::InflightTurnState,
+) -> bool {
+    let Some(channel_name) = state
+        .channel_name
+        .as_ref()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+
+    let session = sessions
+        .entry(channel_id)
+        .or_insert_with(|| super::DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(channel_id.get()),
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: super::runtime_store::load_generation(),
+            assistant_turns: 0,
+        });
+
+    let mut changed = false;
+    if session
+        .channel_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_none()
+    {
+        session.channel_name = Some(channel_name);
+        changed = true;
+    }
+    if session.channel_id.is_none() {
+        session.channel_id = Some(channel_id.get());
+        changed = true;
+    }
+    session.last_active = tokio::time::Instant::now();
+    changed
+}
+
 fn build_restart_handoff_context(
     state: &super::inflight::InflightTurnState,
     best_response: &str,
@@ -204,6 +258,18 @@ pub(super) async fn start_restart_handoff_from_state(
 
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 
+    let seeded_channel_name = {
+        let mut data = shared.core.lock().await;
+        seed_restart_handoff_session_metadata(&mut data.sessions, channel_id, &state)
+    };
+    if seeded_channel_name {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: seeded session metadata before restart handoff for channel {}",
+            channel_id.get()
+        );
+    }
+
     let author_id = serenity::UserId::new(1);
     let mut started_immediately = false;
     if let (Some(ctx), Some(token)) = (
@@ -343,10 +409,13 @@ pub(super) async fn resume_aborted_restart_turn(
 mod tests {
     use super::{
         RestartHandoffScope, build_restart_handoff_session_key, resolve_restart_handoff_scope,
+        seed_restart_handoff_session_metadata,
     };
     use crate::config::Config;
+    use crate::services::discord::DiscordSession;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
 
     fn sample_inflight_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -421,6 +490,56 @@ mod tests {
             build_restart_handoff_session_key(&state, "token-hash", &ProviderKind::Claude);
 
         assert_eq!(resolved.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn restart_handoff_seeds_channel_name_into_missing_session() {
+        let state = sample_inflight_state();
+        let mut sessions = std::collections::HashMap::new();
+
+        let changed = seed_restart_handoff_session_metadata(
+            &mut sessions,
+            ChannelId::new(state.channel_id),
+            &state,
+        );
+
+        assert!(changed);
+        let seeded = sessions.get(&ChannelId::new(state.channel_id)).unwrap();
+        assert_eq!(seeded.channel_name.as_deref(), Some("adk-cc"));
+        assert_eq!(seeded.channel_id, Some(state.channel_id));
+    }
+
+    #[test]
+    fn restart_handoff_preserves_existing_session_channel_name() {
+        let state = sample_inflight_state();
+        let channel_id = ChannelId::new(state.channel_id);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(state.channel_id),
+                channel_name: Some("already-set".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+                assistant_turns: 0,
+            },
+        );
+
+        let changed = seed_restart_handoff_session_metadata(&mut sessions, channel_id, &state);
+
+        assert!(!changed);
+        let seeded = sessions.get(&channel_id).unwrap();
+        assert_eq!(seeded.channel_name.as_deref(), Some("already-set"));
     }
 
     #[test]
