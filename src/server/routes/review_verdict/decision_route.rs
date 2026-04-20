@@ -30,8 +30,8 @@ pub(crate) fn clear_test_worktree_commit_override() {
     }
 }
 
-fn current_issue_worktree_commit(
-    db: &crate::db::Db,
+async fn current_issue_worktree_commit(
+    pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     issue_num: i64,
     context: Option<&serde_json::Value>,
@@ -45,7 +45,16 @@ fn current_issue_worktree_commit(
         }
     }
 
-    match crate::dispatch::resolve_card_worktree(db, card_id, context) {
+    let Some(pool) = pg_pool else {
+        tracing::warn!(
+            "[review-decision] current_issue_worktree_commit: card {} issue #{}: postgres pool unavailable",
+            card_id,
+            issue_num
+        );
+        return None;
+    };
+
+    match crate::dispatch::resolve_card_worktree(pool, card_id, context).await {
         Ok(Some((_worktree_path, _branch, commit))) => Some(commit),
         Ok(None) => None,
         Err(err) => {
@@ -444,11 +453,12 @@ pub async fn submit_review_decision(
                 if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
                 {
                     let current_commit = current_issue_worktree_commit(
-                        &state.db,
+                        state.engine.pg_pool(),
                         &body.card_id,
                         issue_num,
                         last_review_context.as_ref(),
-                    );
+                    )
+                    .await;
                     if let Some(ref cur) = current_commit {
                         let differs = cur != prev_commit;
                         if differs {
@@ -636,29 +646,42 @@ pub async fn submit_review_decision(
                             "[Rework] {}",
                             card_title.as_deref().unwrap_or(&body.card_id)
                         );
-                        match crate::dispatch::create_dispatch_core(
-                            &state.db,
-                            &body.card_id,
-                            agent_id,
-                            "rework",
-                            &rework_title,
-                            &json!({}),
-                        ) {
-                            Ok((dispatch_id, _, _reused)) => {
-                                tracing::info!(
-                                    "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
-                                    body.card_id,
-                                    dispatch_id
-                                );
+                        if let Some(pg_pool) = state.engine.pg_pool() {
+                            match crate::dispatch::create_dispatch_core(
+                                pg_pool,
+                                &body.card_id,
+                                agent_id,
+                                "rework",
+                                &rework_title,
+                                &json!({}),
+                            )
+                            .await
+                            {
+                                Ok((dispatch_id, _, _reused)) => {
+                                    tracing::info!(
+                                        "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
+                                        body.card_id,
+                                        dispatch_id
+                                    );
+                                }
+                                Err(e) => {
+                                    accept_failures
+                                        .push(format!("rework dispatch creation failed: {e}"));
+                                    tracing::warn!(
+                                        "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
+                                        body.card_id
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                accept_failures
-                                    .push(format!("rework dispatch creation failed: {e}"));
-                                tracing::warn!(
-                                    "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
-                                    body.card_id
-                                );
-                            }
+                        } else {
+                            accept_failures.push(
+                                "rework dispatch creation failed: postgres pool required"
+                                    .to_string(),
+                            );
+                            tracing::warn!(
+                                "[review-decision] #195 Rework dispatch creation failed for card {}: postgres pool required",
+                                body.card_id
+                            );
                         }
                     } else {
                         accept_failures.push(format!(
@@ -931,7 +954,7 @@ pub async fn submit_review_decision(
             spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
 
             // #229: Cancel stale pending/dispatched review dispatches for this card.
-            // Without this, the dedup guard in create_dispatch_core blocks
+            // Without this, the dispatch-core dedup guard blocks
             // OnReviewEnter from creating a fresh review dispatch after dispute.
             if let Ok(conn) = state.db.lock() {
                 let mut stmt = conn

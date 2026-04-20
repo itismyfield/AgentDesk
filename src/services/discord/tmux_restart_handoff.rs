@@ -4,7 +4,6 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
-use crate::utils::format::tail_with_ellipsis;
 
 use super::SharedData;
 
@@ -60,23 +59,6 @@ fn seed_restart_handoff_session_metadata(
     }
     session.last_active = tokio::time::Instant::now();
     changed
-}
-
-fn build_restart_handoff_context(
-    state: &super::inflight::InflightTurnState,
-    best_response: &str,
-) -> String {
-    let partial = best_response.trim();
-    let partial_context = if partial.is_empty() {
-        "(재시작 전까지 전달된 partial 응답 없음)".to_string()
-    } else {
-        tail_with_ellipsis(partial, 1200)
-    };
-    format!(
-        "재시작 중 기존 tmux 세션이 종료되어 동일 turn에 재연결하지 못했습니다.\n\n원래 사용자 요청:\n{}\n\n재시작 전 partial 응답:\n{}",
-        state.user_text.trim(),
-        partial_context,
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,7 +203,7 @@ pub(super) async fn start_restart_handoff_from_state(
     state: super::inflight::InflightTurnState,
     best_response: &str,
 ) -> bool {
-    let stale_text = super::turn_bridge::planned_restart_inflight_message(best_response);
+    let stale_text = super::turn_bridge::stale_inflight_message(best_response);
     let _ = super::formatting::replace_long_message_raw(
         http,
         channel_id,
@@ -230,31 +212,6 @@ pub(super) async fn start_restart_handoff_from_state(
         shared,
     )
     .await;
-
-    let context = build_restart_handoff_context(&state, best_response);
-    let handoff_prompt = format!(
-        "dcserver가 재시작되었습니다. 재시작 전 작업의 후속 조치를 이어서 진행해주세요.\n\n## 재시작 전 컨텍스트\n{}\n\n## 요청 사항\n재시작 중 중단된 응답을 이어서 마무리",
-        context
-    );
-    let placeholder_id = match channel_id
-        .send_message(
-            http,
-            serenity::CreateMessage::new()
-                .content("📎 **Post-restart handoff** — 재시작 후속 작업을 자동으로 이어받습니다."),
-        )
-        .await
-    {
-        Ok(msg) => msg.id,
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ failed to send watcher-handoff placeholder for channel {}: {}",
-                channel_id.get(),
-                e
-            );
-            serenity::MessageId::new(state.current_msg_id)
-        }
-    };
 
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 
@@ -265,83 +222,16 @@ pub(super) async fn start_restart_handoff_from_state(
     if seeded_channel_name {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] ↻ watcher death recovery: seeded session metadata before restart handoff for channel {}",
+            "  [{ts}] ↻ watcher death recovery: seeded session metadata after interrupted restart cleanup for channel {}",
             channel_id.get()
         );
     }
 
-    let author_id = serenity::UserId::new(1);
-    let mut started_immediately = false;
-    if let (Some(ctx), Some(token)) = (
-        shared.cached_serenity_ctx.get(),
-        shared.cached_bot_token.get(),
-    ) {
-        match super::router::handle_text_message(
-            ctx,
-            channel_id,
-            placeholder_id,
-            author_id,
-            "system",
-            &handoff_prompt,
-            shared,
-            token,
-            true,
-            false,
-            false,
-            false,
-            None,
-            false,
-            None,
-            // Watcher death handoff: synthetic system-initiated turn that
-            // owns its own placeholder; race-handler delete behavior
-            // matches the legacy foreground path.
-            super::router::TurnKind::Foreground,
-        )
-        .await
-        {
-            Ok(()) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ watcher death recovery: started immediate handoff turn for channel {}",
-                    channel_id.get()
-                );
-                started_immediately = true;
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚠ watcher death recovery: immediate handoff start failed for channel {}: {}",
-                    channel_id.get(),
-                    e
-                );
-            }
-        }
-    }
-
-    if !started_immediately {
-        super::mailbox_enqueue_intervention(
-            shared,
-            provider_kind,
-            channel_id,
-            super::Intervention {
-                author_id,
-                message_id: placeholder_id,
-                source_message_ids: vec![placeholder_id],
-                text: handoff_prompt,
-                mode: super::InterventionMode::Soft,
-                created_at: std::time::Instant::now(),
-                reply_context: None,
-                has_reply_boundary: false,
-                merge_consecutive: false,
-            },
-        )
-        .await;
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
-            channel_id.get()
-        );
-    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ watcher death recovery: suppressed auto post-restart handoff for channel {}",
+        channel_id.get()
+    );
 
     super::inflight::clear_inflight_state(provider_kind, channel_id.get());
     true

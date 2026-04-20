@@ -93,7 +93,7 @@ pub fn register_globals_with_supervisor_and_pg(
     http_ops::register_http_ops(ctx)?;
 
     // ── agentdesk.dispatch ────────────────────────────────────────
-    dispatch_ops::register_dispatch_ops(ctx, db.clone(), pg_pool.clone())?;
+    dispatch_ops::register_dispatch_ops(ctx, pg_pool.clone())?;
 
     // ── agentdesk.kanban ────────────────────────────────────────
     kanban_ops::register_kanban_ops(ctx, db.clone(), pg_pool.clone())?;

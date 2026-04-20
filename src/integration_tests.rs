@@ -1514,7 +1514,7 @@ mod tests {
         seed_agent(&db);
         seed_card(&db, "card-s2", "review");
 
-        let r1 = dispatch::create_dispatch_core(
+        let r1 = dispatch::create_dispatch_core_sqlite_test(
             &db,
             "card-s2",
             "agent-1",
@@ -1524,7 +1524,7 @@ mod tests {
         );
         assert!(r1.is_ok(), "first review-decision should succeed");
 
-        let r2 = dispatch::create_dispatch_core(
+        let r2 = dispatch::create_dispatch_core_sqlite_test(
             &db,
             "card-s2",
             "agent-1",
@@ -2539,7 +2539,7 @@ mod tests {
     // ── Scenario 6: Dispatch roundtrip — create → complete_dispatch → PM gate → review ──
     //
     // Tests the full dispatch lifecycle using the canonical completion path:
-    // 1. dispatch::create_dispatch_core creates a pending dispatch
+    // 1. dispatch-core helper creates a pending dispatch
     // 2. dispatch::complete_dispatch completes via the same path as PATCH /api/dispatches/:id
     //    (DB update → OnDispatchCompleted → drain transitions → fire_transition_hooks)
     // 3. PM gate passes (no DoD, no duration check) → card transitions to review
@@ -2554,7 +2554,7 @@ mod tests {
         seed_card(&db, "card-s6", "in_progress");
 
         // Step 1: Create implementation dispatch via canonical path
-        let (dispatch_id, _, _) = dispatch::create_dispatch_core(
+        let (dispatch_id, _, _) = dispatch::create_dispatch_core_sqlite_test(
             &db,
             "card-s6",
             "agent-1",
@@ -2644,7 +2644,7 @@ mod tests {
         seed_agent(&db);
         seed_card(&db, "card-s6b", "in_progress");
 
-        let (dispatch_id, _, _) = dispatch::create_dispatch_core(
+        let (dispatch_id, _, _) = dispatch::create_dispatch_core_sqlite_test(
             &db,
             "card-s6b",
             "agent-1",
@@ -3347,8 +3347,8 @@ mod tests {
             "default pipeline kickoff must be 'in_progress' (#255: requested is preflight)"
         );
 
-        // Create dispatch via create_dispatch_core_with_id — should use card's effective pipeline
-        let result = dispatch::create_dispatch_core_with_id(
+        // Create dispatch via sqlite dispatch-core-with-id helper — should use card's effective pipeline
+        let result = dispatch::create_dispatch_core_with_id_sqlite_test(
             &db,
             "d-s7-new",
             "card-s7",
@@ -3370,7 +3370,7 @@ mod tests {
             "dispatch must use card's effective pipeline kickoff"
         );
 
-        // Also test create_dispatch_core (the non-ID path)
+        // Also test sqlite dispatch-core (the non-ID path)
         {
             let conn = db.lock().unwrap();
             conn.execute(
@@ -3384,7 +3384,7 @@ mod tests {
                 [],
             ).unwrap();
         }
-        let result2 = dispatch::create_dispatch_core(
+        let result2 = dispatch::create_dispatch_core_sqlite_test(
             &db,
             "card-s7b",
             "agent-1",
@@ -3394,13 +3394,13 @@ mod tests {
         );
         assert!(
             result2.is_ok(),
-            "create_dispatch_core should succeed: {:?}",
+            "dispatch-core helper should succeed: {:?}",
             result2.err()
         );
         assert_eq!(
             get_card_status(&db, "card-s7b"),
             "in_progress",
-            "create_dispatch_core must also use card's effective pipeline kickoff"
+            "dispatch-core helper must also use card's effective pipeline kickoff"
         );
     }
 
@@ -3710,7 +3710,7 @@ mod tests {
             ).unwrap();
         }
 
-        let result_a = dispatch::create_dispatch_core_with_id(
+        let result_a = dispatch::create_dispatch_core_with_id_sqlite_test(
             &db,
             "d-multi-a",
             "card-multi-a",
@@ -3745,7 +3745,7 @@ mod tests {
             ).unwrap();
         }
 
-        let result_b = dispatch::create_dispatch_core_with_id(
+        let result_b = dispatch::create_dispatch_core_with_id_sqlite_test(
             &db,
             "d-multi-b",
             "card-multi-b",
@@ -6385,7 +6385,7 @@ mod tests {
         }
 
         // Seed a completed e2e-test dispatch with a "pass" verdict directly
-        // in the DB — create_dispatch_core requires a resolvable worktree,
+        // in the DB — the dispatch-core helper requires a resolvable worktree,
         // which we don't need here. Firing OnDispatchCompleted manually
         // triggers deploy-pipeline.onDispatchCompleted, which calls
         // advancePipelineStage and hits the counter-stage skip gate.

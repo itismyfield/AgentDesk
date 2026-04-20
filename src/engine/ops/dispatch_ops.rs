@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
@@ -9,17 +8,12 @@ use sqlx::{PgPool, Row as SqlxRow};
 // Creates a task_dispatch row + updates kanban card to "requested".
 // Discord notification is handled by posting to the local /api/send endpoint.
 
-pub(super) fn register_dispatch_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Db,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
     // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title, context_json) → json_string
     // Synchronous DB INSERT — no deferred intent.
-    let db_d = db.clone();
     let pg_create = pg_pool.clone();
     dispatch_obj.set(
         "__create_sync",
@@ -32,21 +26,20 @@ pub(super) fn register_dispatch_ops<'js>(
                       title: String,
                       context_json: String|
                       -> String {
-                    if pg_create.is_some() {
-                        // TODO(#839 phase C): `dispatch.create` still depends on sqlite-only
-                        // dispatch-layer helpers (`create_dispatch_core*`,
-                        // `build_review_context`, attached-intent transactions).
-                        // Porting it cleanly requires lifting those invariants to PG first.
+                    match pg_create.as_ref() {
+                        Some(pool) => dispatch_create_sync(
+                            pool,
+                            &card_id,
+                            &agent_id,
+                            &dispatch_type,
+                            &title,
+                            &context_json,
+                        ),
+                        None => {
+                            r#"{"error":"postgres pool required for dispatch.create in JS hook"}"#
+                                .to_string()
+                        }
                     }
-                    dispatch_create_sync(
-                        &db_d,
-                        pg_create.as_ref(),
-                        &card_id,
-                        &agent_id,
-                        &dispatch_type,
-                        &title,
-                        &context_json,
-                    )
                 },
             ),
         )?,
@@ -54,7 +47,6 @@ pub(super) fn register_dispatch_ops<'js>(
 
     // __mark_failed_raw(dispatch_id, reason) → json_string
     // Marks a dispatch as failed. Used by timeout handlers.
-    let db_mf = db.clone();
     let pg_mf = pg_pool.clone();
     dispatch_obj.set(
         "__mark_failed_raw",
@@ -72,30 +64,13 @@ pub(super) fn register_dispatch_ops<'js>(
                         false,
                     );
                 }
-                let conn = match db_mf.separate_conn() {
-                    Ok(c) => c,
-                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-                };
-                let reason_json = serde_json::json!({ "reason": reason });
-                match crate::dispatch::set_dispatch_status_on_conn(
-                    &conn,
-                    &dispatch_id,
-                    "failed",
-                    Some(&reason_json),
-                    "js_dispatch_mark_failed_raw",
-                    Some(&["pending", "dispatched"]),
-                    false,
-                ) {
-                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-                }
+                r#"{"error":"postgres pool required for dispatch.markFailed"}"#.to_string()
             },
         )?,
     )?;
 
     // __mark_completed_raw(dispatch_id, result_json) → json_string
     // Marks a dispatch as completed. Used by orphan recovery.
-    let db_mc = db.clone();
     let pg_mc = pg_pool.clone();
     dispatch_obj.set(
         "__mark_completed_raw",
@@ -114,31 +89,13 @@ pub(super) fn register_dispatch_ops<'js>(
                         true,
                     );
                 }
-                let conn = match db_mc.separate_conn() {
-                    Ok(c) => c,
-                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-                };
-                let parsed_result = serde_json::from_str::<serde_json::Value>(&result_json)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw_result": result_json }));
-                match crate::dispatch::set_dispatch_status_on_conn(
-                    &conn,
-                    &dispatch_id,
-                    "completed",
-                    Some(&parsed_result),
-                    "js_dispatch_mark_completed_raw",
-                    Some(&["pending", "dispatched"]),
-                    true,
-                ) {
-                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-                }
+                r#"{"error":"postgres pool required for dispatch.markCompleted"}"#.to_string()
             },
         )?,
     )?;
 
     // __has_active_work_raw(card_id) → json_string {"count":N}
     // Checks if a card has active implementation/rework dispatches.
-    let db_aw = db.clone();
     let pg_aw = pg_pool.clone();
     dispatch_obj.set(
         "__has_active_work_raw",
@@ -146,26 +103,12 @@ pub(super) fn register_dispatch_ops<'js>(
             if let Some(pool) = pg_aw.as_ref() {
                 return dispatch_has_active_work_raw_pg(pool, &card_id);
             }
-            let conn = match db_aw.separate_conn() {
-                Ok(c) => c,
-                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-            };
-            match conn.query_row(
-                "SELECT COUNT(*) FROM task_dispatches \
-                     WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
-                     AND status IN ('pending', 'dispatched')",
-                [card_id],
-                |row| row.get::<_, i64>(0),
-            ) {
-                Ok(cnt) => format!(r#"{{"count":{cnt}}}"#),
-                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-            }
+            r#"{"error":"postgres pool required for dispatch.hasActiveWork"}"#.to_string()
         })?,
     )?;
 
     // __set_retry_count_raw(dispatch_id, count) → json_string
     // Updates retry_count for auto-retry tracking.
-    let db_rc = db;
     let pg_rc = pg_pool;
     dispatch_obj.set(
         "__set_retry_count_raw",
@@ -175,17 +118,7 @@ pub(super) fn register_dispatch_ops<'js>(
                 if let Some(pool) = pg_rc.as_ref() {
                     return dispatch_set_retry_count_raw_pg(pool, &dispatch_id, count);
                 }
-                let conn = match db_rc.separate_conn() {
-                    Ok(c) => c,
-                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-                };
-                match conn.execute(
-                    "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
-                    libsql_rusqlite::params![count, dispatch_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                ) {
-                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-                }
+                r#"{"error":"postgres pool required for dispatch.setRetryCount"}"#.to_string()
             },
         )?,
     )?;
@@ -253,10 +186,9 @@ pub(super) fn register_dispatch_ops<'js>(
 
 /// #248/#249: Synchronous dispatch creation — validates and inserts into DB
 /// immediately. The notify outbox row is now inserted atomically inside
-/// `create_dispatch_core`, so no JS-side outbox buffering is needed.
+/// the dispatch-core path, so no JS-side outbox buffering is needed.
 fn dispatch_create_sync(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
+    pg_pool: &PgPool,
     card_id: &str,
     agent_id: &str,
     dispatch_type: &str,
@@ -283,31 +215,59 @@ fn dispatch_create_sync(
                 .and_then(|value| value.as_object())
                 .is_some(),
     };
-    match crate::dispatch::create_dispatch_core_with_options(
-        db,
+    let card_id_owned = card_id.to_string();
+    let agent_id_owned = agent_id.to_string();
+    let dispatch_type_owned = dispatch_type.to_string();
+    let title_owned = title.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
         pg_pool,
-        card_id,
-        agent_id,
-        dispatch_type,
-        title,
-        &context,
-        options,
+        move |bridge_pool| async move {
+            crate::dispatch::create_dispatch_core_with_options(
+                &bridge_pool,
+                &card_id_owned,
+                &agent_id_owned,
+                &dispatch_type_owned,
+                &title_owned,
+                &context,
+                options,
+            )
+            .await
+        },
+        |error| anyhow::anyhow!(error),
     ) {
         Ok((dispatch_id, _old_status, reused)) => {
             if reused {
                 return format!(r#"{{"dispatch_id":"{dispatch_id}","reused":true}}"#);
             }
-            // #117/#158: Update card_review_state for review-decision dispatches
             if dispatch_type == "review-decision" {
-                crate::engine::ops::review_state_sync(
-                    db,
-                    &serde_json::json!({
-                        "card_id": card_id,
-                        "state": "suggestion_pending",
-                        "pending_dispatch_id": dispatch_id,
-                    })
-                    .to_string(),
-                );
+                let card_id_state = card_id.to_string();
+                let dispatch_id_state = dispatch_id.clone();
+                if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
+                    pg_pool,
+                    move |bridge_pool| async move {
+                        sqlx::query(
+                            "INSERT INTO card_review_state (
+                                card_id,
+                                state,
+                                pending_dispatch_id,
+                                updated_at
+                             ) VALUES ($1, 'suggestion_pending', $2, NOW())
+                             ON CONFLICT (card_id) DO UPDATE
+                             SET state = 'suggestion_pending',
+                                 pending_dispatch_id = EXCLUDED.pending_dispatch_id,
+                                 updated_at = NOW()",
+                        )
+                        .bind(&card_id_state)
+                        .bind(&dispatch_id_state)
+                        .execute(&bridge_pool)
+                        .await
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                    },
+                    |error| anyhow::anyhow!(error),
+                ) {
+                    return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
+                }
             }
             format!(r#"{{"dispatch_id":"{dispatch_id}"}}"#)
         }

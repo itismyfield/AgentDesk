@@ -533,7 +533,7 @@ async fn create_activate_dispatch_pg(
         }
     }
     if let Ok(Some((worktree_path, worktree_branch, _))) =
-        crate::dispatch::resolve_card_worktree(&deps.db, card_id, Some(&context_with_strategy))
+        crate::dispatch::resolve_card_worktree(pool, card_id, Some(&context_with_strategy)).await
         && let Some(obj) = context_with_strategy.as_object_mut()
     {
         obj.entry("worktree_path".to_string())

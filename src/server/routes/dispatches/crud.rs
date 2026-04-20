@@ -73,7 +73,7 @@ pub async fn create_dispatch(
         skip_outbox: body.skip_outbox,
     };
 
-    match state.dispatch_service().create_dispatch(input) {
+    match state.dispatch_service().create_dispatch(input).await {
         Ok(result) => (result.status, Json(json!({"dispatch": result.dispatch}))),
         Err(error) => error.into_json_response(),
     }

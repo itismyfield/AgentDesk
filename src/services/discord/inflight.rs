@@ -60,11 +60,6 @@ pub(super) struct InflightTurnState {
     /// Persisted so that replacement watcher instances can skip already-delivered output.
     #[serde(default)]
     pub last_watcher_relayed_offset: Option<u64>,
-    /// True when dcserver entered a planned shutdown while this turn was still inflight.
-    /// Recovery can use this to choose a restart-handoff path instead of a generic
-    /// "interrupted" fallback when tmux disappears across restart.
-    #[serde(default)]
-    pub planned_restart: bool,
 }
 
 impl InflightTurnState {
@@ -114,7 +109,6 @@ impl InflightTurnState {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
-            planned_restart: false,
         }
     }
 
@@ -166,25 +160,6 @@ pub(super) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) {
     };
     let path = inflight_state_path(&root, provider, channel_id);
     let _ = fs::remove_file(path);
-}
-
-pub(super) fn mark_all_inflight_states_planned_restart(provider: &ProviderKind) -> usize {
-    let Some(root) = inflight_runtime_root() else {
-        return 0;
-    };
-    let states = load_inflight_states_from_root(&root, provider);
-    let mut marked = 0usize;
-    for mut state in states {
-        if state.planned_restart {
-            continue;
-        }
-        state.planned_restart = true;
-        state.updated_at = now_string();
-        if save_inflight_state_in_root(&root, &state).is_ok() {
-            marked += 1;
-        }
-    }
-    marked
 }
 
 pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
@@ -321,8 +296,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 mod tests {
     use super::{
         InflightTurnState, latest_request_owner_user_id_for_channel,
-        load_inflight_states_from_root, mark_all_inflight_states_planned_restart,
-        save_inflight_state_in_root,
+        load_inflight_states_from_root, save_inflight_state_in_root,
     };
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
@@ -403,58 +377,5 @@ mod tests {
         }
 
         assert_eq!(owner, Some(222));
-    }
-
-    #[test]
-    fn mark_all_inflight_states_planned_restart_updates_existing_states() {
-        let temp = TempDir::new().unwrap();
-        let inflight_root = temp.path().join("runtime").join("discord_inflight");
-
-        let mut first = InflightTurnState::new(
-            ProviderKind::Codex,
-            123,
-            Some("adk-cdx".to_string()),
-            111,
-            789,
-            999,
-            "hello".to_string(),
-            None,
-            Some("AgentDesk-codex-adk-cdx".to_string()),
-            None,
-            None,
-            0,
-        );
-        first.planned_restart = false;
-        save_inflight_state_in_root(&inflight_root, &first).unwrap();
-
-        let mut second = InflightTurnState::new(
-            ProviderKind::Codex,
-            124,
-            Some("adk-cdx".to_string()),
-            222,
-            790,
-            1000,
-            "world".to_string(),
-            None,
-            Some("AgentDesk-codex-adk-cdx-2".to_string()),
-            None,
-            None,
-            0,
-        );
-        second.planned_restart = true;
-        save_inflight_state_in_root(&inflight_root, &second).unwrap();
-
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-        let marked = mark_all_inflight_states_planned_restart(&ProviderKind::Codex);
-        let loaded = load_inflight_states_from_root(&inflight_root, &ProviderKind::Codex);
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-
-        assert_eq!(marked, 1);
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.iter().all(|state| state.planned_restart));
     }
 }

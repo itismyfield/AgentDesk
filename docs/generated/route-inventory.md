@@ -153,7 +153,7 @@
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:596` | `src/server/routes/domains/admin.rs:70` |
 | `POST` | `/api/re-review` | `kanban::batch_rereview` | `src/server/routes/kanban.rs:3021` | `src/server/routes/domains/kanban.rs:26` |
 | `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:22` | `src/server/routes/domains/admin.rs:71` |
-| `POST` | `/api/review-decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:246` | `src/server/routes/domains/reviews.rs:20` |
+| `POST` | `/api/review-decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:255` | `src/server/routes/domains/reviews.rs:20` |
 | `POST` | `/api/review-tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:619` | `src/server/routes/domains/reviews.rs:24` |
 | `POST` | `/api/review-verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:170` | `src/server/routes/domains/reviews.rs:19` |
 | `GET` | `/api/round-table-meetings` | `meetings::list_meetings` | `src/server/routes/meetings.rs:528` | `src/server/routes/domains/integrations.rs:33` |
