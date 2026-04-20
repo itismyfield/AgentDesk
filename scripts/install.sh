@@ -98,81 +98,6 @@ EOF
   esac
 }
 
-trim_whitespace() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-parse_launchd_env_line() {
-  local line="$1"
-  local key value first last
-
-  line="${line//$'\r'/}"
-  line=$(trim_whitespace "$line")
-  [ -n "$line" ] || return 1
-
-  case "$line" in
-    \#*) return 1 ;;
-  esac
-
-  if [[ "$line" == export[[:space:]]* ]]; then
-    line="${line#export }"
-    line=$(trim_whitespace "$line")
-  fi
-
-  [[ "$line" == *=* ]] || return 1
-
-  key="${line%%=*}"
-  value="${line#*=}"
-  key=$(trim_whitespace "$key")
-  value=$(trim_whitespace "$value")
-
-  [ -n "$key" ] || return 1
-  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
-
-  if [ "${#value}" -ge 2 ]; then
-    first="${value:0:1}"
-    last="${value: -1}"
-    if { [ "$first" = '"' ] && [ "$last" = '"' ]; } || { [ "$first" = "'" ] && [ "$last" = "'" ]; }; then
-      value="${value:1:${#value}-2}"
-    fi
-  fi
-
-  printf '%s\t%s\n' "$key" "$value"
-}
-
-plistbuddy_escape_string() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '%s' "$value"
-}
-
-sync_launchd_plist_environment_from_file() {
-  local plist_path="$1"
-  local env_file="$2"
-  local plistbuddy="/usr/libexec/PlistBuddy"
-  local raw_line parsed key value escaped_value
-
-  [ -f "$plist_path" ] || return 0
-  [ -f "$env_file" ] || return 0
-  [ -x "$plistbuddy" ] || return 0
-
-  "$plistbuddy" -c "Print :EnvironmentVariables" "$plist_path" >/dev/null 2>&1 \
-    || "$plistbuddy" -c "Add :EnvironmentVariables dict" "$plist_path" >/dev/null
-
-  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
-    parsed=$(parse_launchd_env_line "$raw_line") || continue
-    key="${parsed%%$'\t'*}"
-    value="${parsed#*$'\t'}"
-    escaped_value=$(plistbuddy_escape_string "$value")
-    "$plistbuddy" -c "Delete :EnvironmentVariables:$key" "$plist_path" >/dev/null 2>&1 || true
-    "$plistbuddy" -c "Add :EnvironmentVariables:$key string \"$escaped_value\"" "$plist_path" >/dev/null
-  done < "$env_file"
-}
-
 sign_binary_with_fallback() {
   local target="$1"
   local identity="${CODESIGN_IDENTITY:--}"
@@ -378,56 +303,12 @@ info "Setting up launchd service..."
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LAUNCHD_LABEL.plist"
 mkdir -p "$PLIST_DIR"
-
-cat > "$PLIST_PATH" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$LAUNCHD_LABEL</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>$INSTALL_DIR/bin/agentdesk</string>
-        <string>dcserver</string>
-    </array>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>AGENTDESK_CONFIG</key>
-        <string>$INSTALL_DIR/agentdesk.yaml</string>
-        <key>AGENTDESK_ROOT_DIR</key>
-        <string>$INSTALL_DIR</string>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin</string>
-        <key>HOME</key>
-        <string>$HOME</string>
-    </dict>
-
-    <key>WorkingDirectory</key>
-    <string>$HOME</string>
-
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>5</integer>
-
-    <key>StandardOutPath</key>
-    <string>$INSTALL_DIR/logs/dcserver.stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>$INSTALL_DIR/logs/dcserver.stderr.log</string>
-</dict>
-</plist>
-PLIST
-
-LAUNCHD_ENV_FILE="$INSTALL_DIR/config/launchd.env"
-if [ -f "$LAUNCHD_ENV_FILE" ]; then
-  sync_launchd_plist_environment_from_file "$PLIST_PATH" "$LAUNCHD_ENV_FILE"
-  ok "Applied local launchd env: $LAUNCHD_ENV_FILE"
-fi
+"$INSTALL_DIR/bin/agentdesk" emit-launchd-plist \
+  --flavor release \
+  --home "$HOME" \
+  --root-dir "$INSTALL_DIR" \
+  --agentdesk-bin "$INSTALL_DIR/bin/agentdesk" \
+  --output "$PLIST_PATH"
 
 ok "Launchd plist: $PLIST_PATH"
 

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -18,6 +20,8 @@ pub(crate) enum Commands {
     Init,
     /// Re-run the configuration wizard
     Reconfigure,
+    /// Emit a launchd plist using the canonical Rust renderer
+    EmitLaunchdPlist(EmitLaunchdPlistArgs),
     /// Restart Discord bot server(s)
     RestartDcserver {
         /// Discord channel ID for restart completion report
@@ -343,6 +347,31 @@ pub(crate) enum Commands {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum LaunchdPlistFlavorArg {
+    Release,
+    Dev,
+}
+
+#[derive(Args, Clone, Debug)]
+pub(crate) struct EmitLaunchdPlistArgs {
+    /// Runtime flavor to render
+    #[arg(long, value_enum)]
+    pub(crate) flavor: LaunchdPlistFlavorArg,
+    /// Override the home directory used in generated paths
+    #[arg(long)]
+    pub(crate) home: Option<PathBuf>,
+    /// Override the runtime root directory used in generated paths
+    #[arg(long = "root-dir")]
+    pub(crate) root_dir: Option<PathBuf>,
+    /// Override the agentdesk binary path used in ProgramArguments
+    #[arg(long = "agentdesk-bin")]
+    pub(crate) agentdesk_bin: Option<PathBuf>,
+    /// Write the plist to this path instead of stdout
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum DispatchAction {
     /// List active dispatches
@@ -543,6 +572,13 @@ fn rewrite_legacy_args(mut args: Vec<String>) -> Vec<String> {
         rewritten.extend(args.into_iter().skip(1));
         return rewritten;
     }
+    if args.get(1).map(String::as_str) == Some("--emit-launchd-plist") {
+        let mut rewritten = Vec::with_capacity(args.len() + 1);
+        rewritten.push(args.remove(0));
+        rewritten.push("emit-launchd-plist".to_string());
+        rewritten.extend(args.into_iter().skip(1));
+        return rewritten;
+    }
     args
 }
 
@@ -600,6 +636,51 @@ mod tests {
                 assert_eq!(card_id, "610");
                 assert_eq!(phase, Some(1));
                 assert_eq!(thread_group, Some(2));
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn emit_launchd_plist_parses_flavor_and_overrides() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "emit-launchd-plist",
+            "--flavor",
+            "dev",
+            "--home",
+            "/tmp/home",
+            "--root-dir",
+            "/tmp/home/.adk/dev",
+            "--agentdesk-bin",
+            "/tmp/home/.adk/dev/bin/agentdesk",
+            "--output",
+            "/tmp/dev.plist",
+        ])
+        .expect("emit-launchd-plist args should parse");
+
+        match cli.command {
+            Some(Commands::EmitLaunchdPlist(args)) => {
+                assert_eq!(args.flavor, LaunchdPlistFlavorArg::Dev);
+                assert_eq!(
+                    args.home.as_deref(),
+                    Some(PathBuf::from("/tmp/home").as_path())
+                );
+                assert_eq!(
+                    args.root_dir.as_deref(),
+                    Some(PathBuf::from("/tmp/home/.adk/dev").as_path())
+                );
+                assert_eq!(
+                    args.agentdesk_bin.as_deref(),
+                    Some(PathBuf::from("/tmp/home/.adk/dev/bin/agentdesk").as_path())
+                );
+                assert_eq!(
+                    args.output.as_deref(),
+                    Some(PathBuf::from("/tmp/dev.plist").as_path())
+                );
             }
             other => panic!(
                 "unexpected parse result: {:?}",
@@ -684,6 +765,27 @@ mod tests {
                 assert!(!args.skip_pg_import);
                 assert!(!args.allow_unsent_messages);
                 assert!(!args.allow_runtime_active);
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn legacy_emit_launchd_plist_flag_rewrites_to_command() {
+        let cli = Cli::try_parse_from(rewrite_legacy_args(vec![
+            "agentdesk".to_string(),
+            "--emit-launchd-plist".to_string(),
+            "--flavor".to_string(),
+            "release".to_string(),
+        ]))
+        .expect("legacy emit-launchd-plist args should parse");
+
+        match cli.command {
+            Some(Commands::EmitLaunchdPlist(args)) => {
+                assert_eq!(args.flavor, LaunchdPlistFlavorArg::Release);
             }
             other => panic!(
                 "unexpected parse result: {:?}",

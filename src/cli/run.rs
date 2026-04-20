@@ -37,6 +37,9 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             super::handle_init(true);
             Ok(())
         }
+        Commands::EmitLaunchdPlist(args) => {
+            exit_for_cli(super::init::handle_emit_launchd_plist(&args))
+        }
         Commands::RestartDcserver {
             report_channel_id,
             report_provider,

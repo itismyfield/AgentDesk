@@ -5,7 +5,10 @@ use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
-use super::dcserver;
+use super::{
+    args::{EmitLaunchdPlistArgs, LaunchdPlistFlavorArg},
+    dcserver,
+};
 use crate::services::provider::ProviderKind;
 
 // ── Discord REST helpers ───────────────────────────────────────────
@@ -351,20 +354,64 @@ fn default_agent_prompt(role_id: &str) -> String {
 // ── Launchd plist ──────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
-    let root_dir =
-        dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
-    generate_launchd_plist_with_root(home, agentdesk_bin, &root_dir)
+const AGENTDESK_DEV_LAUNCHD_LABEL: &str = "com.agentdesk.dev";
+
+#[cfg(target_os = "macos")]
+fn launchd_path_env(home: &Path) -> String {
+    let home_str = home.display();
+    format!(
+        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{home_str}/.cargo/bin:{home_str}/.local/bin:{home_str}/bin"
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn generate_launchd_plist_with_root(home: &Path, agentdesk_bin: &Path, root_dir: &Path) -> String {
+fn launchd_label(flavor: LaunchdPlistFlavorArg) -> &'static str {
+    match flavor {
+        LaunchdPlistFlavorArg::Release => dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL,
+        LaunchdPlistFlavorArg::Dev => AGENTDESK_DEV_LAUNCHD_LABEL,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_plist_filename(flavor: LaunchdPlistFlavorArg) -> String {
+    format!("{}.plist", launchd_label(flavor))
+}
+
+#[cfg(target_os = "macos")]
+fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathBuf {
+    match flavor {
+        LaunchdPlistFlavorArg::Release => {
+            dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"))
+        }
+        LaunchdPlistFlavorArg::Dev => home.join(".adk").join("dev"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
+    let root_dir = default_launchd_root_dir(home, LaunchdPlistFlavorArg::Release);
+    generate_launchd_plist_for_flavor_with_root(
+        LaunchdPlistFlavorArg::Release,
+        home,
+        agentdesk_bin,
+        &root_dir,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn generate_launchd_plist_for_flavor_with_root(
+    flavor: LaunchdPlistFlavorArg,
+    home: &Path,
+    agentdesk_bin: &Path,
+    root_dir: &Path,
+) -> String {
     let home_str = home.display();
     let bin_str = agentdesk_bin.display();
-    let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
+    let label = launchd_label(flavor);
     let root_str = root_dir.display();
     let logs_dir = root_dir.join("logs");
     let logs_str = logs_dir.display();
+    let path_env = launchd_path_env(home);
     let extra_env_xml =
         render_launchd_env_entries_xml(&root_dir.join("config").join("launchd.env"));
     format!(
@@ -386,11 +433,11 @@ fn generate_launchd_plist_with_root(home: &Path, agentdesk_bin: &Path, root_dir:
   <key>ThrottleInterval</key>
   <integer>5</integer>
   <key>WorkingDirectory</key>
-  <string>{home_str}</string>
+  <string>{root_str}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{home_str}/.cargo/bin</string>
+    <string>{path_env}</string>
     <key>HOME</key>
     <string>{home_str}</string>
     <key>AGENTDESK_ROOT_DIR</key>
@@ -999,10 +1046,66 @@ pub fn handle_init(reconfigure: bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn handle_emit_launchd_plist(args: &EmitLaunchdPlistArgs) -> Result<(), String> {
+    let home = args.home.clone().or_else(dirs::home_dir).ok_or_else(|| {
+        "Failed to resolve home directory for launchd plist rendering".to_string()
+    })?;
+    let root_dir = args
+        .root_dir
+        .clone()
+        .unwrap_or_else(|| default_launchd_root_dir(&home, args.flavor));
+    let agentdesk_bin = match args.agentdesk_bin.clone() {
+        Some(path) => path,
+        None => std::env::current_exe()
+            .map_err(|e| format!("Failed to resolve current agentdesk executable: {e}"))?,
+    };
+    let plist =
+        generate_launchd_plist_for_flavor_with_root(args.flavor, &home, &agentdesk_bin, &root_dir);
+
+    if let Some(output_path) = &args.output {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create plist output directory {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(output_path, plist).map_err(|e| {
+            format!(
+                "Failed to write launchd plist to {}: {e}",
+                output_path.display()
+            )
+        })?;
+    } else {
+        print!("{plist}");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn handle_emit_launchd_plist(_args: &EmitLaunchdPlistArgs) -> Result<(), String> {
+    Err("emit-launchd-plist is only supported on macOS".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "macos")]
+    fn assert_plist_xml_valid(plist: &str) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plist_path = temp_dir.path().join("agentdesk.plist");
+        fs::write(&plist_path, plist).unwrap();
+        let status = std::process::Command::new("plutil")
+            .args(["-lint", plist_path.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "plist should pass plutil validation");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1083,7 +1186,8 @@ mod tests {
         )
         .unwrap();
 
-        let plist = generate_launchd_plist_with_root(
+        let plist = generate_launchd_plist_for_flavor_with_root(
+            LaunchdPlistFlavorArg::Release,
             temp_dir.path(),
             &root_dir.join("bin").join("agentdesk"),
             &root_dir,
@@ -1093,6 +1197,76 @@ mod tests {
         assert!(plist.contains("<string>abc123</string>"));
         assert!(plist.contains("<key>SAMPLE_FLAG</key>"));
         assert!(plist.contains("<string>enabled</string>"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_launchd_plist_release_sets_root_path_and_valid_xml() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let root_dir = home.join(".adk").join("release");
+        let plist = generate_launchd_plist_for_flavor_with_root(
+            LaunchdPlistFlavorArg::Release,
+            &home,
+            &root_dir.join("bin").join("agentdesk"),
+            &root_dir,
+        );
+
+        assert!(plist.contains("<string>com.agentdesk.release</string>"));
+        assert!(plist.contains("<key>AGENTDESK_ROOT_DIR</key>"));
+        assert!(plist.contains(&format!("<string>{}</string>", root_dir.display())));
+        assert!(plist.contains("/opt/homebrew/bin"));
+        assert!(plist.contains(&format!("{}/.local/bin", home.display())));
+        assert!(plist.contains(&format!(
+            "<string>{}</string>",
+            root_dir.join("logs").join("dcserver.stdout.log").display()
+        )));
+        assert_plist_xml_valid(&plist);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_launchd_plist_dev_uses_dev_label_and_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let root_dir = home.join(".adk").join("dev");
+        let plist = generate_launchd_plist_for_flavor_with_root(
+            LaunchdPlistFlavorArg::Dev,
+            &home,
+            &root_dir.join("bin").join("agentdesk"),
+            &root_dir,
+        );
+
+        assert!(plist.contains("<string>com.agentdesk.dev</string>"));
+        assert!(plist.contains(&format!(
+            "<string>{}</string>",
+            root_dir.join("bin").join("agentdesk").display()
+        )));
+        assert!(plist.contains(&format!("<string>{}</string>", root_dir.display())));
+        assert_plist_xml_valid(&plist);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn emit_launchd_plist_writes_requested_output_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let root_dir = home.join(".adk").join("release");
+        let output_path = temp_dir.path().join("nested").join("agentdesk.plist");
+        let args = EmitLaunchdPlistArgs {
+            flavor: LaunchdPlistFlavorArg::Release,
+            home: Some(home.clone()),
+            root_dir: Some(root_dir.clone()),
+            agentdesk_bin: Some(root_dir.join("bin").join("agentdesk")),
+            output: Some(output_path.clone()),
+        };
+
+        handle_emit_launchd_plist(&args).unwrap();
+
+        let written = fs::read_to_string(&output_path).unwrap();
+        assert!(written.contains("<string>com.agentdesk.release</string>"));
+        assert!(written.contains(&format!("<string>{}</string>", root_dir.display())));
+        assert_plist_xml_valid(&written);
     }
 
     #[test]
@@ -1209,11 +1383,12 @@ mod tests {
 
 #[cfg(target_os = "macos")]
 fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Result<(), String> {
+    let flavor = LaunchdPlistFlavorArg::Release;
     let plist_content = generate_launchd_plist(home, agentdesk_bin);
     let launch_agents = home.join("Library").join("LaunchAgents");
     fs::create_dir_all(&launch_agents)
         .map_err(|e| format!("Failed to create LaunchAgents directory: {e}"))?;
-    let plist_filename = format!("{}.plist", dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL);
+    let plist_filename = launchd_plist_filename(flavor);
     let plist_path = launch_agents.join(&plist_filename);
     write_with_backup(&plist_path, &plist_content, reconfigure)
         .map_err(|e| format!("Failed to write plist {}: {e}", plist_path.display()))?;

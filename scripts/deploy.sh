@@ -513,9 +513,7 @@ fi
 
 # ── Step 3: Install/update service ────────────────────────────────────────────
 install_launchd() {
-  local PLIST_SRC="$SCRIPT_DIR/com.agentdesk.release.plist"
   local PLIST_DST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
-  local LAUNCHD_ENV_FILE="$AD_HOME/config/launchd.env"
 
   # Migrate: remove legacy com.agentdesk plist if present
   local LEGACY_PLIST="$HOME/Library/LaunchAgents/com.agentdesk.plist"
@@ -525,24 +523,15 @@ install_launchd() {
     info "Removed legacy plist: $LEGACY_PLIST"
   fi
 
-  if [ ! -f "$PLIST_SRC" ]; then
-    fail "Plist template not found: $PLIST_SRC"
-  fi
-
   mkdir -p "$HOME/Library/LaunchAgents"
   mkdir -p "$AD_HOME/logs"
 
-  # Replace placeholders with actual paths
-  sed \
-    -e "s|AGENTDESK_BIN|$BIN_DIR/agentdesk|g" \
-    -e "s|AGENTDESK_HOME|$AD_HOME|g" \
-    -e "s|USER_HOME|$HOME|g" \
-    "$PLIST_SRC" > "$PLIST_DST"
-
-  if [ -f "$LAUNCHD_ENV_FILE" ]; then
-    sync_launchd_plist_environment_from_file "$PLIST_DST" "$LAUNCHD_ENV_FILE"
-    ok "Applied local launchd env: $LAUNCHD_ENV_FILE"
-  fi
+  "$BIN_DIR/agentdesk" emit-launchd-plist \
+    --flavor release \
+    --home "$HOME" \
+    --root-dir "$AD_HOME" \
+    --agentdesk-bin "$BIN_DIR/agentdesk" \
+    --output "$PLIST_DST"
 
   ok "Plist installed: $PLIST_DST"
 }
