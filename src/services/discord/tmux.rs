@@ -135,27 +135,63 @@ pub(super) fn should_route_terminal_response_via_notify_bot(
     has_assistant_response && task_notification_seen && !inflight_present
 }
 
-/// #826 P1 #2: Decide whether `last_relayed_offset` should advance for a
-/// notify-path relay. Only advance when the outbox enqueue SUCCEEDED (durable
-/// DB-backed commit) OR when the direct-send fallback actually reached
-/// Discord. An enqueue failure with no fallback delivery must leave the
-/// offset untouched so the watcher can re-emit the same tmux range on its
-/// next scan instead of silently dropping the response.
+/// #826 P1 #2 (option b): Decide which of the two offset watermarks
+/// (`last_relayed_offset`, `last_enqueued_offset`) a watcher tick should
+/// advance after attempting to deliver a terminal response.
+///
+///  - `last_relayed_offset` is the canonical "Discord has durably received
+///    this byte range" watermark. It must advance ONLY on confirmed
+///    foreground delivery (direct send or placeholder replace succeeded), or
+///    on the notify-path fallback that reached Discord.
+///  - `last_enqueued_offset` is the "outbox row committed" watermark. It
+///    advances when the notify-bot outbox insert succeeded — the outbox
+///    worker owns delivery + retry from there. Prevents re-enqueue of the
+///    same range on the next tick without conflating staging with delivery.
+///
+/// Both watermarks advance in lock-step on genuine delivery so a later
+/// dedupe check (which takes their max) sees a single unified floor.
 ///
 /// Pure function extracted for regression-test coverage of the offset-commit
 /// gate; the runtime version lives inline in the watcher loop because it is
 /// intertwined with other relay bookkeeping.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OffsetAdvanceDecision {
+    pub advance_relayed: bool,
+    pub advance_enqueued: bool,
+}
+
 #[inline]
-pub(super) fn notify_path_should_advance_offset(
+pub(super) fn notify_path_offset_advance_decision(
     has_current_response: bool,
     enqueue_succeeded: bool,
-    fallback_send_succeeded: bool,
-) -> bool {
-    if !has_current_response {
-        // Nothing to deliver — trivially safe to advance past an empty range.
-        return true;
+    direct_send_delivered: bool,
+) -> OffsetAdvanceDecision {
+    if direct_send_delivered {
+        // Confirmed foreground delivery. Lift both watermarks.
+        return OffsetAdvanceDecision {
+            advance_relayed: true,
+            advance_enqueued: true,
+        };
     }
-    enqueue_succeeded || fallback_send_succeeded
+    if enqueue_succeeded {
+        // Staged on the outbox — advance the enqueue watermark to dedupe the
+        // next tick, but leave the canonical relayed watermark alone.
+        return OffsetAdvanceDecision {
+            advance_relayed: false,
+            advance_enqueued: true,
+        };
+    }
+    if !has_current_response {
+        // Empty turn — advance both in lock-step (the original single-offset
+        // behaviour) so the watcher doesn't spin on this range.
+        return OffsetAdvanceDecision {
+            advance_relayed: true,
+            advance_enqueued: true,
+        };
+    }
+    // Nothing delivered, nothing staged — leave BOTH watermarks untouched so
+    // the next tick can try again.
+    OffsetAdvanceDecision::default()
 }
 
 /// #826: Enqueue a background-trigger turn's terminal response on the
@@ -578,6 +614,18 @@ pub(super) async fn tmux_output_watcher(
             None
         }
     };
+    // #826 P1 #2 (option b): Track the offset from which the last
+    // notify-outbox enqueue was STAGED — i.e. the row is in `message_outbox`
+    // but Discord delivery has NOT yet been confirmed by the outbox worker.
+    // This watermark dedupes re-enqueue when the watcher loops back without
+    // foreground delivery confirmation, while `last_relayed_offset` stays
+    // reserved for genuinely-delivered relays. If the outbox worker later
+    // marks the row `status='failed'`, a follow-up tick can choose to re-emit
+    // (by resetting this watermark) without having already advanced the
+    // canonical relayed offset. Seeded from the same persisted watermark so
+    // a replacement watcher does not re-enqueue content the predecessor
+    // already staged.
+    let mut last_enqueued_offset: Option<u64> = last_relayed_offset;
 
     // Rolling-size-cap rotation state. The watcher loop spins predictably
     // (~500ms sleeps) so a mod-N gate on an iteration counter gives a
@@ -600,6 +648,11 @@ pub(super) async fn tmux_output_watcher(
             } else {
                 None
             };
+            // #826 P1 #2: keep the enqueue watermark in lock-step with the
+            // relay watermark when the bridge hands control back — otherwise
+            // a stale enqueue marker from a previous turn could suppress a
+            // fresh background-trigger enqueue on the new turn.
+            last_enqueued_offset = last_relayed_offset;
             // Clear turn_delivered after preserving the duplicate-relay guard so
             // future turns beyond this resume point can be relayed normally.
             turn_delivered.store(false, Ordering::Relaxed);
@@ -1439,14 +1492,25 @@ pub(super) async fn tmux_output_watcher(
         // output starting at that exact `Y`, so `<=` was silently dropping
         // the entire auto-trigger turn. Strict `<` only catches genuine
         // re-reads of the same starting offset.
-        if let Some(prev_offset) = last_relayed_offset {
+        //
+        // #826 P1 #2: check the max of the relayed and enqueued watermarks so
+        // that a background-trigger response we already staged on the
+        // notify-bot outbox (but whose Discord delivery the outbox worker
+        // hasn't confirmed yet) isn't re-enqueued on the next tick.
+        let dedupe_floor = match (last_relayed_offset, last_enqueued_offset) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        if let Some(prev_offset) = dedupe_floor {
             if data_start_offset < prev_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={})",
+                    "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={:?}, last_enqueued={:?})",
                     tmux_session_name,
                     data_start_offset,
-                    prev_offset
+                    last_relayed_offset,
+                    last_enqueued_offset
                 );
                 if let Some(msg_id) = placeholder_msg_id {
                     let _ = channel_id.delete_message(&http, msg_id).await;
@@ -1592,6 +1656,19 @@ pub(super) async fn tmux_output_watcher(
             );
             // #225 P1-2: Track relay success to gate turn_result_relayed
             let mut relay_ok = true;
+            // #826 P1 #2: Tracks whether the notify-bot outbox enqueue ran and
+            // committed to the DB. Distinct from `relay_ok` because enqueue
+            // success is *staging*, not *delivery*: the outbox row may still
+            // fail to reach Discord, so the canonical `last_relayed_offset`
+            // must NOT advance on enqueue alone. We advance the separate
+            // `last_enqueued_offset` below so subsequent ticks don't re-enqueue
+            // the same tmux range before the worker has had a chance to deliver.
+            let mut notify_enqueue_succeeded = false;
+            // #826 P1 #2: Tracks whether the direct-send fallback (either the
+            // notify-path fallback on enqueue failure, or the normal
+            // foreground command-bot path) actually reached Discord. Only a
+            // confirmed foreground send may advance `last_relayed_offset`.
+            let mut direct_send_delivered = false;
             if route_via_notify_bot {
                 // Background-trigger path: drop the spinner placeholder (it was
                 // sent via the command bot for streaming status) and enqueue the
@@ -1609,7 +1686,14 @@ pub(super) async fn tmux_output_watcher(
                     // No assistant text to deliver — nothing to commit.
                     true
                 };
-                if !enqueued {
+                if enqueued {
+                    // Outbox row is durable (DB-backed) and the background
+                    // worker owns delivery + retries. Mark the enqueue
+                    // watermark so a subsequent tick doesn't stage the same
+                    // range again, but leave the *relayed* watermark alone
+                    // until we have confirmed Discord delivery.
+                    notify_enqueue_succeeded = has_current_response;
+                } else {
                     // #826 P1 #2: enqueue FAILED — the message has NOT been
                     // durably persisted to the outbox. Do not let a
                     // downstream success path accidentally advance
@@ -1628,6 +1712,7 @@ pub(super) async fn tmux_output_watcher(
                         match send_long_message_raw(&http, channel_id, &prefixed, &shared).await {
                             Ok(_) => {
                                 relay_ok = true;
+                                direct_send_delivered = true;
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1639,54 +1724,102 @@ pub(super) async fn tmux_output_watcher(
                 }
                 // Residual risk: enqueue succeeded but the notify-bot outbox
                 // worker may still fail to reach Discord later (notify bot
-                // mis-configured, `/api/send` unreachable, Discord rejects the
-                // message). The outbox is a durable DB-backed queue with its
-                // own retry loop, so a transient worker failure is retried
-                // without our involvement. Exhausting worker retries would
-                // leave the row in `status='failed'` with the offset already
-                // advanced — tracked as follow-up, documented here so the
-                // gap is visible in grep.
+                // mis-configured, `/api/send` unreachable, Discord rejects
+                // the message). Because we only advance `last_enqueued_offset`
+                // (not `last_relayed_offset`) on enqueue success, a later
+                // reconciliation pass that notices the outbox row in
+                // `status='failed'` can roll `last_enqueued_offset` back and
+                // trigger a re-stage without having already committed the
+                // canonical relayed watermark.
             } else {
                 match placeholder_msg_id {
                     Some(msg_id) => {
                         if has_current_response {
-                            if let Err(e) = replace_long_message_raw(
+                            match replace_long_message_raw(
                                 &http, channel_id, msg_id, &prefixed, &shared,
                             )
                             .await
                             {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
-                                relay_ok = false;
+                                Ok(_) => {
+                                    direct_send_delivered = true;
+                                }
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                                    relay_ok = false;
+                                }
                             }
                         } else {
                             let _ = channel_id.delete_message(&http, msg_id).await;
                         }
                     }
                     None => {
-                        if has_current_response
-                            && let Err(e) =
-                                send_long_message_raw(&http, channel_id, &prefixed, &shared).await
-                        {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
-                            relay_ok = false;
+                        if has_current_response {
+                            match send_long_message_raw(&http, channel_id, &prefixed, &shared).await
+                            {
+                                Ok(_) => {
+                                    direct_send_delivered = true;
+                                }
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                                    relay_ok = false;
+                                }
+                            }
                         }
                     }
                 }
             }
             if relay_ok {
-                // Record the offset range only after a successful relay so retries
-                // are not suppressed when Discord delivery fails transiently.
-                last_relayed_offset = Some(data_start_offset);
-                if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-                {
-                    if let Some(mut inflight) =
-                        super::inflight::load_inflight_state(&pk, channel_id.get())
+                // #826 P1 #2: split the offset-commit gate.
+                //
+                //   * `last_relayed_offset` — canonical "Discord has this"
+                //     watermark. Advances ONLY on confirmed foreground
+                //     delivery (direct send or placeholder replace). Used by
+                //     the on-disk inflight mirror so a replacement watcher
+                //     respects genuinely-delivered history.
+                //
+                //   * `last_enqueued_offset` — "outbox row committed"
+                //     watermark. Advances when the notify-bot outbox enqueue
+                //     succeeded and we expect the worker to deliver.
+                //     Prevents re-enqueue of the same tmux range on the next
+                //     tick, without poisoning the canonical relayed offset if
+                //     the async worker ultimately fails to reach Discord.
+                //
+                // An empty (no-assistant-text) pass still needs to advance
+                // both watermarks so the watcher doesn't spin on the same
+                // range — the original code used a single offset and
+                // advanced it whenever `relay_ok` held. We preserve that
+                // invariant by lifting BOTH here.
+                if direct_send_delivered {
+                    last_relayed_offset = Some(data_start_offset);
+                    // Any genuine delivery also satisfies the enqueue-dedupe
+                    // floor, so lift that watermark too.
+                    last_enqueued_offset = Some(data_start_offset);
+                    if let Some((pk, _)) =
+                        parse_provider_and_channel_from_tmux_name(&tmux_session_name)
                     {
-                        inflight.last_watcher_relayed_offset = Some(data_start_offset);
-                        let _ = super::inflight::save_inflight_state(&inflight);
+                        if let Some(mut inflight) =
+                            super::inflight::load_inflight_state(&pk, channel_id.get())
+                        {
+                            inflight.last_watcher_relayed_offset = Some(data_start_offset);
+                            let _ = super::inflight::save_inflight_state(&inflight);
+                        }
                     }
+                } else if notify_enqueue_succeeded {
+                    last_enqueued_offset = Some(data_start_offset);
+                    // Intentionally do NOT update `last_watcher_relayed_offset`
+                    // in the inflight mirror — a replacement watcher should
+                    // see the response as not-yet-delivered so the outbox
+                    // worker's delivery path remains the single source of
+                    // truth for this range.
+                } else if !has_current_response {
+                    // Empty turn (no content, placeholder just deleted).
+                    // Advance both watermarks in lock-step so the dedupe
+                    // guard matches the old single-offset behaviour and we
+                    // don't re-enter this branch for the same range.
+                    last_relayed_offset = Some(data_start_offset);
+                    last_enqueued_offset = Some(data_start_offset);
                 }
                 clear_provider_overload_retry_state(channel_id);
             }
@@ -3208,12 +3341,12 @@ async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadSessionCleanupPlan, WatcherToolState, build_monitor_completion_message,
-        dead_session_cleanup_plan, enqueue_background_trigger_response_to_notify_outbox,
-        load_restored_provider_session_id, notify_path_should_advance_offset,
-        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
-        should_route_terminal_response_via_notify_bot, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state,
+        DeadSessionCleanupPlan, OffsetAdvanceDecision, WatcherToolState,
+        build_monitor_completion_message, dead_session_cleanup_plan,
+        enqueue_background_trigger_response_to_notify_outbox, load_restored_provider_session_id,
+        notify_path_offset_advance_decision, process_watcher_lines,
+        refresh_session_heartbeat_from_tmux_output, should_route_terminal_response_via_notify_bot,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
@@ -3768,29 +3901,108 @@ mod tests {
 
     /// #826 P1 #2 regression guard: when the notify-bot outbox enqueue fails
     /// AND no direct-send fallback reaches Discord, the watcher MUST leave
-    /// `last_relayed_offset` untouched so the same tmux range can be
-    /// re-relayed on the next scan. Advancing the offset here is the bug
-    /// that permanently loses a completion notification when notify-bot is
-    /// unavailable.
+    /// BOTH offset watermarks untouched so the same tmux range can be
+    /// re-relayed on the next scan. Advancing the canonical relayed offset
+    /// here is the bug that permanently loses a completion notification when
+    /// notify-bot is unavailable.
     #[test]
     fn notify_path_does_not_advance_offset_on_enqueue_failure_without_fallback() {
-        // Enqueue failed AND direct-send fallback also failed → no advance.
-        assert!(
-            !notify_path_should_advance_offset(
+        // Enqueue failed AND direct-send fallback also failed → leave both
+        // watermarks alone (the content is still in flight from the watcher's
+        // point of view; next tick must retry).
+        assert_eq!(
+            notify_path_offset_advance_decision(
                 /*has_current_response*/ true, /*enqueue_succeeded*/ false,
-                /*fallback_send_succeeded*/ false,
+                /*direct_send_delivered*/ false,
             ),
-            "enqueue-fail + fallback-fail with content must leave the offset untouched"
+            OffsetAdvanceDecision {
+                advance_relayed: false,
+                advance_enqueued: false
+            },
+            "enqueue-fail + fallback-fail with content must leave both watermarks untouched"
         );
 
-        // Enqueue succeeded → outbox row is durable → advance is safe.
-        assert!(notify_path_should_advance_offset(true, true, false));
+        // Enqueue SUCCEEDED but no foreground delivery confirmation yet —
+        // advance ONLY the enqueue watermark so the outbox row is deduped on
+        // the next tick, while the canonical relayed watermark waits for
+        // actual Discord delivery. THIS is the P1 #2 fix: the original code
+        // treated enqueue success as a delivery-equivalent and advanced the
+        // relayed offset.
+        assert_eq!(
+            notify_path_offset_advance_decision(
+                /*has_current_response*/ true, /*enqueue_succeeded*/ true,
+                /*direct_send_delivered*/ false,
+            ),
+            OffsetAdvanceDecision {
+                advance_relayed: false,
+                advance_enqueued: true
+            },
+            "enqueue success without delivery confirmation must NOT advance last_relayed_offset"
+        );
 
-        // Enqueue failed but fallback direct-send reached Discord → advance.
-        assert!(notify_path_should_advance_offset(true, false, true));
+        // Enqueue failed but fallback direct-send reached Discord → both
+        // watermarks lift together.
+        assert_eq!(
+            notify_path_offset_advance_decision(true, false, true),
+            OffsetAdvanceDecision {
+                advance_relayed: true,
+                advance_enqueued: true
+            }
+        );
+
+        // Both succeeded (uncommon but possible) → lock-step advance.
+        assert_eq!(
+            notify_path_offset_advance_decision(true, true, true),
+            OffsetAdvanceDecision {
+                advance_relayed: true,
+                advance_enqueued: true
+            }
+        );
 
         // No content to deliver → trivially safe to advance past the empty
-        // range regardless of enqueue/fallback outcome.
-        assert!(notify_path_should_advance_offset(false, false, false));
+        // range (preserves the original single-offset behaviour so the
+        // watcher doesn't spin on an empty turn).
+        assert_eq!(
+            notify_path_offset_advance_decision(false, false, false),
+            OffsetAdvanceDecision {
+                advance_relayed: true,
+                advance_enqueued: true
+            }
+        );
+    }
+
+    /// #826 P1 #2 regression guard: the dedupe-floor in the watcher's
+    /// duplicate-relay guard must be `max(last_relayed_offset,
+    /// last_enqueued_offset)`. After a notify-path enqueue advances ONLY the
+    /// enqueue watermark, a later tick that re-reads the same tmux range
+    /// must still be suppressed — otherwise we'd double-enqueue the same
+    /// response while the outbox worker was still delivering the first copy.
+    #[test]
+    fn enqueued_offset_gates_dedupe_even_without_relayed_advance() {
+        // Mirror the max()-dedupe logic from the watcher loop (kept inline
+        // there for hot-path performance — this test pins the invariant).
+        fn dedupe_floor(relayed: Option<u64>, enqueued: Option<u64>) -> Option<u64> {
+            match (relayed, enqueued) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            }
+        }
+
+        // Enqueue advanced but relayed did not — dedupe still protects
+        // against re-emit of the same start offset.
+        assert_eq!(
+            dedupe_floor(/*relayed*/ None, /*enqueued*/ Some(4096)),
+            Some(4096),
+            "enqueue-only advance must still guard the dedupe floor"
+        );
+
+        // Relayed leapfrogs a stale enqueue marker (e.g. a genuine
+        // foreground delivery arrived later) — floor follows the higher
+        // watermark.
+        assert_eq!(dedupe_floor(Some(8192), Some(4096)), Some(8192));
+
+        // Both absent — no floor, watcher may relay freely.
+        assert_eq!(dedupe_floor(None, None), None);
     }
 }
