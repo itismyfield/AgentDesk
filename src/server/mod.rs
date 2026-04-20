@@ -3157,6 +3157,7 @@ async fn message_outbox_loop(
                         &content,
                         &source,
                         &bot,
+                        None,
                     )
                     .await;
                     (status.to_string(), err_text)
