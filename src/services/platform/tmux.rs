@@ -3,6 +3,7 @@
 //! All tmux binary invocations MUST go through this module.
 //! Callers in async contexts should use `tokio::task::spawn_blocking`.
 
+use super::binary_resolver;
 use std::process::{Command, Output, Stdio};
 
 /// Format session name as exact-match target (prefix with `=`).
@@ -10,9 +11,15 @@ fn exact_target(session_name: &str) -> String {
     format!("={session_name}")
 }
 
+fn tmux_command() -> Command {
+    let mut cmd = Command::new("tmux");
+    binary_resolver::apply_runtime_path(&mut cmd);
+    cmd
+}
+
 /// Check if tmux is available on the system.
 pub fn is_available() -> bool {
-    Command::new("tmux")
+    tmux_command()
         .arg("-V")
         .output()
         .map(|o| o.status.success())
@@ -21,7 +28,7 @@ pub fn is_available() -> bool {
 
 /// Get tmux version string (e.g. "tmux 3.4").
 pub fn version() -> Result<String, String> {
-    let out = Command::new("tmux")
+    let out = tmux_command()
         .arg("-V")
         .output()
         .map_err(|e| format!("tmux not found: {e}"))?;
@@ -34,7 +41,7 @@ pub fn version() -> Result<String, String> {
 
 /// Check if a named tmux session exists.
 pub fn has_session(session_name: &str) -> bool {
-    Command::new("tmux")
+    tmux_command()
         .args(["has-session", "-t", &exact_target(session_name)])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -52,7 +59,7 @@ pub fn create_session(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
-    let mut cmd = Command::new("tmux");
+    let mut cmd = tmux_command();
     cmd.args(["new-session", "-d", "-s", session_name]);
     if let Some(dir) = working_dir {
         cmd.args(["-c", dir]);
@@ -92,7 +99,7 @@ fn log_kill_result(session_name: &str, reason: &str, output: &Output) {
 
 fn kill_session_output_internal(session_name: &str, reason: &str) -> std::io::Result<Output> {
     log_kill_request(session_name, reason);
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["kill-session", "-t", &exact_target(session_name)])
         .output();
     match &output {
@@ -164,7 +171,7 @@ pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
     let target = exact_target(session_name);
     let mut args = vec!["send-keys", "-t", &target];
     args.extend(keys);
-    Command::new("tmux")
+    tmux_command()
         .args(&args)
         .output()
         .map_err(|e| format!("tmux send-keys failed: {e}"))
@@ -175,7 +182,7 @@ pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
     let scroll = scroll_back.to_string();
-    Command::new("tmux")
+    tmux_command()
         .args([
             "capture-pane",
             "-p",
@@ -192,7 +199,7 @@ pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
 
 /// List all tmux session names.
 pub fn list_session_names() -> Result<Vec<String>, String> {
-    let out = Command::new("tmux")
+    let out = tmux_command()
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()
         .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
@@ -211,7 +218,7 @@ pub fn has_live_pane(session_name: &str) -> bool {
     if !has_session(session_name) {
         return false;
     }
-    Command::new("tmux")
+    tmux_command()
         .args([
             "list-panes",
             "-t",
@@ -232,7 +239,7 @@ pub fn has_live_pane(session_name: &str) -> bool {
 
 /// Set a tmux session option. Errors are silently ignored (fire-and-forget).
 pub fn set_option(session_name: &str, key: &str, value: &str) {
-    let _ = Command::new("tmux")
+    let _ = tmux_command()
         .args(["set-option", "-t", &exact_target(session_name), key, value])
         .output();
 }
