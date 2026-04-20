@@ -375,6 +375,7 @@ pub async fn run(
             .await
             .map_err(anyhow::Error::msg)?;
     }
+    crate::pipeline::refresh_override_health_report(&db, pg_pool.as_ref()).await;
 
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(
         config.clone(),

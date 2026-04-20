@@ -16,6 +16,7 @@ use tower::ServiceExt;
 fn test_db() -> Db {
     let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    crate::db::schema::migrate(&conn).unwrap();
     crate::db::wrap_conn(conn)
 }
 
@@ -746,6 +747,77 @@ async fn health_api_includes_latest_config_audit_report() {
     assert_eq!(json["config_audit"]["status"], "warn");
     assert_eq!(json["config_audit"]["warnings_count"], 1);
     assert_eq!(json["config_audit"]["db"]["mismatched_agents"][0], "alpha");
+}
+
+#[tokio::test]
+async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router(db.clone(), engine, Some(harness.registry())),
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        let report = crate::pipeline::PipelineOverrideHealthReport {
+            generated_at: "2026-04-20T00:00:00Z".to_string(),
+            status: "warn".to_string(),
+            warnings_count: 1,
+            warnings: vec![
+                "repo override alpha replaces transitions and drops 2 inherited entries"
+                    .to_string(),
+            ],
+            parse_failures: Vec::new(),
+            replace_warnings: vec![crate::pipeline::PipelineOverrideReplaceWarning {
+                layer: "repo".to_string(),
+                target_id: "alpha".to_string(),
+                section: "transitions".to_string(),
+                dropped_count: 2,
+                dropped_items: vec![
+                    "backlog->in_progress".to_string(),
+                    "in_progress->done".to_string(),
+                ],
+            }],
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('pipeline_override_health_report', ?1)",
+            [serde_json::to_string(&report).unwrap()],
+        )
+        .unwrap();
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["pipeline_overrides"]["status"], "warn");
+    assert_eq!(json["pipeline_overrides"]["warnings_count"], 1);
+    assert_eq!(
+        json["pipeline_overrides"]["replace_warnings"][0]["target_id"],
+        "alpha"
+    );
+    assert!(
+        json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|reason| reason == "pipeline_override_warnings:1"),
+        "expected pipeline_override_warnings degraded reason, got {:?}",
+        json["degraded_reasons"]
+    );
 }
 
 #[tokio::test]

@@ -76,6 +76,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     let config_audit_report =
         crate::services::discord::config_audit::load_persisted_report(&state.db)
             .and_then(|report| serde_json::to_value(report).ok());
+    let pipeline_override_report =
+        crate::pipeline::load_persisted_override_health_report(&state.db)
+            .and_then(|report| serde_json::to_value(report).ok());
 
     if let Some(ref registry) = state.health_registry {
         let discord_snapshot = health::build_health_snapshot(registry).await;
@@ -98,6 +101,17 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
                 outbox_age
             )));
         }
+        let pipeline_override_warnings = pipeline_override_report
+            .as_ref()
+            .and_then(|value| value["warnings_count"].as_u64())
+            .unwrap_or(0);
+        if pipeline_override_warnings > 0 {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!(format!(
+                "pipeline_override_warnings:{}",
+                pipeline_override_warnings
+            )));
+        }
 
         json["status"] =
             serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!("unhealthy"));
@@ -110,6 +124,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         }
         if let Some(report) = config_audit_report.clone() {
             json["config_audit"] = report;
+        }
+        if let Some(report) = pipeline_override_report.clone() {
+            json["pipeline_overrides"] = report;
         }
 
         let http_status = if status.is_http_ready() {
@@ -141,6 +158,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         }
         if let Some(report) = config_audit_report {
             json["config_audit"] = report;
+        }
+        if let Some(report) = pipeline_override_report {
+            json["pipeline_overrides"] = report;
         }
         (status, Json(json)).into_response()
     }

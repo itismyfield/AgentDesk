@@ -14,13 +14,15 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
 /// Global singleton pipeline config (the default), loaded once at startup.
 static PIPELINE: OnceLock<PipelineConfig> = OnceLock::new();
+const PIPELINE_OVERRIDE_HEALTH_KV_KEY: &str = "pipeline_override_health_report";
+const PIPELINE_OVERRIDE_AUDIT_ACTOR: &str = "pipeline";
 
 /// Load pipeline from YAML file. Called once during server startup.
 pub fn load(path: &Path) -> Result<()> {
@@ -82,6 +84,444 @@ pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
     Ok(Some(ovr))
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PipelineOverrideParseFailure {
+    pub layer: String,
+    pub target_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PipelineOverrideReplaceWarning {
+    pub layer: String,
+    pub target_id: String,
+    pub section: String,
+    pub dropped_count: usize,
+    pub dropped_items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PipelineOverrideHealthReport {
+    pub generated_at: String,
+    pub status: String,
+    pub warnings_count: usize,
+    pub warnings: Vec<String>,
+    pub parse_failures: Vec<PipelineOverrideParseFailure>,
+    pub replace_warnings: Vec<PipelineOverrideReplaceWarning>,
+}
+
+#[derive(Debug, Clone)]
+struct OverrideSourceRow {
+    layer: &'static str,
+    target_id: String,
+    json: String,
+}
+
+impl PipelineOverrideHealthReport {
+    fn finalize(&mut self) {
+        self.parse_failures.sort_by(|left, right| {
+            (&left.layer, &left.target_id, &left.error).cmp(&(
+                &right.layer,
+                &right.target_id,
+                &right.error,
+            ))
+        });
+        self.replace_warnings.sort_by(|left, right| {
+            (&left.layer, &left.target_id, &left.section).cmp(&(
+                &right.layer,
+                &right.target_id,
+                &right.section,
+            ))
+        });
+        for warning in &mut self.replace_warnings {
+            warning.dropped_items.sort();
+            warning.dropped_items.dedup();
+            warning.dropped_count = warning.dropped_items.len();
+        }
+        self.warnings.sort();
+        self.warnings.dedup();
+        self.warnings_count = self.warnings.len();
+        self.status = if self.warnings.is_empty() {
+            "ok".to_string()
+        } else {
+            "warn".to_string()
+        };
+    }
+}
+
+pub fn load_persisted_override_health_report(
+    db: &crate::db::Db,
+) -> Option<PipelineOverrideHealthReport> {
+    let conn = db.read_conn().ok()?;
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [PIPELINE_OVERRIDE_HEALTH_KV_KEY],
+            |row| row.get(0),
+        )
+        .ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub async fn refresh_override_health_report(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+) -> PipelineOverrideHealthReport {
+    ensure_loaded();
+    let base = resolve(None, None);
+    let rows = if let Some(pool) = pg_pool {
+        match load_override_rows_pg(pool).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    "[pipeline] failed to scan postgres pipeline overrides: {error}; falling back to sqlite"
+                );
+                load_override_rows_sqlite(db).unwrap_or_default()
+            }
+        }
+    } else {
+        load_override_rows_sqlite(db).unwrap_or_default()
+    };
+
+    let mut report = build_override_health_report(&base, &rows);
+    report.finalize();
+
+    for warning in &report.warnings {
+        tracing::warn!("[pipeline] {warning}");
+    }
+
+    persist_override_health_report(db, &report);
+    record_override_audit_logs(db, &report);
+    report
+}
+
+fn parse_override_for_resolve(
+    layer: &str,
+    target_id: &str,
+    json: &str,
+) -> Option<PipelineOverride> {
+    match parse_override(json) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!("[pipeline] override parse failed for {layer}:{target_id}: {error}");
+            None
+        }
+    }
+}
+
+fn load_override_rows_sqlite(db: &crate::db::Db) -> Result<Vec<OverrideSourceRow>> {
+    let conn = db
+        .read_conn()
+        .map_err(|error| anyhow::anyhow!("open sqlite override scan conn: {error}"))?;
+
+    let mut rows = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, pipeline_config
+             FROM github_repos
+             WHERE pipeline_config IS NOT NULL AND TRIM(COALESCE(pipeline_config, '')) != ''",
+        )?;
+        let repo_rows = stmt.query_map([], |row| {
+            Ok(OverrideSourceRow {
+                layer: "repo",
+                target_id: row.get::<_, String>(0)?,
+                json: row.get::<_, String>(1)?,
+            })
+        })?;
+        rows.extend(repo_rows.filter_map(|row| row.ok()));
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, pipeline_config
+             FROM agents
+             WHERE pipeline_config IS NOT NULL AND TRIM(COALESCE(pipeline_config, '')) != ''",
+        )?;
+        let agent_rows = stmt.query_map([], |row| {
+            Ok(OverrideSourceRow {
+                layer: "agent",
+                target_id: row.get::<_, String>(0)?,
+                json: row.get::<_, String>(1)?,
+            })
+        })?;
+        rows.extend(agent_rows.filter_map(|row| row.ok()));
+    }
+    Ok(rows)
+}
+
+async fn load_override_rows_pg(pool: &PgPool) -> Result<Vec<OverrideSourceRow>> {
+    let mut rows = Vec::new();
+
+    let repo_rows = sqlx::query(
+        "SELECT id, pipeline_config::text AS pipeline_config
+         FROM github_repos
+         WHERE pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(|| "scan postgres repo pipeline overrides")?;
+    rows.extend(repo_rows.into_iter().filter_map(|row| {
+        Some(OverrideSourceRow {
+            layer: "repo",
+            target_id: row.try_get::<String, _>("id").ok()?,
+            json: row.try_get::<String, _>("pipeline_config").ok()?,
+        })
+    }));
+
+    let agent_rows = sqlx::query(
+        "SELECT id, pipeline_config::text AS pipeline_config
+         FROM agents
+         WHERE pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(|| "scan postgres agent pipeline overrides")?;
+    rows.extend(agent_rows.into_iter().filter_map(|row| {
+        Some(OverrideSourceRow {
+            layer: "agent",
+            target_id: row.try_get::<String, _>("id").ok()?,
+            json: row.try_get::<String, _>("pipeline_config").ok()?,
+        })
+    }));
+
+    Ok(rows)
+}
+
+fn build_override_health_report(
+    base: &PipelineConfig,
+    rows: &[OverrideSourceRow],
+) -> PipelineOverrideHealthReport {
+    let mut report = PipelineOverrideHealthReport {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        ..PipelineOverrideHealthReport::default()
+    };
+
+    for row in rows {
+        match parse_override(&row.json) {
+            Ok(Some(ovr)) => {
+                for warning in build_replace_warnings(base, &ovr, row.layer, &row.target_id) {
+                    report.warnings.push(format_replace_warning(&warning));
+                    report.replace_warnings.push(warning);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let failure = PipelineOverrideParseFailure {
+                    layer: row.layer.to_string(),
+                    target_id: row.target_id.clone(),
+                    error: error.to_string(),
+                };
+                report.warnings.push(format!(
+                    "{} override {} parse failed: {}",
+                    row.layer, row.target_id, failure.error
+                ));
+                report.parse_failures.push(failure);
+            }
+        }
+    }
+
+    report
+}
+
+fn build_replace_warnings(
+    base: &PipelineConfig,
+    override_cfg: &PipelineOverride,
+    layer: &str,
+    target_id: &str,
+) -> Vec<PipelineOverrideReplaceWarning> {
+    let mut warnings = Vec::new();
+
+    if let Some(states) = override_cfg.states.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "states",
+            dropped_items(
+                base.states.iter().map(|state| state.id.clone()),
+                states.iter().map(|state| state.id.clone()),
+            ),
+        );
+    }
+    if let Some(transitions) = override_cfg.transitions.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "transitions",
+            dropped_items(
+                base.transitions.iter().map(transition_label),
+                transitions.iter().map(transition_label),
+            ),
+        );
+    }
+    if let Some(gates) = override_cfg.gates.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "gates",
+            dropped_items(base.gates.keys().cloned(), gates.keys().cloned()),
+        );
+    }
+    if let Some(hooks) = override_cfg.hooks.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "hooks",
+            dropped_items(base.hooks.keys().cloned(), hooks.keys().cloned()),
+        );
+    }
+    if let Some(events) = override_cfg.events.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "events",
+            dropped_items(base.events.keys().cloned(), events.keys().cloned()),
+        );
+    }
+    if let Some(clocks) = override_cfg.clocks.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "clocks",
+            dropped_items(base.clocks.keys().cloned(), clocks.keys().cloned()),
+        );
+    }
+    if let Some(timeouts) = override_cfg.timeouts.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "timeouts",
+            dropped_items(base.timeouts.keys().cloned(), timeouts.keys().cloned()),
+        );
+    }
+    if let Some(phase_gate) = override_cfg.phase_gate.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "phase_gate.checks",
+            dropped_items(
+                base.phase_gate.checks.iter().cloned(),
+                phase_gate.checks.iter().cloned(),
+            ),
+        );
+    }
+
+    warnings
+}
+
+fn push_replace_warning(
+    warnings: &mut Vec<PipelineOverrideReplaceWarning>,
+    layer: &str,
+    target_id: &str,
+    section: &str,
+    dropped_items: Vec<String>,
+) {
+    if dropped_items.is_empty() {
+        return;
+    }
+    warnings.push(PipelineOverrideReplaceWarning {
+        layer: layer.to_string(),
+        target_id: target_id.to_string(),
+        section: section.to_string(),
+        dropped_count: dropped_items.len(),
+        dropped_items,
+    });
+}
+
+fn dropped_items(
+    parent_items: impl IntoIterator<Item = String>,
+    child_items: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let child: std::collections::BTreeSet<String> = child_items.into_iter().collect();
+    parent_items
+        .into_iter()
+        .filter(|item| !child.contains(item))
+        .collect()
+}
+
+fn transition_label(transition: &TransitionConfig) -> String {
+    format!("{}->{}", transition.from, transition.to)
+}
+
+fn format_replace_warning(warning: &PipelineOverrideReplaceWarning) -> String {
+    let preview = warning
+        .dropped_items
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} override {} replaces {} and drops {} inherited entries{}",
+        warning.layer,
+        warning.target_id,
+        warning.section,
+        warning.dropped_count,
+        if preview.is_empty() {
+            String::new()
+        } else {
+            format!(": {preview}")
+        }
+    )
+}
+
+fn persist_override_health_report(db: &crate::db::Db, report: &PipelineOverrideHealthReport) {
+    let Ok(rendered) = serde_json::to_string(report) else {
+        return;
+    };
+    let Ok(conn) = db.lock() else {
+        tracing::warn!("[pipeline] failed to lock db to persist override health report");
+        return;
+    };
+    if let Err(error) = conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        libsql_rusqlite::params![PIPELINE_OVERRIDE_HEALTH_KV_KEY, rendered],
+    ) {
+        tracing::warn!("[pipeline] failed to persist override health report: {error}");
+    }
+}
+
+fn record_override_audit_logs(db: &crate::db::Db, report: &PipelineOverrideHealthReport) {
+    let Ok(conn) = db.lock() else {
+        tracing::warn!("[pipeline] failed to lock db for override audit logging");
+        return;
+    };
+
+    for failure in &report.parse_failures {
+        let entity_id = format!("{}:{}", failure.layer, failure.target_id);
+        let action = format!("pipeline_override_parse_failed: {}", failure.error);
+        conn.execute(
+            "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+             VALUES ('pipeline_override', ?1, ?2, ?3)",
+            libsql_rusqlite::params![entity_id, action, PIPELINE_OVERRIDE_AUDIT_ACTOR],
+        )
+        .ok();
+    }
+
+    for warning in &report.replace_warnings {
+        let entity_id = format!("{}:{}", warning.layer, warning.target_id);
+        let action = format!(
+            "pipeline_override_section_replace_warning:{} dropped {}",
+            warning.section, warning.dropped_count
+        );
+        conn.execute(
+            "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+             VALUES ('pipeline_override', ?1, ?2, ?3)",
+            libsql_rusqlite::params![entity_id, action, PIPELINE_OVERRIDE_AUDIT_ACTOR],
+        )
+        .ok();
+    }
+}
+
 /// Resolve the effective pipeline for a given (repo, agent) combination.
 ///
 /// Merges: default → repo_override → agent_override.
@@ -110,29 +550,31 @@ pub fn resolve_for_card(
     repo_id: Option<&str>,
     agent_id: Option<&str>,
 ) -> PipelineConfig {
-    let repo_ovr = repo_id
-        .and_then(|rid| {
-            conn.query_row(
-                "SELECT pipeline_config FROM github_repos WHERE id = ?1",
-                [rid],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        })
-        .and_then(|json| parse_override(&json).ok().flatten());
+    let repo_ovr = if let Some(rid) = repo_id {
+        conn.query_row(
+            "SELECT pipeline_config FROM github_repos WHERE id = ?1",
+            [rid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|json| parse_override_for_resolve("repo", rid, &json))
+    } else {
+        None
+    };
 
-    let agent_ovr = agent_id
-        .and_then(|aid| {
-            conn.query_row(
-                "SELECT pipeline_config FROM agents WHERE id = ?1",
-                [aid],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        })
-        .and_then(|json| parse_override(&json).ok().flatten());
+    let agent_ovr = if let Some(aid) = agent_id {
+        conn.query_row(
+            "SELECT pipeline_config FROM agents WHERE id = ?1",
+            [aid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|json| parse_override_for_resolve("agent", aid, &json))
+    } else {
+        None
+    };
 
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
@@ -154,7 +596,7 @@ pub async fn resolve_for_card_pg(
         .ok()
         .flatten()
         .flatten()
-        .and_then(|json| parse_override(&json).ok().flatten())
+        .and_then(|json| parse_override_for_resolve("repo", rid, &json))
     } else {
         None
     };
@@ -171,7 +613,7 @@ pub async fn resolve_for_card_pg(
         .ok()
         .flatten()
         .flatten()
-        .and_then(|json| parse_override(&json).ok().flatten())
+        .and_then(|json| parse_override_for_resolve("agent", aid, &json))
     } else {
         None
     };
@@ -939,6 +1381,23 @@ mod tests {
         .expect("seed agents");
     }
 
+    fn sqlite_test_db() -> crate::db::Db {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    fn sqlite_seed_repo(db: &crate::db::Db, repo_id: &str, pipeline_config: Option<&str>) {
+        let conn = db.lock().expect("sqlite write conn");
+        conn.execute(
+            "INSERT INTO github_repos (id, display_name, pipeline_config)
+             VALUES (?1, ?2, ?3)",
+            libsql_rusqlite::params![repo_id, format!("Repo {repo_id}"), pipeline_config],
+        )
+        .expect("seed sqlite github_repos");
+    }
+
     #[test]
     fn merge_override_replaces_states() {
         let base = minimal_pipeline();
@@ -1074,6 +1533,117 @@ mod tests {
                 .as_ref()
                 .map(|gate| gate.dispatch_to.as_str()),
             Some("ch-qad")
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_override_health_report_persists_parse_failures_and_audit_logs() {
+        ensure_loaded();
+        let db = sqlite_test_db();
+        sqlite_seed_repo(&db, "repo-bad-json", Some(r#"{"states":["broken"]"#));
+
+        let report = refresh_override_health_report(&db, None).await;
+        assert_eq!(report.status, "warn");
+        assert_eq!(report.warnings_count, 1);
+        assert_eq!(report.parse_failures.len(), 1);
+        assert_eq!(report.parse_failures[0].layer, "repo");
+        assert_eq!(report.parse_failures[0].target_id, "repo-bad-json");
+
+        let persisted = load_persisted_override_health_report(&db).expect("persisted report");
+        assert_eq!(persisted.parse_failures, report.parse_failures);
+        assert_eq!(persisted.warnings_count, report.warnings_count);
+
+        let conn = db.read_conn().expect("sqlite read conn");
+        let action: String = conn
+            .query_row(
+                "SELECT action
+                 FROM audit_logs
+                 WHERE entity_type = 'pipeline_override' AND entity_id = 'repo:repo-bad-json'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("parse failure audit row");
+        assert!(action.starts_with("pipeline_override_parse_failed:"));
+    }
+
+    #[tokio::test]
+    async fn refresh_override_health_report_warns_when_empty_transition_override_drops_defaults() {
+        ensure_loaded();
+        let db = sqlite_test_db();
+        let base = resolve(None, None);
+        sqlite_seed_repo(&db, "repo-empty-transitions", Some(r#"{"transitions":[]}"#));
+
+        let report = refresh_override_health_report(&db, None).await;
+        let warning = report
+            .replace_warnings
+            .iter()
+            .find(|warning| {
+                warning.layer == "repo"
+                    && warning.target_id == "repo-empty-transitions"
+                    && warning.section == "transitions"
+            })
+            .expect("transition replace warning");
+        assert_eq!(warning.dropped_count, base.transitions.len());
+        assert_eq!(warning.dropped_items.len(), base.transitions.len());
+
+        let persisted = load_persisted_override_health_report(&db).expect("persisted report");
+        assert!(persisted.warnings.iter().any(|entry| {
+            entry.contains("repo-empty-transitions") && entry.contains("transitions")
+        }));
+    }
+
+    #[tokio::test]
+    async fn refresh_override_health_report_warns_when_partial_state_override_replaces_parent() {
+        ensure_loaded();
+        let db = sqlite_test_db();
+        let base = resolve(None, None);
+        let retained_state = base.states.first().expect("default state");
+        let override_json = serde_json::json!({
+            "states": [{
+                "id": retained_state.id.clone(),
+                "label": retained_state.label.clone(),
+                "terminal": retained_state.terminal,
+            }]
+        })
+        .to_string();
+        sqlite_seed_repo(&db, "repo-partial-states", Some(&override_json));
+
+        let report = refresh_override_health_report(&db, None).await;
+        let warning = report
+            .replace_warnings
+            .iter()
+            .find(|warning| {
+                warning.layer == "repo"
+                    && warning.target_id == "repo-partial-states"
+                    && warning.section == "states"
+            })
+            .expect("state replace warning");
+        assert_eq!(warning.dropped_count, base.states.len().saturating_sub(1));
+        assert_eq!(
+            warning.dropped_items.len(),
+            base.states.len().saturating_sub(1)
+        );
+
+        let conn = db.read_conn().expect("sqlite read conn");
+        let action: String = conn
+            .query_row(
+                "SELECT action
+                 FROM audit_logs
+                 WHERE entity_type = 'pipeline_override' AND entity_id = 'repo:repo-partial-states'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("state replace audit row");
+        assert_eq!(
+            action,
+            format!(
+                "pipeline_override_section_replace_warning:states dropped {}",
+                base.states.len().saturating_sub(1)
+            )
         );
     }
 

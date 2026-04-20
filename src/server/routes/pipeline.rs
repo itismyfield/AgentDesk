@@ -627,60 +627,67 @@ pub async fn set_repo_pipeline(
     Json(body): Json<SetPipelineOverrideBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
+    let response = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        // Validate the override parses correctly if provided
+        let config_str = match &body.config {
+            Some(v) if !v.is_null() => {
+                let s = v.to_string();
+                if let Err(e) = crate::pipeline::parse_override(&s) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("invalid pipeline config: {e}")})),
+                    );
+                }
+                Some(s)
+            }
+            _ => None,
+        };
+
+        match conn.execute(
+            "UPDATE github_repos SET pipeline_config = ?1 WHERE id = ?2",
+            libsql_rusqlite::params![config_str, id],
+        ) {
+            Ok(0) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "repo not found"})),
+            ),
+            Ok(_) => {
+                // Validate the merged effective pipeline
+                let effective = crate::pipeline::resolve_for_card(&conn, Some(&id), None);
+                if let Err(e) = effective.validate() {
+                    // Rollback: clear the override since merge is invalid
+                    let _ = conn.execute(
+                        "UPDATE github_repos SET pipeline_config = NULL WHERE id = ?1",
+                        libsql_rusqlite::params![id],
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("merged pipeline validation failed: {e}")})),
+                    );
+                }
+                (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
+            }
+            Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{e}")})),
-            );
+            ),
         }
     };
 
-    // Validate the override parses correctly if provided
-    let config_str = match &body.config {
-        Some(v) if !v.is_null() => {
-            let s = v.to_string();
-            if let Err(e) = crate::pipeline::parse_override(&s) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid pipeline config: {e}")})),
-                );
-            }
-            Some(s)
-        }
-        _ => None,
-    };
-
-    match conn.execute(
-        "UPDATE github_repos SET pipeline_config = ?1 WHERE id = ?2",
-        libsql_rusqlite::params![config_str, id],
-    ) {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "repo not found"})),
-        ),
-        Ok(_) => {
-            // Validate the merged effective pipeline
-            let effective = crate::pipeline::resolve_for_card(&conn, Some(&id), None);
-            if let Err(e) = effective.validate() {
-                // Rollback: clear the override since merge is invalid
-                let _ = conn.execute(
-                    "UPDATE github_repos SET pipeline_config = NULL WHERE id = ?1",
-                    libsql_rusqlite::params![id],
-                );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("merged pipeline validation failed: {e}")})),
-                );
-            }
-            (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+    if response.0 == StatusCode::OK {
+        crate::pipeline::refresh_override_health_report(&state.db, state.pg_pool.as_ref()).await;
     }
+    response
 }
 
 /// GET /api/pipeline/config/agent/:agent_id
@@ -723,71 +730,78 @@ pub async fn set_agent_pipeline(
     Path(agent_id): Path<String>,
     Json(body): Json<SetPipelineOverrideBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
+    let response = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        let config_str = match &body.config {
+            Some(v) if !v.is_null() => {
+                let s = v.to_string();
+                if let Err(e) = crate::pipeline::parse_override(&s) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("invalid pipeline config: {e}")})),
+                    );
+                }
+                Some(s)
+            }
+            _ => None,
+        };
+
+        match conn.execute(
+            "UPDATE agents SET pipeline_config = ?1 WHERE id = ?2",
+            libsql_rusqlite::params![config_str, agent_id],
+        ) {
+            Ok(0) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "agent not found"})),
+            ),
+            Ok(_) => {
+                // Look up repo_id for this agent to validate merged pipeline
+                let repo_id: Option<String> = conn
+                    .query_row(
+                        "SELECT repo_id FROM agents WHERE id = ?1",
+                        [&agent_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                let effective =
+                    crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), Some(&agent_id));
+                if let Err(e) = effective.validate() {
+                    // Rollback: clear the override
+                    let _ = conn.execute(
+                        "UPDATE agents SET pipeline_config = NULL WHERE id = ?1",
+                        libsql_rusqlite::params![agent_id],
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("merged pipeline validation failed: {e}")})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({"ok": true, "agent_id": agent_id})),
+                )
+            }
+            Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{e}")})),
-            );
+            ),
         }
     };
 
-    let config_str = match &body.config {
-        Some(v) if !v.is_null() => {
-            let s = v.to_string();
-            if let Err(e) = crate::pipeline::parse_override(&s) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid pipeline config: {e}")})),
-                );
-            }
-            Some(s)
-        }
-        _ => None,
-    };
-
-    match conn.execute(
-        "UPDATE agents SET pipeline_config = ?1 WHERE id = ?2",
-        libsql_rusqlite::params![config_str, agent_id],
-    ) {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Ok(_) => {
-            // Look up repo_id for this agent to validate merged pipeline
-            let repo_id: Option<String> = conn
-                .query_row(
-                    "SELECT repo_id FROM agents WHERE id = ?1",
-                    [&agent_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            let effective =
-                crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), Some(&agent_id));
-            if let Err(e) = effective.validate() {
-                // Rollback: clear the override
-                let _ = conn.execute(
-                    "UPDATE agents SET pipeline_config = NULL WHERE id = ?1",
-                    libsql_rusqlite::params![agent_id],
-                );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("merged pipeline validation failed: {e}")})),
-                );
-            }
-            (
-                StatusCode::OK,
-                Json(json!({"ok": true, "agent_id": agent_id})),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+    if response.0 == StatusCode::OK {
+        crate::pipeline::refresh_override_health_report(&state.db, state.pg_pool.as_ref()).await;
     }
+    response
 }
 
 /// GET /api/pipeline/config/graph?repo=...&agent_id=...
