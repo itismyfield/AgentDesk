@@ -206,7 +206,6 @@ pub(super) fn dispatch_context_worktree_target(
     Ok(Some((path.to_string(), branch)))
 }
 
-#[cfg(test)]
 pub(super) fn resolve_parent_dispatch_context_sqlite_test(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,

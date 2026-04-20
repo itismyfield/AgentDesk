@@ -12,11 +12,11 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
-    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title, context_json) → json_string
-    // Synchronous DB INSERT — no deferred intent.
+    // #248: __dispatch_create_raw(card_id, agent_id, dispatch_type, title, context_json)
+    // -> json_string. Synchronous PG INSERT — no deferred intent.
     let pg_create = pg_pool.clone();
     dispatch_obj.set(
-        "__create_sync",
+        "__create_raw",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(
@@ -27,7 +27,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                       context_json: String|
                       -> String {
                     match pg_create.as_ref() {
-                        Some(pool) => dispatch_create_sync(
+                        Some(pool) => dispatch_create_raw_pg(
                             pool,
                             &card_id,
                             &agent_id,
@@ -136,7 +136,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                 // #248: Synchronous DB INSERT — no deferred intent.
                 // Validation + INSERT happen atomically in Rust.
                 var result = JSON.parse(
-                    agentdesk.dispatch.__create_sync(cardId, agentId, dt, t, ctxJson)
+                    agentdesk.dispatch.__create_raw(cardId, agentId, dt, t, ctxJson)
                 );
                 if (result.error) throw new Error(result.error);
                 var dispatchId = result.dispatch_id;
@@ -187,7 +187,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
 /// #248/#249: Synchronous dispatch creation — validates and inserts into DB
 /// immediately. The notify outbox row is now inserted atomically inside
 /// the dispatch-core path, so no JS-side outbox buffering is needed.
-fn dispatch_create_sync(
+fn dispatch_create_raw_pg(
     pg_pool: &PgPool,
     card_id: &str,
     agent_id: &str,

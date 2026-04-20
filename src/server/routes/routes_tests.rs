@@ -14,10 +14,7 @@ use std::sync::MutexGuard;
 use tower::ServiceExt;
 
 fn test_db() -> Db {
-    let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-    crate::db::schema::migrate(&conn).unwrap();
-    crate::db::wrap_conn(conn)
+    crate::db::test_db()
 }
 
 /// Seed test agents for dispatch-related tests (#245 agent-exists guard).
@@ -33,6 +30,11 @@ fn seed_test_agents(db: &Db) {
 fn test_engine(db: &Db) -> PolicyEngine {
     let config = crate::config::Config::default();
     PolicyEngine::new(&config, db.clone()).unwrap()
+}
+
+fn test_engine_with_pg(db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
+    let config = crate::config::Config::default();
+    PolicyEngine::new_with_pg(&config, db.clone(), Some(pg_pool)).unwrap()
 }
 
 fn test_api_router(
@@ -940,6 +942,7 @@ async fn offices_reorder_rejects_wrapped_order_body() {
     let app = test_api_router(db, engine, None);
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("PATCH")
@@ -963,6 +966,7 @@ async fn round_table_meeting_channels_endpoint_does_not_fall_through_to_meeting_
     let app = axum::Router::new().nest("/api", test_api_router(db, engine, None));
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/round-table-meetings/channels")
@@ -1057,6 +1061,7 @@ async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fa
     let app = axum::Router::new().nest("/api", test_api_router(db, engine, Some(health_registry)));
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/round-table-meetings/channels")
@@ -1150,6 +1155,7 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
 
     let app = test_api_router(db, engine, None);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/agents/agent-turn/turn")
@@ -1202,6 +1208,7 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
 
     let app = test_api_router(db, engine, None);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/agents/agent-idle/turn")
@@ -1304,6 +1311,7 @@ async fn stop_agent_turn_preserves_matching_tmux_session() {
 
     let app = test_api_router(db.clone(), engine, None);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3464,6 +3472,7 @@ async fn dispatch_create_and_get() {
 
     let app = test_api_router(db.clone(), engine.clone(), None);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3477,11 +3486,12 @@ async fn dispatch_create_and_get() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::CREATED, "unexpected response: {json}");
     let dispatch_id = json["dispatch"]["id"].as_str().unwrap().to_string();
     assert_eq!(json["dispatch"]["status"], "pending");
     assert_eq!(json["dispatch"]["kanban_card_id"], "c1");
@@ -3542,6 +3552,7 @@ async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
 
     let app = test_api_router(db, engine, None);
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3573,7 +3584,9 @@ async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
 async fn dispatch_create_with_skip_outbox_omits_notify_row() {
     let db = test_db();
     seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
 
     {
         let conn = db.lock().unwrap();
@@ -3583,8 +3596,38 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
             ).unwrap();
     }
 
-    let app = test_api_router(db.clone(), engine, None);
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("ch-td")
+    .bind("TD")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("c1-skip")
+    .bind("Card1 Skip")
+    .bind("ready")
+    .bind("medium")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3598,25 +3641,33 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::CREATED, "unexpected response: {json}");
     let dispatch_id = json["dispatch"]["id"].as_str().unwrap().to_string();
 
-    let conn = db.lock().unwrap();
-    let notify_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-            [&dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let verify_pool = sqlx::PgPool::connect(&pg_db.database_url).await.unwrap();
+    let notify_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint
+         FROM dispatch_outbox
+         WHERE dispatch_id = $1 AND action = 'notify'",
+    )
+    .bind(&dispatch_id)
+    .fetch_one(&verify_pool)
+    .await
+    .unwrap();
     assert_eq!(
         notify_count, 0,
         "skip_outbox=true must suppress notify outbox persistence"
     );
+
+    verify_pool.close().await;
+    drop(app);
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 /// #761: A crafted `POST /api/dispatches` call that preseeds review-target
@@ -3628,17 +3679,18 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
 async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context() {
     let db = test_db();
     seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
 
-    // Real repo with a commit that mentions issue #761 — this is the commit
-    // the validation/refresh chain must resolve to, NOT the injected one.
+    // Real repo exists on the card, but the caller injects a foreign
+    // external target_repo. The hardened path must fail closed instead of
+    // silently falling back to the card repo and reviewing unrelated code.
     let (repo, _repo_override) = setup_test_repo();
-    let real_commit = git_commit(repo.path(), "fix: real work for card (#761)");
     let real_worktree_path = repo.path().to_string_lossy().into_owned();
 
-    // Card in the review-ready state (pre-review), linked to the real repo
-    // via a repo_id that resolves (via AGENTDESK_REPO_DIR set by
-    // setup_test_repo) to `repo.path()`.
+    // Card in the review-ready state (pre-review), linked to a real repo
+    // path while the caller injects a conflicting foreign target_repo.
     {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -3653,6 +3705,35 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
         )
         .unwrap();
     }
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("ch-td")
+    .bind("TD")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, github_issue_number, repo_id
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7
+         )",
+    )
+    .bind("card-761")
+    .bind("Preseed review target")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("ch-td")
+    .bind(761_i64)
+    .bind(&real_worktree_path)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
 
     // Simulate a malicious / buggy caller preseeding review-target fields.
     // The injected commit SHA is syntactically valid but points at nothing
@@ -3680,8 +3761,15 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
     })
     .to_string();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3693,64 +3781,53 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let status = response.status();
     let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    let context = &json["dispatch"]["context"];
-
-    // The injected values MUST NOT survive into the persisted dispatch
-    // context. Either the field is missing (validation chain found nothing)
-    // or it was overwritten with the real target from the card's history.
-    assert_ne!(
-        context["reviewed_commit"].as_str(),
-        Some(injected_commit),
-        "injected reviewed_commit must not propagate into review dispatch context"
-    );
-    assert_ne!(
-        context["worktree_path"].as_str(),
-        Some(injected_worktree),
-        "injected worktree_path must not propagate into review dispatch context"
-    );
-    assert_ne!(
-        context["branch"].as_str(),
-        Some("attacker/controlled-branch"),
-        "injected branch must not propagate into review dispatch context"
-    );
-    assert_ne!(
-        context["target_repo"].as_str(),
-        Some(injected_target_repo),
-        "injected target_repo must not propagate into review dispatch context"
-    );
-
-    // The real target (resolved via find_latest_commit_for_issue for #761)
-    // must have replaced the injected one.
     assert_eq!(
-        context["reviewed_commit"].as_str(),
-        Some(real_commit.as_str()),
-        "validation chain must overwrite reviewed_commit with the real commit for this card's issue"
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected response: {json}"
     );
-    let canonical = |value: &str| {
-        std::fs::canonicalize(value)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
-    assert_eq!(
-        canonical(context["worktree_path"].as_str().unwrap()),
-        canonical(&real_worktree_path),
-        "worktree_path must resolve to the card's real repo dir"
-    );
-
-    // #761 (Codex round-2): The `_trusted_review_target` flag must be
-    // scrubbed from the persisted dispatch context — it has no meaning on
-    // the API-sourced path and must not become an audit artifact that
-    // implies the client steered the review target.
+    let error = json["error"].as_str().unwrap_or_default();
     assert!(
-        context.get("_trusted_review_target").is_none(),
-        "client-supplied _trusted_review_target flag must not persist into the dispatch context"
+        error.contains("external_target_repo_unrecoverable"),
+        "expected fail-closed external_target_repo guard, got {json}"
     );
+    assert!(
+        error.contains(injected_target_repo),
+        "error should point at the rejected injected target_repo, got {json}"
+    );
+    assert!(
+        !json.to_string().contains(injected_commit),
+        "error response must not echo the injected reviewed_commit: {json}"
+    );
+    assert!(
+        !json.to_string().contains(injected_worktree),
+        "error response must not echo the injected worktree_path: {json}"
+    );
+    assert!(
+        !json.to_string().contains("attacker/controlled-branch"),
+        "error response must not echo the injected branch: {json}"
+    );
+
+    let dispatch_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM task_dispatches WHERE kanban_card_id = $1",
+    )
+    .bind("card-761")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        dispatch_count, 0,
+        "fail-closed review-target validation must not persist a dispatch row"
+    );
+
+    drop(app);
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 /// #761 (Codex round-2): Focused negative test for the trust-boundary
@@ -3768,7 +3845,9 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
 async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
     let db = test_db();
     seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
 
     // Deliberately do NOT seed any work dispatch or pr_tracking row for this
     // card — the validation/refresh chain has nothing to resolve. If the
@@ -3789,6 +3868,34 @@ async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
         .unwrap();
     }
 
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("ch-td")
+    .bind("TD")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, github_issue_number
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6
+         )",
+    )
+    .bind("card-761-flag")
+    .bind("Ignore trust flag")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("ch-td")
+    .bind(999999_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
     let injected_commit = "cafef00dcafef00dcafef00dcafef00dcafef00d";
     let injected_worktree = "/tmp/agentdesk-761-flag-attacker-worktree";
     let injected_target_repo = "/tmp/agentdesk-761-flag-attacker-repo";
@@ -3808,8 +3915,15 @@ async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
     })
     .to_string();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3868,6 +3982,10 @@ async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
             "error response must not echo the injected reviewed_commit: {json}"
         );
     }
+
+    drop(app);
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
