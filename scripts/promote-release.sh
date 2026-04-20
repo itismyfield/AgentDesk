@@ -345,38 +345,8 @@ rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 # Wait for active turns to finish before stopping the server.
 # Without this, the SIGTERM interrupts mid-response, cutting off output.
 # REL_PORT already assigned earlier for the zero-inflight gate.
-TURN_WAIT_MAX=120
-TURN_WAIT=0
-_health_turn_snapshot() {
-    local health_json
-    health_json=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null) || { echo "0 0 0"; return; }
-    local active finalizing queue_depth
-    active=$(echo "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
-    finalizing=$(echo "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
-    queue_depth=$(echo "$health_json" | grep -o '"queue_depth":[0-9]*' | head -1 | cut -d: -f2)
-    echo "${active:-0} ${finalizing:-0} ${queue_depth:-0}"
-}
-read -r ACTIVE FINALIZING QUEUE_DEPTH <<EOF
-$(_health_turn_snapshot)
-EOF
-LIVE_TURNS=$(( ACTIVE + FINALIZING ))
-if [ "${LIVE_TURNS}" -gt 0 ]; then
-    echo "▸ Waiting for active/finalizing turns to drain (${LIVE_TURNS} live; queued=${QUEUE_DEPTH} will persist)..."
-    while [ "${LIVE_TURNS}" -gt 0 ] && [ "$TURN_WAIT" -lt "$TURN_WAIT_MAX" ]; do
-        sleep 2
-        TURN_WAIT=$((TURN_WAIT + 2))
-        read -r ACTIVE FINALIZING QUEUE_DEPTH <<EOF
-$(_health_turn_snapshot)
-EOF
-        LIVE_TURNS=$(( ACTIVE + FINALIZING ))
-    done
-    if [ "${LIVE_TURNS}" -gt 0 ]; then
-        echo "  ⚠ ${LIVE_TURNS} active/finalizing turn(s) remain after ${TURN_WAIT_MAX}s — proceeding anyway (queued=${QUEUE_DEPTH})"
-    else
-        echo "  ✓ Active/finalizing turns drained (${TURN_WAIT}s, queued=${QUEUE_DEPTH})"
-    fi
-elif [ "${QUEUE_DEPTH}" -gt 0 ]; then
-    echo "▸ ${QUEUE_DEPTH} queued intervention(s) detected — proceeding; mailbox persistence will restore them after restart"
+if ! wait_for_live_turns_to_drain_or_fail "release" "$PLIST_REL" "$REL_PORT" 120 2; then
+    exit 1
 fi
 
 # Stop release — wait for process to actually die (flock release)

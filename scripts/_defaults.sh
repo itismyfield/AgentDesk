@@ -289,3 +289,101 @@ wait_for_http_service_health() {
 
   return 1
 }
+
+health_turn_snapshot() {
+  local port="$1"
+  local health_json
+  health_json=$(curl -sf --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || return 1
+
+  if _health_json_has_jq; then
+    printf '%s\n' "$health_json" | jq -r '
+      [
+        (.global_active // 0),
+        (.global_finalizing // 0),
+        (.queue_depth // 0)
+      ] | @tsv
+    ' 2>/dev/null | tr '\t' ' '
+    return
+  fi
+
+  local active finalizing queue_depth
+  active=$(printf '%s' "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
+  finalizing=$(printf '%s' "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
+  queue_depth=$(printf '%s' "$health_json" | grep -o '"queue_depth":[0-9]*' | head -1 | cut -d: -f2)
+  echo "${active:-0} ${finalizing:-0} ${queue_depth:-0}"
+}
+
+wait_for_live_turns_to_drain_or_fail() {
+  local scope="$1"
+  local label="$2"
+  local port="$3"
+  local max_wait="${4:-120}"
+  local poll_secs="${5:-2}"
+  local allow_cut="${AGENTDESK_ALLOW_LIVE_TURN_CUT:-0}"
+  local waited=0
+  local active=0 finalizing=0 queue_depth=0 live_turns=0 job_state=""
+
+  if ! read -r active finalizing queue_depth <<EOF
+$(health_turn_snapshot "$port")
+EOF
+  then
+    job_state=$(_launchd_job_state "$label")
+    if [ "$job_state" = "not running" ]; then
+      echo "▸ [gate] ${scope} launchd job already not running — skipping live-turn drain check"
+      return 0
+    fi
+    if [ "$allow_cut" = "1" ]; then
+      echo "⚠ [gate] Unable to read ${scope} health on :${port} (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+      return 0
+    fi
+    echo "✗ [gate] Unable to confirm ${scope} turn drain on :${port} (launchd state: ${job_state:-unknown})"
+    echo "  Refusing restart to avoid cutting active turns."
+    echo "  Override only if intentional: AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+    return 1
+  fi
+
+  live_turns=$(( active + finalizing ))
+  if [ "$live_turns" -eq 0 ]; then
+    if [ "${queue_depth:-0}" -gt 0 ]; then
+      echo "▸ [gate] ${scope} has ${queue_depth} queued intervention(s) only — safe to restart"
+    else
+      echo "▸ [gate] ${scope} has no active/finalizing turns"
+    fi
+    return 0
+  fi
+
+  echo "▸ [gate] Waiting for ${scope} active/finalizing turns to drain (${live_turns} live; queued=${queue_depth})..."
+  while [ "$live_turns" -gt 0 ] && [ "$waited" -lt "$max_wait" ]; do
+    sleep "$poll_secs"
+    waited=$(( waited + poll_secs ))
+    if ! read -r active finalizing queue_depth <<EOF
+$(health_turn_snapshot "$port")
+EOF
+    then
+      job_state=$(_launchd_job_state "$label")
+      if [ "$allow_cut" = "1" ]; then
+        echo "⚠ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+        return 0
+      fi
+      echo "✗ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown})"
+      echo "  Refusing restart to avoid cutting active turns."
+      echo "  Override only if intentional: AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+      return 1
+    fi
+    live_turns=$(( active + finalizing ))
+  done
+
+  if [ "$live_turns" -gt 0 ]; then
+    if [ "$allow_cut" = "1" ]; then
+      echo "⚠ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1 (queued=${queue_depth})"
+      return 0
+    fi
+    echo "✗ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s (queued=${queue_depth})"
+    echo "  Refusing restart to avoid cutting active turns."
+    echo "  Retry after work finishes, or override intentionally with AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+    return 1
+  fi
+
+  echo "✓ [gate] ${scope} active/finalizing turns drained (${waited}s, queued=${queue_depth})"
+  return 0
+}
