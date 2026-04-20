@@ -95,6 +95,9 @@ export function clonePipelineConfig(pipeline: PipelineConfigFull): PipelineConfi
         },
       ]),
     ),
+    events: Object.fromEntries(
+      Object.entries(pipeline.events).map(([key, names]) => [key, [...names]]),
+    ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
     ),
