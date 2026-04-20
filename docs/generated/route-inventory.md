@@ -78,7 +78,7 @@
 | `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:23` | `src/server/routes/domains/integrations.rs:14` |
 | `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:75` | `src/server/routes/domains/integrations.rs:14` |
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:138` | `src/server/routes/domains/integrations.rs:18` |
-| `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:47` | `src/server/routes/domains/access.rs:11` |
+| `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:48` | `src/server/routes/domains/access.rs:11` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:2046` | `src/server/routes/domains/ops.rs:161` |
 | `DELETE` | `/api/hook/session` | `dispatched_sessions::delete_session` | `src/server/routes/dispatched_sessions.rs:829` | `src/server/routes/domains/ops.rs:79` |
 | `POST` | `/api/hook/session` | `dispatched_sessions::hook_session` | `src/server/routes/dispatched_sessions.rs:542` | `src/server/routes/domains/ops.rs:79` |
@@ -166,8 +166,8 @@
 | `POST` | `/api/round-table-meetings/{id}/issues` | `meetings::create_issues` | `src/server/routes/meetings.rs:793` | `src/server/routes/domains/integrations.rs:50` |
 | `POST` | `/api/round-table-meetings/{id}/issues/discard` | `meetings::discard_issue` | `src/server/routes/meetings.rs:977` | `src/server/routes/domains/integrations.rs:54` |
 | `POST` | `/api/round-table-meetings/{id}/issues/discard-all` | `meetings::discard_all_issues` | `src/server/routes/meetings.rs:1027` | `src/server/routes/domains/integrations.rs:58` |
-| `POST` | `/api/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:156` | `src/server/routes/domains/access.rs:12` |
-| `POST` | `/api/senddm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:189` | `src/server/routes/domains/access.rs:13` |
+| `POST` | `/api/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:157` | `src/server/routes/domains/access.rs:12` |
+| `POST` | `/api/senddm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:190` | `src/server/routes/domains/access.rs:13` |
 | `GET` | `/api/session-termination-events` | `termination_events::list_termination_events` | `src/server/routes/termination_events.rs:23` | `src/server/routes/domains/ops.rs:99` |
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:1022` | `src/server/routes/domains/agents.rs:34` |
 | `POST` | `/api/sessions/{session_key}/force-kill` | `dispatched_sessions::force_kill_session` | `src/server/routes/dispatched_sessions.rs:1908` | `src/server/routes/domains/ops.rs:95` |
