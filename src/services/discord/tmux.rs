@@ -46,6 +46,17 @@ pub(super) struct WatcherLineOutcome {
     pub provider_overload_message: Option<String>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
+    /// #826 marker: Claude Code emits `{"type":"system","subtype":"task_notification",...}`
+    /// at the start of a turn it auto-fires in response to a background task
+    /// completing (e.g. a `Bash run_in_background` finishing). This is the
+    /// canonical signal that the current tmux turn is a *background-trigger*
+    /// turn — one for which no user-authored message exists and the terminal
+    /// response must be routed through the notify-bot outbox rather than
+    /// relayed via the command bot. Distinguishing this from a normal
+    /// foreground turn (where `turn_bridge` has merely cleared the inflight
+    /// file prior to handing output back to the watcher) is the P1 review fix
+    /// for the over-broad `inflight.is_none()` predicate.
+    pub task_notification_seen: bool,
 }
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
@@ -97,6 +108,54 @@ fn build_monitor_completion_message(response: &str) -> String {
         "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\n{}",
         response
     )
+}
+
+/// #826 P1 #1: Evaluate whether the terminal response for a tmux-backed turn
+/// should be routed through the notify-bot outbox rather than the normal
+/// command-bot relay. Background-trigger turns (Claude Code auto-fired in
+/// response to a `<task-notification>`) must go through notify to avoid
+/// other agents in the channel treating the output as an actionable directive
+/// (infinite-loop hazard). Ordinary foreground turns — even when the inflight
+/// file was cleared early by `turn_bridge` — must NOT be rerouted, because
+/// the notify-bot outbox may not be available in every deployment, which
+/// would silently drop the reply.
+///
+/// Returns `true` only when ALL of the following hold:
+/// 1. The turn produced an assistant response (no use rerouting emptiness).
+/// 2. A `system/task_notification` event was observed in the turn's JSONL
+///    stream (canonical Claude Code marker for a background-trigger turn).
+/// 3. No inflight state exists for the channel (rules out concurrent
+///    foreground turns that happen to also include the marker).
+#[inline]
+pub(super) fn should_route_terminal_response_via_notify_bot(
+    has_assistant_response: bool,
+    task_notification_seen: bool,
+    inflight_present: bool,
+) -> bool {
+    has_assistant_response && task_notification_seen && !inflight_present
+}
+
+/// #826 P1 #2: Decide whether `last_relayed_offset` should advance for a
+/// notify-path relay. Only advance when the outbox enqueue SUCCEEDED (durable
+/// DB-backed commit) OR when the direct-send fallback actually reached
+/// Discord. An enqueue failure with no fallback delivery must leave the
+/// offset untouched so the watcher can re-emit the same tmux range on its
+/// next scan instead of silently dropping the response.
+///
+/// Pure function extracted for regression-test coverage of the offset-commit
+/// gate; the runtime version lives inline in the watcher loop because it is
+/// intertwined with other relay bookkeeping.
+#[inline]
+pub(super) fn notify_path_should_advance_offset(
+    has_current_response: bool,
+    enqueue_succeeded: bool,
+    fallback_send_succeeded: bool,
+) -> bool {
+    if !has_current_response {
+        // Nothing to deliver — trivially safe to advance past an empty range.
+        return true;
+    }
+    enqueue_succeeded || fallback_send_succeeded
 }
 
 /// #826: Enqueue a background-trigger turn's terminal response on the
@@ -773,6 +832,11 @@ pub(super) async fn tmux_output_watcher(
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
+        // #826 P1 #1: accumulate the task_notification system-event marker so
+        // the terminal-response branch can distinguish a background-trigger
+        // auto-fired turn from a normal foreground turn whose inflight file
+        // was simply cleared early by turn_bridge.
+        let mut task_notification_seen = initial_outcome.task_notification_seen;
 
         // Keep reading until result or timeout
         // Check if a Discord turn claimed this data since our epoch snapshot
@@ -847,6 +911,8 @@ pub(super) async fn tmux_output_watcher(
                             is_provider_overloaded || outcome.is_provider_overloaded;
                         stale_resume_detected =
                             stale_resume_detected || outcome.stale_resume_detected;
+                        task_notification_seen =
+                            task_notification_seen || outcome.task_notification_seen;
                         if provider_overload_message.is_none() {
                             provider_overload_message = outcome.provider_overload_message;
                         }
@@ -1480,19 +1546,33 @@ pub(super) async fn tmux_output_watcher(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
-        // #826: When inflight state is missing at the watcher's terminal-response
-        // point, this is a turn that Claude Code's `<task-notification>` mechanism
-        // auto-fired after the bridge completed and cleaned up. There is no
-        // user-visible message that would normally trigger the bridge path, so
-        // the response must reach the channel via the notify bot — both because
-        // (a) without it the response is silently dropped (the original #826
-        // bug) and (b) sending via the command bot risks other agents in the
-        // channel treating it as an actionable directive (infinite-loop risk).
-        // Notify bot is the canonical sink for background-task-driven info per
-        // `docs/background-task-pattern.md`; it is also dropped at the intake
-        // gate so the agent itself cannot self-trigger another turn off this
+        // #826 P1 #1: Routing a terminal response through the notify-bot
+        // outbox is only correct when the response came from a turn that
+        // Claude Code's `<task-notification>` mechanism auto-fired (no
+        // user-authored message exists, sending via the command bot risks
+        // other agents treating it as a directive → infinite-loop hazard).
+        //
+        // The earlier heuristic — "inflight state is missing at completion"
+        // — is too broad: `turn_bridge` ALSO clears the inflight file before
+        // handing a normal tmux-backed foreground turn's output back to the
+        // watcher for relay. Using only `inflight.is_none()` would silently
+        // reroute ordinary foreground replies through the notify-only path
+        // and drop them when notify/outbox is unavailable.
+        //
+        // The canonical marker is the `system/task_notification` JSONL event
+        // Claude Code emits at the start of an auto-fired turn; we
+        // accumulate it in `task_notification_seen` above. Route to notify
+        // ONLY when BOTH the marker is present AND the inflight file is
+        // absent — the latter remains part of the predicate so that a
+        // foreground turn whose response happens to contain a spurious
+        // task_notification passthrough is still relayed normally.
+        //
+        // Notify bot is the canonical sink for background-task-driven info
+        // per `docs/background-task-pattern.md`; it is dropped at the intake
+        // gate so the agent cannot self-trigger another turn off this
         // delivery.
         let route_via_notify_bot = has_assistant_response
+            && task_notification_seen
             && super::inflight::load_inflight_state(&watcher_provider, channel_id.get()).is_none();
 
         // Send the terminal response to Discord
@@ -1526,23 +1606,46 @@ pub(super) async fn tmux_output_watcher(
                         &prefixed,
                     )
                 } else {
+                    // No assistant text to deliver — nothing to commit.
                     true
                 };
                 if !enqueued {
+                    // #826 P1 #2: enqueue FAILED — the message has NOT been
+                    // durably persisted to the outbox. Do not let a
+                    // downstream success path accidentally advance
+                    // `last_relayed_offset`; clear `relay_ok` first and then
+                    // *only* revive it if the direct-send fallback reaches
+                    // Discord. This keeps the watcher able to retry the same
+                    // tmux range on the next scan instead of silently moving
+                    // past a dropped response.
+                    relay_ok = false;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] 👁 background-trigger notify enqueue failed in channel {} — falling back to direct send",
                         channel_id
                     );
-                    if has_current_response
-                        && let Err(e) =
-                            send_long_message_raw(&http, channel_id, &prefixed, &shared).await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] 👁 Fallback relay failed: {e}");
-                        relay_ok = false;
+                    if has_current_response {
+                        match send_long_message_raw(&http, channel_id, &prefixed, &shared).await {
+                            Ok(_) => {
+                                relay_ok = true;
+                            }
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!("  [{ts}] 👁 Fallback relay failed: {e}");
+                                // relay_ok remains false → offset NOT advanced
+                            }
+                        }
                     }
                 }
+                // Residual risk: enqueue succeeded but the notify-bot outbox
+                // worker may still fail to reach Discord later (notify bot
+                // mis-configured, `/api/send` unreachable, Discord rejects the
+                // message). The outbox is a durable DB-backed queue with its
+                // own retry loop, so a transient worker failure is retried
+                // without our involvement. Exhausting worker retries would
+                // leave the row in `status='failed'` with the offset already
+                // advanced — tracked as follow-up, documented here so the
+                // gap is visible in grep.
             } else {
                 match placeholder_msg_id {
                     Some(msg_id) => {
@@ -2403,6 +2506,16 @@ pub(super) fn process_watcher_lines(
                         if subtype == "compact" || subtype == "auto_compact" {
                             outcome.auto_compacted = true;
                         }
+                        // #826: Claude Code emits a task_notification system
+                        // event when it auto-fires a turn in response to a
+                        // background task completing (e.g. a Bash
+                        // run_in_background finish). This is the authoritative
+                        // marker that lets us distinguish a background-trigger
+                        // turn from a normal foreground turn whose inflight
+                        // file was merely cleared early by turn_bridge.
+                        if subtype == "task_notification" {
+                            outcome.task_notification_seen = true;
+                        }
                     }
                 }
                 _ => {}
@@ -3097,8 +3210,9 @@ mod tests {
     use super::{
         DeadSessionCleanupPlan, WatcherToolState, build_monitor_completion_message,
         dead_session_cleanup_plan, enqueue_background_trigger_response_to_notify_outbox,
-        load_restored_provider_session_id, process_watcher_lines,
-        refresh_session_heartbeat_from_tmux_output, watcher_ready_for_input_turn_completed,
+        load_restored_provider_session_id, notify_path_should_advance_offset,
+        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
+        should_route_terminal_response_via_notify_bot, watcher_ready_for_input_turn_completed,
         watcher_should_yield_to_inflight_state,
     };
     use crate::services::discord::inflight::InflightTurnState;
@@ -3562,5 +3676,121 @@ mod tests {
             "would-have-been-delivered",
         );
         assert!(!ok, "missing db must surface as failure to enable fallback");
+    }
+
+    /// #826 P1 #1 regression guard: a turn whose inflight file is absent but
+    /// which never emitted a `system/task_notification` event is a NORMAL
+    /// foreground turn (turn_bridge cleared the inflight early before
+    /// handing tmux output back to the watcher). Such turns MUST use the
+    /// direct command-bot relay, not the notify-bot outbox — otherwise a
+    /// deployment without notify wiring silently drops every long reply.
+    #[test]
+    fn normal_foreground_turn_without_task_notification_uses_direct_relay() {
+        // No task_notification marker + no inflight + has response → direct.
+        assert!(
+            !should_route_terminal_response_via_notify_bot(
+                /*has_assistant_response*/ true, /*task_notification_seen*/ false,
+                /*inflight_present*/ false,
+            ),
+            "missing inflight ALONE must not reroute a foreground turn to notify"
+        );
+
+        // Background-trigger turn with marker and no inflight → notify.
+        assert!(
+            should_route_terminal_response_via_notify_bot(true, true, false),
+            "genuine background-trigger turns (marker present + no inflight) must route to notify"
+        );
+
+        // Marker present but inflight still exists — treat as a concurrent
+        // foreground turn; do not reroute.
+        assert!(
+            !should_route_terminal_response_via_notify_bot(true, true, true),
+            "inflight-present turns must never route to notify even if a task_notification leaked in"
+        );
+
+        // Marker present but no response — nothing to send.
+        assert!(!should_route_terminal_response_via_notify_bot(
+            false, true, false
+        ));
+    }
+
+    /// #826 P1 #1 regression guard (JSONL-level): `process_watcher_lines`
+    /// must expose the `task_notification` system event as
+    /// `task_notification_seen` so the routing predicate can distinguish a
+    /// background-trigger turn from a foreground one. A run that only
+    /// contains a normal assistant+result pair must leave the flag clear.
+    #[test]
+    fn process_watcher_lines_surfaces_task_notification_marker() {
+        // Background-trigger turn: Claude Code opens with a system
+        // task_notification event before streaming the assistant response.
+        let mut bg_buffer = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-42\",\"status\":\"completed\",\"summary\":\"CI green\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PR #825 리뷰 반영 완료\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        ).to_string();
+        let mut state = crate::services::session_backend::StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let bg_outcome = process_watcher_lines(
+            &mut bg_buffer,
+            &mut state,
+            &mut full_response,
+            &mut tool_state,
+        );
+        assert!(bg_outcome.found_result);
+        assert!(
+            bg_outcome.task_notification_seen,
+            "task_notification system event must set the marker"
+        );
+
+        // Normal foreground turn: no task_notification event. Marker must
+        // stay false so the router keeps the direct-relay path.
+        let mut fg_buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        )
+        .to_string();
+        let mut fg_state = crate::services::session_backend::StreamLineState::new();
+        let mut fg_response = String::new();
+        let mut fg_tool_state = WatcherToolState::new();
+        let fg_outcome = process_watcher_lines(
+            &mut fg_buffer,
+            &mut fg_state,
+            &mut fg_response,
+            &mut fg_tool_state,
+        );
+        assert!(fg_outcome.found_result);
+        assert!(
+            !fg_outcome.task_notification_seen,
+            "a turn without task_notification must not set the marker"
+        );
+    }
+
+    /// #826 P1 #2 regression guard: when the notify-bot outbox enqueue fails
+    /// AND no direct-send fallback reaches Discord, the watcher MUST leave
+    /// `last_relayed_offset` untouched so the same tmux range can be
+    /// re-relayed on the next scan. Advancing the offset here is the bug
+    /// that permanently loses a completion notification when notify-bot is
+    /// unavailable.
+    #[test]
+    fn notify_path_does_not_advance_offset_on_enqueue_failure_without_fallback() {
+        // Enqueue failed AND direct-send fallback also failed → no advance.
+        assert!(
+            !notify_path_should_advance_offset(
+                /*has_current_response*/ true, /*enqueue_succeeded*/ false,
+                /*fallback_send_succeeded*/ false,
+            ),
+            "enqueue-fail + fallback-fail with content must leave the offset untouched"
+        );
+
+        // Enqueue succeeded → outbox row is durable → advance is safe.
+        assert!(notify_path_should_advance_offset(true, true, false));
+
+        // Enqueue failed but fallback direct-send reached Discord → advance.
+        assert!(notify_path_should_advance_offset(true, false, true));
+
+        // No content to deliver → trivially safe to advance past the empty
+        // range regardless of enqueue/fallback outcome.
+        assert!(notify_path_should_advance_offset(false, false, false));
     }
 }
