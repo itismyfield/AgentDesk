@@ -101,6 +101,146 @@ function _mergeCardMetadata(cardId, patch) {
   return meta;
 }
 
+var INVENTORY_DOC_PATHS = [
+  "docs/generated/module-inventory.md",
+  "docs/generated/route-inventory.md",
+  "docs/generated/worker-inventory.md"
+];
+
+function _firstPresent() {
+  for (var i = 0; i < arguments.length; i++) {
+    var value = arguments[i];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return null;
+}
+
+function _execOrThrow(cmd, args, options) {
+  var output = agentdesk.exec(cmd, args, options);
+  if (typeof output === "string" && output.indexOf("ERROR:") === 0) {
+    throw new Error(output.substring("ERROR:".length).trim() || (cmd + " failed"));
+  }
+  return output || "";
+}
+
+function _splitNonEmptyLines(text) {
+  if (!text) return [];
+  return String(text)
+    .split(/\r?\n/)
+    .map(function(line) { return line.trim(); })
+    .filter(function(line) { return line !== ""; });
+}
+
+function _normalizeDispatchTimestamp(createdAt) {
+  if (!createdAt || typeof createdAt !== "string") return null;
+  if (createdAt.indexOf("T") !== -1) return createdAt;
+  return createdAt.replace(" ", "T") + "Z";
+}
+
+function _resolveCompletedWorktreePath(dispatchContext, workResult) {
+  return _firstPresent(
+    workResult && workResult.completed_worktree_path,
+    workResult && workResult.worktree_path,
+    dispatchContext && dispatchContext.completed_worktree_path,
+    dispatchContext && dispatchContext.worktree_path
+  );
+}
+
+function _resolveCompletedBranch(worktreePath, dispatchContext, workResult) {
+  var branch = _firstPresent(
+    workResult && workResult.completed_branch,
+    workResult && workResult.worktree_branch,
+    dispatchContext && dispatchContext.completed_branch,
+    dispatchContext && dispatchContext.worktree_branch,
+    dispatchContext && dispatchContext.branch
+  );
+  if (branch) return branch;
+  if (!worktreePath) return null;
+  var resolved = _execOrThrow("git", ["-C", worktreePath, "branch", "--show-current"]);
+  return resolved ? resolved.trim() : null;
+}
+
+function _dispatchTouchedSrcSinceCreated(worktreePath, createdAt) {
+  if (!worktreePath) return false;
+
+  var dirtySrc = _splitNonEmptyLines(
+    _execOrThrow("git", ["-C", worktreePath, "status", "--porcelain", "--", "src"])
+  );
+  if (dirtySrc.length > 0) return true;
+
+  var since = _normalizeDispatchTimestamp(createdAt);
+  if (!since) return true;
+
+  var baseCommit = _execOrThrow(
+    "git",
+    ["-C", worktreePath, "rev-list", "-n", "1", "--before=" + since, "HEAD"]
+  ).trim();
+
+  var diffArgs = baseCommit
+    ? ["-C", worktreePath, "diff", "--name-only", baseCommit + "..HEAD", "--", "src"]
+    : ["-C", worktreePath, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--", "src"];
+
+  return _splitNonEmptyLines(_execOrThrow("git", diffArgs)).length > 0;
+}
+
+function _inventoryDocsChanged(worktreePath) {
+  var args = ["-C", worktreePath, "status", "--porcelain", "--"].concat(INVENTORY_DOC_PATHS);
+  return _splitNonEmptyLines(_execOrThrow("git", args)).length > 0;
+}
+
+function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) {
+  if (dispatch.dispatch_type !== "implementation" && dispatch.dispatch_type !== "rework") return;
+
+  var worktreePath = _resolveCompletedWorktreePath(dispatchContext, workResult);
+  if (!worktreePath) {
+    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no completed worktree path");
+    return;
+  }
+
+  if (!_dispatchTouchedSrcSinceCreated(worktreePath, dispatch.created_at)) {
+    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no src changes since dispatch start");
+    return;
+  }
+
+  try {
+    agentdesk.runtime.refreshInventoryDocs(worktreePath, { timeout_ms: 60000 });
+    if (!_inventoryDocsChanged(worktreePath)) {
+      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " refreshed generator but docs were already up to date");
+      return;
+    }
+
+    _execOrThrow("git", ["-C", worktreePath, "add", "--"].concat(INVENTORY_DOC_PATHS));
+    if (!_inventoryDocsChanged(worktreePath)) {
+      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " had no staged generated-doc diff");
+      return;
+    }
+
+    _execOrThrow("git", ["-C", worktreePath, "commit", "-m", "chore: refresh inventory"]);
+
+    var branch = _resolveCompletedBranch(worktreePath, dispatchContext, workResult);
+    if (!branch) {
+      throw new Error("could not resolve worktree branch for inventory push");
+    }
+
+    _execOrThrow(
+      "git",
+      ["-C", worktreePath, "push", "-u", "origin", branch],
+      { timeout_ms: 120000 }
+    );
+    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " auto-refreshed generated docs on " + branch);
+  } catch (e) {
+    var errorText = e && e.message ? e.message : String(e);
+    agentdesk.log.warn(
+      "[inventory] dispatch " + dispatch.id + " auto-refresh failed for " + card.id + ": " + errorText
+    );
+    notifyCardOwner(
+      card.id,
+      "module-inventory 자동 갱신 실패\n" + errorText,
+      "inventory"
+    );
+  }
+}
+
 function _findAutoQueueEntriesByDispatch(dispatchId, liveOnly) {
   var statusClause = liveOnly
     ? "e.status IN ('pending', 'dispatched')"
@@ -423,6 +563,7 @@ var rules = {
 
     var workResult = {};
     try { workResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
+    _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult);
     if ((dispatch.dispatch_type === "implementation" || dispatch.dispatch_type === "rework")
         && (workResult.work_outcome === "noop" || workResult.completed_without_changes === true)) {
       _mergeCardMetadata(dispatch.kanban_card_id, {
