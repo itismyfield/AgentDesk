@@ -41,6 +41,36 @@ pub struct TransitionContext {
     pub gates: GateSnapshot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ForceIntent {
+    #[default]
+    None,
+    OperatorOverride,
+    SystemRecovery,
+}
+
+impl ForceIntent {
+    pub fn is_forced(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn audit_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::OperatorOverride => "operator_override",
+            Self::SystemRecovery => "system_recovery",
+        }
+    }
+
+    fn audit_reason(self, source: &str) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::OperatorOverride => Some(format!("explicit operator override via {source}")),
+            Self::SystemRecovery => Some(format!("system recovery via {source}")),
+        }
+    }
+}
+
 // ── Events ───────────────────────────────────────────────────
 
 /// What happened that might cause a state transition.
@@ -223,7 +253,8 @@ fn decide_pipeline_transition(
     ctx: &TransitionContext,
     target: &str,
     source: &str,
-    force: bool,
+    force_intent: ForceIntent,
+    caller: &str,
 ) -> TransitionDecision {
     let card = &ctx.card;
     let pipeline = &ctx.pipeline;
@@ -236,7 +267,7 @@ fn decide_pipeline_transition(
     }
 
     // Terminal guard
-    if pipeline.is_terminal(&card.status) && !force {
+    if pipeline.is_terminal(&card.status) && !force_intent.is_forced() {
         return TransitionDecision {
             outcome: TransitionOutcome::Blocked(format!(
                 "cannot revert terminal card: {} → {} is not allowed",
@@ -257,8 +288,8 @@ fn decide_pipeline_transition(
     match rule {
         Some(t) => match t.transition_type {
             TransitionType::Free => {}
-            TransitionType::Gated if force => {}
-            TransitionType::ForceOnly if force => {}
+            TransitionType::Gated if force_intent.is_forced() => {}
+            TransitionType::ForceOnly if force_intent.is_forced() => {}
             TransitionType::Gated => {
                 // Evaluate gates
                 for gate_name in &t.gates {
@@ -313,12 +344,14 @@ fn decide_pipeline_transition(
                 };
             }
         },
-        None if force => {
+        None if force_intent.is_forced() => {
             tracing::info!(
                 card_id = %card.id,
                 from = %card.status,
                 to = %target,
                 source = %source,
+                force_intent = %force_intent.audit_value(),
+                caller = caller,
                 "force transition without rule: {} → {}",
                 card.status,
                 target
@@ -370,7 +403,7 @@ fn decide_pipeline_transition(
         from: card.status.clone(),
         to: target.to_string(),
         source: source.to_string(),
-        message: "OK".to_string(),
+        message: format_audit_message("OK", force_intent, caller, source),
     });
 
     TransitionDecision {
@@ -381,13 +414,26 @@ fn decide_pipeline_transition(
 
 /// Public wrapper for pipeline-driven transition decisions.
 /// Used by `transition_status_with_opts` after migrating to the reducer pattern.
+pub(crate) fn decide_status_transition_with_caller(
+    ctx: &TransitionContext,
+    target: &str,
+    source: &str,
+    force_intent: ForceIntent,
+    caller: &str,
+) -> TransitionDecision {
+    decide_pipeline_transition(ctx, target, source, force_intent, caller)
+}
+
+#[track_caller]
 pub fn decide_status_transition(
     ctx: &TransitionContext,
     target: &str,
     source: &str,
-    force: bool,
+    force_intent: ForceIntent,
 ) -> TransitionDecision {
-    decide_pipeline_transition(ctx, target, source, force)
+    let caller = std::panic::Location::caller();
+    let caller = format!("{}:{}", caller.file(), caller.line());
+    decide_status_transition_with_caller(ctx, target, source, force_intent, &caller)
 }
 
 fn decide_dispatch_attached(
@@ -569,7 +615,13 @@ fn decide_timeout(ctx: &TransitionContext, state: &str) -> TransitionDecision {
     // Look up on_exhaust target from pipeline
     if let Some(timeout) = ctx.pipeline.timeouts.get(state) {
         if let Some(ref target) = timeout.on_exhaust {
-            return decide_pipeline_transition(ctx, target, "timeout", false);
+            return decide_pipeline_transition(
+                ctx,
+                target,
+                "timeout",
+                ForceIntent::None,
+                "timeout",
+            );
         }
     }
 
@@ -790,6 +842,23 @@ fn execute_audit_log(
     .ok();
 }
 
+fn format_audit_message(
+    base: &str,
+    force_intent: ForceIntent,
+    caller: &str,
+    source: &str,
+) -> String {
+    let Some(reason) = force_intent.audit_reason(source) else {
+        return base.to_string();
+    };
+    let audit_meta = serde_json::json!({
+        "force_intent": force_intent.audit_value(),
+        "caller": caller,
+        "reason": reason,
+    });
+    format!("{base} {audit_meta}")
+}
+
 // ── Unit tests ───────────────────────────────────────────────
 
 #[cfg(test)]
@@ -948,7 +1017,7 @@ mod tests {
     #[test]
     fn free_transition_allowed() {
         let ctx = test_ctx("backlog", false);
-        let decision = decide_status_transition(&ctx, "ready", "api", false);
+        let decision = decide_status_transition(&ctx, "ready", "api", ForceIntent::None);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
         assert!(
             decision
@@ -961,14 +1030,14 @@ mod tests {
     #[test]
     fn gated_transition_allowed_with_dispatch() {
         let ctx = test_ctx("requested", true);
-        let decision = decide_status_transition(&ctx, "in_progress", "api", false);
+        let decision = decide_status_transition(&ctx, "in_progress", "api", ForceIntent::None);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
     }
 
     #[test]
     fn noop_when_same_status() {
         let ctx = test_ctx("ready", false);
-        let decision = decide_status_transition(&ctx, "ready", "api", false);
+        let decision = decide_status_transition(&ctx, "ready", "api", ForceIntent::None);
         assert_eq!(decision.outcome, TransitionOutcome::NoOp);
         assert!(decision.intents.is_empty());
     }
@@ -978,21 +1047,21 @@ mod tests {
     #[test]
     fn terminal_blocks_transition() {
         let ctx = test_ctx("done", false);
-        let decision = decide_status_transition(&ctx, "review", "api", false);
+        let decision = decide_status_transition(&ctx, "review", "api", ForceIntent::None);
         assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
     }
 
     #[test]
     fn gated_blocks_without_dispatch() {
         let ctx = test_ctx("requested", false);
-        let decision = decide_status_transition(&ctx, "in_progress", "api", false);
+        let decision = decide_status_transition(&ctx, "in_progress", "api", ForceIntent::None);
         assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
     }
 
     #[test]
     fn no_rule_blocks_transition() {
         let ctx = test_ctx("backlog", false);
-        let decision = decide_status_transition(&ctx, "done", "api", false);
+        let decision = decide_status_transition(&ctx, "done", "api", ForceIntent::None);
         assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
     }
 
@@ -1001,22 +1070,31 @@ mod tests {
     #[test]
     fn force_bypasses_terminal_guard() {
         let ctx = test_ctx("done", false);
-        let decision = decide_status_transition(&ctx, "review", "pmd", true);
+        let decision =
+            decide_status_transition(&ctx, "review", "pmd", ForceIntent::OperatorOverride);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
     }
 
     #[test]
     fn force_bypasses_gate() {
         let ctx = test_ctx("requested", false);
-        let decision = decide_status_transition(&ctx, "in_progress", "pmd", true);
+        let decision =
+            decide_status_transition(&ctx, "in_progress", "pmd", ForceIntent::OperatorOverride);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
     }
 
     #[test]
     fn force_bypasses_missing_rule() {
         let ctx = test_ctx("backlog", false);
-        let decision = decide_status_transition(&ctx, "done", "pmd", true);
+        let decision = decide_status_transition(&ctx, "done", "pmd", ForceIntent::OperatorOverride);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+
+    #[test]
+    fn force_intent_none_blocks_ruleless_transition() {
+        let ctx = test_ctx("backlog", false);
+        let decision = decide_status_transition(&ctx, "done", "api", ForceIntent::None);
+        assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
     }
 
     // ── Terminal state intents ────────────────────────────────
@@ -1024,7 +1102,7 @@ mod tests {
     #[test]
     fn terminal_transition_includes_cleanup() {
         let ctx = test_ctx("review", false);
-        let decision = decide_status_transition(&ctx, "done", "api", false);
+        let decision = decide_status_transition(&ctx, "done", "api", ForceIntent::None);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
         assert!(
             decision
@@ -1045,7 +1123,7 @@ mod tests {
     #[test]
     fn review_enter_syncs_reviewing_state() {
         let ctx = test_ctx("in_progress", true);
-        let decision = decide_status_transition(&ctx, "review", "api", false);
+        let decision = decide_status_transition(&ctx, "review", "api", ForceIntent::None);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
         assert!(decision.intents.iter().any(
             |i| matches!(i, TransitionIntent::SyncReviewState { state, .. } if state == "reviewing")
@@ -1179,7 +1257,7 @@ mod tests {
     #[test]
     fn blocked_decision_includes_audit_log() {
         let ctx = test_ctx("done", false);
-        let decision = decide_status_transition(&ctx, "review", "api", false);
+        let decision = decide_status_transition(&ctx, "review", "api", ForceIntent::None);
         assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
         assert!(
             decision
@@ -1478,7 +1556,7 @@ mod tests {
         // No transition rule exists from `backlog` to `done` in the test
         // pipeline. Without force: blocked + audited as "no transition rule".
         let ctx = test_ctx("backlog", false);
-        let blocked = decide_status_transition(&ctx, "done", "api", false);
+        let blocked = decide_status_transition(&ctx, "done", "api", ForceIntent::None);
         assert!(
             matches!(blocked.outcome, TransitionOutcome::Blocked(_)),
             "no-rule transition must block without force (got {:?})",
@@ -1510,7 +1588,7 @@ mod tests {
         // UpdateStatus intent is emitted. This mirrors the PMD/admin
         // override path (the only legal way to move a card across a
         // missing rule).
-        let allowed = decide_status_transition(&ctx, "done", "pmd", true);
+        let allowed = decide_status_transition(&ctx, "done", "pmd", ForceIntent::OperatorOverride);
         assert_eq!(
             allowed.outcome,
             TransitionOutcome::Allowed,
@@ -1522,6 +1600,19 @@ mod tests {
                 TransitionIntent::UpdateStatus { to, .. } if to == "done"
             )),
             "force-allowed no-rule transition must emit UpdateStatus to the target"
+        );
+        let forced_audit = allowed.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                TransitionIntent::AuditLog { message, .. }
+                    if message.contains("\"force_intent\":\"operator_override\"")
+                        && message.contains("\"reason\":\"explicit operator override via pmd\"")
+            )
+        });
+        assert!(
+            forced_audit,
+            "forced transition must carry force-intent audit metadata (intents: {:?})",
+            allowed.intents
         );
     }
 }

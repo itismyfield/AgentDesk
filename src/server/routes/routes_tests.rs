@@ -4762,8 +4762,14 @@ async fn kanban_terminal_status_fires_hook() {
     }
 
     // Use force transition: requested → done (no rule, force bypasses)
-    let result =
-        crate::kanban::transition_status_with_opts(&db, &engine, "c1", "done", "pmd", true);
+    let result = crate::kanban::transition_status_with_opts(
+        &db,
+        &engine,
+        "c1",
+        "done",
+        "pmd",
+        crate::engine::transition::ForceIntent::OperatorOverride,
+    );
     assert!(
         result.is_ok(),
         "force transition should succeed: {:?}",
@@ -8271,7 +8277,7 @@ async fn transition_to_done_records_true_negative_in_postgres_review_tuning() {
         "card-pg-tn",
         "done",
         "review",
-        true,
+        crate::engine::transition::ForceIntent::OperatorOverride,
     );
     assert!(result.is_ok(), "transition to done should succeed");
 

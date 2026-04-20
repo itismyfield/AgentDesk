@@ -518,7 +518,7 @@ pub async fn submit_review_decision(
                         &body.card_id,
                         &rework_target,
                         "review_decision_accept_skip_rework_step1",
-                        true,
+                        crate::engine::transition::ForceIntent::SystemRecovery,
                     ) {
                         Ok(_) => {
                             // Step 2: Transition to review — fires OnReviewEnter
@@ -528,7 +528,7 @@ pub async fn submit_review_decision(
                                 &body.card_id,
                                 review_st,
                                 "review_decision_accept_skip_rework_step2",
-                                true,
+                                crate::engine::transition::ForceIntent::SystemRecovery,
                             ) {
                                 Ok(_) => {
                                     // Materialize any follow-up transitions queued by
@@ -624,7 +624,7 @@ pub async fn submit_review_decision(
                         &body.card_id,
                         &rework_target,
                         "review_decision_accept",
-                        true,
+                        crate::engine::transition::ForceIntent::SystemRecovery,
                     ) {
                         Ok(_) => true,
                         Err(e) => {
@@ -1228,7 +1228,7 @@ pub async fn submit_review_decision(
                 &body.card_id,
                 &terminal_state,
                 "dismiss",
-                true, // force — dismiss bypasses review_passed gate
+                crate::engine::transition::ForceIntent::SystemRecovery, // dismiss bypasses review_passed gate
             );
 
             // Post-transition cleanup: cancel remaining pending review dispatches to prevent

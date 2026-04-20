@@ -185,7 +185,7 @@ pub fn sync_github_issues_for_repo(
             card_id,
             terminal,
             "github-sync",
-            true,
+            crate::engine::transition::ForceIntent::SystemRecovery,
         );
         result.closed_count += 1;
         tracing::info!(
@@ -419,7 +419,7 @@ async fn close_pg_card_for_issue(
         &ctx,
         &target_status,
         "github-sync",
-        true,
+        crate::engine::transition::ForceIntent::SystemRecovery,
     );
 
     match &decision.outcome {

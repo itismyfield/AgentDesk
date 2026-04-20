@@ -200,7 +200,9 @@ async fn transition_card_to_backlog_with_cleanup(
         card_id,
         "backlog",
         source,
-        true,
+        crate::engine::transition::ForceIntent::SystemRecovery,
+        // allowed: backlog rewind must clear review/dispatch residue atomically.
+        crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
         |conn| {
             cleanup_force_transition_revert_on_conn(conn, card_id, "backlog")?;
             Ok(())
@@ -513,7 +515,7 @@ pub async fn update_card(
                     &id,
                     new_s,
                     "api",
-                    false,
+                    crate::engine::transition::ForceIntent::None,
                 )
             };
 
@@ -706,7 +708,7 @@ pub async fn assign_card(
                         &id,
                         step,
                         "assign",
-                        false,
+                        crate::engine::transition::ForceIntent::None,
                     )
                     .await
                     {
@@ -723,7 +725,7 @@ pub async fn assign_card(
                 &id,
                 &ready_state,
                 "assign",
-                false,
+                crate::engine::transition::ForceIntent::None,
             )
             .await
             {
@@ -828,7 +830,7 @@ pub async fn assign_card(
                     &id,
                     step,
                     "assign",
-                    false,
+                    crate::engine::transition::ForceIntent::None,
                 ) {
                     tracing::warn!("[assign_card] walk step to '{step}' failed: {e}");
                     break;
@@ -842,7 +844,7 @@ pub async fn assign_card(
                 &id,
                 &ready_state,
                 "assign",
-                false,
+                crate::engine::transition::ForceIntent::None,
             ) {
                 tracing::warn!("[assign_card] transition failed: {e}");
             }
@@ -1703,7 +1705,7 @@ pub async fn bulk_action(
                 card_id,
                 &target_status,
                 "bulk-action",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
         };
 
@@ -2360,7 +2362,7 @@ pub async fn pm_decision(
                 &body.card_id,
                 &resume_target,
                 "pm-decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             ) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2452,7 +2454,7 @@ pub async fn pm_decision(
                         &body.card_id,
                         &rework_target,
                         "pm-decision",
-                        true,
+                        crate::engine::transition::ForceIntent::OperatorOverride,
                     ) {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2500,7 +2502,7 @@ pub async fn pm_decision(
                 &body.card_id,
                 terminal,
                 "pm-decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             ) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2526,7 +2528,7 @@ pub async fn pm_decision(
                 &body.card_id,
                 requeue_target,
                 "pm-decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             ) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2852,7 +2854,7 @@ pub async fn rereview_card(
             &id,
             "review",
             &format!("{caller_source}:rereview({reason})"),
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
         ) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3199,7 +3201,7 @@ pub async fn reopen_card(
             &id,
             &reopen_target,
             &format!("{caller_source}:reopen({reason})"),
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
         );
         result.map(|result| (result.from, result.to))
     } {
@@ -3467,7 +3469,7 @@ pub async fn batch_transition(
             &card_id,
             &body.status,
             &batch_transition_source,
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
         ) {
             Ok(result) => {
                 let (cancelled_dispatches, skipped_auto_queue_entries) =
@@ -3766,7 +3768,9 @@ pub async fn force_transition(
             &id,
             &target_status,
             &caller_source,
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+            // allowed: forced rewind must scrub stale review/dispatch state atomically.
+            crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
             |conn| {
                 cleanup_counts =
                     cleanup_force_transition_revert_on_conn(conn, &id, &target_status)?;
@@ -3780,7 +3784,9 @@ pub async fn force_transition(
             &id,
             &target_status,
             &caller_source,
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+            // allowed: terminal force path must cancel stale dispatches before commit.
+            crate::kanban::AllowedOnConnMutation::ForceTransitionTerminalCleanup,
             |conn| {
                 cleanup_counts.0 =
                     cleanup_force_transition_terminal_on_conn(conn, &id, &target_status)?;
@@ -3794,7 +3800,7 @@ pub async fn force_transition(
             &id,
             &target_status,
             &caller_source,
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
         )
     };
 

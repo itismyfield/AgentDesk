@@ -371,7 +371,7 @@ impl AutoQueueService {
                         &card_id,
                         step,
                         "auto-queue-generate",
-                        false,
+                        crate::engine::transition::ForceIntent::None,
                     )
                     .map_err(|error| {
                         ServiceError::bad_request(format!(

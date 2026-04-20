@@ -262,7 +262,7 @@ pub async fn trigger_rework(
             &card_id,
             "in_progress",
             "trigger-rework",
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
         )
         .await
         {
@@ -322,7 +322,7 @@ pub async fn trigger_rework(
         &card_id,
         "in_progress",
         "trigger-rework",
-        true,
+        crate::engine::transition::ForceIntent::OperatorOverride,
     ) {
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
         Err(e) => (

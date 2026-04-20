@@ -370,7 +370,7 @@ fn resume_from_in_progress(
                 card_id,
                 "review",
                 "resume",
-                true, // force — in_progress→review is gated
+                crate::engine::transition::ForceIntent::OperatorOverride, // force — in_progress→review is gated
             )
             .map_err(|e| format!("transition to review failed: {e}"))?;
 
@@ -410,7 +410,7 @@ fn resume_from_in_progress_manual_intervention(
         card_id,
         "requested",
         "resume_from_in_progress_manual_intervention",
-        true,
+        crate::engine::transition::ForceIntent::OperatorOverride,
     )
     .map_err(|e| format!("transition from in_progress manual intervention failed: {e}"))?;
 
@@ -533,7 +533,7 @@ fn resume_from_review(
                 card_id,
                 &rework_target,
                 "resume_auto_accept",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition to rework target failed: {e}"))?;
 
@@ -650,7 +650,7 @@ fn resume_from_review_dilemma_pending(
                 card_id,
                 &rework_target,
                 "resume_from_review_dilemma_pending",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition failed: {e}"))?;
 
@@ -705,7 +705,7 @@ fn resume_from_review_dilemma_pending(
                 card_id,
                 "requested",
                 "resume_from_review_dilemma_pending",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition to requested failed: {e}"))?;
 
@@ -771,7 +771,7 @@ fn resume_from_pending_decision_legacy(
                 card_id,
                 &rework_target,
                 "resume_from_pending_decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition failed: {e}"))?;
 
@@ -804,7 +804,7 @@ fn resume_from_pending_decision_legacy(
                 card_id,
                 "review",
                 "resume_from_pending_decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition to review failed: {e}"))?;
 
@@ -824,7 +824,7 @@ fn resume_from_pending_decision_legacy(
                 card_id,
                 "requested",
                 "resume_from_pending_decision",
-                true,
+                crate::engine::transition::ForceIntent::OperatorOverride,
             )
             .map_err(|e| format!("transition from pending_decision failed: {e}"))?;
 
@@ -878,7 +878,7 @@ fn resume_from_blocked_legacy(
         card_id,
         "requested",
         "resume_from_blocked",
-        true,
+        crate::engine::transition::ForceIntent::OperatorOverride,
     )
     .map_err(|e| format!("transition from blocked failed: {e}"))?;
 

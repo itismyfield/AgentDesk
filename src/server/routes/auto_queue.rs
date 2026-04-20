@@ -6716,7 +6716,7 @@ pub(crate) fn activate_with_deps(
                     &card_id,
                     step,
                     "auto-queue-walk",
-                    false,
+                    crate::engine::transition::ForceIntent::None,
                 ) {
                     crate::auto_queue_log!(
                         warn,

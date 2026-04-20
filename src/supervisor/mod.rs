@@ -195,7 +195,7 @@ impl RuntimeSupervisor {
                             &candidate.card_id,
                             &ready_target,
                             SUPERVISOR_ACTOR,
-                            true,
+                            crate::engine::transition::ForceIntent::SystemRecovery,
                         ) {
                             Ok(_) => {
                                 executed = true;

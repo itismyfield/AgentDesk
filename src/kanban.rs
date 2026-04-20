@@ -38,7 +38,14 @@ pub fn transition_status(
     card_id: &str,
     new_status: &str,
 ) -> Result<TransitionResult> {
-    transition_status_with_opts(db, engine, card_id, new_status, "system", false)
+    transition_status_with_opts(
+        db,
+        engine,
+        card_id,
+        new_status,
+        "system",
+        crate::engine::transition::ForceIntent::None,
+    )
 }
 
 fn clear_escalation_alert_state_on_conn(
@@ -205,13 +212,52 @@ pub(crate) fn log_audit_on_conn(
     log_audit(conn, card_id, from, to, source, result);
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowedOnConnMutation {
+    ForceTransitionRevertCleanup,
+    ForceTransitionTerminalCleanup,
+    TestOnlyRollbackGuard,
+    TestOnlyManualInterventionCleanup,
+}
+
+impl AllowedOnConnMutation {
+    fn audit_value(self) -> &'static str {
+        match self {
+            Self::ForceTransitionRevertCleanup => "force_transition_revert_cleanup",
+            Self::ForceTransitionTerminalCleanup => "force_transition_terminal_cleanup",
+            Self::TestOnlyRollbackGuard => "test_only_rollback_guard",
+            Self::TestOnlyManualInterventionCleanup => "test_only_manual_intervention_cleanup",
+        }
+    }
+
+    fn rationale(self) -> &'static str {
+        match self {
+            Self::ForceTransitionRevertCleanup => {
+                "same transaction required to clear review and dispatch residue while rewinding status"
+            }
+            Self::ForceTransitionTerminalCleanup => {
+                "same transaction required to cancel stale dispatches before terminal status commits"
+            }
+            Self::TestOnlyRollbackGuard => {
+                "test-only rollback probe for transition + cleanup atomicity"
+            }
+            Self::TestOnlyManualInterventionCleanup => {
+                "test-only cleanup for escalation-cooldown clearing assertions"
+            }
+        }
+    }
+}
+
 fn transition_status_with_opts_inner<F>(
     db: &Db,
     engine: &PolicyEngine,
     card_id: &str,
     new_status: &str,
     source: &str,
-    force: bool,
+    force_intent: crate::engine::transition::ForceIntent,
+    caller: &str,
+    on_conn_policy: Option<AllowedOnConnMutation>,
     on_conn_after_intents: F,
 ) -> Result<TransitionResult>
 where
@@ -320,7 +366,13 @@ where
     };
 
     // ── 2. Pure decision (no I/O) ──
-    let decision = transition::decide_status_transition(&ctx, new_status, source, force);
+    let decision = transition::decide_status_transition_with_caller(
+        &ctx,
+        new_status,
+        source,
+        force_intent,
+        caller,
+    );
 
     // ── 3. Handle blocked decisions ──
     if let TransitionOutcome::Blocked(ref reason) = decision.outcome {
@@ -365,6 +417,16 @@ where
     let exec_result = (|| -> anyhow::Result<()> {
         for intent in &decision.intents {
             transition::execute_intent_on_conn(&conn, intent)?;
+        }
+        if let Some(policy) = on_conn_policy {
+            tracing::debug!(
+                card_id,
+                source,
+                caller,
+                on_conn_policy = policy.audit_value(),
+                rationale = policy.rationale(),
+                "[kanban] executing allowlisted on-conn mutation after transition intents"
+            );
         }
         on_conn_after_intents(&conn)?;
         let (new_review_status, new_blocked_reason): (Option<String>, Option<String>) = conn
@@ -427,40 +489,57 @@ where
 /// 2. Call decide_status_transition (pure function — no I/O)
 /// 3. Execute decision intents via Executor
 /// 4. Fire post-transition hooks (GitHub sync, policy hooks)
+#[track_caller]
 pub fn transition_status_with_opts(
     db: &Db,
     engine: &PolicyEngine,
     card_id: &str,
     new_status: &str,
     source: &str,
-    force: bool,
+    force_intent: crate::engine::transition::ForceIntent,
 ) -> Result<TransitionResult> {
-    transition_status_with_opts_inner(db, engine, card_id, new_status, source, force, |_conn| {
-        Ok(())
-    })
-}
-
-/// Full transition with an extra DB mutation executed inside the same
-/// transaction as the canonical transition intents.
-pub fn transition_status_with_opts_and_on_conn<F>(
-    db: &Db,
-    engine: &PolicyEngine,
-    card_id: &str,
-    new_status: &str,
-    source: &str,
-    force: bool,
-    on_conn_after_intents: F,
-) -> Result<TransitionResult>
-where
-    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
-{
+    let caller = std::panic::Location::caller();
+    let caller = format!("{}:{}", caller.file(), caller.line());
     transition_status_with_opts_inner(
         db,
         engine,
         card_id,
         new_status,
         source,
-        force,
+        force_intent,
+        &caller,
+        None,
+        |_conn| Ok(()),
+    )
+}
+
+/// Full transition with an extra DB mutation executed inside the same
+/// transaction as the canonical transition intents.
+#[track_caller]
+pub fn transition_status_with_opts_and_on_conn<F>(
+    db: &Db,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+    on_conn_policy: AllowedOnConnMutation,
+    on_conn_after_intents: F,
+) -> Result<TransitionResult>
+where
+    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
+{
+    let caller = std::panic::Location::caller();
+    let caller = format!("{}:{}", caller.file(), caller.line());
+    transition_status_with_opts_inner(
+        db,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        &caller,
+        Some(on_conn_policy),
         on_conn_after_intents,
     )
 }
@@ -472,7 +551,7 @@ pub async fn transition_status_with_opts_pg(
     card_id: &str,
     new_status: &str,
     source: &str,
-    force: bool,
+    force_intent: crate::engine::transition::ForceIntent,
 ) -> Result<TransitionResult> {
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
@@ -580,7 +659,13 @@ pub async fn transition_status_with_opts_pg(
         },
     };
 
-    let decision = transition::decide_status_transition(&ctx, new_status, source, force);
+    let decision = transition::decide_status_transition_with_caller(
+        &ctx,
+        new_status,
+        source,
+        force_intent,
+        "kanban::transition_status_with_opts_pg",
+    );
 
     if let TransitionOutcome::Blocked(ref reason) = decision.outcome {
         let mut tx = pg_pool
@@ -1823,8 +1908,14 @@ mod tests {
         seed_card(&db, "card-force", "requested");
         // No dispatch, but force=true
 
-        let result =
-            transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
+        let result = transition_status_with_opts(
+            &db,
+            &engine,
+            "card-force",
+            "in_progress",
+            "pmd",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        );
         assert!(result.is_ok(), "force=true should bypass dispatch check");
     }
 
@@ -1947,7 +2038,8 @@ mod tests {
             "card-force-rollback",
             "in_progress",
             "pmd",
-            true,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+            AllowedOnConnMutation::TestOnlyRollbackGuard,
             |_conn| Err(anyhow::anyhow!("cleanup failed")),
         );
         assert!(result.is_err(), "cleanup failure must abort the transition");
@@ -2498,7 +2590,14 @@ mod tests {
         let (_run_id, entry_a, _entry_b) = seed_auto_queue_run(&db, "agent-1");
 
         // Transition card-q1 to done
-        let result = transition_status_with_opts(&db, &engine, "card-q1", "done", "review", true);
+        let result = transition_status_with_opts(
+            &db,
+            &engine,
+            "card-q1",
+            "done",
+            "review",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        );
         assert!(result.is_ok(), "transition to done should succeed");
 
         // Verify: entry_a should be 'done' (set by Rust transition_status)
@@ -2555,8 +2654,14 @@ mod tests {
             .unwrap();
         }
 
-        let result =
-            transition_status_with_opts(&db, &engine, "card-notify", "done", "review", true);
+        let result = transition_status_with_opts(
+            &db,
+            &engine,
+            "card-notify",
+            "done",
+            "review",
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        );
         assert!(result.is_ok(), "transition to done should succeed");
 
         let phase_gate_dispatch_id = {
@@ -2655,8 +2760,14 @@ mod tests {
         }
 
         // Transition to requested (NOT done)
-        let result =
-            transition_status_with_opts(&db, &engine, "card-pd", "requested", "pm-gate", true);
+        let result = transition_status_with_opts(
+            &db,
+            &engine,
+            "card-pd",
+            "requested",
+            "pm-gate",
+            crate::engine::transition::ForceIntent::SystemRecovery,
+        );
         assert!(result.is_ok());
 
         // Verify: entry should still be 'dispatched' (not done)
@@ -2709,7 +2820,7 @@ mod tests {
             "card-rework",
             "in_progress",
             "pm-decision",
-            true,
+            crate::engine::transition::ForceIntent::SystemRecovery,
         );
         assert!(result.is_ok(), "rework transition should succeed");
 
@@ -2750,8 +2861,14 @@ mod tests {
 
         seed_dispatch(&db, "card-first", "pending");
 
-        let result =
-            transition_status_with_opts(&db, &engine, "card-first", "in_progress", "system", true);
+        let result = transition_status_with_opts(
+            &db,
+            &engine,
+            "card-first",
+            "in_progress",
+            "system",
+            crate::engine::transition::ForceIntent::SystemRecovery,
+        );
         assert!(result.is_ok());
 
         let age_seconds: i64 = {
