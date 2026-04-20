@@ -4,7 +4,7 @@
 
 - Production Rust modules: `260`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `75`
+- Giant files: `76`
 
 ## Namespace Summary
 
@@ -73,20 +73,20 @@
 | `dispatch` | `src/dispatch/mod.rs` | 4642 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 2657 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 719 |  |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 1260 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 624 |  |
 | `engine` | `src/engine/mod.rs` | 1709 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 819 |  |
 | `engine::loader` | `src/engine/loader.rs` | 281 |  |
-| `engine::ops` | `src/engine/ops.rs` | 177 |  |
+| `engine::ops` | `src/engine/ops.rs` | 178 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 335 |  |
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 791 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 626 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 46 |  |
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1055 | giant-file |
 | `engine::ops::deploy_ops` | `src/engine/ops/deploy_ops.rs` | 122 |  |
-| `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 553 |  |
+| `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 556 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 573 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 396 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 56 |  |
@@ -112,7 +112,7 @@
 | `launch` | `src/launch.rs` | 39 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 67 |  |
-| `pipeline` | `src/pipeline.rs` | 1006 | giant-file |
+| `pipeline` | `src/pipeline.rs` | 1258 | giant-file |
 | `receipt` | `src/receipt.rs` | 2130 | giant-file |
 | `reconcile` | `src/reconcile.rs` | 539 |  |
 | `runtime` | `src/runtime.rs` | 112 |  |
@@ -210,7 +210,7 @@
 | `services::discord::config_audit` | `src/services/discord/config_audit.rs` | 1145 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 528 |  |
 | `services::discord::dm_reply_store` | `src/services/discord/dm_reply_store.rs` | 463 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1530 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 1568 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 2201 | giant-file |
@@ -261,7 +261,7 @@
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 93 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 187 |  |
-| `services::dispatches` | `src/services/dispatches.rs` | 344 |  |
+| `services::dispatches` | `src/services/dispatches.rs` | 345 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 145 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 632 |  |

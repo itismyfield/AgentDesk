@@ -10,6 +10,8 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
 const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
 const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
+const THINKING_STATUS_MAX_BYTES: usize = 600;
+const TOOL_STATUS_MAX_BYTES: usize = 300;
 
 /// Byte budget for the inline preview kept alongside a .txt attachment when a
 /// message would otherwise have to be split. Leaves ~300 bytes of DISCORD_MSG_LIMIT
@@ -467,6 +469,17 @@ mod tests {
         assert!(placeholder.starts_with('…'));
     }
 
+    #[test]
+    fn test_build_streaming_placeholder_text_respects_utf8_limit_for_status_only() {
+        use super::{DISCORD_MSG_LIMIT, build_streaming_placeholder_text};
+
+        let status_block = &format!("⏳ {}", "🙂".repeat(1200));
+        let placeholder = build_streaming_placeholder_text("", status_block);
+
+        assert!(placeholder.len() <= DISCORD_MSG_LIMIT);
+        assert!(placeholder.ends_with('…'));
+    }
+
     // ── filter_codex_tool_logs tests ─────────────────────────────────────
 
     #[test]
@@ -598,6 +611,18 @@ mod tests {
         );
         assert_eq!(placeholder, "⠋ ⚙ Bash: cargo build");
     }
+
+    #[test]
+    fn test_build_placeholder_status_block_keeps_utf8_text_within_byte_budget() {
+        let placeholder = build_placeholder_status_block(
+            "⠋",
+            None,
+            Some(&format!("💭 {}", "🙂".repeat(1200))),
+            "",
+        );
+        assert!(placeholder.len() <= super::THINKING_STATUS_MAX_BYTES + 16);
+        assert!(placeholder.ends_with('…'));
+    }
 }
 
 pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -652,6 +677,7 @@ pub(super) struct StreamingRolloverPlan {
 }
 
 fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &str) -> String {
+    let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
         .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
@@ -670,6 +696,7 @@ pub(super) fn plan_streaming_rollover(
         return None;
     }
 
+    let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
         .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN)
@@ -677,7 +704,7 @@ pub(super) fn plan_streaming_rollover(
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
     Some(StreamingRolloverPlan {
-        display_snapshot: build_streaming_placeholder_snapshot(current_portion, status_block),
+        display_snapshot: build_streaming_placeholder_snapshot(current_portion, &status_block),
         frozen_chunk: current_portion[..split_at].to_string(),
         split_at,
     })
@@ -688,7 +715,7 @@ pub(super) fn build_streaming_placeholder_text(
     status_block: &str,
 ) -> String {
     if current_portion.is_empty() {
-        status_block.to_string()
+        clamp_placeholder_status_block(status_block)
     } else {
         build_streaming_placeholder_snapshot(current_portion, status_block)
     }
@@ -1498,12 +1525,13 @@ pub(super) fn preserve_previous_tool_status(
 
 /// Convert a technical tool status line into a human-friendly label with emoji.
 pub(super) fn humanize_tool_status(tool_line: &str) -> String {
-    // Thinking: show full text, cap at 600 chars (must leave room for body+footer within Discord 2000 char limit)
+    // Thinking: show more detail than tool invocations, but keep the final
+    // placeholder edit safely below Discord's byte limit even for UTF-8-heavy text.
     if tool_line.starts_with("💭") {
-        return truncate_for_status(tool_line, 600);
+        return truncate_for_status_bytes(tool_line, THINKING_STATUS_MAX_BYTES);
     }
-    // Everything else: show the raw tool line, truncated at 300 chars
-    truncate_for_status(tool_line, 300)
+    // Everything else: show the raw tool line, truncated more aggressively.
+    truncate_for_status_bytes(tool_line, TOOL_STATUS_MAX_BYTES)
 }
 
 /// Build the spinner/status block shown in Discord placeholders.
@@ -1520,11 +1548,21 @@ pub(super) fn build_placeholder_status_block(
     format!("{indicator} {tool_status}")
 }
 
-fn truncate_for_status(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{truncated}…")
+fn truncate_for_status_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
     }
+
+    let ellipsis = "…";
+    let body_budget = max_bytes.saturating_sub(ellipsis.len());
+    if body_budget == 0 {
+        return ellipsis.to_string();
+    }
+
+    let safe_end = floor_char_boundary(s, body_budget);
+    format!("{}{}", &s[..safe_end], ellipsis)
+}
+
+fn clamp_placeholder_status_block(status_block: &str) -> String {
+    truncate_for_status_bytes(status_block, DISCORD_MSG_LIMIT)
 }

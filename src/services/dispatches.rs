@@ -127,6 +127,7 @@ impl DispatchService {
 
         match dispatch::create_dispatch_with_options(
             &self.db,
+            self.engine.pg_pool(),
             &self.engine,
             &input.kanban_card_id,
             &input.to_agent_id,
@@ -188,17 +189,17 @@ impl DispatchService {
             return Ok(dispatch);
         }
 
-        if let Some(status) = input.status.as_deref() {
-            if !VALID_DISPATCH_STATUSES.contains(&status) {
-                return Err(ServiceError::bad_request(format!(
-                    "invalid dispatch status '{}' — allowed values: {}",
-                    status,
-                    VALID_DISPATCH_STATUSES.join(", ")
-                ))
-                .with_code(ErrorCode::Validation)
-                .with_context("dispatch_id", id)
-                .with_context("status", status));
-            }
+        if let Some(status) = input.status.as_deref()
+            && !VALID_DISPATCH_STATUSES.contains(&status)
+        {
+            return Err(ServiceError::bad_request(format!(
+                "invalid dispatch status '{}' — allowed values: {}",
+                status,
+                VALID_DISPATCH_STATUSES.join(", ")
+            ))
+            .with_code(ErrorCode::Validation)
+            .with_context("dispatch_id", id)
+            .with_context("status", status));
         }
 
         let conn = self.db.lock().map_err(|e| {

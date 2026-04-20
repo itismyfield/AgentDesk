@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -132,6 +133,48 @@ pub fn resolve_for_card(
             .flatten()
         })
         .and_then(|json| parse_override(&json).ok().flatten());
+
+    resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
+}
+
+pub async fn resolve_for_card_pg(
+    pool: &PgPool,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> PipelineConfig {
+    let repo_ovr = if let Some(rid) = repo_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config::text AS pipeline_config
+             FROM github_repos
+             WHERE id = $1",
+        )
+        .bind(rid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .and_then(|json| parse_override(&json).ok().flatten())
+    } else {
+        None
+    };
+
+    let agent_ovr = if let Some(aid) = agent_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config::text AS pipeline_config
+             FROM agents
+             WHERE id = $1",
+        )
+        .bind(aid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .and_then(|json| parse_override(&json).ok().flatten())
+    } else {
+        None
+    };
 
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
@@ -601,14 +644,14 @@ impl PipelineConfig {
         }
 
         // Clock fields must reference valid states
-        for (state, _) in &self.clocks {
+        for state in self.clocks.keys() {
             if !state_ids.contains(&state.as_str()) {
                 anyhow::bail!("clock for unknown state: {}", state);
             }
         }
 
         // Hook bindings must reference valid states
-        for (state, _) in &self.hooks {
+        for state in self.hooks.keys() {
             if !state_ids.contains(&state.as_str()) {
                 anyhow::bail!("hook binding for unknown state: {}", state);
             }
@@ -696,6 +739,7 @@ impl PipelineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     fn minimal_pipeline() -> PipelineConfig {
         PipelineConfig {
@@ -750,6 +794,149 @@ mod tests {
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
         }
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Option<Self> {
+            let admin_url = postgres_admin_url();
+            let database_name = format!("agentdesk_pipeline_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres pipeline test: admin connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!("skipping postgres pipeline test: create database failed: {error}");
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+            Some(Self {
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn migrate(&self) -> Option<PgPool> {
+            let pool = match sqlx::PgPool::connect(&self.database_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres pipeline test: db connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("skipping postgres pipeline test: migrate failed: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(pool)
+        }
+
+        async fn drop(self) {
+            let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await else {
+                return;
+            };
+            let _ = sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+            None => format!("postgres://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_url() -> String {
+        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        format!("{}/postgres", postgres_base_database_url())
+    }
+
+    async fn pg_seed_repo(pool: &PgPool, repo_id: &str, pipeline_config: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, pipeline_config)
+             VALUES ($1, $2, $3::jsonb)",
+        )
+        .bind(repo_id)
+        .bind(format!("Repo {repo_id}"))
+        .bind(pipeline_config)
+        .execute(pool)
+        .await
+        .expect("seed github_repos");
+    }
+
+    async fn pg_seed_agent(pool: &PgPool, agent_id: &str, pipeline_config: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, pipeline_config)
+             VALUES ($1, $2, $3::jsonb)",
+        )
+        .bind(agent_id)
+        .bind(format!("Agent {agent_id}"))
+        .bind(pipeline_config)
+        .execute(pool)
+        .await
+        .expect("seed agents");
     }
 
     #[test]
@@ -990,6 +1177,71 @@ mod tests {
             },
         );
         assert!(p.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_for_card_pg_supports_default_repo_and_repo_plus_agent_merges() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        ensure_loaded();
+        let default = resolve(None, None);
+        let effective = resolve_for_card_pg(&pool, None, None).await;
+        assert_eq!(effective.name, default.name);
+        assert_eq!(effective.phase_gate, default.phase_gate);
+
+        pg_seed_repo(
+            &pool,
+            "repo-only",
+            Some(r#"{"hooks":{"review":{"on_enter":["RepoHook"],"on_exit":[]}}}"#),
+        )
+        .await;
+        let effective = resolve_for_card_pg(&pool, Some("repo-only"), None).await;
+        assert_eq!(
+            effective
+                .hooks
+                .get("review")
+                .map(|hooks| hooks.on_enter.clone()),
+            Some(vec!["RepoHook".to_string()])
+        );
+
+        pg_seed_repo(
+            &pool,
+            "repo-stack",
+            Some(r#"{"hooks":{"review":{"on_enter":["RepoHook"],"on_exit":[]}}}"#),
+        )
+        .await;
+        pg_seed_agent(
+            &pool,
+            "agent-stack",
+            Some(
+                r#"{"phase_gate":{"dispatch_to":"agent-review","dispatch_type":"agent-gate","pass_verdict":"agent_passed","checks":["agent_passed"]}}"#,
+            ),
+        )
+        .await;
+        let effective = resolve_for_card_pg(&pool, Some("repo-stack"), Some("agent-stack")).await;
+        assert_eq!(
+            effective
+                .hooks
+                .get("review")
+                .map(|hooks| hooks.on_enter.clone()),
+            Some(vec!["RepoHook".to_string()])
+        );
+        assert_eq!(effective.phase_gate.dispatch_to, "agent-review");
+        assert_eq!(effective.phase_gate.dispatch_type, "agent-gate");
+        assert_eq!(effective.phase_gate.pass_verdict, "agent_passed");
+        assert_eq!(
+            effective.phase_gate.checks,
+            vec!["agent_passed".to_string()]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
