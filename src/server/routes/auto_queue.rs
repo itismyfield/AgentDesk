@@ -736,7 +736,7 @@ fn load_dispatched_card_ids_for_runs(
         "SELECT DISTINCT kanban_card_id
          FROM auto_queue_entries
          WHERE run_id IN ({placeholders})
-           AND status = 'dispatched'
+           AND status IN ('dispatched', 'user_cancelled')
            AND kanban_card_id IS NOT NULL
            AND TRIM(kanban_card_id) != ''"
     );
@@ -1034,7 +1034,7 @@ async fn load_dispatched_card_ids_for_runs_pg(
         "SELECT DISTINCT e.kanban_card_id
          FROM auto_queue_entries e
          WHERE e.run_id = ANY($1)
-           AND e.status = 'dispatched'
+           AND e.status IN ('dispatched', 'user_cancelled')
            AND e.kanban_card_id IS NOT NULL
            AND BTRIM(e.kanban_card_id) <> ''
          ORDER BY e.kanban_card_id",
@@ -1156,7 +1156,10 @@ async fn transition_entry_to_skipped_pg(
             .map_err(|error| format!("rollback missing postgres entry {entry_id}: {error}"))?;
         return Ok(false);
     };
-    if !matches!(current_status.as_str(), "pending" | "dispatched") {
+    if !matches!(
+        current_status.as_str(),
+        "pending" | "dispatched" | "user_cancelled"
+    ) {
         tx.rollback().await.map_err(|error| {
             format!("rollback non-skippable postgres entry {entry_id}: {error}")
         })?;
@@ -1994,7 +1997,7 @@ fn load_restore_entries(
         "SELECT id, kanban_card_id, agent_id, COALESCE(thread_group, 0)
          FROM auto_queue_entries
          WHERE run_id = ?1
-           AND status = 'skipped'
+           AND status IN ('skipped', 'user_cancelled')
          ORDER BY priority_rank ASC, created_at ASC, id ASC",
     )?;
     let rows = stmt.query_map([run_id], |row| {
