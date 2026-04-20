@@ -69,7 +69,6 @@ const VISUAL_OVERRIDE_KEYS = new Set([
   "transitions",
   "gates",
   "hooks",
-  "events",
   "clocks",
   "timeouts",
   "phase_gate",
@@ -95,9 +94,6 @@ export function clonePipelineConfig(pipeline: PipelineConfigFull): PipelineConfi
           on_exit: [...hook.on_exit],
         },
       ]),
-    ),
-    events: Object.fromEntries(
-      Object.entries(pipeline.events).map(([key, hooks]) => [key, [...hooks]]),
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
@@ -258,9 +254,6 @@ export function buildOverridePayload(
           on_exit: [...hook.on_exit],
         },
       ]),
-    ),
-    events: Object.fromEntries(
-      Object.entries(pipeline.events).map(([key, hooks]) => [key, [...hooks]]),
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
