@@ -250,7 +250,7 @@
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 590 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 352 |  |
-| `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 496 |  |
+| `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 497 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 2045 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 1616 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
