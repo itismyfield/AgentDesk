@@ -121,10 +121,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test transition --all-targets -- --skip _pg_ --skip postgres_
-          cargo test auto_queue --all-targets -- --skip _pg_ --skip postgres_
-          cargo test cancel --all-targets -- --skip _pg_ --skip postgres_
-          cargo test pg_decision --all-targets -- --skip _pg_ --skip postgres_
+          cargo test --all-targets transition
+          cargo test --all-targets auto_queue
+          cargo test --all-targets cancel
+          cargo test --all-targets review_decision
           cargo test invariant --all-targets -- --skip _pg_ --skip postgres_
         env:
           RUST_BACKTRACE: 1
@@ -249,11 +249,5 @@ jobs:
 
           exit $FAIL
 
-      - name: Generated docs drift (warning only)
-        id: generated_docs
-        continue-on-error: true
+      - name: Generated docs drift (hard block)
         run: python3 scripts/generate_inventory_docs.py --check
-
-      - name: Report generated docs drift warning
-        if: steps.generated_docs.outcome == 'failure'
-        run: echo "::warning title=Generated docs drift::generated docs are stale; hard enforcement runs on main/nightly workflows."
