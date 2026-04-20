@@ -435,7 +435,7 @@ async fn create_dispatch_core_internal(
         .map_err(|error| anyhow::anyhow!("Card lookup error: {error}"))?
         .ok_or_else(|| anyhow::anyhow!("Card not found: {kanban_card_id}"))?;
 
-    let agent_exists = sqlx::query_scalar::<_, i64>(
+    let agent_exists = sqlx::query_scalar::<_, i32>(
         "SELECT 1
          FROM agents
          WHERE id = $1

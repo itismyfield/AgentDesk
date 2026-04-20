@@ -3458,7 +3458,10 @@ mod tests {
         assert_eq!(pg_parsed, sqlite_parsed);
         assert_eq!(pg_parsed["branch"], "wt/8481-live");
         assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
-        assert_eq!(pg_parsed["worktree_path"], wt_path);
+        assert_eq!(
+            canonicalize_path(pg_parsed["worktree_path"].as_str().unwrap()),
+            canonicalize_path(wt_path)
+        );
 
         pool.close().await;
         pg_db.drop().await;
@@ -3567,7 +3570,10 @@ mod tests {
         assert_eq!(pg_parsed["target_repo"], repo_dir);
         assert_eq!(pg_parsed["branch"], "wt/8483-live");
         assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
-        assert_eq!(pg_parsed["worktree_path"], wt_path);
+        assert_eq!(
+            canonicalize_path(pg_parsed["worktree_path"].as_str().unwrap()),
+            canonicalize_path(wt_path)
+        );
         assert!(pg_parsed.get("review_target_reject_reason").is_none());
 
         pool.close().await;
