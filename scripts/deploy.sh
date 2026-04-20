@@ -536,6 +536,7 @@ install_launchd() {
   sed \
     -e "s|AGENTDESK_BIN|$BIN_DIR/agentdesk|g" \
     -e "s|AGENTDESK_HOME|$AD_HOME|g" \
+    -e "s|USER_HOME|$HOME|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 
   if [ -f "$LAUNCHD_ENV_FILE" ]; then

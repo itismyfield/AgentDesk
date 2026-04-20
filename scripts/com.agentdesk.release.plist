@@ -15,6 +15,10 @@
     <dict>
         <key>AGENTDESK_ROOT_DIR</key>
         <string>AGENTDESK_HOME</string>
+        <key>HOME</key>
+        <string>USER_HOME</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:USER_HOME/.cargo/bin:USER_HOME/bin:USER_HOME/.local/bin</string>
     </dict>
 
     <key>WorkingDirectory</key>
