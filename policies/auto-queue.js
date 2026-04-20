@@ -526,7 +526,10 @@ var autoQueue = {
       finalizeRunWithoutPhaseGate(finishedRuns[fr].id);
     }
 
-    // Find active runs with pending entries
+    // Find active runs with pending entries.
+    // #815: `user_cancelled` entries are deliberately excluded here — they
+    // represent an explicit operator stop and must never be resurrected by
+    // the tick. Only `pending` entries are re-dispatchable.
     var activeRuns = agentdesk.db.query(
       "SELECT DISTINCT r.id " +
       "FROM auto_queue_runs r " +
