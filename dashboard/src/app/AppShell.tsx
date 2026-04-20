@@ -45,6 +45,7 @@ import {
   ToastOverlay,
   type Notification,
 } from "../components/NotificationCenter";
+import { deriveOfficeAgentState } from "../components/office-view/officeAgentState";
 import OfficeSelectorBar from "../components/OfficeSelectorBar";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
 import {
@@ -74,12 +75,14 @@ import {
 
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const DashboardPageView = lazy(() => import("../components/DashboardPageView"));
+const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const OfficeManagerView = lazy(() => import("../components/OfficeManagerView"));
-const MeetingMinutesView = lazy(() => import("../components/MeetingMinutesView"));
+const MeetingsAndSkillsPage = lazy(() => import("../components/MeetingsAndSkillsPage"));
 const SettingsView = lazy(() => import("../components/SettingsView"));
 const AgentInfoCard = lazy(() => import("../components/agent-manager/AgentInfoCard"));
+const OfficeAgentDrawer = lazy(() => import("../components/office-view/OfficeAgentDrawer"));
 const CommandPalette = lazy(() => import("../components/CommandPalette"));
 
 interface AppShellProps {
@@ -94,7 +97,7 @@ interface AppShellProps {
   dismissNotification: (id: string) => void;
 }
 
-type AgentsPageTab = "agents" | "departments" | "dispatch";
+type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "agentdesk.sidebar.collapsed";
@@ -185,6 +188,9 @@ export default function AppShell({
     useKanban();
 
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
+  const [officeInfoMode, setOfficeInfoMode] = useState<"default" | "office">(
+    "default",
+  );
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
@@ -213,6 +219,10 @@ export default function AppShell({
   });
 
   const spriteMap = useSpriteMap(agents);
+  const officeAgentState = useMemo(
+    () => deriveOfficeAgentState(agentsWithDispatched, kanbanCards),
+    [agentsWithDispatched, kanbanCards],
+  );
   const unresolvedMeetingsCount = roundTableMeetings.filter(
     hasUnresolvedMeetingIssues,
   ).length;
@@ -308,7 +318,9 @@ export default function AppShell({
     ) => {
       setShowMobileMoreMenu(false);
       if (options?.agentsTab) {
-        setAgentsPageTab(options.agentsTab);
+        setAgentsPageTab(
+          options.agentsTab === "dispatch" ? "backlog" : options.agentsTab,
+        );
       }
       if (options?.kanbanFocus) {
         setKanbanSignalFocus(options.kanbanFocus);
@@ -344,6 +356,27 @@ export default function AppShell({
     refreshDepartments,
     refreshOffices,
   ]);
+
+  const openDefaultAgentInfo = useCallback((agent: Agent) => {
+    setOfficeInfoMode("default");
+    setOfficeInfoAgent(agent);
+  }, []);
+
+  const openOfficeAgentInfo = useCallback((agent: Agent) => {
+    setOfficeInfoMode("office");
+    setOfficeInfoAgent(agent);
+  }, []);
+
+  const closeOfficeInfo = useCallback(() => {
+    setOfficeInfoAgent(null);
+    setOfficeInfoMode("default");
+  }, []);
+
+  useEffect(() => {
+    if (officeInfoMode === "office" && currentRoute?.id !== "office") {
+      closeOfficeInfo();
+    }
+  }, [closeOfficeInfo, currentRoute?.id, officeInfoMode]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -958,7 +991,7 @@ export default function AppShell({
                     }
                     kanbanCards={kanbanCards}
                     onNavigateToKanban={() => navigateToRoute("/kanban")}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                    onSelectAgent={openOfficeAgentInfo}
                     onSelectDepartment={() =>
                       navigateToRoute("/agents", { agentsTab: "departments" })
                     }
@@ -972,6 +1005,7 @@ export default function AppShell({
                   <AgentManagerView
                     agents={agents}
                     departments={departments}
+                    kanbanCards={kanbanCards}
                     language={settings.language}
                     officeId={selectedOfficeId}
                     onAgentsChange={() => {
@@ -993,6 +1027,7 @@ export default function AppShell({
                         ),
                       );
                     }}
+                    onSelectAgent={openDefaultAgentInfo}
                     activeTab={agentsPageTab}
                     onTabChange={setAgentsPageTab}
                   />
@@ -1046,29 +1081,7 @@ export default function AppShell({
               <Route
                 path="/stats"
                 element={
-                  <DashboardPageView
-                    stats={stats}
-                    agents={agents}
-                    sessions={visibleDispatchedSessions}
-                    meetings={roundTableMeetings}
-                    settings={settings}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                    onOpenKanbanSignal={(signal) =>
-                      navigateToRoute("/kanban", {
-                        kanbanFocus: signal,
-                      })
-                    }
-                    onOpenDispatchSessions={() =>
-                      navigateToRoute("/agents", { agentsTab: "dispatch" })
-                    }
-                    onOpenSettings={() => navigateToRoute("/settings")}
-                    onRefreshMeetings={() =>
-                      api
-                        .getRoundTableMeetings()
-                        .then(setRoundTableMeetings)
-                        .catch(() => {})
-                    }
-                  />
+                  <StatsPageView settings={settings} />
                 }
               />
               <Route
@@ -1086,7 +1099,7 @@ export default function AppShell({
               <Route
                 path="/meetings"
                 element={
-                  <MeetingMinutesView
+                  <MeetingsAndSkillsPage
                     meetings={roundTableMeetings}
                     onRefresh={() =>
                       api
@@ -1110,14 +1123,14 @@ export default function AppShell({
                     meetings={roundTableMeetings}
                     settings={settings}
                     requestedTab={"achievements" satisfies DashboardTab}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                    onSelectAgent={openDefaultAgentInfo}
                     onOpenKanbanSignal={(signal) =>
                       navigateToRoute("/kanban", {
                         kanbanFocus: signal,
                       })
                     }
                     onOpenDispatchSessions={() =>
-                      navigateToRoute("/agents", { agentsTab: "dispatch" })
+                      navigateToRoute("/agents", { agentsTab: "backlog" })
                     }
                     onOpenSettings={() => navigateToRoute("/settings")}
                     onRefreshMeetings={() =>
@@ -1336,21 +1349,42 @@ export default function AppShell({
 
       <Suspense fallback={null}>
         {officeInfoAgent && (
-          <AgentInfoCard
-            agent={officeInfoAgent}
-            spriteMap={spriteMap}
-            isKo={isKo}
-            locale={locale}
-            tr={tr}
-            departments={departments}
-            onClose={() => setOfficeInfoAgent(null)}
-            onAgentUpdated={() => {
-              refreshAgents();
-              refreshAllAgents();
-              refreshOffices();
-              refreshAuditLogs();
-            }}
-          />
+          officeInfoMode === "office" ? (
+            <OfficeAgentDrawer
+              open
+              agent={officeInfoAgent}
+              departments={departments}
+              locale={locale}
+              isKo={isKo}
+              spriteMap={spriteMap}
+              currentCard={
+                officeAgentState.primaryCardByAgent.get(officeInfoAgent.id) ??
+                null
+              }
+              manualIntervention={
+                officeAgentState.manualInterventionByAgent.get(
+                  officeInfoAgent.id,
+                ) ?? null
+              }
+              onClose={closeOfficeInfo}
+            />
+          ) : (
+            <AgentInfoCard
+              agent={officeInfoAgent}
+              spriteMap={spriteMap}
+              isKo={isKo}
+              locale={locale}
+              tr={tr}
+              departments={departments}
+              onClose={closeOfficeInfo}
+              onAgentUpdated={() => {
+                refreshAgents();
+                refreshAllAgents();
+                refreshOffices();
+                refreshAuditLogs();
+              }}
+            />
+          )
         )}
       </Suspense>
 
@@ -1360,7 +1394,7 @@ export default function AppShell({
             agents={allAgents}
             departments={departments}
             isKo={isKo}
-            onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+            onSelectAgent={openDefaultAgentInfo}
             onNavigate={(path) => navigateToRoute(path)}
             onClose={() => setShowCommandPalette(false)}
             routes={PALETTE_ROUTES}
