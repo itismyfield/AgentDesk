@@ -10,7 +10,7 @@ use crate::engine::PolicyEngine;
 
 use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
 use super::dispatch_context::{
-    ReviewTargetTrust, TargetRepoSource, build_review_context,
+    ReviewTargetTrust, TargetRepoSource, build_review_context, build_review_context_pg,
     dispatch_context_with_session_strategy, dispatch_context_worktree_target,
     inject_review_dispatch_identifiers, json_string_field, resolve_card_target_repo_ref,
     resolve_card_worktree, resolve_parent_dispatch_context,
@@ -441,14 +441,31 @@ fn create_dispatch_core_internal(
         // need to pre-populate review-target fields must NOT go through
         // `create_dispatch*` — they must call `build_review_context` directly
         // with `ReviewTargetTrust::Trusted`.
-        build_review_context(
-            db,
-            kanban_card_id,
-            to_agent_id,
-            &context_with_session_strategy,
-            ReviewTargetTrust::Untrusted,
-            caller_target_repo_source,
-        )?
+        if let Some(pool) = pg_pool {
+            let card_id = kanban_card_id.to_string();
+            let target_agent_id = to_agent_id.to_string();
+            let review_context = context_with_session_strategy.clone();
+            block_on_dispatch_pg(pool, move |pool| async move {
+                build_review_context_pg(
+                    &pool,
+                    &card_id,
+                    &target_agent_id,
+                    &review_context,
+                    ReviewTargetTrust::Untrusted,
+                    caller_target_repo_source,
+                )
+                .await
+            })?
+        } else {
+            build_review_context(
+                db,
+                kanban_card_id,
+                to_agent_id,
+                &context_with_session_strategy,
+                ReviewTargetTrust::Untrusted,
+                caller_target_repo_source,
+            )?
+        }
     } else {
         let mut base = serde_json::to_string(&context_with_session_strategy)?;
         let phase_gate_sidecar = context_with_session_strategy
