@@ -33,6 +33,7 @@ mod skill_usage_analytics;
 pub mod skills_api;
 pub mod stats;
 pub mod termination_events;
+pub mod v1;
 
 use axum::{
     Router,
@@ -158,6 +159,7 @@ fn compose_api_router(state: AppState) -> ApiRouter {
         .merge(domains::reviews::router(state.clone()))
         .merge(domains::ops::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
+        .merge(v1::router(state.clone()))
         .merge(domains::admin::router(state))
 }
 
