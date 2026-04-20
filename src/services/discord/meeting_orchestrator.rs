@@ -2034,13 +2034,22 @@ fn format_memory_recall_context(recall: &RecallResponse) -> String {
     chunks.join("\n\n")
 }
 
-fn participant_recall_mode(memory: &ResolvedMemorySettings) -> RecallMode {
-    if memory.backend == super::settings::MemoryBackendKind::Memento
-        && !memory.query_recall_after_bootstrap
-    {
-        RecallMode::Bootstrap
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeetingRecallMode {
+    Bootstrap,
+    Query,
+    Skip,
+}
+
+fn participant_recall_mode(memory: &ResolvedMemorySettings, round: u32) -> MeetingRecallMode {
+    if memory.backend != super::settings::MemoryBackendKind::Memento {
+        MeetingRecallMode::Query
+    } else if round <= 1 {
+        MeetingRecallMode::Bootstrap
+    } else if memory.query_recall_after_bootstrap {
+        MeetingRecallMode::Query
     } else {
-        RecallMode::Query
+        MeetingRecallMode::Skip
     }
 }
 
@@ -2052,9 +2061,15 @@ fn build_participant_recall_request(
     round: u32,
     agenda: &str,
     transcript: &str,
-) -> RecallRequest {
-    RecallRequest {
-        mode: participant_recall_mode(&participant.memory),
+) -> Option<RecallRequest> {
+    let mode = match participant_recall_mode(&participant.memory, round) {
+        MeetingRecallMode::Bootstrap => RecallMode::Bootstrap,
+        MeetingRecallMode::Query => RecallMode::Query,
+        MeetingRecallMode::Skip => return None,
+    };
+
+    Some(RecallRequest {
+        mode,
         provider,
         role_id: participant.role_id.clone(),
         channel_id,
@@ -2065,7 +2080,7 @@ fn build_participant_recall_request(
         case_id: None,
         phase: None,
         resolution_status: None,
-    }
+    })
 }
 
 async fn participant_memory_recall(
@@ -2077,18 +2092,20 @@ async fn participant_memory_recall(
     agenda: &str,
     transcript: &str,
 ) -> String {
+    let Some(request) = build_participant_recall_request(
+        participant,
+        provider,
+        channel_id,
+        meeting_id,
+        round,
+        agenda,
+        transcript,
+    ) else {
+        return String::new();
+    };
+
     let backend = build_resolved_memory_backend(&participant.memory);
-    let recall = backend
-        .recall(build_participant_recall_request(
-            participant,
-            provider,
-            channel_id,
-            meeting_id,
-            round,
-            agenda,
-            transcript,
-        ))
-        .await;
+    let recall = backend.recall(request).await;
 
     for warning in &recall.warnings {
         tracing::warn!(
@@ -2938,15 +2955,15 @@ mod tests {
     use super::{
         ActiveMeetingSlot, DEFAULT_MEETING_SELECTION_STAGE_TIMEOUT_SECS,
         MAX_MEETING_STAGE_TIMEOUT_SECS, MIN_MEETING_STAGE_TIMEOUT_SECS, Meeting,
-        MeetingAgentConfig, MeetingConfig, MeetingParticipant, MeetingStatus, MeetingUtterance,
-        ProviderKind, RecallMode, ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
-        build_fallback_meeting_summary, build_meeting_markdown, build_meeting_start_status_message,
-        build_meeting_status_payload, build_participant_recall_request,
-        build_selection_reason_line, clamp_max_participants, display_query_hash,
-        effective_round_count, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
-        parse_participant_selection_response, resolve_meeting_stage_timeout_secs,
-        select_participants, summary_agent_context, thread_query_hash, truncate_for_meeting,
-        validate_fixed_participants,
+        MeetingAgentConfig, MeetingConfig, MeetingParticipant, MeetingRecallMode, MeetingStatus,
+        MeetingUtterance, ProviderKind, RecallMode, ResolvedMemorySettings, SummaryAgentConfig,
+        agent_metadata_card, build_fallback_meeting_summary, build_meeting_markdown,
+        build_meeting_start_status_message, build_meeting_status_payload,
+        build_participant_recall_request, build_selection_reason_line, clamp_max_participants,
+        display_query_hash, effective_round_count, meeting_query_hash, meeting_slot_state,
+        parse_meeting_start_text, parse_participant_selection_response, participant_recall_mode,
+        resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
+        thread_query_hash, truncate_for_meeting, validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -3267,7 +3284,8 @@ mod tests {
             2,
             "장기 기억 hardening rollout",
             "1라운드 합의: query recall을 기본값으로 전환",
-        );
+        )
+        .expect("round 2 should use query recall");
 
         assert_eq!(request.mode, RecallMode::Query);
         assert_eq!(request.role_id, "openclaw-coder");
@@ -3280,6 +3298,21 @@ mod tests {
             request.context_text.as_deref(),
             Some("장기 기억 hardening rollout\n\n1라운드 합의: query recall을 기본값으로 전환")
         );
+    }
+
+    #[test]
+    fn test_participant_recall_mode_bootstraps_first_round_then_skips_when_query_recall_disabled() {
+        let memory = ResolvedMemorySettings {
+            backend: crate::services::discord::settings::MemoryBackendKind::Memento,
+            query_recall_after_bootstrap: false,
+            ..ResolvedMemorySettings::default()
+        };
+
+        assert_eq!(
+            participant_recall_mode(&memory, 1),
+            MeetingRecallMode::Bootstrap
+        );
+        assert_eq!(participant_recall_mode(&memory, 2), MeetingRecallMode::Skip);
     }
 
     #[test]
