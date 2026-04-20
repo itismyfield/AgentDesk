@@ -8,7 +8,6 @@ use serde_json::json;
 use sqlx::Row;
 
 use super::AppState;
-use crate::db::schema::seed_builtin_pipeline_stages;
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -232,13 +231,6 @@ pub async fn create_repo(
                 Json(json!({"error": format!("{e}")})),
             );
         }
-    }
-
-    if let Err(e) = seed_builtin_pipeline_stages(&conn) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("seed_builtin_pipeline_stages: {e}")})),
-        );
     }
 
     match conn.query_row(

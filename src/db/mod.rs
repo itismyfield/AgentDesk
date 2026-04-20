@@ -1,6 +1,5 @@
 pub mod agents;
 pub mod auto_queue;
-pub(crate) mod builtin_pipeline;
 pub mod kanban;
 pub mod memento_feedback_stats;
 pub mod postgres;

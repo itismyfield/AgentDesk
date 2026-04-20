@@ -1431,7 +1431,7 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
                 JSON.stringify((function() {
                     var saved = agentdesk.autoQueue.savePhaseGateState("aq-phase-run", 2, {
                         status: "failed",
-                        verdict: "deploy_failed",
+                        verdict: "phase_gate_failed",
                         dispatch_ids: [
                             "aq-phase-valid-1",
                             "aq-phase-valid-1",
@@ -1442,7 +1442,7 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
                         next_phase: 3,
                         final_phase: true,
                         anchor_card_id: "aq-phase-card",
-                        failure_reason: "deploy-dev failed",
+                        failure_reason: "phase gate failed",
                         created_at: "2026-04-15 00:00:00"
                     });
                     var rows = agentdesk.db.query(
@@ -1475,11 +1475,11 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
         assert_eq!(parsed["rows"][0]["dispatch_id"], "aq-phase-valid-1");
         assert_eq!(parsed["rows"][1]["dispatch_id"], "aq-phase-valid-2");
         assert_eq!(parsed["rows"][0]["status"], "failed");
-        assert_eq!(parsed["rows"][0]["verdict"], "deploy_failed");
+        assert_eq!(parsed["rows"][0]["verdict"], "phase_gate_failed");
         assert_eq!(parsed["rows"][0]["next_phase"], 3);
         assert_eq!(parsed["rows"][0]["final_phase"], 1);
         assert_eq!(parsed["rows"][0]["anchor_card_id"], "aq-phase-card");
-        assert_eq!(parsed["rows"][0]["failure_reason"], "deploy-dev failed");
+        assert_eq!(parsed["rows"][0]["failure_reason"], "phase gate failed");
         assert_eq!(parsed["cleared"], true);
         assert_eq!(parsed["remaining"], 0);
     });

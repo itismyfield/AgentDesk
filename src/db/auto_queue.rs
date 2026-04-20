@@ -1506,7 +1506,6 @@ pub struct AutoQueueRunRecord {
     pub completed_at: Option<i64>,
     pub max_concurrent_threads: i64,
     pub thread_group_count: i64,
-    pub deploy_phases: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1614,8 +1613,7 @@ pub fn get_run(
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
                 COALESCE(max_concurrent_threads, 1),
-                COALESCE(thread_group_count, 1),
-                deploy_phases
+                COALESCE(thread_group_count, 1)
          FROM auto_queue_runs
          WHERE id = ?1",
         [run_id],
@@ -1632,7 +1630,6 @@ pub fn get_run(
                 completed_at: row.get(8)?,
                 max_concurrent_threads: row.get(9)?,
                 thread_group_count: row.get(10)?,
-                deploy_phases: row.get(11)?,
             })
         },
     )
@@ -1656,8 +1653,7 @@ pub async fn get_run_pg(
                     THEN EXTRACT(EPOCH FROM completed_at)::BIGINT * 1000
                 END AS completed_at,
                 COALESCE(max_concurrent_threads, 1)::BIGINT AS max_concurrent_threads,
-                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count,
-                deploy_phases
+                COALESCE(thread_group_count, 1)::BIGINT AS thread_group_count
          FROM auto_queue_runs
          WHERE id = $1",
     )
@@ -4274,7 +4270,6 @@ fn auto_queue_run_record_from_pg_row(
         completed_at: row.try_get("completed_at")?,
         max_concurrent_threads: row.try_get("max_concurrent_threads")?,
         thread_group_count: row.try_get("thread_group_count")?,
-        deploy_phases: row.try_get("deploy_phases")?,
     })
 }
 
@@ -5616,7 +5611,7 @@ mod tests {
             2,
             &PhaseGateStateWrite {
                 status: "failed".to_string(),
-                verdict: Some("deploy_failed".to_string()),
+                verdict: Some("phase_gate_failed".to_string()),
                 dispatch_ids: vec![
                     "dispatch-valid-1".to_string(),
                     "dispatch-valid-1".to_string(),
@@ -5627,7 +5622,7 @@ mod tests {
                 next_phase: Some(3),
                 final_phase: true,
                 anchor_card_id: None,
-                failure_reason: Some("deploy-dev failed".to_string()),
+                failure_reason: Some("phase gate failed".to_string()),
                 created_at: Some("2026-04-15 00:00:00".to_string()),
             },
         )
@@ -5669,10 +5664,10 @@ mod tests {
         assert_eq!(rows[0].0.as_deref(), Some("dispatch-valid-1"));
         assert_eq!(rows[1].0.as_deref(), Some("dispatch-valid-2"));
         assert_eq!(rows[0].1, "failed");
-        assert_eq!(rows[0].2.as_deref(), Some("deploy_failed"));
+        assert_eq!(rows[0].2.as_deref(), Some("phase_gate_failed"));
         assert_eq!(rows[0].3, Some(3));
         assert_eq!(rows[0].4, 1);
-        assert_eq!(rows[0].5.as_deref(), Some("deploy-dev failed"));
+        assert_eq!(rows[0].5.as_deref(), Some("phase gate failed"));
     }
 
     #[test]

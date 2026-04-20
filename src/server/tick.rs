@@ -1,89 +1,9 @@
 use crate::db::Db;
 use crate::engine::PolicyEngine;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
 const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
-
-static DEPLOY_GATE_RUNNING: AtomicBool = AtomicBool::new(false);
-
-fn poll_deploy_gates(db: &Db) {
-    if DEPLOY_GATE_RUNNING.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let gate = {
-        let Ok(conn) = db.lock() else { return };
-        let mut stmt = match conn.prepare(
-            "SELECT pg.run_id, pg.phase, r.deploy_phases
-             FROM auto_queue_phase_gates pg
-             JOIN auto_queue_runs r ON r.id = pg.run_id
-             WHERE pg.status = 'pending' AND r.deploy_phases IS NOT NULL
-             LIMIT 1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let result: Option<(String, i64, String)> = stmt
-            .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .ok();
-        let Some((run_id, phase, deploy_phases_json)) = result else {
-            return;
-        };
-        let deploy_phases: Vec<i64> =
-            serde_json::from_str(&deploy_phases_json).unwrap_or_default();
-        if !deploy_phases.contains(&phase) {
-            return;
-        }
-        (run_id, phase)
-    };
-
-    let (run_id, phase) = gate;
-    let db = db.clone();
-    DEPLOY_GATE_RUNNING.store(true, Ordering::Relaxed);
-
-    std::thread::spawn(move || {
-        tracing::info!("[deploy-gate] starting deploy for run {} phase {}", &run_id[..8.min(run_id.len())], phase);
-
-        let result = crate::engine::ops::deploy_ops::run_deploy();
-
-        let success = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        let summary = result
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-
-        if let Ok(conn) = db.lock() {
-            if success {
-                tracing::info!("[deploy-gate] deploy succeeded for run {} phase {}: {}", &run_id[..8.min(run_id.len())], phase, summary);
-                conn.execute(
-                    "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                    libsql_rusqlite::params![run_id, phase],
-                )
-                .ok();
-                conn.execute(
-                    "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status = 'paused'",
-                    libsql_rusqlite::params![run_id],
-                )
-                .ok();
-            } else {
-                let error = result
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("deploy failed");
-                tracing::warn!("[deploy-gate] deploy failed for run {} phase {}: {}", &run_id[..8.min(run_id.len())], phase, error);
-                conn.execute(
-                    "UPDATE auto_queue_phase_gates SET status = 'failed', failure_reason = ?3 WHERE run_id = ?1 AND phase = ?2",
-                    libsql_rusqlite::params![run_id, phase, error],
-                )
-                .ok();
-            }
-        }
-
-        DEPLOY_GATE_RUNNING.store(false, Ordering::Relaxed);
-    });
-}
 
 pub(super) async fn refresh_memory_health_for_startup() {
     crate::services::memory::refresh_backend_health(MEMORY_HEALTH_STARTUP_REASON).await;
@@ -118,7 +38,6 @@ pub(super) async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         interval_30s.tick().await;
         count += 1;
 
-        poll_deploy_gates(&db);
         fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s");
         drain_transitions(&engine, &db);
 

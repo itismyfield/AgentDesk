@@ -870,23 +870,8 @@ function loadPhaseGateDispatches(dispatchIds) {
   );
 }
 
-function _isDeployPhase(runId, phase) {
-  var rows = agentdesk.db.query(
-    "SELECT deploy_phases FROM auto_queue_runs WHERE id = ?",
-    [runId]
-  );
-  if (rows.length === 0 || !rows[0].deploy_phases) return false;
-  try {
-    var phases = JSON.parse(rows[0].deploy_phases);
-    return Array.isArray(phases) && phases.indexOf(phase) >= 0;
-  } catch (e) {
-    return false;
-  }
-}
-
 function _phaseGateRequired(runId, phase) {
   // General phase gates are always required after a phase completes.
-  // `deploy_phases` only selects the deploy/build gate implementation.
   return true;
 }
 
@@ -922,10 +907,6 @@ function runHasUserCancelledEntry(runId) {
     [runId]
   );
   return (rows.length > 0) && rows[0].cnt > 0;
-}
-
-function _deployGateTitle(phase) {
-  return "[Deploy Gate] Phase " + phase + " 빌드+배포";
 }
 
 function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardId) {
@@ -1124,46 +1105,7 @@ function _phaseGateTitle(group, phase, runId) {
   return "[" + group.dispatch_type + " P" + phase + "] " + issueLabel;
 }
 
-function _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCardId) {
-  var livePhaseCount = remainingRunnableEntryCount(runId, phase);
-  if (livePhaseCount > 0) {
-    autoQueueLog("info", "Skipping deploy gate for phase " + phase + " — " + livePhaseCount + " live entries remain", {
-      run_id: runId,
-      card_id: anchorCardId,
-      batch_phase: phase
-    });
-    return null;
-  }
-
-  pauseRun(runId);
-
-  var state = {
-    run_id: runId,
-    batch_phase: phase,
-    next_phase: nextPhase,
-    final_phase: !!finalPhase,
-    anchor_card_id: anchorCardId,
-    status: "pending",
-    dispatch_ids: [],
-    gates: [],
-    gate_title: _deployGateTitle(phase),
-    created_at: new Date().toISOString()
-  };
-
-  savePhaseGateState(runId, phase, state);
-  autoQueueLog("info", _deployGateTitle(phase) + " 생성 — Rust가 비동기로 실행합니다", {
-    run_id: runId,
-    card_id: anchorCardId,
-    batch_phase: phase
-  });
-  return state;
-}
-
 function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorCardId) {
-  if (_isDeployPhase(runId, phase)) {
-    return _createDeployGateDispatch(runId, phase, nextPhase, finalPhase, anchorCardId);
-  }
-
   var existing = loadPhaseGateState(runId, phase);
   if (existing) {
     pauseRun(runId);

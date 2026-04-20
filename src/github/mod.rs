@@ -588,8 +588,6 @@ pub fn register_repo(db: &Db, repo_id: &str) -> Result<RepoRow, String> {
         [repo_id],
     )
     .map_err(|e| format!("insert: {e}"))?;
-    crate::db::schema::seed_builtin_pipeline_stages(&conn)
-        .map_err(|e| format!("seed builtin pipeline stages: {e}"))?;
 
     let row = conn
         .query_row(

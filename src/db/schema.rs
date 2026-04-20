@@ -2,7 +2,6 @@ use anyhow::Result;
 use libsql_rusqlite::{Connection, OptionalExtension, params_from_iter}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use std::collections::HashSet;
 
-use crate::db::builtin_pipeline::{AGENTDESK_PIPELINE_STAGES, AGENTDESK_REPO_ID};
 const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
 const SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY: &str =
     "session_transcript_agent_id_backfill:v1";
@@ -893,65 +892,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pdr_user_status ON pending_dm_replies(user_id, status);",
     )?;
 
-    seed_builtin_pipeline_stages(conn)?;
-
-    Ok(())
-}
-
-pub fn seed_builtin_pipeline_stages(conn: &Connection) -> Result<()> {
-    let repo_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM github_repos WHERE id = ?1)",
-            [AGENTDESK_REPO_ID],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !repo_exists {
-        return Ok(());
-    }
-
-    for stage in AGENTDESK_PIPELINE_STAGES {
-        ensure_pipeline_stage(
-            conn,
-            AGENTDESK_REPO_ID,
-            stage.stage_name,
-            stage.stage_order,
-            stage.trigger_after,
-            stage.provider,
-            stage.skip_condition,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn ensure_pipeline_stage(
-    conn: &Connection,
-    repo_id: &str,
-    stage_name: &str,
-    stage_order: i64,
-    trigger_after: Option<&str>,
-    provider: Option<&str>,
-    skip_condition: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO pipeline_stages (
-            repo_id, stage_name, stage_order, trigger_after, provider, skip_condition
-         )
-         SELECT ?1, ?2, ?3, ?4, ?5, ?6
-         WHERE NOT EXISTS (
-            SELECT 1 FROM pipeline_stages WHERE repo_id = ?1 AND stage_name = ?2
-         )",
-        libsql_rusqlite::params![
-            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            repo_id,
-            stage_name,
-            stage_order,
-            trigger_after,
-            provider,
-            skip_condition,
-        ],
-    )?;
     Ok(())
 }
 
@@ -1086,12 +1026,6 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "auto_queue_runs",
         "thread_group_count",
         "ALTER TABLE auto_queue_runs ADD COLUMN thread_group_count INTEGER DEFAULT 1;",
-    )?;
-    ensure_auto_queue_column(
-        conn,
-        "auto_queue_runs",
-        "deploy_phases",
-        "ALTER TABLE auto_queue_runs ADD COLUMN deploy_phases TEXT;",
     )?;
     // #747 round-2: phase-gate grace window. Set by OnCardTerminal at the
     // start of its continuation work; read by the tick-fired
@@ -2298,118 +2232,6 @@ fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn builtin_stage_rows(
-        conn: &Connection,
-    ) -> Vec<(String, i64, Option<String>, Option<String>, Option<String>)> {
-        conn.prepare(
-            "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
-             FROM pipeline_stages
-             WHERE repo_id = ?1
-             ORDER BY stage_order ASC",
-        )
-        .unwrap()
-        .query_map([AGENTDESK_REPO_ID], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap()
-    }
-
-    #[test]
-    fn migrate_seeds_builtin_agentdesk_pipeline_stages_for_existing_repo() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE kv_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            );",
-        )
-        .unwrap();
-        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
-            .unwrap();
-        conn.execute(
-            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, 'AgentDesk', TRUE)",
-            [AGENTDESK_REPO_ID],
-        )
-        .unwrap();
-
-        migrate(&conn).unwrap();
-
-        assert_eq!(
-            builtin_stage_rows(&conn),
-            vec![
-                (
-                    "dev-deploy".to_string(),
-                    100,
-                    Some("review_pass".to_string()),
-                    Some("self".to_string()),
-                    Some("no_rs_changes".to_string()),
-                ),
-                (
-                    "e2e-test".to_string(),
-                    200,
-                    None,
-                    Some("counter".to_string()),
-                    Some("no_rs_changes".to_string()),
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn seed_builtin_pipeline_stages_is_idempotent_for_agentdesk_repo() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, 'AgentDesk', TRUE)",
-            [AGENTDESK_REPO_ID],
-        )
-        .unwrap();
-
-        seed_builtin_pipeline_stages(&conn).unwrap();
-        seed_builtin_pipeline_stages(&conn).unwrap();
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = ?1",
-                [AGENTDESK_REPO_ID],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(
-            builtin_stage_rows(&conn),
-            vec![
-                (
-                    "dev-deploy".to_string(),
-                    100,
-                    Some("review_pass".to_string()),
-                    Some("self".to_string()),
-                    Some("no_rs_changes".to_string()),
-                ),
-                (
-                    "e2e-test".to_string(),
-                    200,
-                    None,
-                    Some("counter".to_string()),
-                    Some("no_rs_changes".to_string()),
-                ),
-            ]
-        );
-    }
 
     #[test]
     fn migrate_rebuilds_session_transcripts_without_agent_fk() {

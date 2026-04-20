@@ -6,15 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
-/// Tmux session name suffix for dev/release isolation.
-/// Dev environment (`~/.adk/dev`) appends "-dev"; release has no suffix.
+/// Tmux session name suffix (reserved for future isolation use; currently empty).
 pub fn tmux_env_suffix() -> &'static str {
-    use std::sync::OnceLock;
-    static SUFFIX: OnceLock<String> = OnceLock::new();
-    SUFFIX.get_or_init(|| match std::env::var("AGENTDESK_ROOT_DIR").ok() {
-        Some(root) if root.contains(".adk/dev") => "-dev".to_string(),
-        _ => String::new(),
-    })
+    ""
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

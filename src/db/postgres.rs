@@ -8,7 +8,6 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Row};
 
 use crate::config::{AgentChannel, AgentDef, Config};
-use crate::db::builtin_pipeline::{AGENTDESK_PIPELINE_STAGES, AGENTDESK_REPO_ID};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
@@ -252,36 +251,6 @@ pub async fn register_repo(pool: &PgPool, repo_id: &str) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|error| format!("insert github_repos {repo_id}: {error}"))?;
-
-    if repo_id == AGENTDESK_REPO_ID {
-        for stage in AGENTDESK_PIPELINE_STAGES {
-            sqlx::query(
-                "INSERT INTO pipeline_stages (
-                    repo_id, stage_name, stage_order, trigger_after, provider, skip_condition
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (repo_id, stage_name) DO UPDATE
-                 SET stage_order = EXCLUDED.stage_order,
-                     trigger_after = EXCLUDED.trigger_after,
-                     provider = EXCLUDED.provider,
-                     skip_condition = EXCLUDED.skip_condition",
-            )
-            .bind(AGENTDESK_REPO_ID)
-            .bind(stage.stage_name)
-            .bind(stage.stage_order)
-            .bind(stage.trigger_after)
-            .bind(stage.provider)
-            .bind(stage.skip_condition)
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "seed pipeline stage {} for {}: {error}",
-                    stage.stage_name, AGENTDESK_REPO_ID
-                )
-            })?;
-        }
-    }
 
     Ok(())
 }
@@ -575,7 +544,7 @@ mod tests {
         config.database.password = std::env::var("PGPASSWORD")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        config.github.repos = vec![crate::db::builtin_pipeline::AGENTDESK_REPO_ID.to_string()];
+        config.github.repos = vec!["itismyfield/AgentDesk".to_string()];
         config.agents = vec![crate::config::AgentDef {
             id: "pg-agent".to_string(),
             name: "PG Agent".to_string(),
@@ -644,26 +613,11 @@ mod tests {
         assert_eq!(server_port, config.server.port.to_string());
 
         let repo_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM github_repos WHERE id = $1")
-            .bind(crate::db::builtin_pipeline::AGENTDESK_REPO_ID)
+            .bind("itismyfield/AgentDesk")
             .fetch_one(&pool)
             .await
             .expect("count github_repos");
         assert_eq!(repo_count, 1);
-
-        let stage_names = sqlx::query(
-            "SELECT stage_name
-             FROM pipeline_stages
-             WHERE repo_id = $1
-             ORDER BY stage_order",
-        )
-        .bind(crate::db::builtin_pipeline::AGENTDESK_REPO_ID)
-        .fetch_all(&pool)
-        .await
-        .expect("load pipeline stages")
-        .into_iter()
-        .map(|row| row.get::<String, _>("stage_name"))
-        .collect::<Vec<_>>();
-        assert_eq!(stage_names, vec!["dev-deploy", "e2e-test"]);
 
         let agent_row = sqlx::query(
             "SELECT id, provider, discord_channel_cdx

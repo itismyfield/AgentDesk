@@ -676,7 +676,6 @@ struct AutoQueueRunRow {
     unified_thread_channel_id: Option<String>,
     max_concurrent_threads: Option<i64>,
     thread_group_count: Option<i64>,
-    deploy_phases: Option<String>,
     created_at: Option<String>,
     completed_at: Option<String>,
 }
@@ -2292,7 +2291,6 @@ fn load_all_auto_queue_runs(conn: &Connection) -> Result<Vec<AutoQueueRunRow>, S
                     unified_thread_channel_id,
                     max_concurrent_threads,
                     thread_group_count,
-                    deploy_phases,
                     created_at,
                     completed_at
              FROM auto_queue_runs
@@ -2314,9 +2312,8 @@ fn load_all_auto_queue_runs(conn: &Connection) -> Result<Vec<AutoQueueRunRow>, S
                 unified_thread_channel_id: row.get(9)?,
                 max_concurrent_threads: row.get(10)?,
                 thread_group_count: row.get(11)?,
-                deploy_phases: row.get(12)?,
-                created_at: row.get(13)?,
-                completed_at: row.get(14)?,
+                created_at: row.get(12)?,
+                completed_at: row.get(13)?,
             })
         })
         .map_err(|e| format!("query auto_queue_runs export: {e}"))?;
@@ -5019,11 +5016,11 @@ async fn import_supporting_tables_into_pg(
             "INSERT INTO auto_queue_runs (
                 id, repo, agent_id, status, ai_model, ai_rationale, timeout_minutes, unified_thread,
                 unified_thread_id, unified_thread_channel_id, max_concurrent_threads, thread_group_count,
-                deploy_phases, created_at, completed_at
+                created_at, completed_at
              )
              VALUES (
                 $1, $2, $3, COALESCE($4, 'active'), $5, $6, COALESCE($7, 120), COALESCE($8, FALSE),
-                $9, $10, COALESCE($11, 1), COALESCE($12, 1), $13, CAST($14 AS timestamptz), CAST($15 AS timestamptz)
+                $9, $10, COALESCE($11, 1), COALESCE($12, 1), CAST($13 AS timestamptz), CAST($14 AS timestamptz)
              )
              ON CONFLICT (id) DO UPDATE
              SET repo = EXCLUDED.repo,
@@ -5037,7 +5034,6 @@ async fn import_supporting_tables_into_pg(
                  unified_thread_channel_id = EXCLUDED.unified_thread_channel_id,
                  max_concurrent_threads = EXCLUDED.max_concurrent_threads,
                  thread_group_count = EXCLUDED.thread_group_count,
-                 deploy_phases = EXCLUDED.deploy_phases,
                  created_at = EXCLUDED.created_at,
                  completed_at = EXCLUDED.completed_at",
         )
@@ -5053,7 +5049,6 @@ async fn import_supporting_tables_into_pg(
         .bind(&row.unified_thread_channel_id)
         .bind(row.max_concurrent_threads)
         .bind(row.thread_group_count)
-        .bind(&row.deploy_phases)
         .bind(&row.created_at)
         .bind(&row.completed_at)
         .execute(&mut *tx)
@@ -6141,11 +6136,11 @@ mod tests {
             );
             INSERT INTO auto_queue_runs (
                 id, repo, agent_id, status, ai_model, ai_rationale, timeout_minutes, unified_thread,
-                unified_thread_id, unified_thread_channel_id, max_concurrent_threads, thread_group_count, deploy_phases, created_at, completed_at
+                unified_thread_id, unified_thread_channel_id, max_concurrent_threads, thread_group_count, created_at, completed_at
             )
             VALUES (
                 'run-1', 'repo-1', 'agent-1', 'completed', 'gpt-5', 'test', 120, 1,
-                'thread-group-1', 'chan-1', 1, 1, '1,2', '2026-04-18 09:00:00', '2026-04-18 09:20:00'
+                'thread-group-1', 'chan-1', 1, 1, '2026-04-18 09:00:00', '2026-04-18 09:20:00'
             );
             INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, priority_rank, reason, status, dispatch_id, retry_count,

@@ -8,8 +8,6 @@ var BENIGN_BLOCKED_REASON_PREFIXES = [
   "ci:running",
   "ci:rerunning",
   "ci:rework",
-  "deploy:waiting",
-  "deploy:deploying:",
   // #743: create-pr dispatch in flight — benign progress state
   "pr:creating"
 ];
