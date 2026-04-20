@@ -1179,6 +1179,7 @@ pub(super) async fn restore_inflight_turns(
                         shared,
                     )
                     .await;
+                    save_missing_session_handoff(provider, &state, &best_response);
                     clear_inflight_state(provider, state.channel_id);
                 }
                 continue;
@@ -1974,6 +1975,72 @@ mod tests {
                 .context
                 .contains("이어서 원인과 대응을 설명하겠습니다")
         );
+    }
+
+    #[test]
+    fn planned_restart_recovery_saves_handoff_for_non_unix_followup() {
+        let _lock = super::super::runtime_store::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("agentdesk-root");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        let _reset = EnvReset;
+
+        let state = crate::services::discord::inflight::InflightTurnState {
+            version: 1,
+            provider: "codex".to_string(),
+            channel_id: 1486333430516945010,
+            channel_name: Some("adk-cdx-t1486333430516945010".to_string()),
+            logical_channel_id: Some(1479671301387059202),
+            thread_id: Some(1486333430516945010),
+            thread_title: Some("[AgentDesk] restart recovery".to_string()),
+            request_owner_user_id: 343742347365974026,
+            user_msg_id: 1487795113240559790,
+            current_msg_id: 1487799916758827140,
+            current_msg_len: 0,
+            user_text: "dcserver 재시작 후에도 이어서 마무리해줘.".to_string(),
+            session_id: Some("session-restart".to_string()),
+            tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945010".to_string()),
+            output_path: Some("/tmp/agentdesk-test-restart.jsonl".to_string()),
+            input_fifo_path: Some("/tmp/agentdesk-test-restart.input".to_string()),
+            last_offset: 77,
+            turn_start_offset: Some(77),
+            full_response: "재시작 전 답변을 정리하던 중이었습니다.".to_string(),
+            response_sent_offset: 0,
+            current_tool_line: None,
+            prev_tool_status: None,
+            started_at: "2026-03-29 22:10:34".to_string(),
+            updated_at: "2026-03-29 22:13:53".to_string(),
+            born_generation: 8,
+            any_tool_used: true,
+            has_post_tool_text: false,
+            session_key: None,
+            dispatch_id: None,
+            last_watcher_relayed_offset: None,
+            planned_restart: true,
+        };
+
+        save_missing_session_handoff(
+            &ProviderKind::Codex,
+            &state,
+            "새 dcserver가 올라오면 이어서 남은 설명을 마무리합니다.",
+        );
+
+        let handoffs = crate::services::discord::handoff::load_handoffs(&ProviderKind::Codex);
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].channel_id, state.channel_id);
+        assert_eq!(handoffs[0].user_msg_id, Some(state.user_msg_id));
+        assert!(handoffs[0].intent.contains("중단된 응답"));
+        assert!(handoffs[0].context.contains("원래 사용자 요청"));
+        assert!(handoffs[0].context.contains("남은 설명을 마무리합니다"));
     }
 
     #[test]

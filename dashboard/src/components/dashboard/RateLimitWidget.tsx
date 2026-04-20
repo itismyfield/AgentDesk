@@ -87,13 +87,8 @@ export function transformRawData(
   return {
     providers: raw.providers
       .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
-      .map((rp) => ({
-        provider: normalizeRateLimitProviderLabel(rp.provider),
-        fetched_at: rp.fetched_at,
-        stale: rp.stale,
-        unsupported: Boolean(rp.unsupported),
-        reason: typeof rp.reason === "string" ? rp.reason : null,
-        buckets: rp.buckets
+      .flatMap((rp) => {
+        const buckets = rp.buckets
           .filter((b) => !HIDDEN_BUCKETS.has(b.name))
           .map((b) => {
             const utilization =
@@ -113,8 +108,21 @@ export function transformRawData(
               resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
               level,
             };
-          }),
-      })),
+          });
+        if (rp.unsupported && buckets.length === 0) {
+          return [];
+        }
+        return [
+          {
+            provider: normalizeRateLimitProviderLabel(rp.provider),
+            fetched_at: rp.fetched_at,
+            stale: rp.stale,
+            unsupported: Boolean(rp.unsupported),
+            reason: typeof rp.reason === "string" ? rp.reason : null,
+            buckets,
+          },
+        ];
+      }),
   };
 }
 

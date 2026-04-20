@@ -609,12 +609,8 @@ export function normalizeMiniRateLimitProviderLabel(provider: string): string {
 export function transformRLProviders(raw: RawRLProvider[]): RLProvider[] {
   return raw
     .filter((rp) => !RL_HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
-    .map((rp) => ({
-      provider: normalizeMiniRateLimitProviderLabel(rp.provider),
-      stale: rp.stale,
-      unsupported: Boolean(rp.unsupported),
-      reason: typeof rp.reason === "string" ? rp.reason : null,
-      buckets: rp.buckets
+    .flatMap((rp) => {
+      const buckets = rp.buckets
         .filter((b) => !RL_HIDDEN_BUCKETS.has(b.name))
         .map((b) => {
           const utilization =
@@ -633,8 +629,20 @@ export function transformRLProviders(raw: RawRLProvider[]): RLProvider[] {
                   : "normal"
             ) as "normal" | "warning" | "danger",
           };
-        }),
-    }));
+        });
+      if (rp.unsupported && buckets.length === 0) {
+        return [];
+      }
+      return [
+        {
+          provider: normalizeMiniRateLimitProviderLabel(rp.provider),
+          stale: rp.stale,
+          unsupported: Boolean(rp.unsupported),
+          reason: typeof rp.reason === "string" ? rp.reason : null,
+          buckets,
+        },
+      ];
+    });
 }
 
 const RL_ICONS: Record<string, string> = {
