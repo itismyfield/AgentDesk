@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,19 @@ class ManageDawnLaunchdaemonsTests(unittest.TestCase):
                 "/tmp/skills-b",
             ],
         )
+
+    def test_build_schedule_override_rejects_non_dict_plist_root(self) -> None:
+        with tempfile.NamedTemporaryFile("wb", suffix=".plist", delete=False) as handle:
+            plistlib.dump(["not", "a", "dict"], handle)
+            source_plist = Path(handle.name)
+
+        try:
+            with self.assertRaises(MODULE.ScheduleOverrideError) as ctx:
+                MODULE.build_schedule_override(source_plist, hour=5, minute=30)
+        finally:
+            source_plist.unlink(missing_ok=True)
+
+        self.assertIn("expected plist dictionary root", str(ctx.exception))
 
     def test_access_denied_matches_sudo_password_message(self) -> None:
         self.assertTrue(MODULE.access_denied("sudo: a password is required"))

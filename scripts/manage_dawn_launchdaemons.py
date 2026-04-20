@@ -489,6 +489,11 @@ def build_schedule_override(source_plist: Path, *, hour: int, minute: int) -> Pa
         raise ScheduleOverrideError(
             f"failed to build schedule override from `{source_plist}`: {exc}"
         ) from exc
+    if not isinstance(plist, dict):
+        raise ScheduleOverrideError(
+            "failed to build schedule override from "
+            f"`{source_plist}`: expected plist dictionary root, got {type(plist).__name__}"
+        )
     plist["StartCalendarInterval"] = {"Hour": hour, "Minute": minute}
     tmp = tempfile.NamedTemporaryFile(prefix="dawn-launchd-", suffix=".plist", delete=False)
     try:
