@@ -156,6 +156,17 @@ struct ImportSummary {
     rate_limit_cache_upserted: i64,
     deferred_hooks_upserted: i64,
     audit_logs_inserted: i64,
+    auto_queue_entries_skipped_orphans: i64,
+    auto_queue_entry_transitions_skipped_orphans: i64,
+    auto_queue_entry_dispatch_history_skipped_orphans: i64,
+    auto_queue_phase_gates_skipped_orphans: i64,
+    auto_queue_slots_skipped_orphans: i64,
+    dispatch_events_skipped_orphans: i64,
+    card_retrospectives_skipped_orphans: i64,
+    card_review_state_skipped_orphans: i64,
+    pr_tracking_skipped_orphans: i64,
+    session_termination_events_skipped_orphans: i64,
+    meeting_transcripts_skipped_orphans: i64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -178,6 +189,38 @@ struct RuntimeActiveStatus {
     overridden: bool,
 }
 
+#[derive(Debug, Default, Clone)]
+struct OrphanSkipSummary {
+    auto_queue_entries: i64,
+    auto_queue_entry_transitions: i64,
+    auto_queue_entry_dispatch_history: i64,
+    auto_queue_phase_gates: i64,
+    auto_queue_slots: i64,
+    dispatch_events: i64,
+    card_retrospectives: i64,
+    card_review_state: i64,
+    pr_tracking: i64,
+    session_termination_events: i64,
+    meeting_transcripts: i64,
+}
+
+impl OrphanSkipSummary {
+    fn apply_to_import_summary(&self, summary: &mut ImportSummary) {
+        summary.auto_queue_entries_skipped_orphans = self.auto_queue_entries;
+        summary.auto_queue_entry_transitions_skipped_orphans = self.auto_queue_entry_transitions;
+        summary.auto_queue_entry_dispatch_history_skipped_orphans =
+            self.auto_queue_entry_dispatch_history;
+        summary.auto_queue_phase_gates_skipped_orphans = self.auto_queue_phase_gates;
+        summary.auto_queue_slots_skipped_orphans = self.auto_queue_slots;
+        summary.dispatch_events_skipped_orphans = self.dispatch_events;
+        summary.card_retrospectives_skipped_orphans = self.card_retrospectives;
+        summary.card_review_state_skipped_orphans = self.card_review_state;
+        summary.pr_tracking_skipped_orphans = self.pr_tracking;
+        summary.session_termination_events_skipped_orphans = self.session_termination_events;
+        summary.meeting_transcripts_skipped_orphans = self.meeting_transcripts;
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 struct PidFileSignal {
     path: String,
@@ -198,6 +241,7 @@ struct TcpSignal {
 #[derive(Debug, Default)]
 struct SqliteCutoverSnapshot {
     counts: SqliteCutoverCounts,
+    orphan_skips: OrphanSkipSummary,
     offices: Vec<OfficeRow>,
     departments: Vec<DepartmentRow>,
     office_agents: Vec<OfficeAgentRow>,
@@ -240,6 +284,163 @@ struct SqliteCutoverSnapshot {
     memento_feedback_turn_stats: Vec<MementoFeedbackTurnStatsRow>,
     rate_limit_cache: Vec<RateLimitCacheRow>,
     deferred_hooks: Vec<DeferredHookRow>,
+}
+
+fn collect_string_ids(ids: impl Iterator<Item = String>) -> BTreeSet<String> {
+    ids.collect()
+}
+
+fn optional_parent_missing(parent_id: &Option<String>, parent_ids: &BTreeSet<String>) -> bool {
+    match parent_id.as_deref() {
+        Some(id) => !parent_ids.contains(id),
+        None => false,
+    }
+}
+
+fn clear_missing_optional_parent(parent_id: &mut Option<String>, parent_ids: &BTreeSet<String>) {
+    if optional_parent_missing(parent_id, parent_ids) {
+        *parent_id = None;
+    }
+}
+
+fn retain_rows<T>(rows: &mut Vec<T>, mut keep: impl FnMut(&T) -> bool) -> i64 {
+    let before = rows.len();
+    rows.retain(|row| keep(row));
+    before as i64 - rows.len() as i64
+}
+
+fn prune_sqlite_cutover_orphans(snapshot: &mut SqliteCutoverSnapshot) -> OrphanSkipSummary {
+    let office_ids = collect_string_ids(snapshot.offices.iter().map(|row| row.id.clone()));
+    for row in &mut snapshot.departments {
+        clear_missing_optional_parent(&mut row.office_id, &office_ids);
+    }
+
+    let agent_ids = collect_string_ids(snapshot.agents.iter().map(|row| row.id.clone()));
+    for row in &mut snapshot.kanban_cards {
+        clear_missing_optional_parent(&mut row.assigned_agent_id, &agent_ids);
+    }
+    for row in &mut snapshot.sessions {
+        clear_missing_optional_parent(&mut row.agent_id, &agent_ids);
+    }
+
+    let card_ids = collect_string_ids(snapshot.kanban_cards.iter().map(|row| row.id.clone()));
+    for row in &mut snapshot.task_dispatches {
+        clear_missing_optional_parent(&mut row.kanban_card_id, &card_ids);
+    }
+    for row in &mut snapshot.dispatch_queue {
+        clear_missing_optional_parent(&mut row.kanban_card_id, &card_ids);
+    }
+    for row in &mut snapshot.review_decisions {
+        clear_missing_optional_parent(&mut row.kanban_card_id, &card_ids);
+    }
+
+    let dispatch_ids =
+        collect_string_ids(snapshot.task_dispatches.iter().map(|row| row.id.clone()));
+    let session_keys =
+        collect_string_ids(snapshot.sessions.iter().map(|row| row.session_key.clone()));
+    let meeting_ids = collect_string_ids(snapshot.meetings.iter().map(|row| row.id.clone()));
+    let run_ids = collect_string_ids(snapshot.auto_queue_runs.iter().map(|row| row.id.clone()));
+
+    let mut summary = OrphanSkipSummary::default();
+
+    summary.dispatch_events = retain_rows(&mut snapshot.dispatch_events, |row| {
+        dispatch_ids.contains(&row.dispatch_id)
+    });
+    for row in &mut snapshot.dispatch_events {
+        clear_missing_optional_parent(&mut row.kanban_card_id, &card_ids);
+    }
+
+    summary.card_retrospectives = retain_rows(&mut snapshot.card_retrospectives, |row| {
+        card_ids.contains(&row.card_id) && dispatch_ids.contains(&row.dispatch_id)
+    });
+    summary.card_review_state = retain_rows(&mut snapshot.card_review_state, |row| {
+        card_ids.contains(&row.card_id)
+    });
+    summary.pr_tracking = retain_rows(&mut snapshot.pr_tracking, |row| {
+        card_ids.contains(&row.card_id)
+    });
+    summary.session_termination_events =
+        retain_rows(&mut snapshot.session_termination_events, |row| {
+            session_keys.contains(&row.session_key)
+        });
+    summary.meeting_transcripts = retain_rows(&mut snapshot.meeting_transcripts, |row| {
+        !optional_parent_missing(&row.meeting_id, &meeting_ids)
+    });
+
+    summary.auto_queue_entries = retain_rows(&mut snapshot.auto_queue_entries, |row| {
+        !optional_parent_missing(&row.run_id, &run_ids)
+    });
+    for row in &mut snapshot.auto_queue_entries {
+        clear_missing_optional_parent(&mut row.kanban_card_id, &card_ids);
+    }
+
+    let entry_ids =
+        collect_string_ids(snapshot.auto_queue_entries.iter().map(|row| row.id.clone()));
+
+    summary.auto_queue_entry_transitions =
+        retain_rows(&mut snapshot.auto_queue_entry_transitions, |row| {
+            entry_ids.contains(&row.entry_id)
+        });
+    summary.auto_queue_entry_dispatch_history =
+        retain_rows(&mut snapshot.auto_queue_entry_dispatch_history, |row| {
+            entry_ids.contains(&row.entry_id) && dispatch_ids.contains(&row.dispatch_id)
+        });
+    summary.auto_queue_phase_gates = retain_rows(&mut snapshot.auto_queue_phase_gates, |row| {
+        run_ids.contains(&row.run_id)
+    });
+    for row in &mut snapshot.auto_queue_phase_gates {
+        clear_missing_optional_parent(&mut row.dispatch_id, &dispatch_ids);
+        clear_missing_optional_parent(&mut row.anchor_card_id, &card_ids);
+    }
+    summary.auto_queue_slots = retain_rows(&mut snapshot.auto_queue_slots, |row| {
+        !optional_parent_missing(&row.assigned_run_id, &run_ids)
+    });
+
+    summary
+}
+
+fn orphan_skip_warnings(summary: &ImportSummary) -> Vec<String> {
+    [
+        (
+            "auto_queue_entries",
+            summary.auto_queue_entries_skipped_orphans,
+        ),
+        (
+            "auto_queue_entry_transitions",
+            summary.auto_queue_entry_transitions_skipped_orphans,
+        ),
+        (
+            "auto_queue_entry_dispatch_history",
+            summary.auto_queue_entry_dispatch_history_skipped_orphans,
+        ),
+        (
+            "auto_queue_phase_gates",
+            summary.auto_queue_phase_gates_skipped_orphans,
+        ),
+        ("auto_queue_slots", summary.auto_queue_slots_skipped_orphans),
+        ("dispatch_events", summary.dispatch_events_skipped_orphans),
+        (
+            "card_retrospectives",
+            summary.card_retrospectives_skipped_orphans,
+        ),
+        (
+            "card_review_state",
+            summary.card_review_state_skipped_orphans,
+        ),
+        ("pr_tracking", summary.pr_tracking_skipped_orphans),
+        (
+            "session_termination_events",
+            summary.session_termination_events_skipped_orphans,
+        ),
+        (
+            "meeting_transcripts",
+            summary.meeting_transcripts_skipped_orphans,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .map(|(table, count)| format!("postgres cutover skipped {count} orphan rows from {table}"))
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -964,6 +1165,11 @@ pub async fn cmd_migrate_postgres_cutover(args: PostgresCutoverArgs) -> Result<(
 
     let report = result?;
     print_report(&report)?;
+    if let Some(imported) = report.imported.as_ref() {
+        for warning in orphan_skip_warnings(imported) {
+            eprintln!("WARN: {warning}");
+        }
+    }
     if let Some(blocker) = report.blocker {
         return Err(blocker);
     }
@@ -1207,8 +1413,9 @@ fn load_sqlite_cutover_snapshot(
     need_full_rows: bool,
 ) -> Result<SqliteCutoverSnapshot, String> {
     let counts = sqlite_cutover_counts(sqlite)?;
-    Ok(SqliteCutoverSnapshot {
+    let mut snapshot = SqliteCutoverSnapshot {
         counts: counts.clone(),
+        orphan_skips: OrphanSkipSummary::default(),
         offices: load_rows_if_needed(need_full_rows && counts.offices > 0, || {
             load_all_offices(sqlite)
         })?,
@@ -1352,7 +1559,9 @@ fn load_sqlite_cutover_snapshot(
         deferred_hooks: load_rows_if_needed(need_full_rows && counts.deferred_hooks > 0, || {
             load_all_deferred_hooks(sqlite)
         })?,
-    })
+    };
+    snapshot.orphan_skips = prune_sqlite_cutover_orphans(&mut snapshot);
+    Ok(snapshot)
 }
 
 fn print_report(report: &PostgresCutoverReport) -> Result<(), String> {
@@ -4371,6 +4580,20 @@ fn merge_import_summaries(base: &mut ImportSummary, next: ImportSummary) {
     base.rate_limit_cache_upserted += next.rate_limit_cache_upserted;
     base.deferred_hooks_upserted += next.deferred_hooks_upserted;
     base.audit_logs_inserted += next.audit_logs_inserted;
+    base.auto_queue_entries_skipped_orphans += next.auto_queue_entries_skipped_orphans;
+    base.auto_queue_entry_transitions_skipped_orphans +=
+        next.auto_queue_entry_transitions_skipped_orphans;
+    base.auto_queue_entry_dispatch_history_skipped_orphans +=
+        next.auto_queue_entry_dispatch_history_skipped_orphans;
+    base.auto_queue_phase_gates_skipped_orphans += next.auto_queue_phase_gates_skipped_orphans;
+    base.auto_queue_slots_skipped_orphans += next.auto_queue_slots_skipped_orphans;
+    base.dispatch_events_skipped_orphans += next.dispatch_events_skipped_orphans;
+    base.card_retrospectives_skipped_orphans += next.card_retrospectives_skipped_orphans;
+    base.card_review_state_skipped_orphans += next.card_review_state_skipped_orphans;
+    base.pr_tracking_skipped_orphans += next.pr_tracking_skipped_orphans;
+    base.session_termination_events_skipped_orphans +=
+        next.session_termination_events_skipped_orphans;
+    base.meeting_transcripts_skipped_orphans += next.meeting_transcripts_skipped_orphans;
 }
 
 async fn upsert_kanban_audit_logs_into_pg(
@@ -5641,6 +5864,7 @@ async fn import_full_state_into_pg(
     snapshot: &SqliteCutoverSnapshot,
 ) -> Result<ImportSummary, String> {
     let mut summary = ImportSummary::default();
+    snapshot.orphan_skips.apply_to_import_summary(&mut summary);
     merge_import_summaries(
         &mut summary,
         import_live_state_into_pg(
@@ -5672,7 +5896,8 @@ mod tests {
         SqliteCutoverCounts, TaskDispatchRow, TcpSignal, advance_pg_serial_sequences,
         cutover_blocker, detect_runtime_active, import_full_state_into_pg, import_history_into_pg,
         import_live_state_into_pg, load_pg_cutover_counts, load_session_transcripts,
-        load_sqlite_cutover_snapshot, sqlite_cutover_counts, write_archive_files,
+        load_sqlite_cutover_snapshot, orphan_skip_warnings, sqlite_cutover_counts,
+        write_archive_files,
     };
     use libsql_rusqlite::Connection;
     use sqlx::{PgPool, Row};
@@ -6390,6 +6615,118 @@ mod tests {
         assert!(snapshot.auto_queue_slots.is_empty());
     }
 
+    #[test]
+    fn load_sqlite_cutover_snapshot_skips_orphan_rows_and_tracks_counts() {
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
+        crate::db::schema::migrate(&conn).expect("sqlite migrate");
+        seed_full_cutover_fixture(&conn);
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ('entry-orphan-run', 'run-missing', 'card-1', 'agent-1', 'pending');
+             INSERT INTO auto_queue_entry_transitions (id, entry_id, from_status, to_status, trigger_source, created_at)
+             VALUES (999, 'entry-missing', 'pending', 'failed', 'test', '2026-04-18 09:30:00');
+             INSERT INTO auto_queue_entry_dispatch_history (id, entry_id, dispatch_id, trigger_source, created_at)
+             VALUES (999, 'entry-missing', 'dispatch-1', 'test', '2026-04-18 09:30:01');
+             INSERT INTO auto_queue_phase_gates (id, run_id, phase, status, dispatch_id, pass_verdict, final_phase, created_at, updated_at)
+             VALUES (999, 'run-missing', 1, 'pending', 'dispatch-missing-phase', 'phase_gate_passed', 0, '2026-04-18 09:30:02', '2026-04-18 09:30:02');
+             INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at)
+             VALUES ('agent-1', 99, 'run-missing', 1, '{\"99\":\"thread-orphan\"}', '2026-04-18 09:30:03', '2026-04-18 09:30:03');
+             INSERT INTO dispatch_events (id, dispatch_id, kanban_card_id, to_status, transition_source, created_at)
+             VALUES (999, 'dispatch-missing', 'card-1', 'queued', 'test', '2026-04-18 09:30:04');
+             INSERT INTO card_retrospectives (
+                 id, card_id, dispatch_id, terminal_status, title, topic, content, result_json, memory_payload, created_at, updated_at
+             )
+             VALUES (
+                 'retro-missing', 'card-1', 'dispatch-missing', 'done', 'Retro missing', 'retro', 'Missing dispatch', '{}', '{}',
+                 '2026-04-18 09:30:05', '2026-04-18 09:30:05'
+             );
+             INSERT INTO card_review_state (card_id, state, updated_at)
+             VALUES ('card-missing', 'idle', '2026-04-18 09:30:06');
+             INSERT INTO pr_tracking (card_id, state, dispatch_generation, review_round, retry_count, created_at, updated_at)
+             VALUES ('card-missing', 'create-pr', '', 0, 0, '2026-04-18 09:30:07', '2026-04-18 09:30:07');
+             INSERT INTO session_termination_events (
+                 id, session_key, killer_component, reason_code, created_at
+             )
+             VALUES (999, 'session-missing', 'test', 'missing_parent', '2026-04-18 09:30:08');
+             INSERT INTO meeting_transcripts (id, meeting_id, seq, round, speaker_name, content, is_summary)
+             VALUES (999, 'meeting-missing', 1, 1, 'AgentDesk', 'Orphan transcript', 0);
+             PRAGMA foreign_keys = ON;",
+        )
+        .expect("insert orphan sqlite rows");
+
+        let snapshot =
+            load_sqlite_cutover_snapshot(&conn, true, true).expect("sqlite snapshot with orphans");
+
+        assert_eq!(snapshot.orphan_skips.auto_queue_entries, 1);
+        assert_eq!(snapshot.orphan_skips.auto_queue_entry_transitions, 1);
+        assert_eq!(snapshot.orphan_skips.auto_queue_entry_dispatch_history, 1);
+        assert_eq!(snapshot.orphan_skips.auto_queue_phase_gates, 1);
+        assert_eq!(snapshot.orphan_skips.auto_queue_slots, 1);
+        assert_eq!(snapshot.orphan_skips.dispatch_events, 1);
+        assert_eq!(snapshot.orphan_skips.card_retrospectives, 1);
+        assert_eq!(snapshot.orphan_skips.card_review_state, 1);
+        assert_eq!(snapshot.orphan_skips.pr_tracking, 1);
+        assert_eq!(snapshot.orphan_skips.session_termination_events, 1);
+        assert_eq!(snapshot.orphan_skips.meeting_transcripts, 1);
+        assert!(
+            !snapshot
+                .auto_queue_entries
+                .iter()
+                .any(|row| row.id == "entry-orphan-run")
+        );
+        assert!(
+            !snapshot
+                .auto_queue_entry_transitions
+                .iter()
+                .any(|row| row.id == 999)
+        );
+        assert!(
+            !snapshot
+                .auto_queue_entry_dispatch_history
+                .iter()
+                .any(|row| row.id == 999)
+        );
+        assert!(
+            !snapshot
+                .auto_queue_phase_gates
+                .iter()
+                .any(|row| row.id == 999)
+        );
+        assert!(
+            !snapshot
+                .auto_queue_slots
+                .iter()
+                .any(|row| row.slot_index == 99)
+        );
+        assert!(!snapshot.dispatch_events.iter().any(|row| row.id == 999));
+        assert!(
+            !snapshot
+                .card_retrospectives
+                .iter()
+                .any(|row| row.id == "retro-missing")
+        );
+        assert!(
+            !snapshot
+                .card_review_state
+                .iter()
+                .any(|row| row.card_id == "card-missing")
+        );
+        assert!(
+            !snapshot
+                .pr_tracking
+                .iter()
+                .any(|row| row.card_id == "card-missing")
+        );
+        assert!(
+            !snapshot
+                .session_termination_events
+                .iter()
+                .any(|row| row.id == 999)
+        );
+        assert!(!snapshot.meeting_transcripts.iter().any(|row| row.id == 999));
+    }
+
     #[tokio::test]
     async fn import_live_state_into_pg_copies_active_dispatches_sessions_and_outbox() {
         let pg_db = TestPostgresDb::create().await;
@@ -6821,6 +7158,17 @@ mod tests {
             summary.session_transcripts_upserted,
             sqlite_table_count(&conn, "session_transcripts")
         );
+        assert_eq!(summary.auto_queue_entries_skipped_orphans, 0);
+        assert_eq!(summary.auto_queue_entry_transitions_skipped_orphans, 0);
+        assert_eq!(summary.auto_queue_entry_dispatch_history_skipped_orphans, 0);
+        assert_eq!(summary.auto_queue_phase_gates_skipped_orphans, 0);
+        assert_eq!(summary.auto_queue_slots_skipped_orphans, 0);
+        assert_eq!(summary.dispatch_events_skipped_orphans, 0);
+        assert_eq!(summary.card_retrospectives_skipped_orphans, 0);
+        assert_eq!(summary.card_review_state_skipped_orphans, 0);
+        assert_eq!(summary.pr_tracking_skipped_orphans, 0);
+        assert_eq!(summary.session_termination_events_skipped_orphans, 0);
+        assert_eq!(summary.meeting_transcripts_skipped_orphans, 0);
 
         let message_outbox = sqlx::query(
             "SELECT reason_code, session_key
@@ -6841,6 +7189,56 @@ mod tests {
                 .get::<Option<String>, _>("session_key")
                 .as_deref(),
             Some("session-1")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn import_full_state_into_pg_reports_skipped_orphans() {
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
+        crate::db::schema::migrate(&conn).expect("sqlite migrate");
+        seed_full_cutover_fixture(&conn);
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO auto_queue_entry_transitions (id, entry_id, from_status, to_status, trigger_source, created_at)
+             VALUES (999, 'entry-missing', 'pending', 'failed', 'test', '2026-04-18 09:30:00');
+             INSERT INTO auto_queue_entry_dispatch_history (id, entry_id, dispatch_id, trigger_source, created_at)
+             VALUES (999, 'entry-missing', 'dispatch-1', 'test', '2026-04-18 09:30:01');
+             PRAGMA foreign_keys = ON;",
+        )
+        .expect("insert orphan auto_queue rows");
+        let snapshot =
+            load_sqlite_cutover_snapshot(&conn, true, true).expect("full sqlite snapshot");
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let summary = import_full_state_into_pg(&pool, &snapshot)
+            .await
+            .expect("import full state with orphan skips");
+        assert_eq!(summary.auto_queue_entry_transitions_skipped_orphans, 1);
+        assert_eq!(summary.auto_queue_entry_dispatch_history_skipped_orphans, 1);
+        assert_eq!(
+            pg_table_count_test(&pool, "auto_queue_entry_transitions").await,
+            sqlite_table_count(&conn, "auto_queue_entry_transitions") - 1
+        );
+        assert_eq!(
+            pg_table_count_test(&pool, "auto_queue_entry_dispatch_history").await,
+            sqlite_table_count(&conn, "auto_queue_entry_dispatch_history") - 1
+        );
+
+        let warnings = orphan_skip_warnings(&summary);
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("auto_queue_entry_transitions"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("auto_queue_entry_dispatch_history"))
         );
 
         pool.close().await;
