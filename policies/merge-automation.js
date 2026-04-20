@@ -309,70 +309,113 @@ function extractRepoFromIssueUrl(url) {
   return prTracking.extractRepoFromIssueUrl(url);
 }
 
-function loadLatestCompletedWorkTarget(cardId) {
+function appendMergeCandidateReason(details, code, message) {
+  if (!details) return;
+  if (!details.reasons) details.reasons = [];
+  details.reasons.push({
+    code: code,
+    message: message
+  });
+}
+
+function buildWorkTargetFromDispatchRow(row) {
+  var result = parseJsonObject(row.result);
+  var context = parseJsonObject(row.context);
+  var worktreePath = firstPresent(
+    result.completed_worktree_path,
+    result.worktree_path,
+    context.completed_worktree_path,
+    context.worktree_path
+  );
+  var branch = firstPresent(
+    result.completed_branch,
+    result.worktree_branch,
+    result.branch,
+    context.completed_branch,
+    context.worktree_branch,
+    context.branch
+  );
+  var headSha = firstPresent(
+    result.completed_commit,
+    result.reviewed_commit,
+    context.completed_commit,
+    context.reviewed_commit
+  );
+
+  if (!branch && worktreePath) {
+    var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
+    if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
+      branch = branchResult.trim();
+    }
+  }
+  if (!headSha && worktreePath) {
+    var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
+      headSha = headResult.trim();
+    }
+  }
+
+  return {
+    worktree_path: worktreePath,
+    branch: branch,
+    head_sha: headSha
+  };
+}
+
+function inspectLatestCompletedWorkTarget(cardId) {
+  var inspected = [];
+  var excludedRows = agentdesk.db.query(
+    "SELECT id, status, result, context FROM task_dispatches " +
+    "WHERE kanban_card_id = ? " +
+    "AND dispatch_type IN ('implementation', 'rework') " +
+    "AND status IN ('pending', 'dispatched', 'cancelled') " +
+    "ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC LIMIT 8",
+    [cardId]
+  );
+  for (var i = 0; i < excludedRows.length; i++) {
+    var excludedRow = excludedRows[i];
+    inspected.push({
+      dispatch_id: excludedRow.id,
+      status: excludedRow.status,
+      selected: false,
+      reason: "status '" + excludedRow.status + "' is not merge-eligible",
+      target: buildWorkTargetFromDispatchRow(excludedRow)
+    });
+  }
+
   var rows = agentdesk.db.query(
     "SELECT id, status, result, context FROM task_dispatches " +
     "WHERE kanban_card_id = ? " +
     "AND dispatch_type IN ('implementation', 'rework') " +
-    "AND status IN ('completed', 'cancelled', 'dispatched', 'pending') " +
+    "AND status = 'completed' " +
     "ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC LIMIT 8",
     [cardId]
   );
 
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    var result = parseJsonObject(row.result);
-    var context = parseJsonObject(row.context);
-    var worktreePath = firstPresent(
-      result.completed_worktree_path,
-      result.worktree_path,
-      context.completed_worktree_path,
-      context.worktree_path
-    );
-    var branch = firstPresent(
-      result.completed_branch,
-      result.worktree_branch,
-      result.branch,
-      context.completed_branch,
-      context.worktree_branch,
-      context.branch
-    );
-    var headSha = firstPresent(
-      result.completed_commit,
-      result.reviewed_commit,
-      context.completed_commit,
-      context.reviewed_commit
-    );
-
-    if (!branch && worktreePath) {
-      var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
-      if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
-        branch = branchResult.trim();
-      }
-    }
-    if (!headSha && worktreePath) {
-      var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-      if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
-        headSha = headResult.trim();
-      }
-    }
-
-    if (!worktreePath && !branch && !headSha) {
+    var target = buildWorkTargetFromDispatchRow(row);
+    var reason = !target.worktree_path && !target.branch && !target.head_sha
+      ? "completed dispatch has no worktree_path/branch/head_sha metadata"
+      : null;
+    inspected.push({
+      dispatch_id: row.id,
+      status: row.status,
+      selected: !reason,
+      reason: reason || "selected latest completed work dispatch",
+      target: target
+    });
+    if (reason) {
       continue;
     }
-    if (row.status !== "completed") {
-      agentdesk.log.info(
-        "[merge] Card " + cardId + " terminal merge reusing " + row.status + " work dispatch " + row.id
-      );
-    }
-    return {
-      worktree_path: worktreePath,
-      branch: branch,
-      head_sha: headSha
-    };
+    return { target: target, inspected: inspected };
   }
 
-  return null;
+  return { target: null, inspected: inspected };
+}
+
+function loadLatestCompletedWorkTarget(cardId) {
+  return inspectLatestCompletedWorkTarget(cardId).target;
 }
 
 function execGitOrThrow(args) {
@@ -507,33 +550,72 @@ function parsePrNumberFromOutput(output) {
   return match ? parseInt(match[1], 10) : null;
 }
 
-function resolveTerminalMergeCandidate(cardId, tracking) {
+function resolveTerminalMergeCandidate(cardId, tracking, details) {
   var card = loadCardContext(cardId);
+  if (details) {
+    details.card = card;
+    details.tracking = tracking || null;
+  }
   if (!card) {
+    appendMergeCandidateReason(details, "card_not_found", "card not found");
     agentdesk.log.info("[merge] Card " + cardId + " terminal merge skipped: card not found");
     return null;
   }
 
-  var latestWork = loadLatestCompletedWorkTarget(cardId);
+  var latestWorkInfo = inspectLatestCompletedWorkTarget(cardId);
+  var latestWork = latestWorkInfo.target;
+  if (details) {
+    details.latest_work_dispatches = latestWorkInfo.inspected;
+    details.latest_work = latestWork;
+  }
   var repoId = firstPresent(
     tracking && tracking.repo_id,
     card.repo_id,
     extractRepoFromIssueUrl(card.github_issue_url)
   );
   var worktreePath = firstPresent(
-    tracking && tracking.worktree_path,
-    latestWork && latestWork.worktree_path
+    latestWork && latestWork.worktree_path,
+    tracking && tracking.worktree_path
   );
   var branch = firstPresent(
-    tracking && tracking.branch,
-    latestWork && latestWork.branch
+    latestWork && latestWork.branch,
+    tracking && tracking.branch
   );
   var headSha = firstPresent(
-    tracking && tracking.head_sha,
-    latestWork && latestWork.head_sha
+    latestWork && latestWork.head_sha,
+    tracking && tracking.head_sha
   );
 
+  if (tracking && latestWork) {
+    if (tracking.worktree_path && latestWork.worktree_path
+        && tracking.worktree_path !== latestWork.worktree_path) {
+      appendMergeCandidateReason(
+        details,
+        "tracking_worktree_stale",
+        "tracking worktree_path " + tracking.worktree_path +
+          " replaced with latest completed work worktree_path " + latestWork.worktree_path
+      );
+    }
+    if (tracking.branch && latestWork.branch && tracking.branch !== latestWork.branch) {
+      appendMergeCandidateReason(
+        details,
+        "tracking_branch_stale",
+        "tracking branch " + tracking.branch +
+          " replaced with latest completed work branch " + latestWork.branch
+      );
+    }
+    if (tracking.head_sha && latestWork.head_sha && tracking.head_sha !== latestWork.head_sha) {
+      appendMergeCandidateReason(
+        details,
+        "tracking_head_sha_stale",
+        "tracking head_sha " + tracking.head_sha +
+          " replaced with latest completed work head_sha " + latestWork.head_sha
+      );
+    }
+  }
+
   if (!repoId) {
+    appendMergeCandidateReason(details, "missing_repo_id", "repo_id missing");
     agentdesk.log.info("[merge] Card " + cardId + " terminal merge skipped: repo_id missing");
     return null;
   }
@@ -542,6 +624,11 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
   if (!worktreePath) missing.push("worktree_path");
   if (!branch) missing.push("branch");
   if (missing.length > 0) {
+    appendMergeCandidateReason(
+      details,
+      "missing_candidate_fields",
+      "missing " + missing.join(", ")
+    );
     agentdesk.log.info(
       "[merge] Card " + cardId + " terminal merge skipped: missing " + missing.join(", ")
     );
@@ -550,6 +637,11 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
 
   var session = findLatestSessionForWorktree(worktreePath);
   if (!session) {
+    appendMergeCandidateReason(
+      details,
+      "untrusted_worktree_path",
+      "untrusted worktree_path (no session match): " + worktreePath
+    );
     agentdesk.log.warn(
       "[merge] Card " + cardId + " terminal merge skipped: untrusted worktree_path (no session match): " +
       worktreePath
@@ -562,6 +654,11 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
     session.agent_id &&
     String(session.agent_id) !== String(card.assigned_agent_id)
   ) {
+    appendMergeCandidateReason(
+      details,
+      "worktree_owner_mismatch",
+      "worktree owner mismatch (" + session.agent_id + " != " + card.assigned_agent_id + ")"
+    );
     agentdesk.log.warn(
       "[merge] Card " + cardId + " terminal merge skipped: worktree owner mismatch (" +
       session.agent_id + " != " + card.assigned_agent_id + ")"
@@ -577,6 +674,11 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
     canonicalBranchResult.indexOf("ERROR") === 0 ||
     !canonicalBranchResult.trim()
   ) {
+    appendMergeCandidateReason(
+      details,
+      "canonical_branch_resolution_failed",
+      "failed to resolve branch from trusted worktree"
+    );
     agentdesk.log.warn(
       "[merge] Card " + cardId + " terminal merge skipped: failed to resolve branch from trusted worktree"
     );
@@ -584,6 +686,11 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
   }
   var canonicalBranch = canonicalBranchResult.trim();
   if (branch && branch !== canonicalBranch) {
+    appendMergeCandidateReason(
+      details,
+      "canonical_branch_override",
+      "branch " + branch + " replaced with canonical branch " + canonicalBranch
+    );
     agentdesk.log.warn(
       "[merge] Card " + cardId + " terminal merge: dispatch branch mismatch (" +
       branch + " -> " + canonicalBranch + "); using canonical branch"
@@ -591,13 +698,22 @@ function resolveTerminalMergeCandidate(cardId, tracking) {
   }
   branch = canonicalBranch;
 
-  return {
+  var candidate = {
     card: card,
     repo_id: repoId,
     worktree_path: worktreePath,
     branch: branch,
     head_sha: headSha
   };
+  if (details) {
+    details.candidate = candidate;
+    appendMergeCandidateReason(
+      details,
+      "candidate_ready",
+      "selected candidate " + branch + " at " + worktreePath
+    );
+  }
+  return candidate;
 }
 
 function resolveCanonicalRepoRoot(worktreePath) {
@@ -2108,6 +2224,21 @@ function notifyAgentMainChannel(agentId, prNum, title) {
   }
   agentdesk.kv.set(kvKey, "true", 7200); // 2h TTL
 }
+
+agentdesk.mergeAutomation = agentdesk.mergeAutomation || {};
+agentdesk.mergeAutomation.diagnoseTerminalMergeCandidate = function(cardId) {
+  var tracking = loadTrackedPrForCard(cardId);
+  var details = {
+    card_id: cardId,
+    tracking: tracking || null,
+    latest_work_dispatches: [],
+    latest_work: null,
+    reasons: [],
+    candidate: null
+  };
+  resolveTerminalMergeCandidate(cardId, tracking, details);
+  return details;
+};
 
 agentdesk.registerPolicy(mergeAutomation);
 

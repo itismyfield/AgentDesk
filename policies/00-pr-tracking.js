@@ -41,10 +41,13 @@
       "ON CONFLICT(card_id) DO UPDATE SET " +
       "repo_id = COALESCE(excluded.repo_id, pr_tracking.repo_id), " +
       "worktree_path = COALESCE(excluded.worktree_path, pr_tracking.worktree_path), " +
-      "branch = COALESCE(excluded.branch, pr_tracking.branch), " +
+      // Freshness semantics: branch/head_sha/state are authoritative on
+      // each write. Do not keep stale values alive via COALESCE when a
+      // caller intentionally clears or replaces them.
+      "branch = excluded.branch, " +
       "pr_number = COALESCE(excluded.pr_number, pr_tracking.pr_number), " +
-      "head_sha = COALESCE(excluded.head_sha, pr_tracking.head_sha), " +
-      "state = COALESCE(excluded.state, pr_tracking.state), " +
+      "head_sha = excluded.head_sha, " +
+      "state = excluded.state, " +
       "last_error = excluded.last_error, " +
       "updated_at = datetime('now')",
       [cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError]

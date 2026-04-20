@@ -496,6 +496,45 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_work_dispatch_target_with_status(
+        db: &db::Db,
+        dispatch_id: &str,
+        card_id: &str,
+        dispatch_type: &str,
+        status: &str,
+        worktree_path: &str,
+        branch: &str,
+        commit: &str,
+        minutes_ago: i64,
+    ) {
+        let offset = format!("-{minutes_ago} minutes");
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                result, created_at, updated_at, completed_at
+            ) VALUES (
+                ?1, ?2, 'agent-1', ?3, ?4, 'Work dispatch',
+                ?5, datetime('now', ?6), datetime('now', ?6),
+                CASE WHEN ?4 = 'completed' THEN datetime('now', ?6) ELSE NULL END
+            )",
+            libsql_rusqlite::params![
+                dispatch_id,
+                card_id,
+                dispatch_type,
+                status,
+                serde_json::json!({
+                    "completed_worktree_path": worktree_path,
+                    "completed_branch": branch,
+                    "completed_commit": commit,
+                })
+                .to_string(),
+                offset,
+            ],
+        )
+        .unwrap();
+    }
+
     fn seed_completed_review_dispatch(
         db: &db::Db,
         dispatch_id: &str,
@@ -8307,6 +8346,313 @@ mod tests {
             ),
             "caller must log when worktree metadata is unavailable; logs={logs}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_854_terminal_merge_diagnostic_prefers_completed_work_and_reports_exclusions() {
+        let (repo, _remote, _gh) = setup_test_repo_with_origin_and_mock_gh(&[]);
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+
+        run_git(repo.path(), &["branch", "wt/card-854-completed"]);
+        let completed_worktree = worktrees_dir.join("card-854-completed");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                completed_worktree.to_str().unwrap(),
+                "wt/card-854-completed",
+            ],
+        );
+        fs::write(completed_worktree.join("completed.txt"), "completed\n").unwrap();
+        run_git(completed_worktree.as_path(), &["add", "completed.txt"]);
+        run_git(
+            completed_worktree.as_path(),
+            &["commit", "-m", "feat: completed candidate #854"],
+        );
+        let completed_head = run_git_output(completed_worktree.as_path(), &["rev-parse", "HEAD"]);
+
+        run_git(repo.path(), &["branch", "wt/card-854-pending"]);
+        let pending_worktree = worktrees_dir.join("card-854-pending");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                pending_worktree.to_str().unwrap(),
+                "wt/card-854-pending",
+            ],
+        );
+        fs::write(pending_worktree.join("pending.txt"), "pending\n").unwrap();
+        run_git(pending_worktree.as_path(), &["add", "pending.txt"]);
+        run_git(
+            pending_worktree.as_path(),
+            &["commit", "-m", "feat: pending candidate #854"],
+        );
+        let pending_head = run_git_output(pending_worktree.as_path(), &["rev-parse", "HEAD"]);
+
+        run_git(repo.path(), &["branch", "wt/card-854-dispatched"]);
+        let dispatched_worktree = worktrees_dir.join("card-854-dispatched");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                dispatched_worktree.to_str().unwrap(),
+                "wt/card-854-dispatched",
+            ],
+        );
+        fs::write(dispatched_worktree.join("dispatched.txt"), "dispatched\n").unwrap();
+        run_git(dispatched_worktree.as_path(), &["add", "dispatched.txt"]);
+        run_git(
+            dispatched_worktree.as_path(),
+            &["commit", "-m", "feat: dispatched candidate #854"],
+        );
+        let dispatched_head = run_git_output(dispatched_worktree.as_path(), &["rev-parse", "HEAD"]);
+
+        run_git(repo.path(), &["branch", "wt/card-854-cancelled"]);
+        let cancelled_worktree = worktrees_dir.join("card-854-cancelled");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                cancelled_worktree.to_str().unwrap(),
+                "wt/card-854-cancelled",
+            ],
+        );
+        fs::write(cancelled_worktree.join("cancelled.txt"), "cancelled\n").unwrap();
+        run_git(cancelled_worktree.as_path(), &["add", "cancelled.txt"]);
+        run_git(
+            cancelled_worktree.as_path(),
+            &["commit", "-m", "feat: cancelled candidate #854"],
+        );
+        let cancelled_head = run_git_output(cancelled_worktree.as_path(), &["rev-parse", "HEAD"]);
+
+        let db = test_db();
+        let policies_dir = setup_merge_policy_dir();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-854-diagnostic", "done", "test/repo", 854, None);
+        seed_worktree_session(
+            &db,
+            "session-854-completed",
+            completed_worktree.to_str().unwrap(),
+        );
+        seed_worktree_session(
+            &db,
+            "session-854-pending",
+            pending_worktree.to_str().unwrap(),
+        );
+        seed_worktree_session(
+            &db,
+            "session-854-dispatched",
+            dispatched_worktree.to_str().unwrap(),
+        );
+        seed_worktree_session(
+            &db,
+            "session-854-cancelled",
+            cancelled_worktree.to_str().unwrap(),
+        );
+        seed_pr_tracking(
+            &db,
+            "card-854-diagnostic",
+            "test/repo",
+            Some(completed_worktree.to_str().unwrap()),
+            "stale/tracking-branch",
+            Some(854),
+            Some("stale-tracking-head"),
+            "merge",
+        );
+        seed_work_dispatch_target_with_status(
+            &db,
+            "impl-854-completed",
+            "card-854-diagnostic",
+            "implementation",
+            "completed",
+            completed_worktree.to_str().unwrap(),
+            "wt/card-854-completed",
+            &completed_head,
+            4,
+        );
+        seed_work_dispatch_target_with_status(
+            &db,
+            "impl-854-pending",
+            "card-854-diagnostic",
+            "implementation",
+            "pending",
+            pending_worktree.to_str().unwrap(),
+            "wt/card-854-pending",
+            &pending_head,
+            1,
+        );
+        seed_work_dispatch_target_with_status(
+            &db,
+            "rw-854-dispatched",
+            "card-854-diagnostic",
+            "rework",
+            "dispatched",
+            dispatched_worktree.to_str().unwrap(),
+            "wt/card-854-dispatched",
+            &dispatched_head,
+            2,
+        );
+        seed_work_dispatch_target_with_status(
+            &db,
+            "rw-854-cancelled",
+            "card-854-diagnostic",
+            "rework",
+            "cancelled",
+            cancelled_worktree.to_str().unwrap(),
+            "wt/card-854-cancelled",
+            &cancelled_head,
+            3,
+        );
+
+        let raw = engine
+            .eval_js::<String>(
+                r#"(() => JSON.stringify(agentdesk.mergeAutomation.diagnoseTerminalMergeCandidate("card-854-diagnostic")))()"#,
+            )
+            .unwrap();
+        let diag: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let candidate = &diag["candidate"];
+        let inspections = diag["latest_work_dispatches"]
+            .as_array()
+            .expect("diagnostic inspections");
+        let reasons = diag["reasons"].as_array().expect("diagnostic reasons");
+
+        assert_eq!(
+            candidate["branch"].as_str(),
+            Some("wt/card-854-completed"),
+            "latest completed work must win over newer pending/dispatched/cancelled rows"
+        );
+        assert_eq!(
+            candidate["head_sha"].as_str(),
+            Some(completed_head.as_str()),
+            "candidate head_sha must come from the latest completed work, not stale tracking"
+        );
+        assert!(
+            inspections.iter().any(|entry| {
+                entry["dispatch_id"].as_str() == Some("impl-854-pending")
+                    && entry["selected"].as_bool() == Some(false)
+                    && entry["reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("not merge-eligible")
+            }),
+            "pending work dispatch must be reported as excluded"
+        );
+        assert!(
+            inspections.iter().any(|entry| {
+                entry["dispatch_id"].as_str() == Some("rw-854-dispatched")
+                    && entry["selected"].as_bool() == Some(false)
+            }),
+            "dispatched work dispatch must be reported as excluded"
+        );
+        assert!(
+            inspections.iter().any(|entry| {
+                entry["dispatch_id"].as_str() == Some("rw-854-cancelled")
+                    && entry["selected"].as_bool() == Some(false)
+            }),
+            "cancelled work dispatch must be reported as excluded"
+        );
+        assert!(
+            reasons.iter().any(|entry| {
+                entry["code"].as_str() == Some("tracking_branch_stale")
+                    && entry["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("stale/tracking-branch")
+            }),
+            "diagnostics must explain when stale tracking branch was replaced"
+        );
+        assert!(
+            reasons.iter().any(|entry| {
+                entry["code"].as_str() == Some("tracking_head_sha_stale")
+                    && entry["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("stale-tracking-head")
+            }),
+            "diagnostics must explain when stale tracking head_sha was replaced"
+        );
+    }
+
+    #[test]
+    fn scenario_854_pr_tracking_upsert_clears_stale_branch_head_and_overwrites_state() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-854-pr-tracking",
+            "review",
+            "test/repo",
+            855,
+            None,
+        );
+        seed_pr_tracking(
+            &db,
+            "card-854-pr-tracking",
+            "test/repo",
+            Some("/tmp/wt/card-854-pr-tracking"),
+            "stale/branch",
+            Some(855),
+            Some("stale-head"),
+            "wait-ci",
+        );
+
+        let raw = engine
+            .eval_js::<String>(
+                r#"(() => {
+                    agentdesk.prTracking.upsert(
+                        "card-854-pr-tracking",
+                        "test/repo",
+                        "/tmp/wt/card-854-pr-tracking",
+                        null,
+                        855,
+                        null,
+                        "merge",
+                        "fresh overwrite test"
+                    );
+                    return "ok";
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(raw, "ok");
+
+        let conn = db.lock().unwrap();
+        let (branch, head_sha, state, last_error): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT branch, head_sha, state, last_error \
+                 FROM pr_tracking WHERE card_id = 'card-854-pr-tracking'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            branch, None,
+            "authoritative null branch must clear stale value"
+        );
+        assert_eq!(
+            head_sha, None,
+            "authoritative null head_sha must clear stale value"
+        );
+        assert_eq!(
+            state.as_deref(),
+            Some("merge"),
+            "authoritative non-null state must overwrite stale value"
+        );
+        assert_eq!(last_error.as_deref(), Some("fresh overwrite test"));
     }
 
     #[cfg(unix)]
