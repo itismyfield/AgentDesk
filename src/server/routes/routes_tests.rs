@@ -18024,6 +18024,64 @@ fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots
 }
 
 #[test]
+fn auto_queue_recovery_keeps_user_cancelled_runs_active() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-user-cancelled-recovery");
+    seed_auto_queue_card(
+        &db,
+        "card-user-cancelled-recovery",
+        9017,
+        "in_progress",
+        "agent-user-cancelled-recovery",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-user-cancelled-recovery', 'test-repo', 'agent-user-cancelled-recovery', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+            ) VALUES (
+                'entry-user-cancelled-recovery', 'run-user-cancelled-recovery',
+                'card-user-cancelled-recovery', 'agent-user-cancelled-recovery',
+                'user_cancelled', 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-user-cancelled-recovery'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_status, "active",
+        "user_cancelled entries must block onTick1min from auto-completing the run"
+    );
+}
+
+#[test]
 fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolves() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
