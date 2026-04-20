@@ -8,6 +8,60 @@ use crate::utils::format::tail_with_ellipsis;
 
 use super::SharedData;
 
+fn seed_restart_handoff_session_metadata(
+    sessions: &mut std::collections::HashMap<ChannelId, super::DiscordSession>,
+    channel_id: ChannelId,
+    state: &super::inflight::InflightTurnState,
+) -> bool {
+    let Some(channel_name) = state
+        .channel_name
+        .as_ref()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+
+    let session = sessions
+        .entry(channel_id)
+        .or_insert_with(|| super::DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(channel_id.get()),
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: super::runtime_store::load_generation(),
+            assistant_turns: 0,
+        });
+
+    let mut changed = false;
+    if session
+        .channel_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_none()
+    {
+        session.channel_name = Some(channel_name);
+        changed = true;
+    }
+    if session.channel_id.is_none() {
+        session.channel_id = Some(channel_id.get());
+        changed = true;
+    }
+    session.last_active = tokio::time::Instant::now();
+    changed
+}
+
 fn build_restart_handoff_context(
     state: &super::inflight::InflightTurnState,
     best_response: &str,
@@ -83,6 +137,82 @@ pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     resolve_dispatched_thread_dispatch(db?, thread_channel_id)
 }
 
+fn build_restart_handoff_session_key(
+    state: &super::inflight::InflightTurnState,
+    token_hash: &str,
+    provider_kind: &ProviderKind,
+) -> Option<String> {
+    state
+        .session_key
+        .as_ref()
+        .filter(|key| !key.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            state
+                .tmux_session_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|tmux_name| {
+                    super::adk_session::build_namespaced_session_key(
+                        token_hash,
+                        provider_kind,
+                        tmux_name,
+                    )
+                })
+        })
+        .or_else(|| {
+            state
+                .channel_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|channel_name| {
+                    let tmux_name = provider_kind.build_tmux_session_name(channel_name);
+                    super::adk_session::build_namespaced_session_key(
+                        token_hash,
+                        provider_kind,
+                        &tmux_name,
+                    )
+                })
+        })
+}
+
+async fn clear_restart_handoff_provider_session(
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider_kind: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+) {
+    let session_key =
+        match build_restart_handoff_session_key(state, &shared.token_hash, provider_kind) {
+            Some(key) => Some(key),
+            None => {
+                super::adk_session::build_adk_session_key(shared, channel_id, provider_kind).await
+            }
+        };
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+    }
+
+    if let Some(key) = session_key {
+        super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: cleared provider session before restart handoff for channel {} ({})",
+            channel_id.get(),
+            key
+        );
+    } else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: cleared in-memory provider session before restart handoff for channel {}",
+            channel_id.get()
+        );
+    }
+}
+
 pub(super) async fn start_restart_handoff_from_state(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
@@ -125,6 +255,20 @@ pub(super) async fn start_restart_handoff_from_state(
             serenity::MessageId::new(state.current_msg_id)
         }
     };
+
+    clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
+
+    let seeded_channel_name = {
+        let mut data = shared.core.lock().await;
+        seed_restart_handoff_session_metadata(&mut data.sessions, channel_id, &state)
+    };
+    if seeded_channel_name {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: seeded session metadata before restart handoff for channel {}",
+            channel_id.get()
+        );
+    }
 
     let author_id = serenity::UserId::new(1);
     let mut started_immediately = false;
@@ -263,10 +407,15 @@ pub(super) async fn resume_aborted_restart_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{RestartHandoffScope, resolve_restart_handoff_scope};
+    use super::{
+        RestartHandoffScope, build_restart_handoff_session_key, resolve_restart_handoff_scope,
+        seed_restart_handoff_session_metadata,
+    };
     use crate::config::Config;
+    use crate::services::discord::DiscordSession;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
 
     fn sample_inflight_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -314,6 +463,83 @@ mod tests {
             "/tmp/new-output.jsonl",
         );
         assert_eq!(scope, RestartHandoffScope::ProviderChannelScopedFallback);
+    }
+
+    #[test]
+    fn restart_handoff_session_key_prefers_persisted_inflight_key() {
+        let mut state = sample_inflight_state();
+        state.session_key = Some("claude/token-hash/host:AgentDesk-claude-adk-cc".to_string());
+
+        let resolved =
+            build_restart_handoff_session_key(&state, "other-token-hash", &ProviderKind::Claude);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("claude/token-hash/host:AgentDesk-claude-adk-cc")
+        );
+    }
+
+    #[test]
+    fn restart_handoff_session_key_falls_back_to_tmux_name() {
+        let mut state = sample_inflight_state();
+        state.session_key = None;
+        let hostname = crate::services::platform::hostname_short();
+        let expected = format!("claude/token-hash/{hostname}:AgentDesk-claude-adk-cc");
+
+        let resolved =
+            build_restart_handoff_session_key(&state, "token-hash", &ProviderKind::Claude);
+
+        assert_eq!(resolved.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn restart_handoff_seeds_channel_name_into_missing_session() {
+        let state = sample_inflight_state();
+        let mut sessions = std::collections::HashMap::new();
+
+        let changed = seed_restart_handoff_session_metadata(
+            &mut sessions,
+            ChannelId::new(state.channel_id),
+            &state,
+        );
+
+        assert!(changed);
+        let seeded = sessions.get(&ChannelId::new(state.channel_id)).unwrap();
+        assert_eq!(seeded.channel_name.as_deref(), Some("adk-cc"));
+        assert_eq!(seeded.channel_id, Some(state.channel_id));
+    }
+
+    #[test]
+    fn restart_handoff_preserves_existing_session_channel_name() {
+        let state = sample_inflight_state();
+        let channel_id = ChannelId::new(state.channel_id);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(state.channel_id),
+                channel_name: Some("already-set".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+                assistant_turns: 0,
+            },
+        );
+
+        let changed = seed_restart_handoff_session_metadata(&mut sessions, channel_id, &state);
+
+        assert!(!changed);
+        let seeded = sessions.get(&channel_id).unwrap();
+        assert_eq!(seeded.channel_name.as_deref(), Some("already-set"));
     }
 
     #[test]

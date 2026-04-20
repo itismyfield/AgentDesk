@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Row as SqlxRow};
 
 use crate::db::Db;
 use crate::db::agents::{
@@ -19,7 +19,8 @@ use super::dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, record_dispatch_status_event_on_conn,
 };
 use super::{
-    DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_conn, query_dispatch_row,
+    DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_conn,
+    cancel_dispatch_and_reset_auto_queue_on_pg_tx, query_dispatch_row, summarize_dispatch_result,
 };
 
 fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
@@ -178,6 +179,23 @@ fn is_single_active_dispatch_violation(error: &libsql_rusqlite::Error) -> bool {
     )
 }
 
+fn is_single_active_dispatch_violation_pg(error: &sqlx::Error) -> bool {
+    let Some(db_error) = error.as_database_error() else {
+        return false;
+    };
+    if db_error.code().as_deref() != Some("23505") {
+        return false;
+    }
+    matches!(
+        db_error.constraint(),
+        Some(
+            "idx_single_active_review"
+                | "idx_single_active_review_decision"
+                | "idx_single_active_create_pr"
+        )
+    )
+}
+
 fn validate_dispatch_target_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -300,6 +318,85 @@ where
     crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| {
         anyhow::anyhow!("{error}")
     })
+}
+
+fn parse_dispatch_json_text_pg(raw: Option<&str>) -> Option<serde_json::Value> {
+    raw.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+}
+
+async fn query_dispatch_row_pg(pool: &PgPool, dispatch_id: &str) -> Result<serde_json::Value> {
+    let row = sqlx::query(
+        "SELECT
+            id,
+            kanban_card_id,
+            from_agent_id,
+            to_agent_id,
+            dispatch_type,
+            status,
+            title,
+            context,
+            result,
+            parent_dispatch_id,
+            chain_depth,
+            created_at::text AS created_at,
+            updated_at::text AS updated_at,
+            completed_at::text AS completed_at,
+            COALESCE(retry_count, 0) AS retry_count
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?
+    .ok_or_else(|| anyhow::anyhow!("Dispatch query error: Query returned no rows"))?;
+
+    let status = row
+        .try_get::<String, _>("status")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
+    let updated_at = row
+        .try_get::<String, _>("updated_at")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
+    let dispatch_type = row
+        .try_get::<Option<String>, _>("dispatch_type")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
+    let context_raw = row
+        .try_get::<Option<String>, _>("context")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
+    let result_raw = row
+        .try_get::<Option<String>, _>("result")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
+    let context = parse_dispatch_json_text_pg(context_raw.as_deref());
+    let result = parse_dispatch_json_text_pg(result_raw.as_deref());
+    let result_summary = summarize_dispatch_result(
+        dispatch_type.as_deref(),
+        Some(status.as_str()),
+        result.as_ref(),
+        context.as_ref(),
+    );
+    let completed_at = row
+        .try_get::<Option<String>, _>("completed_at")
+        .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?
+        .or_else(|| (status == "completed").then(|| updated_at.clone()));
+
+    Ok(json!({
+        "id": row.try_get::<String, _>("id").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "from_agent_id": row.try_get::<Option<String>, _>("from_agent_id").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "to_agent_id": row.try_get::<Option<String>, _>("to_agent_id").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "dispatch_type": dispatch_type,
+        "status": status,
+        "title": row.try_get::<Option<String>, _>("title").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "context": context,
+        "result": result,
+        "result_summary": result_summary,
+        "parent_dispatch_id": row.try_get::<Option<String>, _>("parent_dispatch_id").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "chain_depth": row.try_get::<i64, _>("chain_depth").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "created_at": row.try_get::<String, _>("created_at").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "updated_at": updated_at,
+        "completed_at": completed_at,
+        "retry_count": row.try_get::<i64, _>("retry_count").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -515,7 +612,7 @@ fn create_dispatch_core_internal(
         || dispatch_type == "rework"
         || dispatch_type == "consultation";
 
-    if dispatch_type == "review-decision" {
+    if pg_pool.is_none() && dispatch_type == "review-decision" {
         let mut stmt = conn.prepare(
             "SELECT id FROM task_dispatches \
              WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' \
@@ -543,21 +640,79 @@ fn create_dispatch_core_internal(
         }
     }
 
-    let attach_result = apply_dispatch_attached_intents(
-        &conn,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_id,
-        dispatch_type,
-        is_review_type,
-        &old_status,
-        &effective,
-        title,
-        &context_str,
-        parent_dispatch_id.as_deref(),
-        chain_depth,
-        options,
-    );
+    let attach_result = if let Some(pool) = pg_pool {
+        let card_id = kanban_card_id.to_string();
+        let to_agent_id = to_agent_id.to_string();
+        let dispatch_id = dispatch_id.to_string();
+        let dispatch_type = dispatch_type.to_string();
+        let old_status = old_status.clone();
+        let effective = effective.clone();
+        let title = title.to_string();
+        let context_str = context_str.clone();
+        let parent_dispatch_id = parent_dispatch_id.clone();
+        block_on_dispatch_pg(pool, move |pool| async move {
+            let mut tx = pool.begin().await.map_err(|error| {
+                anyhow::anyhow!("begin postgres dispatch {dispatch_id}: {error}")
+            })?;
+            let result = async {
+                if dispatch_type == "review-decision" {
+                    let cancelled = cancel_stale_review_decisions_pg_tx(&mut tx, &card_id).await?;
+                    if cancelled > 0 {
+                        tracing::info!(
+                            "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
+                            cancelled,
+                            card_id
+                        );
+                    }
+                }
+
+                apply_dispatch_attached_intents_pg(
+                    &mut tx,
+                    &card_id,
+                    &to_agent_id,
+                    &dispatch_id,
+                    &dispatch_type,
+                    is_review_type,
+                    &old_status,
+                    &effective,
+                    &title,
+                    &context_str,
+                    parent_dispatch_id.as_deref(),
+                    chain_depth,
+                    options,
+                    is_single_active_dispatch_violation_pg,
+                )
+                .await
+            }
+            .await;
+
+            match result {
+                Ok(()) => tx.commit().await.map_err(|error| {
+                    anyhow::anyhow!("commit postgres dispatch {dispatch_id}: {error}")
+                }),
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    Err(error)
+                }
+            }
+        })
+    } else {
+        apply_dispatch_attached_intents(
+            &conn,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_id,
+            dispatch_type,
+            is_review_type,
+            &old_status,
+            &effective,
+            title,
+            &context_str,
+            parent_dispatch_id.as_deref(),
+            chain_depth,
+            options,
+        )
+    };
 
     if let Err(e) = attach_result {
         // #743: include "create-pr" in the UNIQUE-race dedup recovery path.
@@ -761,7 +916,14 @@ pub fn create_dispatch_with_options(
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-    let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
+    let dispatch = if let Some(pool) = pg_pool {
+        let dispatch_id = dispatch_id.clone();
+        block_on_dispatch_pg(pool, move |pool| async move {
+            query_dispatch_row_pg(&pool, &dispatch_id).await
+        })?
+    } else {
+        query_dispatch_row(&conn, &dispatch_id)?
+    };
 
     if reused {
         let mut d = dispatch;
@@ -855,6 +1017,245 @@ fn apply_dispatch_attached_intents(
         }
     }
     result
+}
+
+async fn record_dispatch_status_event_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    from_status: Option<&str>,
+    to_status: &str,
+    transition_source: &str,
+    payload: Option<&serde_json::Value>,
+) -> Result<()> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT kanban_card_id, dispatch_type
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load postgres dispatch event context {dispatch_id}: {error}")
+    })?;
+    let (kanban_card_id, dispatch_type) = row.unwrap_or((None, None));
+
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(dispatch_id)
+    .bind(kanban_card_id)
+    .bind(dispatch_type)
+    .bind(from_status)
+    .bind(to_status)
+    .bind(transition_source)
+    .bind(payload.cloned())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("insert postgres dispatch event for {dispatch_id}: {error}")
+    })?;
+    Ok(())
+}
+
+async fn ensure_dispatch_notify_outbox_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    agent_id: &str,
+    card_id: &str,
+    title: &str,
+) -> Result<bool> {
+    let dispatch_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres dispatch status {dispatch_id}: {error}"))?;
+
+    if matches!(
+        dispatch_status.as_deref(),
+        Some("completed") | Some("failed") | Some("cancelled")
+    ) {
+        return Ok(false);
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title)
+         VALUES ($1, 'notify', $2, $3, $4)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(dispatch_id)
+    .bind(agent_id)
+    .bind(card_id)
+    .bind(title)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("insert postgres dispatch outbox for {dispatch_id}: {error}")
+    })?;
+
+    Ok(inserted.rows_affected() > 0)
+}
+
+async fn cancel_stale_review_decisions_pg_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    card_id: &str,
+) -> Result<usize> {
+    let stale_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = 'review-decision'
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load stale postgres review-decision dispatches for {card_id}: {error}")
+    })?;
+
+    let mut cancelled = 0usize;
+    for stale_id in &stale_ids {
+        cancelled += cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+            tx,
+            stale_id,
+            Some("superseded_by_new_review_decision"),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
+    Ok(cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_dispatch_attached_intents_pg<F>(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_id: &str,
+    dispatch_type: &str,
+    is_review_type: bool,
+    old_status: &str,
+    effective: &crate::pipeline::PipelineConfig,
+    title: &str,
+    context_str: &str,
+    parent_dispatch_id: Option<&str>,
+    chain_depth: i64,
+    options: DispatchCreateOptions,
+    is_single_active_violation_check: F,
+) -> Result<()>
+where
+    F: Fn(&sqlx::Error) -> bool,
+{
+    use crate::engine::transition::{
+        self, CardState, GateSnapshot, TransitionContext, TransitionEvent, TransitionOutcome,
+    };
+
+    let kickoff_state = if !is_review_type && !options.sidecar_dispatch {
+        Some(effective.kickoff_for(old_status).unwrap_or_else(|| {
+            tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
+            effective.initial_state().to_string()
+        }))
+    } else {
+        None
+    };
+
+    let ctx = TransitionContext {
+        card: CardState {
+            id: card_id.to_string(),
+            status: old_status.to_string(),
+            review_status: None,
+            latest_dispatch_id: None,
+        },
+        pipeline: effective.clone(),
+        gates: GateSnapshot::default(),
+    };
+
+    let decision = if options.sidecar_dispatch {
+        transition::TransitionDecision {
+            outcome: transition::TransitionOutcome::Allowed,
+            intents: Vec::new(),
+        }
+    } else {
+        transition::decide_transition(
+            &ctx,
+            &TransitionEvent::DispatchAttached {
+                dispatch_id: dispatch_id.to_string(),
+                dispatch_type: dispatch_type.to_string(),
+                kickoff_state,
+            },
+        )
+    };
+
+    if let TransitionOutcome::Blocked(reason) = &decision.outcome {
+        return Err(anyhow::anyhow!("{}", reason));
+    }
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+            parent_dispatch_id, chain_depth, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, NOW(), NOW()
+        )",
+    )
+    .bind(dispatch_id)
+    .bind(card_id)
+    .bind(to_agent_id)
+    .bind(dispatch_type)
+    .bind(title)
+    .bind(context_str)
+    .bind(parent_dispatch_id)
+    .bind(chain_depth)
+    .execute(&mut **tx)
+    .await
+    {
+        if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
+            && is_single_active_violation_check(&error)
+        {
+            return Err(anyhow::anyhow!(
+                "{} already exists for card {} (concurrent race prevented by DB constraint)",
+                dispatch_type,
+                card_id
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "insert postgres dispatch {dispatch_id} for {card_id}: {error}"
+        ));
+    }
+
+    record_dispatch_status_event_on_pg_tx(
+        tx,
+        dispatch_id,
+        None,
+        "pending",
+        "create_dispatch",
+        None,
+    )
+    .await?;
+    if !options.skip_outbox {
+        ensure_dispatch_notify_outbox_on_pg_tx(tx, dispatch_id, to_agent_id, card_id, title)
+            .await?;
+    }
+    for intent in &decision.intents {
+        crate::engine::transition_executor_pg::execute_activate_transition_intent_pg(tx, intent)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok(())
 }
 
 /// Connection-local variant: does NOT manage its own transaction. Caller must
@@ -977,6 +1378,9 @@ pub(crate) fn apply_dispatch_attached_intents_on_conn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::pipeline::ClockConfig;
+    use std::collections::HashMap;
 
     struct TestPostgresDb {
         admin_url: String,
@@ -1163,6 +1567,420 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed task_dispatches");
+    }
+
+    fn seed_sqlite_card_and_agent(db: &Db, card_id: &str, status: &str, agent_id: &str) {
+        let conn = db.lock().expect("lock sqlite test db");
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES (?1, ?2, '111', '222')",
+            libsql_rusqlite::params![agent_id, format!("Agent {agent_id}")],
+        )
+        .expect("seed sqlite agent");
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES (?1, 'Test Card', ?2, ?3)",
+            libsql_rusqlite::params![card_id, status, agent_id],
+        )
+        .expect("seed sqlite card");
+    }
+
+    async fn pg_count_dispatches(pool: &PgPool, dispatch_id: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .expect("count task_dispatches")
+    }
+
+    async fn pg_count_notify_outbox(pool: &PgPool, dispatch_id: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM dispatch_outbox
+             WHERE dispatch_id = $1
+               AND action = 'notify'",
+        )
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .expect("count notify outbox")
+    }
+
+    async fn pg_card_status(pool: &PgPool, card_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT status
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_one(pool)
+        .await
+        .expect("load card status")
+    }
+
+    async fn pg_latest_dispatch_id(pool: &PgPool, card_id: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT latest_dispatch_id
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_one(pool)
+        .await
+        .expect("load latest dispatch id")
+    }
+
+    async fn pg_dispatch_status(pool: &PgPool, dispatch_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT status
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .expect("load dispatch status")
+    }
+
+    async fn pg_default_pipeline(pool: &PgPool) -> crate::pipeline::PipelineConfig {
+        crate::pipeline::ensure_loaded();
+        crate::pipeline::resolve_for_card_pg(pool, None, None).await
+    }
+
+    fn invalid_clock_pipeline(
+        base: &crate::pipeline::PipelineConfig,
+        state: &str,
+    ) -> crate::pipeline::PipelineConfig {
+        let mut pipeline = base.clone();
+        let mut clocks = HashMap::new();
+        clocks.insert(
+            state.to_string(),
+            ClockConfig {
+                set: "definitely_missing_dispatch_clock_column".to_string(),
+                mode: None,
+            },
+        );
+        pipeline.clocks = clocks;
+        pipeline
+    }
+
+    #[tokio::test]
+    async fn apply_dispatch_attached_intents_pg_happy_path_inserts_review_and_updates_card() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_agent(&pool, "agent-apply-happy", Some("111"), Some("222")).await;
+        pg_seed_card(&pool, "card-apply-happy", None, None).await;
+        let effective = pg_default_pipeline(&pool).await;
+
+        let mut tx = pool.begin().await.expect("begin postgres tx");
+        apply_dispatch_attached_intents_pg(
+            &mut tx,
+            "card-apply-happy",
+            "agent-apply-happy",
+            "dispatch-apply-happy",
+            "review",
+            true,
+            "ready",
+            &effective,
+            "Happy path",
+            &json!({}).to_string(),
+            None,
+            0,
+            DispatchCreateOptions::default(),
+            is_single_active_dispatch_violation_pg,
+        )
+        .await
+        .expect("happy path dispatch attach");
+        tx.commit().await.expect("commit postgres tx");
+
+        assert_eq!(
+            pg_count_dispatches(&pool, "dispatch-apply-happy").await,
+            1,
+            "task_dispatches row must be inserted"
+        );
+        assert_eq!(
+            pg_count_notify_outbox(&pool, "dispatch-apply-happy").await,
+            1,
+            "notify outbox row must be inserted"
+        );
+        assert_eq!(
+            pg_card_status(&pool, "card-apply-happy").await,
+            "ready",
+            "review dispatch must leave the card state unchanged"
+        );
+        assert_eq!(
+            pg_latest_dispatch_id(&pool, "card-apply-happy")
+                .await
+                .as_deref(),
+            Some("dispatch-apply-happy"),
+            "latest_dispatch_id must track the new dispatch"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn apply_dispatch_attached_intents_pg_unique_race_surfaces_dedup_message() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_agent(&pool, "agent-apply-race", Some("111"), Some("222")).await;
+        pg_seed_card(&pool, "card-apply-race", None, None).await;
+        pg_seed_dispatch(
+            &pool,
+            "dispatch-apply-race-existing",
+            "card-apply-race",
+            "review",
+            "pending",
+        )
+        .await;
+        let effective = pg_default_pipeline(&pool).await;
+
+        let mut tx = pool.begin().await.expect("begin postgres tx");
+        let err = apply_dispatch_attached_intents_pg(
+            &mut tx,
+            "card-apply-race",
+            "agent-apply-race",
+            "dispatch-apply-race-new",
+            "review",
+            true,
+            "ready",
+            &effective,
+            "Race loser",
+            &json!({}).to_string(),
+            None,
+            0,
+            DispatchCreateOptions::default(),
+            is_single_active_dispatch_violation_pg,
+        )
+        .await
+        .expect_err("unique race loser must surface dedup marker");
+        assert!(
+            err.to_string()
+                .contains("concurrent race prevented by DB constraint"),
+            "PG UNIQUE loser must preserve the dedup marker"
+        );
+        tx.rollback().await.expect("rollback postgres tx");
+        assert_eq!(
+            lookup_active_dispatch_id_pg(&pool, "card-apply-race", "review").await,
+            Some("dispatch-apply-race-existing".to_string()),
+            "lookup_active_dispatch_id_pg must still return the seeded winner"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn apply_dispatch_attached_intents_pg_rolls_back_mid_transaction_failures() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_agent(&pool, "agent-apply-rollback", Some("111"), Some("222")).await;
+        pg_seed_card(&pool, "card-apply-rollback", None, None).await;
+        let base_pipeline = pg_default_pipeline(&pool).await;
+        let kickoff_state = base_pipeline
+            .kickoff_for("ready")
+            .unwrap_or_else(|| base_pipeline.initial_state().to_string());
+        let failing_pipeline = invalid_clock_pipeline(&base_pipeline, &kickoff_state);
+
+        let mut tx = pool.begin().await.expect("begin postgres tx");
+        let err = apply_dispatch_attached_intents_pg(
+            &mut tx,
+            "card-apply-rollback",
+            "agent-apply-rollback",
+            "dispatch-apply-rollback",
+            "implementation",
+            false,
+            "ready",
+            &failing_pipeline,
+            "Rollback path",
+            &json!({}).to_string(),
+            None,
+            0,
+            DispatchCreateOptions::default(),
+            is_single_active_dispatch_violation_pg,
+        )
+        .await
+        .expect_err("invalid clock column must abort the transaction");
+        assert!(
+            err.to_string()
+                .contains("definitely_missing_dispatch_clock_column"),
+            "the injected ApplyClock failure should be the surfaced error"
+        );
+        tx.rollback().await.expect("rollback postgres tx");
+        assert_eq!(
+            pg_count_dispatches(&pool, "dispatch-apply-rollback").await,
+            0,
+            "task_dispatches insert must roll back on later failure"
+        );
+        assert_eq!(
+            pg_count_notify_outbox(&pool, "dispatch-apply-rollback").await,
+            0,
+            "notify outbox insert must roll back on later failure"
+        );
+        assert_eq!(
+            pg_card_status(&pool, "card-apply-rollback").await,
+            "ready",
+            "card status must remain unchanged after rollback"
+        );
+        assert_eq!(
+            pg_latest_dispatch_id(&pool, "card-apply-rollback").await,
+            None,
+            "latest_dispatch_id must remain unchanged after rollback"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn apply_dispatch_attached_intents_pg_skip_outbox_omits_notify_row() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        pg_seed_agent(&pool, "agent-apply-skip", Some("111"), Some("222")).await;
+        pg_seed_card(&pool, "card-apply-skip", None, None).await;
+        let effective = pg_default_pipeline(&pool).await;
+
+        let mut tx = pool.begin().await.expect("begin postgres tx");
+        apply_dispatch_attached_intents_pg(
+            &mut tx,
+            "card-apply-skip",
+            "agent-apply-skip",
+            "dispatch-apply-skip",
+            "implementation",
+            false,
+            "ready",
+            &effective,
+            "Skip outbox",
+            &json!({}).to_string(),
+            None,
+            0,
+            DispatchCreateOptions {
+                skip_outbox: true,
+                ..Default::default()
+            },
+            is_single_active_dispatch_violation_pg,
+        )
+        .await
+        .expect("skip_outbox dispatch attach");
+        tx.commit().await.expect("commit postgres tx");
+
+        assert_eq!(
+            pg_count_dispatches(&pool, "dispatch-apply-skip").await,
+            1,
+            "task_dispatches row must still be inserted"
+        );
+        assert_eq!(
+            pg_count_notify_outbox(&pool, "dispatch-apply-skip").await,
+            0,
+            "skip_outbox must suppress notify outbox insertion"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn create_dispatch_core_pg_cancels_stale_review_decision_siblings() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        let db = crate::db::test_db();
+        seed_sqlite_card_and_agent(
+            &db,
+            "card-apply-review-decision",
+            "review",
+            "agent-apply-review-decision",
+        );
+
+        pg_seed_card(&pool, "card-apply-review-decision", None, None).await;
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET status = 'review'
+             WHERE id = $1",
+        )
+        .bind("card-apply-review-decision")
+        .execute(&pool)
+        .await
+        .expect("align postgres card status");
+        pg_seed_agent(
+            &pool,
+            "agent-apply-review-decision",
+            Some("111"),
+            Some("222"),
+        )
+        .await;
+        pg_seed_dispatch(
+            &pool,
+            "dispatch-apply-review-decision-old",
+            "card-apply-review-decision",
+            "review-decision",
+            "pending",
+        )
+        .await;
+        let (dispatch_id, old_status, reused) = create_dispatch_core_with_id_and_options_pg(
+            &db,
+            Some(&pool),
+            "card-apply-review-decision",
+            "agent-apply-review-decision",
+            "dispatch-apply-review-decision-new",
+            "review-decision",
+            "Fresh review decision",
+            &json!({}),
+            DispatchCreateOptions::default(),
+        )
+        .expect("review-decision create should cancel stale sibling");
+
+        assert_eq!(dispatch_id, "dispatch-apply-review-decision-new");
+        assert_eq!(old_status, "review");
+        assert!(!reused);
+
+        assert_eq!(
+            pg_dispatch_status(&pool, "dispatch-apply-review-decision-old").await,
+            "cancelled",
+            "stale review-decision sibling must be cancelled before the new insert commits"
+        );
+        assert_eq!(
+            pg_dispatch_status(&pool, "dispatch-apply-review-decision-new").await,
+            "pending",
+            "new review-decision dispatch must be inserted"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
