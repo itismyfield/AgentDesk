@@ -634,9 +634,10 @@ channels:
 
     #[test]
     fn test_channel_binding_memory_overrides_agent_memory_defaults() {
-        let _mem0_env = Mem0EnvGuard::install();
-        let schema: OrgSchema = serde_yaml::from_str(
-            r#"
+        with_temp_root(|_temp_home: &TempDir| {
+            let _mem0_env = Mem0EnvGuard::install();
+            let schema: OrgSchema = serde_yaml::from_str(
+                r#"
 version: 1
 agents:
   spark:
@@ -661,27 +662,28 @@ channels:
           ingestion:
             custom_instructions: "Prefer high-confidence facts"
 "#,
-        )
-        .expect("parse org schema");
+            )
+            .expect("parse org schema");
 
-        let (channel_binding, agent_def) =
-            resolve_channel_binding(&schema, ChannelId::new(1488022491992424448), None)
-                .expect("resolve channel binding");
-        let memory =
-            resolve_memory_settings(agent_def.memory.as_ref(), channel_binding.memory.as_ref());
+            let (channel_binding, agent_def) =
+                resolve_channel_binding(&schema, ChannelId::new(1488022491992424448), None)
+                    .expect("resolve channel binding");
+            let memory =
+                resolve_memory_settings(agent_def.memory.as_ref(), channel_binding.memory.as_ref());
 
-        assert_eq!(
-            memory.backend,
-            super::super::settings::MemoryBackendKind::Mem0
-        );
-        assert_eq!(memory.recall_timeout_ms, 100);
-        assert_eq!(memory.capture_timeout_ms, 7000);
-        assert_eq!(memory.mem0.profile, "strict");
-        assert_eq!(memory.mem0.ingestion.infer, Some(false));
-        assert_eq!(
-            memory.mem0.ingestion.custom_instructions.as_deref(),
-            Some("Prefer high-confidence facts")
-        );
+            assert_eq!(
+                memory.backend,
+                super::super::settings::MemoryBackendKind::Mem0
+            );
+            assert_eq!(memory.recall_timeout_ms, 100);
+            assert_eq!(memory.capture_timeout_ms, 7000);
+            assert_eq!(memory.mem0.profile, "strict");
+            assert_eq!(memory.mem0.ingestion.infer, Some(false));
+            assert_eq!(
+                memory.mem0.ingestion.custom_instructions.as_deref(),
+                Some("Prefer high-confidence facts")
+            );
+        });
     }
 
     #[test]
