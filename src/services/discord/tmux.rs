@@ -99,6 +99,44 @@ fn build_monitor_completion_message(response: &str) -> String {
     )
 }
 
+/// #826: Enqueue a background-trigger turn's terminal response on the
+/// notify-bot outbox so it reaches the channel without going through the
+/// command bot. The notify-bot is dropped at the intake gate, which is what
+/// keeps the auto-trigger path from feeding back into a new turn.
+///
+/// Returns `false` only when the database handle is unavailable or the SQL
+/// insert fails — the caller falls back to a direct command-bot send in that
+/// case so the message is never silently lost.
+pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
+    db: Option<&crate::db::Db>,
+    channel_id: ChannelId,
+    content: &str,
+) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let Some(db) = db else {
+        return false;
+    };
+    let target = format!("channel:{}", channel_id.get());
+    // Intentionally omit reason_code so the lifecycle dedupe in
+    // `message_outbox::enqueue` does not suppress consecutive auto-trigger
+    // responses on the same channel — each background-task completion is its
+    // own event the user must see.
+    crate::services::message_outbox::enqueue_with_db(
+        db,
+        crate::services::message_outbox::OutboxMessage {
+            target: target.as_str(),
+            content,
+            bot: "notify",
+            source: "system",
+            reason_code: None,
+            session_key: None,
+        },
+    )
+}
+
 fn watcher_should_yield_to_active_bridge_turn(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -1325,8 +1363,18 @@ pub(super) async fn tmux_output_watcher(
         }
 
         // Duplicate-relay guard: if we already relayed from this same data range, suppress.
+        //
+        // #826: use strict `<` so that data starting EXACTLY at the boundary
+        // recorded by the previous relay (or by the bridge's `resume_offset`)
+        // is treated as new data, not a re-read. After a normal bridge turn
+        // ends the watcher resumes with `last_relayed_offset = Some(Y)` where
+        // `Y` is the byte right after the bridge's last consumed byte. A turn
+        // auto-fired by Claude Code's `<task-notification>` writes its tmux
+        // output starting at that exact `Y`, so `<=` was silently dropping
+        // the entire auto-trigger turn. Strict `<` only catches genuine
+        // re-reads of the same starting offset.
         if let Some(prev_offset) = last_relayed_offset {
-            if data_start_offset <= prev_offset {
+            if data_start_offset < prev_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={})",
@@ -1432,6 +1480,21 @@ pub(super) async fn tmux_output_watcher(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
+        // #826: When inflight state is missing at the watcher's terminal-response
+        // point, this is a turn that Claude Code's `<task-notification>` mechanism
+        // auto-fired after the bridge completed and cleaned up. There is no
+        // user-visible message that would normally trigger the bridge path, so
+        // the response must reach the channel via the notify bot — both because
+        // (a) without it the response is silently dropped (the original #826
+        // bug) and (b) sending via the command bot risks other agents in the
+        // channel treating it as an actionable directive (infinite-loop risk).
+        // Notify bot is the canonical sink for background-task-driven info per
+        // `docs/background-task-pattern.md`; it is also dropped at the intake
+        // gate so the agent itself cannot self-trigger another turn off this
+        // delivery.
+        let route_via_notify_bot = has_assistant_response
+            && super::inflight::load_inflight_state(&watcher_provider, channel_id.get()).is_none();
+
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
         let relay_ok = if has_assistant_response {
@@ -1442,35 +1505,70 @@ pub(super) async fn tmux_output_watcher(
             let prefixed = build_monitor_completion_message(&formatted);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {})",
+                "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {}, notify={})",
                 prefixed.len(),
-                data_start_offset
+                data_start_offset,
+                route_via_notify_bot
             );
             // #225 P1-2: Track relay success to gate turn_result_relayed
             let mut relay_ok = true;
-            match placeholder_msg_id {
-                Some(msg_id) => {
-                    if has_current_response {
-                        if let Err(e) =
-                            replace_long_message_raw(&http, channel_id, msg_id, &prefixed, &shared)
-                                .await
-                        {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
-                            relay_ok = false;
-                        }
-                    } else {
-                        let _ = channel_id.delete_message(&http, msg_id).await;
-                    }
+            if route_via_notify_bot {
+                // Background-trigger path: drop the spinner placeholder (it was
+                // sent via the command bot for streaming status) and enqueue the
+                // terminal response on the notify-bot outbox.
+                if let Some(msg_id) = placeholder_msg_id {
+                    let _ = channel_id.delete_message(&http, msg_id).await;
                 }
-                None => {
+                let enqueued = if has_current_response {
+                    enqueue_background_trigger_response_to_notify_outbox(
+                        shared.db.as_ref(),
+                        channel_id,
+                        &prefixed,
+                    )
+                } else {
+                    true
+                };
+                if !enqueued {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] 👁 background-trigger notify enqueue failed in channel {} — falling back to direct send",
+                        channel_id
+                    );
                     if has_current_response
                         && let Err(e) =
                             send_long_message_raw(&http, channel_id, &prefixed, &shared).await
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                        tracing::info!("  [{ts}] 👁 Fallback relay failed: {e}");
                         relay_ok = false;
+                    }
+                }
+            } else {
+                match placeholder_msg_id {
+                    Some(msg_id) => {
+                        if has_current_response {
+                            if let Err(e) = replace_long_message_raw(
+                                &http, channel_id, msg_id, &prefixed, &shared,
+                            )
+                            .await
+                            {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                                relay_ok = false;
+                            }
+                        } else {
+                            let _ = channel_id.delete_message(&http, msg_id).await;
+                        }
+                    }
+                    None => {
+                        if has_current_response
+                            && let Err(e) =
+                                send_long_message_raw(&http, channel_id, &prefixed, &shared).await
+                        {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                            relay_ok = false;
+                        }
                     }
                 }
             }
@@ -2998,13 +3096,15 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, WatcherToolState, build_monitor_completion_message,
-        dead_session_cleanup_plan, load_restored_provider_session_id, process_watcher_lines,
+        dead_session_cleanup_plan, enqueue_background_trigger_response_to_notify_outbox,
+        load_restored_provider_session_id, process_watcher_lines,
         refresh_session_heartbeat_from_tmux_output, watcher_ready_for_input_turn_completed,
         watcher_should_yield_to_inflight_state,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
+    use poise::serenity_prelude::ChannelId;
 
     #[test]
     fn restored_live_tmux_session_loads_namespaced_provider_session_id() {
@@ -3360,5 +3460,107 @@ mod tests {
             true,
             start + std::time::Duration::from_secs(16)
         ));
+    }
+
+    // ── #826: background-task auto-trigger relay routes through notify outbox ──
+
+    /// When a `Bash run_in_background` (or codex `--background`) task completes
+    /// and Claude Code's `<task-notification>` mechanism fires the auto turn
+    /// after the bridge has already cleaned up, the watcher must enqueue the
+    /// terminal response on the notify-bot outbox so the user sees it. Going
+    /// through the command bot would risk other agents in the channel treating
+    /// the response as an actionable directive (infinite-loop hazard).
+    #[test]
+    fn background_trigger_response_enqueues_notify_outbox_row() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(987_654_321);
+        let content = "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\nPR #825 리뷰 4건 fix 완료";
+
+        let enqueued =
+            enqueue_background_trigger_response_to_notify_outbox(Some(&db), channel, content);
+        assert!(
+            enqueued,
+            "background-trigger enqueue must succeed when db is present"
+        );
+
+        let conn = db.lock().unwrap();
+        let (target, stored_content, bot, source): (String, String, String, String) = conn
+            .query_row(
+                "SELECT target, content, bot, source FROM message_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("expected one outbox row");
+
+        assert_eq!(target, format!("channel:{}", channel.get()));
+        assert_eq!(stored_content, content);
+        assert_eq!(bot, "notify", "must use notify bot to avoid loop hazard");
+        assert_eq!(source, "system");
+    }
+
+    /// Consecutive background-task completions in the same channel must each
+    /// produce their own outbox row — using a `reason_code` here would trip
+    /// the lifecycle-notification dedupe and silently drop later events.
+    #[test]
+    fn background_trigger_response_does_not_dedupe_consecutive_events() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(555_111_222);
+        assert!(enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            "first completion"
+        ));
+        assert!(enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            "second completion"
+        ));
+
+        let count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM message_outbox WHERE target = ?1 AND bot = 'notify'",
+                [format!("channel:{}", channel.get()).as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "consecutive background-task events must not dedupe"
+        );
+    }
+
+    /// Empty/whitespace responses must short-circuit without writing a row —
+    /// otherwise the user sees a noise notification with no content.
+    #[test]
+    fn background_trigger_response_skips_empty_payload() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(111_222_333);
+        assert!(enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            "   \n"
+        ));
+        let count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "empty content must not produce an outbox row");
+    }
+
+    /// When the database is unavailable, the helper reports failure so the
+    /// caller can fall back to a direct Discord send rather than silently
+    /// dropping the response (#826 root cause was a silent drop).
+    #[test]
+    fn background_trigger_response_reports_failure_when_db_missing() {
+        let channel = ChannelId::new(999_888_777);
+        let ok = enqueue_background_trigger_response_to_notify_outbox(
+            None,
+            channel,
+            "would-have-been-delivered",
+        );
+        assert!(!ok, "missing db must surface as failure to enable fallback");
     }
 }
