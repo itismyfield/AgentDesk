@@ -1,5 +1,8 @@
 use crate::db::Db;
-use std::{fs, path::PathBuf};
+use std::{ffi::OsString, fs, path::PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use super::{
     register_globals, register_globals_with_supervisor, review_state_sync,
@@ -11,6 +14,48 @@ fn test_db() -> Db {
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     crate::db::schema::migrate(&conn).unwrap();
     crate::db::wrap_conn(conn)
+}
+
+fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+struct EnvVarOverride {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarOverride {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let guard = test_env_lock();
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            _guard: guard,
+            key,
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvVarOverride {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, contents: &str) {
+    fs::write(path, contents).unwrap();
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).unwrap();
 }
 
 #[test]
@@ -1491,6 +1536,71 @@ fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
         assert_eq!(parsed["agent_id"], "agent-continue");
         assert_eq!(parsed["thread_group"], 3);
     });
+}
+
+#[cfg(unix)]
+#[test]
+fn test_runtime_refresh_inventory_docs_executes_generator_in_worktree() {
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join("scripts")).unwrap();
+    fs::create_dir_all(repo.path().join("docs/generated")).unwrap();
+    fs::write(
+        repo.path().join("scripts/generate_inventory_docs.py"),
+        "print('placeholder inventory generator')\n",
+    )
+    .unwrap();
+
+    let fake_python_dir = tempfile::tempdir().unwrap();
+    let fake_python = fake_python_dir.path().join("python3");
+    write_executable(
+        &fake_python,
+        r#"#!/bin/sh
+set -eu
+script="$1"
+test -f "$script"
+mkdir -p docs/generated
+printf 'module refreshed\n' > docs/generated/module-inventory.md
+printf 'route refreshed\n' > docs/generated/route-inventory.md
+printf 'worker refreshed\n' > docs/generated/worker-inventory.md
+echo 'inventory refreshed'
+"#,
+    );
+    let _python_override = EnvVarOverride::set_path("AGENTDESK_PYTHON3_PATH", &fake_python);
+
+    let db = test_db();
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    let repo_path = serde_json::to_string(repo.path().to_str().unwrap()).unwrap();
+    let script = format!(
+        r#"
+                JSON.stringify(
+                    agentdesk.runtime.refreshInventoryDocs({repo_path}, {{ timeout_ms: 5000 }})
+                )
+                "#,
+    );
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let raw: String = ctx.eval(script.clone()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["ok"], true, "refresh op must succeed: {parsed}");
+        assert_eq!(
+            parsed["stdout"].as_str().unwrap_or_default(),
+            "inventory refreshed"
+        );
+    });
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("docs/generated/module-inventory.md")).unwrap(),
+        "module refreshed\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("docs/generated/route-inventory.md")).unwrap(),
+        "route refreshed\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("docs/generated/worker-inventory.md")).unwrap(),
+        "worker refreshed\n"
+    );
 }
 
 #[test]

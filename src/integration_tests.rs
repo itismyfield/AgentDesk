@@ -97,6 +97,42 @@ mod tests {
         }
     }
 
+    struct RepoDirAndPythonPathOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous_repo: Option<OsString>,
+        previous_python: Option<OsString>,
+    }
+
+    impl RepoDirAndPythonPathOverride {
+        fn new(repo_path: &std::path::Path, python_path: &std::path::Path) -> Self {
+            let guard = lock_repo_dir_env();
+            let previous_repo = std::env::var_os("AGENTDESK_REPO_DIR");
+            let previous_python = std::env::var_os("AGENTDESK_PYTHON3_PATH");
+            unsafe {
+                std::env::set_var("AGENTDESK_REPO_DIR", repo_path);
+                std::env::set_var("AGENTDESK_PYTHON3_PATH", python_path);
+            }
+            Self {
+                _guard: guard,
+                previous_repo,
+                previous_python,
+            }
+        }
+    }
+
+    impl Drop for RepoDirAndPythonPathOverride {
+        fn drop(&mut self) {
+            match self.previous_repo.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") },
+            }
+            match self.previous_python.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_PYTHON3_PATH", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_PYTHON3_PATH") },
+            }
+        }
+    }
+
     struct RuntimeRootOverride {
         _guard: std::sync::MutexGuard<'static, ()>,
         previous: Option<OsString>,
@@ -286,6 +322,31 @@ mod tests {
         run_git(repo.path(), &["push", "-u", "origin", "main"]);
 
         let override_guard = RepoDirOverride::new(repo.path());
+        (repo, remote, override_guard)
+    }
+
+    fn setup_test_repo_with_origin_and_python(
+        python_path: &std::path::Path,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        RepoDirAndPythonPathOverride,
+    ) {
+        let remote = tempfile::tempdir().unwrap();
+        run_git(remote.path(), &["init", "--bare", "--initial-branch=main"]);
+
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        let override_guard = RepoDirAndPythonPathOverride::new(repo.path(), python_path);
         (repo, remote, override_guard)
     }
 
@@ -1017,6 +1078,15 @@ mod tests {
             dir.path().join("merge-automation.js"),
         )
         .unwrap();
+        dir
+    }
+
+    fn setup_kanban_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("policies")
+            .join("kanban-rules.js");
+        fs::copy(&source, dir.path().join("kanban-rules.js")).unwrap();
         dir
     }
 
@@ -10599,5 +10669,314 @@ done
                 Ok(_) => {}
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_811_on_dispatch_completed_refreshes_inventory_before_review_handoff() {
+        let python_dir = tempfile::tempdir().unwrap();
+        let fake_python = python_dir.path().join("python3");
+        write_executable_script(
+            &fake_python,
+            r#"#!/bin/sh
+set -eu
+script="$1"
+test -f "$script"
+mkdir -p docs/generated
+printf 'module refreshed\n' > docs/generated/module-inventory.md
+printf 'route refreshed\n' > docs/generated/route-inventory.md
+printf 'worker refreshed\n' > docs/generated/worker-inventory.md
+echo 'inventory refreshed'
+"#,
+        );
+
+        let (repo, _remote, _env) = setup_test_repo_with_origin_and_python(&fake_python);
+        let policies_dir = setup_kanban_policy_dir();
+
+        fs::create_dir_all(repo.path().join("scripts")).unwrap();
+        fs::create_dir_all(repo.path().join("docs/generated")).unwrap();
+        fs::create_dir_all(repo.path().join("src/services/discord")).unwrap();
+        fs::write(
+            repo.path().join("scripts/generate_inventory_docs.py"),
+            "print('placeholder inventory generator')\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/module-inventory.md"),
+            "stale module\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/route-inventory.md"),
+            "stale route\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/worker-inventory.md"),
+            "stale worker\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("src/services/discord/health.rs"),
+            "pub fn health() {}\n",
+        )
+        .unwrap();
+        run_git(repo.path(), &["add", "scripts", "docs", "src"]);
+        run_git(
+            repo.path(),
+            &["commit", "-m", "chore: seed inventory fixture"],
+        );
+        run_git(repo.path(), &["push", "origin", "main"]);
+
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        let branch = "wt/card-811-refresh";
+        run_git(repo.path(), &["branch", branch]);
+        let worktree_path = worktrees_dir.join("card-811-refresh");
+        run_git(
+            repo.path(),
+            &["worktree", "add", worktree_path.to_str().unwrap(), branch],
+        );
+        fs::write(
+            worktree_path.join("src/services/discord/health.rs"),
+            "pub fn health() {}\npub fn readiness() {}\n",
+        )
+        .unwrap();
+        run_git(
+            worktree_path.as_path(),
+            &["add", "src/services/discord/health.rs"],
+        );
+        run_git(
+            worktree_path.as_path(),
+            &["commit", "-m", "feat: touch src during dispatch"],
+        );
+        let completed_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-811-refresh",
+            "in_progress",
+            "test/repo",
+            811,
+            None,
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                    context, result, created_at, updated_at, completed_at
+                ) VALUES (
+                    ?1, 'card-811-refresh', 'agent-1', 'implementation', 'completed',
+                    'Inventory refresh dispatch', ?2, ?3,
+                    datetime('now', '-10 minutes'), datetime('now'), datetime('now')
+                )",
+                libsql_rusqlite::params![
+                    "impl-811-refresh",
+                    json!({
+                        "worktree_path": worktree_path.to_string_lossy().to_string(),
+                        "worktree_branch": branch,
+                    })
+                    .to_string(),
+                    json!({
+                        "completed_worktree_path": worktree_path.to_string_lossy().to_string(),
+                        "completed_branch": branch,
+                        "completed_commit": completed_commit,
+                        "completion_source": "integration_test",
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name(
+                "OnDispatchCompleted",
+                serde_json::json!({ "dispatch_id": "impl-811-refresh" }),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            run_git_output(worktree_path.as_path(), &["log", "-1", "--pretty=%s"]),
+            "chore: refresh inventory"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree_path.join("docs/generated/module-inventory.md")).unwrap(),
+            "module refreshed\n"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree_path.join("docs/generated/route-inventory.md")).unwrap(),
+            "route refreshed\n"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree_path.join("docs/generated/worker-inventory.md")).unwrap(),
+            "worker refreshed\n"
+        );
+        assert_eq!(get_card_status(&db, "card-811-refresh"), "review");
+
+        let local_head = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+        let remote_head = run_git_output(repo.path(), &["rev-parse", &format!("origin/{branch}")]);
+        assert_eq!(
+            local_head, remote_head,
+            "inventory refresh commit must be pushed before PR handoff"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_811_on_dispatch_completed_skips_inventory_refresh_without_src_changes() {
+        let python_dir = tempfile::tempdir().unwrap();
+        let fake_python = python_dir.path().join("python3");
+        write_executable_script(
+            &fake_python,
+            r#"#!/bin/sh
+set -eu
+script="$1"
+test -f "$script"
+mkdir -p docs/generated
+printf 'module refreshed\n' > docs/generated/module-inventory.md
+printf 'route refreshed\n' > docs/generated/route-inventory.md
+printf 'worker refreshed\n' > docs/generated/worker-inventory.md
+echo 'inventory refreshed'
+"#,
+        );
+
+        let (repo, _remote, _env) = setup_test_repo_with_origin_and_python(&fake_python);
+        let policies_dir = setup_kanban_policy_dir();
+
+        fs::create_dir_all(repo.path().join("scripts")).unwrap();
+        fs::create_dir_all(repo.path().join("docs/generated")).unwrap();
+        fs::create_dir_all(repo.path().join("src/services/discord")).unwrap();
+        fs::write(
+            repo.path().join("scripts/generate_inventory_docs.py"),
+            "print('placeholder inventory generator')\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/module-inventory.md"),
+            "stale module\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/route-inventory.md"),
+            "stale route\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("docs/generated/worker-inventory.md"),
+            "stale worker\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("src/services/discord/health.rs"),
+            "pub fn health() {}\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("README.md"), "seed\n").unwrap();
+        run_git(repo.path(), &["add", "scripts", "docs", "src", "README.md"]);
+        run_git(
+            repo.path(),
+            &["commit", "-m", "chore: seed inventory fixture"],
+        );
+        run_git(repo.path(), &["push", "origin", "main"]);
+
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        let branch = "wt/card-811-no-src";
+        run_git(repo.path(), &["branch", branch]);
+        let worktree_path = worktrees_dir.join("card-811-no-src");
+        run_git(
+            repo.path(),
+            &["worktree", "add", worktree_path.to_str().unwrap(), branch],
+        );
+        fs::write(
+            worktree_path.join("README.md"),
+            "seed\nextra docs-only note\n",
+        )
+        .unwrap();
+        run_git(worktree_path.as_path(), &["add", "README.md"]);
+        run_git(
+            worktree_path.as_path(),
+            &["commit", "-m", "docs: update readme only"],
+        );
+        let completed_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, policies_dir.path());
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-811-no-src",
+            "in_progress",
+            "test/repo",
+            812,
+            None,
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                    context, result, created_at, updated_at, completed_at
+                ) VALUES (
+                    ?1, 'card-811-no-src', 'agent-1', 'implementation', 'completed',
+                    'Inventory skip dispatch', ?2, ?3,
+                    datetime('now', '-10 minutes'), datetime('now'), datetime('now')
+                )",
+                libsql_rusqlite::params![
+                    "impl-811-no-src",
+                    json!({
+                        "worktree_path": worktree_path.to_string_lossy().to_string(),
+                        "worktree_branch": branch,
+                    })
+                    .to_string(),
+                    json!({
+                        "completed_worktree_path": worktree_path.to_string_lossy().to_string(),
+                        "completed_branch": branch,
+                        "completed_commit": completed_commit,
+                        "completion_source": "integration_test",
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name(
+                "OnDispatchCompleted",
+                serde_json::json!({ "dispatch_id": "impl-811-no-src" }),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            run_git_output(worktree_path.as_path(), &["log", "-1", "--pretty=%s"]),
+            "docs: update readme only"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree_path.join("docs/generated/module-inventory.md")).unwrap(),
+            "stale module\n"
+        );
+        assert_eq!(get_card_status(&db, "card-811-no-src"), "review");
+
+        let remote_branch = run_git_output(
+            repo.path(),
+            &["branch", "--remote", "--list", &format!("origin/{branch}")],
+        );
+        assert_eq!(
+            remote_branch.trim(),
+            "",
+            "non-src dispatches must not create a follow-up inventory push"
+        );
     }
 }
