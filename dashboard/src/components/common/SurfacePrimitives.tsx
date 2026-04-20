@@ -257,15 +257,16 @@ export function SurfaceCallout({ children, action, className, style }: SurfaceCa
   );
 }
 
-interface SurfaceEmptyStateProps {
+interface SurfaceEmptyStateProps extends HTMLAttributes<HTMLDivElement> {
   children: ReactNode;
   className?: string;
   style?: CSSProperties;
 }
 
-export function SurfaceEmptyState({ children, className, style }: SurfaceEmptyStateProps) {
+export function SurfaceEmptyState({ children, className, style, ...rest }: SurfaceEmptyStateProps) {
   return (
     <SurfaceCard
+      {...rest}
       className={className}
       style={{
         borderStyle: "dashed",
@@ -425,11 +426,10 @@ export function SurfaceTabCard({
   );
 }
 
-interface SurfaceSegmentButtonProps {
+interface SurfaceSegmentButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   children: ReactNode;
   active?: boolean;
   tone?: SurfaceTone;
-  onClick?: () => void;
   className?: string;
   style?: CSSProperties;
 }
@@ -441,12 +441,14 @@ export function SurfaceSegmentButton({
   onClick,
   className,
   style,
+  ...rest
 }: SurfaceSegmentButtonProps) {
   const chrome = getToneChrome(tone);
 
   return (
     <button
-      type="button"
+      {...rest}
+      type={rest.type ?? "button"}
       onClick={onClick}
       className={joinClasses("rounded-full px-3 py-1.5 text-xs font-medium transition-colors", className)}
       style={{
@@ -467,11 +469,6 @@ interface SurfaceActionButtonProps extends ButtonHTMLAttributes<HTMLButtonElemen
   children: ReactNode;
   tone?: SurfaceTone;
   compact?: boolean;
-  type?: "button" | "submit" | "reset";
-  disabled?: boolean;
-  onClick?: () => void;
-  className?: string;
-  style?: CSSProperties;
 }
 
 export function SurfaceActionButton({

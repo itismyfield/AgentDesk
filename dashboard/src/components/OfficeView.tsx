@@ -30,6 +30,12 @@ import {
   type OfficeManualIntervention,
   type OfficeSeatStatus,
 } from "./office-view/officeAgentState";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceNotice,
+  SurfaceSection,
+} from "./common/SurfacePrimitives";
 
 interface OfficeViewProps {
   agents: Agent[];
@@ -550,23 +556,48 @@ function OfficeManualWarningOverlay({
   isKo: boolean;
   onSelectAgent?: (agent: Agent) => void;
 }) {
+  const [hoveredWarningId, setHoveredWarningId] = useState<string | null>(null);
+  const [expandedWarningId, setExpandedWarningId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!expandedWarningId) return;
+    if (!entries.some(({ warning }) => warning.cardId === expandedWarningId)) {
+      setExpandedWarningId(null);
+    }
+  }, [entries, expandedWarningId]);
+
   if (entries.length === 0) return null;
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10">
-      {entries.map(({ agent, warning, position }) => (
-        <div
-          key={warning.cardId}
-          className="group absolute pointer-events-auto"
-          style={{
-            left: position.x + 16,
-            top: position.y - 28,
-            transform: "translate(-50%, -50%)",
-          }}
-        >
+      {entries.map(({ agent, warning, position }) => {
+        const isOpen = hoveredWarningId === warning.cardId || expandedWarningId === warning.cardId;
+        return (
+          <div
+            key={warning.cardId}
+            className="absolute pointer-events-auto"
+            style={{
+              left: position.x + 16,
+              top: position.y - 28,
+              transform: "translate(-50%, -50%)",
+            }}
+            onMouseEnter={() => setHoveredWarningId(warning.cardId)}
+            onMouseLeave={() => setHoveredWarningId((current) => (current === warning.cardId ? null : current))}
+            onFocusCapture={() => setHoveredWarningId(warning.cardId)}
+            onBlurCapture={(event) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+              setHoveredWarningId((current) => (current === warning.cardId ? null : current));
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setExpandedWarningId((current) => (current === warning.cardId ? null : current));
+                setHoveredWarningId((current) => (current === warning.cardId ? null : current));
+              }
+            }}
+          >
           <button
             type="button"
-            className="flex h-7 min-w-7 items-center justify-center rounded-full border text-xs font-semibold shadow-sm transition hover:scale-[1.04] focus:outline-none focus:ring-2"
+            className="relative flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm transition hover:scale-[1.04] focus:outline-none focus:ring-2"
             style={{
               color: "var(--warn)",
               borderColor: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
@@ -577,48 +608,62 @@ function OfficeManualWarningOverlay({
                 ? `${agent.alias || agent.name_ko || agent.name} 수동 개입 경고`
                 : `${agent.alias || agent.name} manual intervention warning`
             }
+            aria-expanded={isOpen}
+            onClick={() =>
+              setExpandedWarningId((current) => (current === warning.cardId ? null : warning.cardId))
+            }
           >
-            !
+            <span
+              aria-hidden="true"
+              className="absolute -bottom-1 left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 border-b border-r"
+              style={{
+                borderColor: "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)",
+                background: "color-mix(in oklch, var(--warn) 14%, var(--bg-2) 86%)",
+              }}
+            />
+            <span aria-hidden="true">&lt;!&gt;</span>
           </button>
-          <div
-            className="pointer-events-none absolute bottom-[calc(100%+0.55rem)] left-1/2 hidden w-64 -translate-x-1/2 rounded-2xl border px-3 py-3 shadow-xl group-hover:block group-focus-within:block"
-            style={{
-              borderColor: "color-mix(in oklch, var(--warn) 26%, var(--line) 74%)",
-              background: "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)",
-            }}
-          >
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
-              {isKo ? "수동 개입" : "Manual intervention"}
-            </div>
-            <div className="mt-1 text-sm font-semibold" style={{ color: "var(--fg)" }}>
-              {warning.title}
-            </div>
-            <div className="mt-2 text-xs leading-5" style={{ color: "var(--fg-muted)" }}>
-              {warning.reason
-                ?? (isKo
-                  ? "구체 사유는 카드 상세에서 확인할 수 있습니다."
-                  : "Open the detail drawer to inspect the full reason.")}
-            </div>
-            <div className="mt-3 flex items-center justify-between gap-2">
-              <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
-                {warning.issueNumber ? `#${warning.issueNumber}` : warning.status}
-              </span>
-              <button
-                type="button"
-                className="pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] font-semibold transition hover:opacity-90"
-                onClick={() => onSelectAgent?.(agent)}
-                style={{
-                  color: "var(--warn)",
-                  borderColor: "color-mix(in oklch, var(--warn) 30%, var(--line) 70%)",
-                  background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
-                }}
+          {isOpen && (
+            <SurfaceCard
+              className="absolute bottom-[calc(100%+0.55rem)] left-1/2 z-10 w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-[22px] px-3 py-3 shadow-xl"
+              style={{
+                borderColor: "color-mix(in oklch, var(--warn) 26%, var(--line) 74%)",
+                background: "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)",
+              }}
+            >
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
+                {isKo ? "수동 개입" : "Manual intervention"}
+              </div>
+              <div className="mt-1 text-sm font-semibold" style={{ color: "var(--fg)" }}>
+                {warning.title}
+              </div>
+              <div
+                className="mt-2 break-words whitespace-pre-wrap text-xs leading-5"
+                style={{ color: "var(--fg-muted)" }}
               >
-                {isKo ? "세부 보기" : "Open detail"}
-              </button>
-            </div>
+                {warning.reason
+                  ?? (isKo
+                    ? "구체 사유는 카드 상세에서 확인할 수 있습니다."
+                    : "Open the detail drawer to inspect the full reason.")}
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <span className="text-[11px]" style={{ color: "var(--fg-faint)" }}>
+                  {warning.issueNumber ? `#${warning.issueNumber}` : warning.status}
+                </span>
+                <SurfaceActionButton
+                  tone="warn"
+                  compact
+                  className="pointer-events-auto rounded-full"
+                  onClick={() => onSelectAgent?.(agent)}
+                >
+                  {isKo ? "세부 보기" : "Open detail"}
+                </SurfaceActionButton>
+              </div>
+            </SurfaceCard>
+          )}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -656,12 +701,42 @@ function MobileAgentStatusGrid({
     return (a.alias || a.name_ko || a.name).localeCompare(b.alias || b.name_ko || b.name);
   });
 
+  const [expandedWarningAgentId, setExpandedWarningAgentId] = useState<string | null>(null);
+  const manualCount = sorted.reduce(
+    (count, agent) => count + (manualInterventionByAgent.has(agent.id) ? 1 : 0),
+    0,
+  );
+
+  useEffect(() => {
+    if (!expandedWarningAgentId) return;
+    if (!manualInterventionByAgent.has(expandedWarningAgentId)) {
+      setExpandedWarningAgentId(null);
+    }
+  }, [expandedWarningAgentId, manualInterventionByAgent]);
+
   return (
     <div className="mt-3 px-3 pb-6">
-      <div className="text-xs font-semibold uppercase tracking-[0.24em] mb-2 px-1" style={{ color: "var(--th-text-muted)" }}>
-        {isKo ? "에이전트 현황" : "Agent Status"}
-      </div>
-      <div className="grid grid-cols-2 gap-2">
+      <SurfaceSection
+        eyebrow="Office Lite"
+        title={isKo ? "에이전트 현황" : "Agent Status"}
+        description={
+          isKo
+            ? "수동 개입, 좌석 상태, 대표 작업을 모바일 카드로 빠르게 확인합니다."
+            : "Review manual interventions, seat state, and the primary task in compact mobile cards."
+        }
+        badge={isKo ? `${sorted.length}명` : `${sorted.length} agents`}
+        className="rounded-[30px] p-4 sm:p-5"
+      >
+        {manualCount > 0 && (
+          <SurfaceNotice tone="warn" compact className="mt-4">
+            <div className="text-[11px] leading-5">
+              {isKo
+                ? `수동 개입이 필요한 에이전트 ${manualCount}명이 상단으로 정렬되어 있습니다.`
+                : `${manualCount} agents with manual intervention are pinned to the top.`}
+            </div>
+          </SurfaceNotice>
+        )}
+        <div className="mt-4 grid grid-cols-2 gap-2">
         {sorted.map((agent) => {
           const status = seatStatusByAgent.get(agent.id) ?? "idle";
           const statusMeta = getSeatStatusMeta(status, isKo);
@@ -670,78 +745,133 @@ function MobileAgentStatusGrid({
           const preview = manualIntervention?.reason
             ? previewManualReason(manualIntervention.reason)
             : previewCardTitle(primaryCard?.title ?? null);
+          const isWarningExpanded = expandedWarningAgentId === agent.id;
 
           return (
-            <button
+            <SurfaceCard
               key={agent.id}
-              type="button"
-              onClick={() => onSelectAgent?.(agent)}
-              className="rounded-2xl px-3 py-3 text-left"
+              className="rounded-[24px] px-3 py-3 text-left"
               style={{
                 background: manualIntervention
-                  ? "color-mix(in oklch, var(--warn) 8%, var(--bg-2) 92%)"
-                  : "color-mix(in oklch, var(--fg-faint) 6%, var(--bg-2) 94%)",
-                border: manualIntervention
-                  ? "1px solid color-mix(in oklch, var(--warn) 28%, var(--line) 72%)"
-                  : "1px solid var(--th-card-border)",
+                  ? "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)"
+                  : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                borderColor: manualIntervention
+                  ? "color-mix(in srgb, var(--th-accent-warn) 26%, var(--th-border) 74%)"
+                  : "color-mix(in srgb, var(--th-border) 68%, transparent)",
               }}
             >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="text-base">{agent.avatar_emoji}</span>
-                  <span className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
-                    {agent.alias || agent.name_ko || agent.name}
-                  </span>
-                </div>
-                {manualIntervention && (
-                  <span
-                    className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                    style={{
-                      color: "var(--warn)",
-                      background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
-                    }}
-                  >
-                    {isKo ? "수동 개입" : "Manual"}
-                  </span>
-                )}
-              </div>
-              <div className="mt-2 flex items-center gap-1.5">
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ background: statusMeta.color }}
-                />
-                <span
-                  className="truncate text-xs"
-                  style={{ color: statusMeta.color }}
-                >
-                  {agent.session_info || statusMeta.label}
-                </span>
-              </div>
-              {preview && (
-                <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-                  {preview}
-                </div>
-              )}
-              {agent.department_name_ko && (
-                <div className="mt-2">
-                  <span
-                    className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
-                    style={{
-                      color: statusMeta.color,
-                      background: statusMeta.background,
-                      border: `1px solid ${statusMeta.border}`,
-                    }}
-                  >
-                    <span className="truncate">
-                      {isKo ? agent.department_name_ko : (agent.department_name || agent.department_name_ko)}
+              <button type="button" onClick={() => onSelectAgent?.(agent)} className="w-full text-left">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="text-base">{agent.avatar_emoji}</span>
+                    <span className="truncate text-xs font-medium" style={{ color: "var(--th-text)" }}>
+                      {agent.alias || agent.name_ko || agent.name}
                     </span>
+                  </div>
+                  {manualIntervention && (
+                    <span
+                      className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                      style={{
+                        color: "var(--warn)",
+                        background: "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)",
+                      }}
+                    >
+                      {isKo ? "수동 개입" : "Manual"}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ background: statusMeta.color }}
+                  />
+                  <span
+                    className="truncate text-xs"
+                    style={{ color: statusMeta.color }}
+                  >
+                    {agent.session_info || statusMeta.label}
                   </span>
                 </div>
+                {preview && (
+                  <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                    {preview}
+                  </div>
+                )}
+                {agent.department_name_ko && (
+                  <div className="mt-2">
+                    <span
+                      className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-[10px] font-medium"
+                      style={{
+                        color: statusMeta.color,
+                        background: statusMeta.background,
+                        border: `1px solid ${statusMeta.border}`,
+                      }}
+                    >
+                      <span className="truncate">
+                        {isKo ? agent.department_name_ko : (agent.department_name || agent.department_name_ko)}
+                      </span>
+                    </span>
+                  </div>
+                )}
+              </button>
+              {manualIntervention && (
+                <div className="mt-3">
+                  <SurfaceNotice
+                    tone="warn"
+                    compact
+                    className="items-start rounded-[20px]"
+                    action={(
+                      <SurfaceActionButton
+                        tone="warn"
+                        compact
+                        className="shrink-0 rounded-full"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setExpandedWarningAgentId((current) => (current === agent.id ? null : agent.id));
+                        }}
+                        aria-expanded={isWarningExpanded}
+                      >
+                      {isWarningExpanded
+                        ? (isKo ? "접기" : "Hide")
+                        : (isKo ? "사유 보기" : "Show reason")}
+                      </SurfaceActionButton>
+                    )}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--warn)" }}>
+                        {isKo ? "경고" : "Warning"}
+                      </div>
+                      <div className="mt-1 text-[11px] font-semibold leading-5" style={{ color: "var(--th-text)" }}>
+                        {manualIntervention.title}
+                      </div>
+                    </div>
+                  </SurfaceNotice>
+                  {isWarningExpanded && (
+                    <SurfaceCard
+                      className="mt-2 rounded-[20px] px-3 py-3"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
+                        background: "color-mix(in srgb, var(--th-badge-amber-bg) 62%, var(--th-card-bg) 38%)",
+                      }}
+                    >
+                      <div
+                        className="break-words whitespace-pre-wrap text-[11px] leading-5"
+                        style={{ color: "var(--th-text-muted)" }}
+                      >
+                        {manualIntervention.reason
+                          ?? (isKo
+                            ? "구체 사유는 상세 패널에서 확인할 수 있습니다."
+                            : "Open the detail panel to inspect the full reason.")}
+                      </div>
+                    </SurfaceCard>
+                  )}
+                </div>
               )}
-            </button>
+            </SurfaceCard>
           );
         })}
-      </div>
+        </div>
+      </SurfaceSection>
     </div>
   );
 }

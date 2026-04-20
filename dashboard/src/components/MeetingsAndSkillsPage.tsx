@@ -181,7 +181,11 @@ export default function MeetingsAndSkillsPage({
   }, [meetings]);
 
   const renderMeetingsPanel = () => (
-    <div ref={meetingsRef} className="min-w-0">
+    <div
+      ref={meetingsRef}
+      className="min-w-0"
+      data-testid="meetings-page-timeline"
+    >
       <MeetingMinutesView
         meetings={meetings}
         onRefresh={onRefresh}
@@ -196,29 +200,32 @@ export default function MeetingsAndSkillsPage({
   );
 
   const renderSkillsPanel = () => (
-    <SurfaceSection
-      eyebrow={t({ ko: "Skills", en: "Skills" })}
-      title={t({ ko: "스킬 카탈로그", en: "Skill Catalog" })}
-      description={t({
-        ko: "회의 타임라인 옆에서 최근에 축적된 자동화 스킬을 함께 확인합니다.",
-        en: "Review the current automation skill catalog alongside the meeting timeline.",
-      })}
-      className="rounded-[28px] p-4 sm:p-5"
-      style={{
-        borderColor:
-          "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
-      }}
-    >
-      <div className="meetings-and-skills__skills mt-4 min-w-0">
-        <SkillCatalogView embedded />
-      </div>
-    </SurfaceSection>
+    <div data-testid="meetings-page-skills" className="min-w-0">
+      <SurfaceSection
+        eyebrow={t({ ko: "Skills", en: "Skills" })}
+        title={t({ ko: "스킬 카탈로그", en: "Skill Catalog" })}
+        description={t({
+          ko: "회의 타임라인 옆에서 최근에 축적된 자동화 스킬을 함께 확인합니다.",
+          en: "Review the current automation skill catalog alongside the meeting timeline.",
+        })}
+        className="rounded-[28px] p-4 sm:p-5"
+        style={{
+          borderColor:
+            "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+        }}
+      >
+        <div className="meetings-and-skills__skills mt-4 min-w-0">
+          <SkillCatalogView embedded />
+        </div>
+      </SurfaceSection>
+    </div>
   );
 
   return (
     <div
+      data-testid="meetings-page"
       className="mx-auto h-full w-full max-w-[1600px] min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >

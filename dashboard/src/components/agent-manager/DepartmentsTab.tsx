@@ -47,7 +47,7 @@ export default function DepartmentsTab({
   onDragEnd,
 }: DepartmentsTabProps) {
   return (
-    <div className="space-y-4">
+    <div data-testid="agents-departments-tab" className="space-y-4">
       {deptOrderDirty && (
         <SurfaceNotice
           tone="info"
@@ -86,6 +86,7 @@ export default function DepartmentsTab({
           const showDropAfter = isDragTarget && dragOverPosition === "after";
           return (
             <SurfaceCard
+              data-testid={`agents-department-card-${dept.id}`}
               key={dept.id}
               className={`group relative px-4 py-4 transition-all hover:shadow-md ${isDragging ? "opacity-60" : ""}`}
               style={{ cursor: "grab" }}

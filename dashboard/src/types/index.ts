@@ -551,11 +551,12 @@ export interface PipelineConfigFull {
   transitions: {
     from: string;
     to: string;
-    type: "free" | "gated";
+    type: "free" | "gated" | "force_only";
     gates?: string[];
   }[];
   gates: Record<string, { type: string; check?: string; description?: string }>;
   hooks: Record<string, { on_enter: string[]; on_exit: string[] }>;
+  events: Record<string, string[]>;
   clocks: Record<string, { set: string; mode?: string }>;
   timeouts: Record<
     string,
@@ -582,6 +583,7 @@ export interface PipelineOverride {
   transitions?: PipelineConfigFull["transitions"];
   gates?: PipelineConfigFull["gates"];
   hooks?: PipelineConfigFull["hooks"];
+  events?: PipelineConfigFull["events"];
   clocks?: PipelineConfigFull["clocks"];
   timeouts?: PipelineConfigFull["timeouts"];
   phase_gate?: PhaseGateConfig;

@@ -211,6 +211,7 @@ function BacklogCardDrawer({
       onClick={onClose}
     >
       <div
+        data-testid="agents-backlog-drawer"
         role="dialog"
         aria-modal="true"
         aria-label={card.title}
@@ -492,7 +493,7 @@ export default function BacklogTab({
   };
 
   return (
-    <div className="space-y-4">
+    <div data-testid="agents-backlog-tab" className="space-y-4">
       <div className="grid gap-3 md:grid-cols-3">
         <SurfaceMetricPill
           label={tr("백로그 총량", "Backlog Total")}
@@ -529,6 +530,7 @@ export default function BacklogTab({
 
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <select
+              data-testid="agents-backlog-filter-provider"
               value={providerFilter}
               onChange={(event) => setProviderFilter(event.target.value)}
               className="rounded-xl px-3 py-2 text-xs outline-none"
@@ -547,6 +549,7 @@ export default function BacklogTab({
             </select>
 
             <select
+              data-testid="agents-backlog-filter-severity"
               value={severityFilter}
               onChange={(event) => setSeverityFilter(event.target.value as SeverityFilter)}
               className="rounded-xl px-3 py-2 text-xs outline-none"
@@ -565,6 +568,7 @@ export default function BacklogTab({
             </select>
 
             <select
+              data-testid="agents-backlog-filter-status"
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
               className="rounded-xl px-3 py-2 text-xs outline-none"
@@ -583,6 +587,7 @@ export default function BacklogTab({
             </select>
 
             <select
+              data-testid="agents-backlog-sort"
               value={`${sortKey}:${sortDirection}`}
               onChange={(event) => {
                 const [nextKey, nextDirection] = event.target.value.split(":") as [BacklogSortKey, SortDirection];
@@ -614,7 +619,11 @@ export default function BacklogTab({
         </SurfaceEmptyState>
       ) : (
         <>
-          <div className="hidden overflow-hidden rounded-[28px] border lg:block" style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}>
+          <div
+            data-testid="agents-backlog-table"
+            className="hidden overflow-hidden rounded-[28px] border lg:block"
+            style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}
+          >
             <div
               className="grid items-center gap-3 border-b px-4 py-3"
               style={{
@@ -639,6 +648,7 @@ export default function BacklogTab({
                 const providerMeta = getProviderMeta(resolveCardAgent(card, agentMap)?.cli_provider);
                 return (
                   <button
+                    data-testid={`agents-backlog-row-${card.id}`}
                     key={card.id}
                     type="button"
                     onClick={() => setSelectedCard(card)}
@@ -705,12 +715,13 @@ export default function BacklogTab({
             </div>
           </div>
 
-          <div className="space-y-3 lg:hidden">
+          <div data-testid="agents-backlog-cards" className="space-y-3 lg:hidden">
             {filteredCards.map((card) => {
               const assignee = card.assignee_agent_id ? agentMap.get(card.assignee_agent_id) : null;
               const providerMeta = getProviderMeta(resolveCardAgent(card, agentMap)?.cli_provider);
               return (
                 <SurfaceCard
+                  data-testid={`agents-backlog-card-${card.id}`}
                   key={card.id}
                   onClick={() => setSelectedCard(card)}
                   className="cursor-pointer space-y-3 rounded-[28px] p-4 transition-transform hover:-translate-y-0.5"
