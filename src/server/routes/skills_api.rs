@@ -69,7 +69,13 @@ fn push_skill_root(
     }
 }
 
-fn discover_skills_from_disk() -> Vec<DiscoveredSkill> {
+#[derive(Debug, Default)]
+struct DiscoveryResult {
+    skills: Vec<DiscoveredSkill>,
+    any_root_errored: bool,
+}
+
+fn discover_skills_from_disk() -> DiscoveryResult {
     let mut roots = Vec::new();
     let mut seen_roots = HashSet::new();
     if let Some(runtime_root) = crate::config::runtime_root() {
@@ -111,13 +117,23 @@ fn discover_skills_from_disk() -> Vec<DiscoveredSkill> {
     }
 
     let mut discovered = Vec::new();
+    let mut any_root_errored = false;
     let mut seen_ids = HashSet::new();
     for (root, kind) in roots {
         if !root.is_dir() {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::warn!(
+                    root = %root.display(),
+                    error = %err,
+                    "sync_skills_from_disk: failed to enumerate skill root; skipping prune"
+                );
+                any_root_errored = true;
+                continue;
+            }
         };
 
         for entry in entries.filter_map(|e| e.ok()) {
@@ -173,23 +189,34 @@ fn discover_skills_from_disk() -> Vec<DiscoveredSkill> {
         }
     }
 
-    discovered
+    DiscoveryResult {
+        skills: discovered,
+        any_root_errored,
+    }
 }
 
 pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) -> HashSet<String> {
-    let discovered = discover_skills_from_disk();
+    sync_skills_from_disk_with_prune(conn, true)
+}
+
+pub(super) fn sync_skills_from_disk_with_prune(
+    conn: &libsql_rusqlite::Connection,
+    prune_missing: bool,
+) -> HashSet<String> {
+    let discovery = discover_skills_from_disk();
     let mut disk_skill_ids = HashSet::new();
 
-    for skill in discovered {
+    for skill in discovery.skills {
         disk_skill_ids.insert(skill.id.clone());
         let _ = conn.execute(
-            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)
+            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    description = excluded.description,
                    source_path = excluded.source_path,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at,
+                   deleted_at = NULL",
             libsql_rusqlite::params![
                 skill.id,
                 skill.id,
@@ -200,7 +227,40 @@ pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) -> HashS
         );
     }
 
+    if prune_missing {
+        if discovery.any_root_errored {
+            tracing::warn!(
+                "sync_skills_from_disk: pruning skipped due to partial disk failure \
+                 (at least one skill root failed to enumerate)"
+            );
+        } else {
+            prune_missing_skills(conn, &disk_skill_ids);
+        }
+    }
+
     disk_skill_ids
+}
+
+fn prune_missing_skills(conn: &libsql_rusqlite::Connection, seen: &HashSet<String>) {
+    let existing_ids: Vec<String> =
+        match conn.prepare("SELECT id FROM skills WHERE deleted_at IS NULL") {
+            Ok(mut stmt) => match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|row| row.ok()).collect(),
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+
+    let now_secs = Utc::now().timestamp();
+    for id in existing_ids {
+        if seen.contains(&id) {
+            continue;
+        }
+        let _ = conn.execute(
+            "UPDATE skills SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            libsql_rusqlite::params![id, now_secs],
+        );
+    }
 }
 
 #[derive(Default)]
@@ -238,7 +298,8 @@ fn load_skill_metadata(
         "SELECT id,
                 COALESCE(name, id) AS skill_name,
                 COALESCE(description, name, id) AS skill_desc
-         FROM skills",
+         FROM skills
+         WHERE deleted_at IS NULL",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -602,7 +663,7 @@ pub async fn prune(
     };
 
     let dry_run = params.dry_run.unwrap_or(false);
-    let disk_skill_ids = sync_skills_from_disk(&conn);
+    let disk_skill_ids = sync_skills_from_disk_with_prune(&conn, !dry_run);
     let stale_skill_ids = match load_stale_skill_ids(&conn, &disk_skill_ids) {
         Ok(ids) => ids,
         Err(e) => {
@@ -613,20 +674,6 @@ pub async fn prune(
         }
     };
 
-    if !dry_run {
-        for skill_id in &stale_skill_ids {
-            if let Err(e) = conn.execute(
-                "DELETE FROM skills WHERE id = ?1",
-                libsql_rusqlite::params![skill_id],
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("failed to prune stale skill {skill_id}: {e}")})),
-                );
-            }
-        }
-    }
-
     (
         StatusCode::OK,
         Json(json!({
@@ -634,8 +681,104 @@ pub async fn prune(
             "dry_run": dry_run,
             "stale_skill_ids": stale_skill_ids,
             "stale_count": stale_skill_ids.len(),
-            "deleted_from_skills": if dry_run { 0 } else { stale_skill_ids.len() },
+            "soft_deleted_from_skills": if dry_run { 0 } else { stale_skill_ids.len() },
             "skill_usage_policy": "preserved",
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_skills_conn() -> libsql_rusqlite::Connection {
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                description TEXT,
+                source_path TEXT,
+                trigger_patterns TEXT,
+                updated_at TEXT,
+                deleted_at INTEGER
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_skill(conn: &libsql_rusqlite::Connection, id: &str, description: &str) {
+        conn.execute(
+            "INSERT INTO skills (id, name, description, source_path) VALUES (?1, ?1, ?2, ?3)",
+            libsql_rusqlite::params![id, description, format!("/tmp/skills/{id}/SKILL.md")],
+        )
+        .unwrap();
+    }
+
+    fn deleted_at(conn: &libsql_rusqlite::Connection, id: &str) -> Option<i64> {
+        conn.query_row(
+            "SELECT deleted_at FROM skills WHERE id = ?1",
+            libsql_rusqlite::params![id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn prune_soft_deletes_rows_not_present_on_disk() {
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "alive-skill", "still on disk");
+        insert_skill(&conn, "deleted-skill", "removed from disk");
+
+        let mut seen = HashSet::new();
+        seen.insert("alive-skill".to_string());
+
+        prune_missing_skills(&conn, &seen);
+
+        assert_eq!(deleted_at(&conn, "alive-skill"), None);
+        assert!(deleted_at(&conn, "deleted-skill").is_some());
+    }
+
+    #[test]
+    fn load_skill_metadata_excludes_soft_deleted_rows() {
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "alive", "alive desc");
+        insert_skill(&conn, "stale", "stale desc");
+
+        let mut seen = HashSet::new();
+        seen.insert("alive".to_string());
+        prune_missing_skills(&conn, &seen);
+
+        let metadata = load_skill_metadata(&conn).unwrap();
+        assert!(metadata.contains_key("alive"));
+        assert!(!metadata.contains_key("stale"));
+    }
+
+    #[test]
+    fn sync_upsert_clears_deleted_at_when_skill_returns() {
+        let conn = setup_skills_conn();
+        insert_skill(&conn, "resurrected", "old desc");
+        prune_missing_skills(&conn, &HashSet::new());
+        assert!(deleted_at(&conn, "resurrected").is_some());
+
+        conn.execute(
+            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at, deleted_at)
+             VALUES (?1, ?1, ?2, ?3, NULL, NULL, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               description = excluded.description,
+               source_path = excluded.source_path,
+               updated_at = excluded.updated_at,
+               deleted_at = NULL",
+            libsql_rusqlite::params![
+                "resurrected",
+                "new desc",
+                "/tmp/skills/resurrected/SKILL.md"
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(deleted_at(&conn, "resurrected"), None);
+    }
 }

@@ -158,6 +158,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN suggestion_pending_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN review_entered_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN awaiting_dod_at TEXT;");
+
+    // #816 (review fixes): skills soft-delete column. Hard delete broke
+    // /api/agents/:id/skills INNER JOIN and transcript-based analytics; switch
+    // to soft delete by setting deleted_at to a unix timestamp when a skill
+    // disappears from disk, and clearing it when the skill re-appears.
+    let _ = conn.execute_batch("ALTER TABLE skills ADD COLUMN deleted_at INTEGER;");
+
     let _ = conn.execute_batch(
         "UPDATE agents
          SET discord_channel_cc = COALESCE(NULLIF(TRIM(discord_channel_cc), ''), NULLIF(TRIM(discord_channel_id), '')),
