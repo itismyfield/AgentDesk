@@ -70,6 +70,23 @@ pub(super) struct InflightTurnState {
     /// Generation that owns the planned restart/handoff lifecycle.
     #[serde(default)]
     pub restart_generation: Option<u64>,
+    /// #897 counter-model re-review — `true` when this inflight was
+    /// synthesised by `POST /api/inflight/rebind` to adopt a live tmux
+    /// session that had no real user-authored turn driving it (zero-valued
+    /// `user_msg_id` / `current_msg_id` / `request_owner_user_id`).
+    ///
+    /// Callers that route based on "is there a live foreground turn" must
+    /// treat a rebind-origin inflight as **absent** — otherwise the
+    /// background-trigger notify-bot predicate in
+    /// `should_route_terminal_response_via_notify_bot` sees a
+    /// non-rebind_origin inflight, routes the recovered auto-trigger
+    /// response back through the command bot, and reintroduces the
+    /// loop-hazard that #826 was fixing. Reactions / transcript writes
+    /// that key off `user_msg_id` should also skip work when this flag is
+    /// set, because the placeholder IDs do not identify a real Discord
+    /// message.
+    #[serde(default)]
+    pub rebind_origin: bool,
 }
 
 impl InflightTurnState {
@@ -121,6 +138,7 @@ impl InflightTurnState {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         }
     }
 

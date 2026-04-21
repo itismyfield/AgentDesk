@@ -1710,7 +1710,14 @@ pub(crate) async fn rebind_inflight_for_channel(
 
     // Build and persist the new inflight state. No request_owner / msg_ids
     // apply because this recovery has no originating Discord message.
-    let state = super::inflight::InflightTurnState::new(
+    //
+    // #897 counter-model re-review (round 2): flag this as `rebind_origin`
+    // so routing predicates that key off "is there a live foreground turn"
+    // treat it as absent. Without that, the watcher's
+    // `should_route_terminal_response_via_notify_bot` sees a non-empty
+    // inflight and drops background-trigger output back to the command-bot
+    // path — precisely the loop-hazard #826 was avoiding.
+    let mut state = super::inflight::InflightTurnState::new(
         provider.clone(),
         channel_id,
         channel_name.clone(),
@@ -1724,6 +1731,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         Some(input_fifo.clone()),
         initial_offset,
     );
+    state.rebind_origin = true;
 
     // Atomic create-or-fail: if a legitimate turn created its inflight file
     // between the preflight check above and this point, the write fails
@@ -2092,6 +2100,7 @@ mod tests {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         };
 
         assert!(
@@ -2202,6 +2211,7 @@ mod tests {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         };
 
         save_missing_session_handoff(

@@ -129,12 +129,22 @@ fn build_monitor_completion_message(response: &str) -> String {
 /// the notify-bot path (existing pre-#826 behaviour, silent drop). Codex
 /// coverage is tracked as a follow-up in #898.
 ///
+/// **`inflight_present` semantics (#897 round 2):** this parameter tracks
+/// the presence of a *foreground* inflight (a legitimate turn driven by a
+/// real Discord user message), NOT every file under `discord_inflight/`.
+/// A `rebind_origin` inflight synthesised by `POST /api/inflight/rebind`
+/// must be passed as `false` here — otherwise the recovered auto-trigger
+/// response is routed through the command bot, reintroducing the #826
+/// loop hazard. The caller (watcher loop) filters the inflight snapshot
+/// on `!state.rebind_origin` before invoking this predicate.
+///
 /// Returns `true` only when ALL of the following hold:
 /// 1. The turn produced an assistant response (no use rerouting emptiness).
 /// 2. A `system/task_notification` event was observed in the turn's JSONL
 ///    stream (canonical Claude Code marker for a background-trigger turn).
-/// 3. No inflight state exists for the channel (rules out concurrent
-///    foreground turns that happen to also include the marker).
+/// 3. No FOREGROUND inflight state exists for the channel (rules out
+///    concurrent real user turns that happen to also include the marker;
+///    a rebind-origin synthetic inflight does not count).
 #[inline]
 pub(super) fn should_route_terminal_response_via_notify_bot(
     has_assistant_response: bool,
@@ -234,10 +244,18 @@ pub(super) fn build_bg_trigger_session_key(
 /// command bot. The notify-bot is dropped at the intake gate, which is what
 /// keeps the auto-trigger path from feeding back into a new turn.
 ///
-/// **Dedupe** (#897 counter-model review P1): both `reason_code` and
-/// `session_key` are set so `message_outbox::enqueue`'s lifecycle-notification
-/// dedupe arms. `session_key` encodes `channel_id + data_start_offset +
-/// content hash`, so:
+/// **Storage backend** (#897 counter-model re-review round 2 Medium):
+/// matches `turn_bridge::enqueue_headless_delivery`'s priority —
+/// `pg_pool` first when available (primary production storage), falling
+/// back to the SQLite `Db` when only the legacy backend is wired in.
+/// Without this, a PG-backed runtime would reach the old SQLite-only
+/// code path with `Db::None` and silently fall back to direct-send,
+/// bypassing the new dedupe / failure-reconcile behaviour entirely.
+///
+/// **Dedupe** (#897 round 1 P1 #3): both `reason_code` and `session_key`
+/// are set so the lifecycle-notification dedupe in
+/// `message_outbox::enqueue` can arm. `session_key` encodes
+/// `channel_id + data_start_offset + content hash`, so:
 ///   * Distinct background completions in the same channel produce distinct
 ///     session_keys (different offsets or different content) → each lands
 ///     as its own outbox row.
@@ -248,10 +266,19 @@ pub(super) fn build_bg_trigger_session_key(
 ///   * The dedupe lookup filters out `status='failed'` rows, so a permanently
 ///     failed prior attempt is NOT allowed to suppress a fresh re-stage.
 ///
-/// Returns `false` only when the database handle is unavailable or the SQL
-/// insert fails — the caller falls back to a direct command-bot send in that
-/// case so the message is never silently lost.
-pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
+/// The PG path currently does INSERT without a per-tick dedupe query (the
+/// SQLite-only `enqueue` helper lives in `message_outbox.rs`; porting it
+/// to a shared sqlx/rusqlite interface is tracked separately). Same-row
+/// dedupe on the PG side is still achievable via a `UNIQUE(reason_code,
+/// session_key, status) WHERE status != 'failed'` partial index, but
+/// that's a schema change outside this PR's scope. Follow-up tracked in
+/// #898-family.
+///
+/// Returns `false` only when BOTH backends are unavailable or their
+/// insert fails — the caller falls back to a direct command-bot send in
+/// that case so the message is never silently lost.
+pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
+    pg_pool: Option<&sqlx::PgPool>,
     db: Option<&crate::db::Db>,
     channel_id: ChannelId,
     content: &str,
@@ -261,11 +288,38 @@ pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
     if trimmed.is_empty() {
         return true;
     }
+    let target = format!("channel:{}", channel_id.get());
+    let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
+
+    // Prefer the Postgres-backed outbox when available — mirrors the
+    // headless-delivery ordering in `turn_bridge::enqueue_headless_delivery`.
+    if let Some(pool) = pg_pool {
+        match sqlx::query(
+            "INSERT INTO message_outbox
+             (target, content, bot, source, reason_code, session_key)
+             VALUES ($1, $2, 'notify', 'system', 'bg_trigger.auto_turn', $3)",
+        )
+        .bind(target.as_str())
+        .bind(content)
+        .bind(session_key.as_str())
+        .execute(pool)
+        .await
+        {
+            Ok(_) => return true,
+            Err(error) => {
+                tracing::warn!(
+                    "background-trigger postgres outbox insert failed for channel {}: {} — falling back to sqlite",
+                    channel_id,
+                    error
+                );
+                // Fall through to the SQLite fallback below.
+            }
+        }
+    }
+
     let Some(db) = db else {
         return false;
     };
-    let target = format!("channel:{}", channel_id.get());
-    let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
     // Call `enqueue` directly (instead of `enqueue_with_db`) so we can
     // distinguish a dedupe-skip (`Ok(false)` — an EARLIER retry already wrote
     // the row, so this call is conceptually successful) from a genuine SQL
@@ -316,24 +370,90 @@ pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
 /// roll `last_enqueued_offset` back and re-stage the same tmux range on
 /// the next watcher tick.
 ///
+/// **Storage backend** (#897 round 2 Medium): prefers `pg_pool` when
+/// available, falling back to the SQLite `Db` — mirrors the enqueue
+/// path's ordering so a PG-backed runtime actually reconciles its own
+/// failed rows instead of silently skipping when `Db::None`.
+///
 /// Why this is safe to re-stage:
 /// * `message_outbox::enqueue`'s lifecycle dedupe filters out rows where
 ///   `status='failed'`, so re-inserting at the same session_key produces a
 ///   fresh pending row rather than collapsing into the dead one.
-/// * We delete the failed rows here so they no longer pollute `SELECT *`
+/// * We delete the failed rows here so they don't pollute `SELECT *`
 ///   queries or eat unbounded table space.
 ///
 /// Without this reconciliation a single transient notify-bot or Discord
 /// failure permanently suppresses re-enqueue for the remainder of the
 /// watcher's lifetime — the exact P1 gap the counter-model reviewer
 /// flagged. See PR #897.
-fn reconcile_failed_bg_trigger_enqueues_for_channel(
+async fn reconcile_failed_bg_trigger_enqueues_for_channel(
+    pg_pool: Option<&sqlx::PgPool>,
     db: Option<&crate::db::Db>,
     channel_id: ChannelId,
 ) -> Option<u64> {
+    let target = format!("channel:{}", channel_id.get());
+
+    // Prefer the Postgres-backed outbox.
+    if let Some(pool) = pg_pool {
+        let rows_res = sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT id, session_key FROM message_outbox
+             WHERE target = $1
+               AND bot = 'notify'
+               AND source = 'system'
+               AND reason_code = 'bg_trigger.auto_turn'
+               AND status = 'failed'",
+        )
+        .bind(target.as_str())
+        .fetch_all(pool)
+        .await;
+
+        match rows_res {
+            Ok(rows) if !rows.is_empty() => {
+                let mut min_offset: Option<u64> = None;
+                for (_, session_key) in &rows {
+                    if let Some(offset) = session_key
+                        .as_deref()
+                        .and_then(parse_bg_trigger_offset_from_session_key)
+                    {
+                        min_offset = Some(min_offset.map(|m| m.min(offset)).unwrap_or(offset));
+                    }
+                }
+                for (id, _) in &rows {
+                    if let Err(error) = sqlx::query("DELETE FROM message_outbox WHERE id = $1")
+                        .bind(id)
+                        .execute(pool)
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to delete reconciled bg_trigger row {}: {}",
+                            id,
+                            error
+                        );
+                    }
+                }
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?}) [pg]",
+                    rows.len(),
+                    channel_id,
+                    min_offset,
+                );
+                return min_offset;
+            }
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    "postgres bg_trigger reconcile query failed for channel {}: {} — falling back to sqlite",
+                    channel_id,
+                    error
+                );
+                // Fall through to SQLite fallback below.
+            }
+        }
+    }
+
     let db = db?;
     let conn = db.separate_conn().ok()?;
-    let target = format!("channel:{}", channel_id.get());
 
     let rows: Vec<(i64, String)> = {
         let mut stmt = conn
@@ -373,7 +493,7 @@ fn reconcile_failed_bg_trigger_enqueues_for_channel(
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?})",
+        "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?}) [sqlite]",
         rows.len(),
         channel_id,
         min_offset,
@@ -877,8 +997,12 @@ pub(super) async fn tmux_output_watcher(
         // never blocks the rest of the loop — a SQL hiccup just returns
         // None.
         if rotation_tick % BG_FAILURE_RECONCILE_EVERY == 0 {
-            if let Some(min_failed_offset) =
-                reconcile_failed_bg_trigger_enqueues_for_channel(shared.db.as_ref(), channel_id)
+            if let Some(min_failed_offset) = reconcile_failed_bg_trigger_enqueues_for_channel(
+                shared.pg_pool.as_ref(),
+                shared.db.as_ref(),
+                channel_id,
+            )
+            .await
             {
                 last_enqueued_offset = rollback_enqueued_offset_for_reconciled_failures(
                     last_enqueued_offset,
@@ -1849,9 +1973,24 @@ pub(super) async fn tmux_output_watcher(
         // per `docs/background-task-pattern.md`; it is dropped at the intake
         // gate so the agent cannot self-trigger another turn off this
         // delivery.
-        let route_via_notify_bot = has_assistant_response
-            && task_notification_seen
-            && super::inflight::load_inflight_state(&watcher_provider, channel_id.get()).is_none();
+        //
+        // #897 counter-model re-review (round 2): a `rebind_origin`
+        // inflight is a SYNTHETIC placeholder written by
+        // `POST /api/inflight/rebind` to adopt a live tmux session that had
+        // no real user-authored turn driving it. It must be treated as
+        // absent for this predicate — otherwise the recovered
+        // auto-trigger's response drops back to the command-bot relay,
+        // reintroducing the loop hazard the notify routing was fixing.
+        let inflight_snapshot =
+            super::inflight::load_inflight_state(&watcher_provider, channel_id.get());
+        let foreground_inflight_present = inflight_snapshot
+            .as_ref()
+            .is_some_and(|state| !state.rebind_origin);
+        let route_via_notify_bot = should_route_terminal_response_via_notify_bot(
+            has_assistant_response,
+            task_notification_seen,
+            foreground_inflight_present,
+        );
 
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
@@ -1892,11 +2031,13 @@ pub(super) async fn tmux_output_watcher(
                 }
                 let enqueued = if has_current_response {
                     enqueue_background_trigger_response_to_notify_outbox(
+                        shared.pg_pool.as_ref(),
                         shared.db.as_ref(),
                         channel_id,
                         &prefixed,
                         data_start_offset,
                     )
+                    .await
                 } else {
                     // No assistant text to deliver — nothing to commit.
                     true
@@ -3934,18 +4075,20 @@ mod tests {
     /// terminal response on the notify-bot outbox so the user sees it. Going
     /// through the command bot would risk other agents in the channel treating
     /// the response as an actionable directive (infinite-loop hazard).
-    #[test]
-    fn background_trigger_response_enqueues_notify_outbox_row() {
+    #[tokio::test]
+    async fn background_trigger_response_enqueues_notify_outbox_row() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(987_654_321);
         let content = "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\nPR #825 리뷰 4건 fix 완료";
 
         let enqueued = enqueue_background_trigger_response_to_notify_outbox(
+            /*pg_pool*/ None,
             Some(&db),
             channel,
             content,
             /*data_start_offset*/ 4096,
-        );
+        )
+        .await;
         assert!(
             enqueued,
             "background-trigger enqueue must succeed when db is present"
@@ -3996,22 +4139,30 @@ mod tests {
     /// distinct tmux range, so the `session_key` (which includes
     /// `data_start_offset` and a content hash) must differ between them and
     /// the dedupe must NOT collapse legitimately-separate events into one.
-    #[test]
-    fn background_trigger_response_does_not_dedupe_distinct_events() {
+    #[tokio::test]
+    async fn background_trigger_response_does_not_dedupe_distinct_events() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(555_111_222);
-        assert!(enqueue_background_trigger_response_to_notify_outbox(
-            Some(&db),
-            channel,
-            "first completion",
-            /*data_start_offset*/ 1_000,
-        ));
-        assert!(enqueue_background_trigger_response_to_notify_outbox(
-            Some(&db),
-            channel,
-            "second completion",
-            /*data_start_offset*/ 2_000,
-        ));
+        assert!(
+            enqueue_background_trigger_response_to_notify_outbox(
+                None,
+                Some(&db),
+                channel,
+                "first completion",
+                /*data_start_offset*/ 1_000,
+            )
+            .await
+        );
+        assert!(
+            enqueue_background_trigger_response_to_notify_outbox(
+                None,
+                Some(&db),
+                channel,
+                "second completion",
+                /*data_start_offset*/ 2_000,
+            )
+            .await
+        );
 
         let count: i64 = db
             .lock()
@@ -4032,22 +4183,30 @@ mod tests {
     /// identical content) within the dedupe TTL must collapse into a single
     /// outbox row, preventing the watcher from re-enqueuing while the outbox
     /// worker is still driving the same message to Discord.
-    #[test]
-    fn background_trigger_response_dedupes_identical_retry() {
+    #[tokio::test]
+    async fn background_trigger_response_dedupes_identical_retry() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(666_222_333);
-        assert!(enqueue_background_trigger_response_to_notify_outbox(
-            Some(&db),
-            channel,
-            "same content",
-            /*data_start_offset*/ 8_192,
-        ));
-        assert!(enqueue_background_trigger_response_to_notify_outbox(
-            Some(&db),
-            channel,
-            "same content",
-            /*data_start_offset*/ 8_192,
-        ));
+        assert!(
+            enqueue_background_trigger_response_to_notify_outbox(
+                None,
+                Some(&db),
+                channel,
+                "same content",
+                /*data_start_offset*/ 8_192,
+            )
+            .await
+        );
+        assert!(
+            enqueue_background_trigger_response_to_notify_outbox(
+                None,
+                Some(&db),
+                channel,
+                "same content",
+                /*data_start_offset*/ 8_192,
+            )
+            .await
+        );
 
         let count: i64 = db
             .lock()
@@ -4066,16 +4225,20 @@ mod tests {
 
     /// Empty/whitespace responses must short-circuit without writing a row —
     /// otherwise the user sees a noise notification with no content.
-    #[test]
-    fn background_trigger_response_skips_empty_payload() {
+    #[tokio::test]
+    async fn background_trigger_response_skips_empty_payload() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(111_222_333);
-        assert!(enqueue_background_trigger_response_to_notify_outbox(
-            Some(&db),
-            channel,
-            "   \n",
-            0,
-        ));
+        assert!(
+            enqueue_background_trigger_response_to_notify_outbox(
+                None,
+                Some(&db),
+                channel,
+                "   \n",
+                0,
+            )
+            .await
+        );
         let count: i64 = db
             .lock()
             .unwrap()
@@ -4087,15 +4250,17 @@ mod tests {
     /// When the database is unavailable, the helper reports failure so the
     /// caller can fall back to a direct Discord send rather than silently
     /// dropping the response (#826 root cause was a silent drop).
-    #[test]
-    fn background_trigger_response_reports_failure_when_db_missing() {
+    #[tokio::test]
+    async fn background_trigger_response_reports_failure_when_db_missing() {
         let channel = ChannelId::new(999_888_777);
         let ok = enqueue_background_trigger_response_to_notify_outbox(
-            None,
+            /*pg_pool*/ None,
+            /*db*/ None,
             channel,
             "would-have-been-delivered",
             0,
-        );
+        )
+        .await;
         assert!(!ok, "missing db must surface as failure to enable fallback");
     }
 
@@ -4179,8 +4344,8 @@ mod tests {
     /// (b) delete the row so it doesn't accumulate. Combined with the
     /// dedupe lookup's `status != 'failed'` filter, this lets a subsequent
     /// enqueue at the same session_key land as a fresh row.
-    #[test]
-    fn reconcile_failed_bg_trigger_rows_returns_min_offset_and_deletes_them() {
+    #[tokio::test]
+    async fn reconcile_failed_bg_trigger_rows_returns_min_offset_and_deletes_them() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(777_444_111);
 
@@ -4204,7 +4369,8 @@ mod tests {
             .unwrap();
         }
 
-        let min = super::reconcile_failed_bg_trigger_enqueues_for_channel(Some(&db), channel);
+        let min =
+            super::reconcile_failed_bg_trigger_enqueues_for_channel(None, Some(&db), channel).await;
         assert_eq!(
             min,
             Some(1_000),
@@ -4230,11 +4396,12 @@ mod tests {
 
     /// #897 P1 #2: when there are no failed rows the reconciler returns
     /// `None` (no rollback needed) without side effects.
-    #[test]
-    fn reconcile_returns_none_when_no_failed_rows() {
+    #[tokio::test]
+    async fn reconcile_returns_none_when_no_failed_rows() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(888_555_222);
-        let min = super::reconcile_failed_bg_trigger_enqueues_for_channel(Some(&db), channel);
+        let min =
+            super::reconcile_failed_bg_trigger_enqueues_for_channel(None, Some(&db), channel).await;
         assert_eq!(min, None);
     }
 
