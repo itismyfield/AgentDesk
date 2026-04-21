@@ -75,6 +75,17 @@ import {
   type AccentPreset,
   type ThemePreference,
 } from "./themePreferences";
+import { STORAGE_KEYS } from "../lib/storageKeys";
+import { useLocalStorage } from "../lib/useLocalStorage";
+import {
+  DailyMissions,
+  LevelRing,
+  StreakCounter,
+  getAgentLevelFromXp,
+  getMissionResetCountdown,
+  getMissionTotalXp,
+  type DailyMissionViewModel,
+} from "../components/gamification/GamificationShared";
 
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
@@ -105,6 +116,17 @@ type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(3.5rem + env(safe-area-inset-bottom))";
+const HOME_DEFAULT_WIDGETS = [
+  "m_tokens",
+  "m_cost",
+  "m_progress",
+  "m_streak",
+  "office",
+  "missions",
+  "roster",
+  "activity",
+  "kanban",
+];
 const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
   "office",
@@ -140,6 +162,63 @@ const SHELL_TABBAR_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 20;
 const SHELL_BOTTOM_SHEET_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 5;
 const SHELL_TOAST_Z_INDEX = 95;
 const SHELL_MODAL_Z_INDEX = 100;
+const OPERATOR_LEVEL_TITLES_KO = [
+  "신입",
+  "수습",
+  "사원",
+  "주임",
+  "대리",
+  "과장",
+  "차장",
+  "부장",
+  "이사",
+  "사장",
+];
+const OPERATOR_LEVEL_TITLES_EN = [
+  "Newbie",
+  "Trainee",
+  "Staff",
+  "Associate",
+  "Sr. Associate",
+  "Manager",
+  "Asst. Dir.",
+  "Director",
+  "VP",
+  "President",
+];
+
+function areStringArraysEqual(left: readonly string[], right: readonly string[]) {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function normalizeHomeWidgetOrder(
+  value: unknown,
+  defaults: readonly string[] = HOME_DEFAULT_WIDGETS,
+) {
+  const allowed = new Set(defaults);
+  const normalized: string[] = [];
+  if (Array.isArray(value)) {
+    value.forEach((entry) => {
+      if (typeof entry !== "string" || !allowed.has(entry) || normalized.includes(entry)) {
+        return;
+      }
+      normalized.push(entry);
+    });
+  }
+  defaults.forEach((widgetId) => {
+    if (!normalized.includes(widgetId)) {
+      normalized.push(widgetId);
+    }
+  });
+  return normalized;
+}
+
+function getOperatorLevelTitle(level: number, isKo: boolean) {
+  const titles = isKo ? OPERATOR_LEVEL_TITLES_KO : OPERATOR_LEVEL_TITLES_EN;
+  const index = Math.max(0, Math.min(level - 1, titles.length - 1));
+  return titles[index];
+}
 
 const THEME_OPTIONS: Array<{
   id: ThemePreference;
@@ -258,10 +337,34 @@ export default function AppShell({
     () => selectedOfficeLabel(offices, selectedOfficeId, tr),
     [offices, selectedOfficeId, tr],
   );
+  const currentUserXp = useMemo(() => {
+    if (stats?.top_agents?.length) {
+      const samples = stats.top_agents.slice(0, 3);
+      return Math.round(
+        samples.reduce((sum, agent) => sum + agent.stats_xp, 0) /
+          Math.max(samples.length, 1),
+      );
+    }
+    if (agentsWithDispatched.length === 0) {
+      return 0;
+    }
+    const rankedAgents = [...agentsWithDispatched]
+      .sort((left, right) => right.stats_xp - left.stats_xp)
+      .slice(0, 3);
+    return Math.round(
+      rankedAgents.reduce((sum, agent) => sum + agent.stats_xp, 0) /
+        Math.max(rankedAgents.length, 1),
+    );
+  }, [agentsWithDispatched, stats?.top_agents]);
+  const currentUserLevel = useMemo(
+    () => getAgentLevelFromXp(currentUserXp),
+    [currentUserXp],
+  );
   const currentUserLabel = "you";
-  const currentUserDetail = wsConnected
-    ? tr(`${currentOfficeName} · 실시간 연결`, `${currentOfficeName} · live link`)
-    : tr(`${currentOfficeName} · 재연결 중`, `${currentOfficeName} · reconnecting`);
+  const currentUserDetail = `lv.${currentUserLevel.level} · ${getOperatorLevelTitle(
+    currentUserLevel.level,
+    isKo,
+  )}`;
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-color-scheme: dark)");
@@ -605,14 +708,25 @@ export default function AppShell({
                     "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
                 }}
               >
-                <div
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold"
-                  style={{
-                    background: "var(--th-overlay-subtle)",
-                    color: "var(--th-text-primary)",
-                  }}
-                >
-                  AD
+                <div className="shrink-0">
+                  <LevelRing
+                    dataTestId="sidebar-user-level-ring"
+                    value={Math.round(currentUserLevel.progress * 100)}
+                    size={40}
+                    stroke={3}
+                    color="var(--th-accent-primary)"
+                    trackColor="color-mix(in srgb, var(--th-overlay-medium) 86%, transparent)"
+                  >
+                    <div
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-[11px] font-semibold"
+                      style={{
+                        background: "var(--th-overlay-subtle)",
+                        color: "var(--th-text-primary)",
+                      }}
+                    >
+                      AD
+                    </div>
+                  </LevelRing>
                 </div>
                 <div className="min-w-0">
                   <div
@@ -928,10 +1042,12 @@ export default function AppShell({
                 path="/home"
                 element={
                   <HomeOverviewPage
+                    isMobileViewport={isMobileViewport}
                     isKo={isKo}
                     wsConnected={wsConnected}
                     currentOfficeLabel={currentOfficeName}
                     stats={stats}
+                    agents={agentsWithDispatched}
                     meetings={roundTableMeetings}
                     notifications={notifications}
                     kanbanCards={kanbanCards}
@@ -1614,45 +1730,41 @@ function NotificationSummaryRow({
 }
 
 function HomeOverviewPage({
+  isMobileViewport,
   isKo,
   wsConnected,
   currentOfficeLabel,
   stats,
+  agents,
   meetings,
   notifications,
   kanbanCards,
 }: {
+  isMobileViewport: boolean;
   isKo: boolean;
   wsConnected: boolean;
   currentOfficeLabel: string;
   stats: DashboardStats | null;
+  agents: Agent[];
   meetings: RoundTableMeeting[];
   notifications: Notification[];
   kanbanCards: KanbanCard[];
 }) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(null);
+  const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
+  const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
   const defaultWidgets = useMemo(
-    () => ["m_tokens", "m_cost", "m_progress", "m_streak", "office", "missions", "roster", "activity", "kanban"],
+    () => [...HOME_DEFAULT_WIDGETS],
     [],
   );
-  const [widgets, setWidgets] = useState<string[]>(() => {
-    if (typeof window === "undefined") return defaultWidgets;
-    try {
-      const stored =
-        window.localStorage.getItem("agentdesk.widgets") ??
-        window.localStorage.getItem("agentdesk.home.widgets");
-      const parsed = stored ? (JSON.parse(stored) as unknown) : null;
-      return Array.isArray(parsed) && parsed.length > 0
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : defaultWidgets;
-    } catch {
-      return defaultWidgets;
-    }
-  });
+  const [widgets, setWidgets] = useLocalStorage<string[]>(
+    STORAGE_KEYS.homeOrder,
+    () => [...HOME_DEFAULT_WIDGETS],
+  );
   const outstandingMeetings = meetings.filter(hasUnresolvedMeetingIssues).length;
   const liveNotifications = notifications.filter(
     (notification) => Date.now() - notification.ts < 60_000,
@@ -1661,7 +1773,29 @@ function HomeOverviewPage({
   const inProgressCards = kanbanCards.filter(
     (card) => card.status === "in_progress" || card.status === "review",
   ).length;
-  const topAgents = (stats?.top_agents ?? []).slice(0, 6);
+  const topAgents = useMemo(
+    () =>
+      (stats?.top_agents?.length
+        ? stats.top_agents
+        : [...agents]
+            .sort(
+              (left, right) =>
+                right.stats_xp - left.stats_xp ||
+                right.stats_tasks_done - left.stats_tasks_done,
+            )
+            .map((agent) => ({
+              id: agent.id,
+              name: agent.name,
+              alias: agent.alias ?? null,
+              name_ko: agent.name_ko,
+              avatar_emoji: agent.avatar_emoji,
+              stats_tasks_done: agent.stats_tasks_done,
+              stats_xp: agent.stats_xp,
+              stats_tokens: agent.stats_tokens,
+            })))
+        .slice(0, 6),
+    [agents, stats?.top_agents],
+  );
   const doneCards = kanbanCards.filter((card) => card.status === "done").length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
   const totalActionableCards = requestedCards + inProgressCards + blockedCards;
@@ -1670,42 +1804,42 @@ function HomeOverviewPage({
   const agentTotal = stats?.agents.total ?? topAgents.length;
   const liveSessions = stats?.dispatched_count ?? 0;
   const providerSummary = tr("2/2 프로바이더 연결", "2/2 providers connected");
-  const missionRows = [
+  const operationalMissionRows: DailyMissionViewModel[] = [
     {
       id: "review",
       label: tr("리뷰 대기 비우기", "Clear review queue"),
-      value: reviewQueue,
-      total: Math.max(reviewQueue, 1),
-      done: reviewQueue === 0,
-      accent: "var(--th-accent-warn)",
-      detail: tr("우선 확인이 필요한 카드", "Cards waiting for reviewer action"),
+      current: reviewQueue === 0 ? 1 : 0,
+      target: 1,
+      completed: reviewQueue === 0,
+      description: tr("우선 확인이 필요한 카드", "Cards waiting for reviewer action"),
+      xp: 35,
     },
     {
       id: "blocked",
       label: tr("블록 카드 줄이기", "Reduce blocked cards"),
-      value: stats?.kanban.blocked ?? blockedCards,
-      total: Math.max(blockedCards, 1),
-      done: blockedCards === 0,
-      accent: "var(--th-accent-danger)",
-      detail: tr("의존성/외부 응답 대기", "Waiting on dependencies or replies"),
+      current: Math.max(0, 1 - Math.min(stats?.kanban.blocked ?? blockedCards, 1)),
+      target: 1,
+      completed: blockedCards === 0,
+      description: tr("의존성/외부 응답 대기", "Waiting on dependencies or replies"),
+      xp: 30,
     },
     {
       id: "dispatch",
       label: tr("실시간 세션 유지", "Keep live sessions healthy"),
-      value: stats?.dispatched_count ?? 0,
-      total: Math.max(stats?.dispatched_count ?? 0, 1),
-      done: wsConnected,
-      accent: "var(--th-accent-info)",
-      detail: tr("현재 연결된 작업 세션", "Currently connected working sessions"),
+      current: Math.min(stats?.dispatched_count ?? 0, 3),
+      target: 3,
+      completed: (stats?.dispatched_count ?? 0) >= 3 && wsConnected,
+      description: tr("현재 연결된 작업 세션", "Currently connected working sessions"),
+      xp: 40,
     },
     {
       id: "meetings",
       label: tr("회의 후속 정리", "Close meeting follow-ups"),
-      value: outstandingMeetings,
-      total: Math.max(totalMeetings, 1),
-      done: outstandingMeetings === 0,
-      accent: "var(--th-accent-primary)",
-      detail: tr("정리/이슈화가 필요한 회의", "Meetings still needing wrap-up"),
+      current: Math.max(0, totalMeetings - outstandingMeetings),
+      target: Math.max(totalMeetings, 1),
+      completed: outstandingMeetings === 0,
+      description: tr("정리/이슈화가 필요한 회의", "Meetings still needing wrap-up"),
+      xp: 25,
     },
   ];
   const activityItems = notifications.slice(0, 4).map((notification) => ({
@@ -1754,8 +1888,51 @@ function HomeOverviewPage({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("agentdesk.widgets", JSON.stringify(widgets));
-  }, [widgets]);
+    if (window.localStorage.getItem(STORAGE_KEYS.homeOrder) !== null) return;
+    try {
+      const legacyRaw =
+        window.localStorage.getItem("agentdesk.widgets") ??
+        window.localStorage.getItem("agentdesk.home.widgets");
+      const parsed = legacyRaw ? (JSON.parse(legacyRaw) as unknown) : null;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const migrated = normalizeHomeWidgetOrder(parsed);
+        if (migrated.length > 0) {
+          setWidgets(migrated);
+        }
+      }
+    } catch {
+      // Ignore malformed legacy storage and keep the default order.
+    }
+  }, [setWidgets]);
+
+  useEffect(() => {
+    const normalized = normalizeHomeWidgetOrder(widgets);
+    if (!areStringArraysEqual(widgets, normalized)) {
+      setWidgets(normalized);
+    }
+  }, [setWidgets, widgets]);
+
+  useEffect(() => {
+    if (!isMobileViewport || !editing) return;
+    setEditing(false);
+  }, [editing, isMobileViewport, setEditing]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api.getAchievements().catch(() => ({ achievements: [], daily_missions: [] })),
+      api.getStreaks().catch(() => ({ streaks: [] })),
+    ]).then(([achievementResponse, streakResponse]) => {
+      if (!active) return;
+      setGamification(achievementResponse);
+      setStreaks(
+        [...streakResponse.streaks].sort((left, right) => right.streak - left.streak),
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const todayLabel = useMemo(
     () =>
@@ -1797,6 +1974,62 @@ function HomeOverviewPage({
       }).format(value),
     [],
   );
+  const streakLeader = streaks[0] ?? null;
+  const gamificationLeader = topAgents[0] ?? null;
+  const gamificationLevel = getAgentLevelFromXp(gamificationLeader?.stats_xp ?? 0);
+  const dailyMissions = useMemo<DailyMissionViewModel[]>(() => {
+    if (gamification?.daily_missions?.length) {
+      return gamification.daily_missions.map((mission) => {
+        switch (mission.id) {
+          case "dispatches_today":
+            return {
+              id: mission.id,
+              label: tr("오늘 디스패치 5건 완료", "Complete 5 dispatches today"),
+              current: mission.current,
+              target: mission.target,
+              completed: mission.completed,
+              description: tr("오늘 실제 완료된 디스패치 수", "Completed dispatches today"),
+              xp: 40,
+            };
+          case "active_agents_today":
+            return {
+              id: mission.id,
+              label: tr("오늘 3명 이상 출항", "Get 3 agents shipping today"),
+              current: mission.current,
+              target: mission.target,
+              completed: mission.completed,
+              description: tr("오늘 완료 기록이 있는 에이전트 수", "Agents with completed work today"),
+              xp: 35,
+            };
+          case "review_queue_zero":
+            return {
+              id: mission.id,
+              label: tr("리뷰 큐 비우기", "Drain the review queue"),
+              current: mission.current,
+              target: mission.target,
+              completed: mission.completed,
+              description: tr("리뷰 대기 카드를 0으로 유지", "Keep the review queue empty"),
+              xp: 40,
+            };
+          default:
+            return {
+              id: mission.id,
+              label: mission.label,
+              current: mission.current,
+              target: mission.target,
+              completed: mission.completed,
+            };
+        }
+      });
+    }
+    return operationalMissionRows;
+  }, [gamification?.daily_missions, operationalMissionRows, tr]);
+  const missionReset = useMemo(() => getMissionResetCountdown(), []);
+  const missionResetLabel = tr(
+    `리셋까지 ${missionReset.hours}시간 ${missionReset.minutes}분`,
+    `Resets in ${missionReset.hours}h ${missionReset.minutes}m`,
+  );
+  const missionXpLabel = dailyMissions.length > 0 ? `+${getMissionTotalXp(dailyMissions)} XP` : undefined;
 
   const widgetSpecs = useMemo(
     () => ({
@@ -1864,20 +2097,28 @@ function HomeOverviewPage({
       m_streak: {
         className: "lg:col-span-3",
         render: () => (
-          <HomeMetricTile
-            icon={<Flame size={14} />}
+          <StreakCounter
+            dataTestId="home-streak-counter"
+            className="h-full"
+            icon={<Flame size={18} />}
             title={tr("연속 활동", "Current streak")}
-            value={tr(`${activityStreak}일`, `${activityStreak}d`)}
-            sub={tr(
-              `${analytics?.summary.active_days ?? 0}일 활성 · ${stats?.top_agents.length ?? 0}명 참여`,
-              `${analytics?.summary.active_days ?? 0} active days · ${stats?.top_agents.length ?? 0} agents involved`,
+            value={tr(`${streakLeader?.streak ?? activityStreak}일`, `${streakLeader?.streak ?? activityStreak}d`)}
+            subtitle={tr(
+              gamificationLeader
+                ? `lv.${gamificationLevel.level} · XP ${formatCompact(Math.round(gamificationLeader.stats_xp))}`
+                : `${analytics?.summary.active_days ?? 0}일 활성`,
+              gamificationLeader
+                ? `lv.${gamificationLevel.level} · XP ${formatCompact(Math.round(gamificationLeader.stats_xp))}`
+                : `${analytics?.summary.active_days ?? 0} active days`,
             )}
-            delta={
-              analytics?.summary.active_days
-                ? tr(`${analytics.summary.active_days}/7 활성`, `${analytics.summary.active_days}/7 active`)
+            badgeLabel={tr("streak", "streak")}
+            detail={
+              streakLeader
+                ? tr(`${streakLeader.name} 최장`, `${streakLeader.name} best`)
+                : analytics?.summary.active_days
+                  ? tr(`${analytics.summary.active_days}/7 활성`, `${analytics.summary.active_days}/7 active`)
                 : undefined
             }
-            deltaTone="up"
             accent="var(--th-accent-danger)"
           />
         ),
@@ -1952,31 +2193,16 @@ function HomeOverviewPage({
               "Keep today's operational priorities in view.",
             )}
           >
-            <div className="space-y-3">
-              {missionRows.map((row) => {
-                const progress = row.total <= 0 ? 100 : Math.max(0, Math.min(100, Math.round(((row.total - row.value) / row.total) * 100)));
-                return (
-                  <div key={row.id} className="rounded-2xl border px-3 py-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                          {row.label}
-                        </div>
-                        <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                          {row.detail}
-                        </div>
-                      </div>
-                      <span className="rounded-full px-2.5 py-1 text-xs font-semibold" style={{ background: "var(--th-overlay-medium)", color: row.done ? "var(--th-accent-success)" : row.accent }}>
-                        {row.done ? tr("완료", "Done") : tr(`${row.value}건`, `${row.value}`)}
-                      </span>
-                    </div>
-                    <div className="mt-3 h-1.5 rounded-full" style={{ background: "color-mix(in srgb, var(--th-border-subtle) 68%, transparent)" }}>
-                      <div className="h-full rounded-full" style={{ width: `${progress}%`, background: row.done ? "var(--th-accent-success)" : row.accent }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <DailyMissions
+              dataTestId="home-daily-missions"
+              itemTestIdPrefix="home-daily-mission"
+              missions={dailyMissions}
+              emptyLabel={tr("표시할 데일리 미션이 없습니다.", "No daily missions available.")}
+              doneLabel={tr("완료", "Done")}
+              progressLabel={tr("진행", "Progress")}
+              resetLabel={missionResetLabel}
+              totalXpLabel={missionXpLabel}
+            />
           </HomeWidgetShell>
         ),
       },
@@ -2134,7 +2360,6 @@ function HomeOverviewPage({
       isKo,
       kanbanCards,
       meetings.length,
-      missionRows,
       notifications.length,
       outstandingMeetings,
       requestedCards,
@@ -2146,10 +2371,16 @@ function HomeOverviewPage({
       wsConnected,
       activityItems,
       activityStreak,
+      dailyMissions,
       formatCompact,
       formatCurrency,
+      gamificationLeader,
+      gamificationLevel.level,
       latestAnalyticsDay,
+      missionResetLabel,
+      missionXpLabel,
       reviewQueue,
+      streakLeader,
     ],
   );
 
@@ -2177,33 +2408,37 @@ function HomeOverviewPage({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {editing && (
+          {!isMobileViewport && editing && (
             <button
               type="button"
-            onClick={() => setWidgets(defaultWidgets)}
-            className="rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
-            style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)" }}
-          >
-            {tr("기본값", "Reset")}
+              onClick={() => setWidgets([...defaultWidgets])}
+              data-testid="home-reset-order"
+              className="rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
+              style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)" }}
+            >
+              {tr("기본값", "Reset")}
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => setEditing((prev) => !prev)}
-            className="inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
-            style={{
-              borderColor: editing ? "var(--th-accent-primary)" : "var(--th-border-subtle)",
-              background: editing ? "var(--th-accent-primary-soft)" : "transparent",
-              color: editing ? "var(--th-text-heading)" : "var(--th-text-primary)",
-            }}
-          >
-            <GripVertical size={14} />
-            {editing ? tr("완료", "Done") : tr("편집", "Edit")}
-          </button>
+          {!isMobileViewport ? (
+            <button
+              type="button"
+              onClick={() => setEditing((prev) => !prev)}
+              data-testid="home-edit-toggle"
+              className="inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
+              style={{
+                borderColor: editing ? "var(--th-accent-primary)" : "var(--th-border-subtle)",
+                background: editing ? "var(--th-accent-primary-soft)" : "transparent",
+                color: editing ? "var(--th-text-heading)" : "var(--th-text-primary)",
+              }}
+            >
+              <GripVertical size={14} />
+              {editing ? tr("완료", "Done") : tr("편집", "Edit")}
+            </button>
+          ) : null}
         </div>
       </div>
 
-      {editing && (
+      {!isMobileViewport && editing && (
         <div className="mt-4 rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)", background: "var(--th-accent-primary-soft)", color: "var(--th-text-secondary)" }}>
           <span className="inline-flex items-center gap-2">
             <GripVertical size={14} />
@@ -2222,9 +2457,10 @@ function HomeOverviewPage({
           return (
             <div
               key={widgetId}
-              draggable={editing}
+              data-testid={`home-widget-${widgetId}`}
+              draggable={editing && !isMobileViewport}
               onDragStart={(event) => {
-                if (!editing) return;
+                if (!editing || isMobileViewport) return;
                 setDragIndex(index);
                 event.dataTransfer.effectAllowed = "move";
                 try {
@@ -2234,12 +2470,12 @@ function HomeOverviewPage({
                 }
               }}
               onDragOver={(event) => {
-                if (!editing) return;
+                if (!editing || isMobileViewport) return;
                 event.preventDefault();
                 if (overIndex !== index) setOverIndex(index);
               }}
               onDrop={(event) => {
-                if (!editing) return;
+                if (!editing || isMobileViewport) return;
                 event.preventDefault();
                 if (dragIndex == null || dragIndex === index) {
                   setDragIndex(null);

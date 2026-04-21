@@ -72,6 +72,7 @@ export default function KanbanColumn({
 }: KanbanColumnProps) {
   return (
     <section
+      data-testid={`kanban-column-${column.status}`}
       className={`${compactBoard ? "w-full" : "w-[320px] shrink-0"} space-y-3 rounded-2xl border p-3`}
       style={{
         borderColor: "rgba(148,163,184,0.24)",
@@ -178,6 +179,7 @@ function BacklogIssueCard({
 
   return (
     <article
+      data-testid={`kanban-backlog-issue-${issue.number}`}
       className="cursor-pointer rounded-2xl border p-3 transition-colors hover:border-[rgba(148,163,184,0.4)]"
       style={{
         borderColor: "rgba(148,163,184,0.2)",
@@ -265,6 +267,7 @@ function KanbanCardArticle({
 
   return (
     <article
+      data-testid={`kanban-card-${card.id}`}
       onClick={() => onCardClick(card.id)}
       className="cursor-pointer rounded-2xl border p-3 transition-transform hover:-translate-y-0.5"
       style={{

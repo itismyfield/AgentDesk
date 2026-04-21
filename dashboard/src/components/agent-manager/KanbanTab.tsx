@@ -8,7 +8,8 @@ import AutoQueuePanel from "./AutoQueuePanel";
 import PipelineVisualEditor from "./PipelineVisualEditor";
 import CardTimeline from "./CardTimeline";
 import MarkdownContent from "../common/MarkdownContent";
-import KanbanColumn from "./KanbanColumn";
+import { Drawer } from "../common/overlay/Drawer";
+import KanbanColumn, { type KanbanColumnProps } from "./KanbanColumn";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -32,6 +33,7 @@ import type {
 import type { KanbanReview } from "../../api";
 import { localeName } from "../../i18n";
 import {
+  BOARD_COLUMN_DEFS,
   COLUMN_DEFS,
   EMPTY_EDITOR,
   PRIORITY_OPTIONS,
@@ -43,6 +45,7 @@ import {
   createChecklistItem,
   formatIso,
   formatTs,
+  getBoardColumnStatus,
   getCardDelayBadge,
   getCardDwellBadge,
   getCardMetadata,
@@ -55,6 +58,7 @@ import {
   parseIssueSections,
   priorityLabel,
   stringifyCardMetadata,
+  type KanbanBoardColumnStatus,
   type EditorState,
 } from "./kanban-utils";
 import {
@@ -195,7 +199,7 @@ export default function KanbanTab({
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
-  const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
+  const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus | KanbanBoardColumnStatus>("backlog");
   const [retryAssigneeId, setRetryAssigneeId] = useState("");
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const [closingIssueNumber, setClosingIssueNumber] = useState<number | null>(null);
@@ -441,7 +445,7 @@ export default function KanbanTab({
   }, [selectedRepo]);
 
   useEffect(() => {
-    if (!showClosed && TERMINAL_STATUSES.has(mobileColumnStatus)) {
+    if (!showClosed && mobileColumnStatus === "done") {
       setMobileColumnStatus("backlog");
     }
   }, [mobileColumnStatus, showClosed]);
@@ -457,10 +461,11 @@ export default function KanbanTab({
       const focusStatus =
         cards.find((card) => card.review_status === "dilemma_pending")?.status
         ?? cards.find((card) => hasManualInterventionReason(card) && card.status === "requested")?.status
+        ?? cards.find((card) => card.status === "qa_failed")?.status
         ?? cards.find((card) => hasManualInterventionReason(card) && card.status === "in_progress")?.status
         ?? "in_progress";
       setMobileColumnStatus(
-        focusStatus === "review" || focusStatus === "requested" ? focusStatus : "in_progress",
+        focusStatus === "review" ? "review" : getBoardColumnStatus(focusStatus),
       );
     } else if (externalStatusFocus === "requested") {
       setMobileColumnStatus("requested");
@@ -709,6 +714,32 @@ export default function KanbanTab({
         selectedParentCard ? tr(`상위 ${selectedParentCard.title}`, `Parent ${selectedParentCard.title}`) : null,
       ].filter(Boolean).join(" · ")
     : "";
+  const selectedRepoSource = useMemo(
+    () => repoSources.find((source) => source.repo === selectedRepo) ?? null,
+    [repoSources, selectedRepo],
+  );
+  const pipelineHookEntries = useMemo(() => {
+    const hooks = selectedRepoSource?.pipeline_config?.hooks;
+    if (!hooks) return [];
+    return Object.entries(hooks).flatMap(([state, config]) => {
+      const entries: Array<{ state: string; phase: "on_enter" | "on_exit"; hook: string }> = [];
+      for (const hook of config.on_enter ?? []) {
+        entries.push({ state, phase: "on_enter", hook });
+      }
+      for (const hook of config.on_exit ?? []) {
+        entries.push({ state, phase: "on_exit", hook });
+      }
+      return entries;
+    }).sort((a, b) =>
+      a.state.localeCompare(b.state)
+      || a.phase.localeCompare(b.phase)
+      || a.hook.localeCompare(b.hook),
+    );
+  }, [selectedRepoSource]);
+  const pipelineHookNames = useMemo(
+    () => Array.from(new Set(pipelineHookEntries.map((entry) => entry.hook))).sort((a, b) => a.localeCompare(b)),
+    [pipelineHookEntries],
+  );
 
   // Fetch per-agent pipeline stages when agent is selected
   useEffect(() => {
@@ -754,7 +785,7 @@ export default function KanbanTab({
       if (cardTypeFilter === "review" && !isReviewCard(card)) return false;
       if (signalStatusFilter === "review" && card.status !== "review") return false;
       if (signalStatusFilter === "blocked" && !isManualInterventionCard(card)) return false;
-      if (signalStatusFilter === "requested" && card.status !== "requested") return false;
+      if (signalStatusFilter === "requested" && getBoardColumnStatus(card.status) !== "requested") return false;
       if (
         signalStatusFilter === "stalled"
         && !(card.status === "in_progress" && Boolean(card.started_at) && nowMs - ((card.started_at ?? 0) < 1e12 ? (card.started_at ?? 0) * 1000 : (card.started_at ?? 0)) > STALE_IN_PROGRESS_MS)
@@ -786,8 +817,8 @@ export default function KanbanTab({
 
   // Compute dynamic columns: inject pipeline stage columns when an agent is selected
   const effectiveColumnDefs = useMemo(() => {
-    if (!selectedAgentId || !agentPipelineStages.length) return COLUMN_DEFS;
-    const base = COLUMN_DEFS.filter((c) => !QA_STATUSES.has(c.status));
+    if (!selectedAgentId || !agentPipelineStages.length) return BOARD_COLUMN_DEFS;
+    const base = BOARD_COLUMN_DEFS.filter((c) => c.status !== "qa_pending" && c.status !== "qa_in_progress");
     const reviewPassStages = agentPipelineStages.filter((s) => s.trigger_after === "review_pass");
     if (reviewPassStages.length === 0) return base;
     const reviewIdx = base.findIndex((c) => c.status === "review");
@@ -802,12 +833,12 @@ export default function KanbanTab({
   }, [selectedAgentId, agentPipelineStages]);
 
   const cardsByStatus = useMemo(() => {
-    const grouped = new Map<KanbanCardStatus, KanbanCard[]>();
+    const grouped = new Map<string, KanbanCard[]>();
     for (const column of effectiveColumnDefs) {
       grouped.set(column.status, []);
     }
     for (const card of filteredCards) {
-      grouped.get(card.status)?.push(card);
+      grouped.get(getBoardColumnStatus(card.status))?.push(card);
     }
 
     const isAncestor = (possibleAncestorId: string, card: KanbanCard): boolean => {
@@ -882,13 +913,15 @@ export default function KanbanTab({
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const reviewQueueCount = filteredCards.filter((card) => card.status === "review").length;
   const inProgressCount = filteredCards.filter((card) => card.status === "in_progress").length;
-  const requestedCount = filteredCards.filter((card) => card.status === "requested").length;
+  const readyCount = filteredCards.filter((card) => getBoardColumnStatus(card.status) === "requested").length;
   const manualInterventionCount = filteredCards.filter((card) => isManualInterventionCard(card)).length;
-  const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
+  const hasQaCards = filteredCards.some((card) => card.status === "qa_pending" || card.status === "qa_in_progress");
+  const hasFailedCards = filteredCards.some((card) => getBoardColumnStatus(card.status) === "failed");
   const boardColumns = useMemo(() => effectiveColumnDefs.filter((column) =>
-    (showClosed || !TERMINAL_STATUSES.has(column.status))
-    && (!QA_STATUSES.has(column.status) || hasQaCards),
-  ), [effectiveColumnDefs, hasQaCards, showClosed]);
+    (showClosed || column.status !== "done")
+    && (column.status !== "failed" || hasFailedCards)
+    && ((column.status !== "qa_pending" && column.status !== "qa_in_progress") || hasQaCards),
+  ), [effectiveColumnDefs, hasFailedCards, hasQaCards, showClosed]);
   const mobileColumnSummaries = useMemo(() => boardColumns.map((column) => {
     const columnCards = cardsByStatus.get(column.status) ?? [];
     return {
@@ -1125,8 +1158,6 @@ export default function KanbanTab({
     setAssignAssigneeId(repoSource?.default_agent_id ?? "");
   };
 
-  const showDesktopDetailPanel = Boolean(selectedCard && !compactBoard);
-
   useEffect(() => {
     const fallbackStatus = boardColumns[0]?.status ?? "backlog";
     if (!boardColumns.some((column) => column.status === mobileColumnStatus)) {
@@ -1134,7 +1165,7 @@ export default function KanbanTab({
     }
   }, [boardColumns, mobileColumnStatus]);
 
-  const focusMobileColumn = (status: KanbanCardStatus, scrollToSection: boolean) => {
+  const focusMobileColumn = (status: KanbanCardStatus | KanbanBoardColumnStatus, scrollToSection: boolean) => {
     setMobileColumnStatus(status);
     if (!scrollToSection || typeof document === "undefined") return;
     window.requestAnimationFrame(() => {
@@ -1146,7 +1177,7 @@ export default function KanbanTab({
   const handleCardOpen = (cardId: string) => {
     const card = cardsById.get(cardId);
     if (card) {
-      setMobileColumnStatus(card.status);
+      setMobileColumnStatus(getBoardColumnStatus(card.status));
     }
     setSelectedBacklogIssue(null);
     setSelectedCardId(cardId);
@@ -1159,12 +1190,13 @@ export default function KanbanTab({
   const signalFilterLabel =
     signalStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
       : signalStatusFilter === "blocked" ? tr("수동 개입", "Manual intervention")
-        : signalStatusFilter === "requested" ? tr("수락 대기", "Waiting acceptance")
+        : signalStatusFilter === "requested" ? tr("준비됨", "Ready")
           : signalStatusFilter === "stalled" ? tr("진행 정체", "Stale in progress")
             : null;
 
   return (
     <div
+      data-testid="kanban-page"
       className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden pb-24 md:pb-0"
       style={{ paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))" }}
     >
@@ -1399,7 +1431,7 @@ export default function KanbanTab({
                 <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
                 <option value="review">{tr("리뷰 대기", "Review queue")}</option>
                 <option value="blocked">{tr("수동 개입", "Manual intervention")}</option>
-                <option value="requested">{tr("수락 대기", "Waiting acceptance")}</option>
+                <option value="requested">{tr("준비됨", "Ready")}</option>
                 <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
               </select>
               <label
@@ -1491,8 +1523,7 @@ export default function KanbanTab({
               </div>
 
               {selectedRepo && (() => {
-                const currentSource = repoSources.find((source) => source.repo === selectedRepo);
-                if (!currentSource) return null;
+                if (!selectedRepoSource) return null;
                 return (
                   <label
                     className="mt-4 flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
@@ -1500,12 +1531,12 @@ export default function KanbanTab({
                   >
                     <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
                     <select
-                      value={currentSource.default_agent_id ?? ""}
+                      value={selectedRepoSource.default_agent_id ?? ""}
                       onChange={(event) => {
                         const value = event.target.value || null;
-                        void api.updateKanbanRepoSource(currentSource.id, { default_agent_id: value });
+                        void api.updateKanbanRepoSource(selectedRepoSource.id, { default_agent_id: value });
                         setRepoSources((prev) => prev.map((source) => (
-                          source.id === currentSource.id
+                          source.id === selectedRepoSource.id
                             ? { ...source, default_agent_id: value }
                             : source
                         )));
@@ -1826,13 +1857,13 @@ export default function KanbanTab({
               <SurfaceMetricPill tone="info" label={tr("진행 중", "In Progress")} value={inProgressCount} className="min-w-[108px]" />
               <SurfaceMetricPill tone="warn" label={tr("리뷰", "Review")} value={reviewQueueCount} className="min-w-[108px]" />
               <SurfaceMetricPill tone="danger" label={tr("수동 개입", "Manual")} value={manualInterventionCount} className="min-w-[108px]" />
-              <SurfaceMetricPill tone="neutral" label={tr("수락 대기", "Requested")} value={requestedCount} className="min-w-[108px]" />
+              <SurfaceMetricPill tone="neutral" label={tr("준비됨", "Ready")} value={readyCount} className="min-w-[108px]" />
             </div>
           </div>
         </SurfaceCard>
       )}
 
-      <div className={showDesktopDetailPanel ? "grid min-w-0 items-start gap-4 md:grid-cols-[minmax(0,1fr)_24rem] xl:grid-cols-[minmax(0,1fr)_28rem]" : "min-w-0"}>
+      <div className="min-w-0">
         <div className="min-w-0 space-y-4">
           {!selectedRepo ? (
             <SurfaceEmptyState
@@ -1851,6 +1882,7 @@ export default function KanbanTab({
                         <button
                           key={column.status}
                           type="button"
+                          data-testid={`kanban-mobile-summary-${column.status}`}
                           onClick={() => focusMobileColumn(column.status, true)}
                           className="min-w-[7rem] rounded-2xl border px-3 py-2 text-left"
                           style={{
@@ -1881,7 +1913,11 @@ export default function KanbanTab({
                 </>
               )}
 
-              <div className="pb-2" style={{ overflowX: "auto", overflowY: "visible" }}>
+              <div
+                className="pb-2"
+                data-testid="kanban-board-scroll"
+                style={{ overflowX: "auto", overflowY: "visible" }}
+              >
                 <div className="flex items-start gap-4 min-w-max">
                   {visibleColumns.map((column) => {
                     const columnCards = cardsByStatus.get(column.status) ?? [];
@@ -1889,7 +1925,7 @@ export default function KanbanTab({
                     return (
                       <div key={column.status} id={`kanban-mobile-${column.status}`}>
                         <KanbanColumn
-                          column={column}
+                          column={column as KanbanColumnProps["column"]}
                           columnCards={columnCards}
                           backlogIssues={backlogIssues}
                           backlogCount={backlogCount}
@@ -1919,30 +1955,16 @@ export default function KanbanTab({
           )}
         </div>
 
-        {selectedCard && (
-          <div
-            className={compactBoard ? "fixed inset-0 z-50" : "hidden min-w-0 md:block"}
-            style={compactBoard ? { backgroundColor: "var(--th-modal-overlay)" } : undefined}
-            onClick={compactBoard ? () => setSelectedCardId(null) : undefined}
-          >
-            <div className={compactBoard ? "h-full w-full" : "sticky top-0"}>
-              <div
-                onClick={compactBoard ? (e) => e.stopPropagation() : undefined}
-                className={compactBoard
-                  ? "h-[100svh] w-full overflow-y-auto px-5 py-5 space-y-4"
-                  : "w-full max-h-[calc(100svh-7rem)] overflow-y-auto rounded-3xl border p-5 lg:p-6 space-y-4 shadow-2xl"}
-                style={{
-                  background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
-                  borderColor: compactBoard ? "transparent" : "color-mix(in srgb, var(--th-border) 72%, transparent)",
-                  paddingTop: compactBoard
-                    ? "max(1.25rem, calc(1.25rem + env(safe-area-inset-top)))"
-                    : undefined,
-                  paddingBottom: compactBoard
-                    ? "max(6rem, calc(6rem + env(safe-area-inset-bottom)))"
-                    : "max(2rem, calc(2rem + env(safe-area-inset-bottom)))",
-                }}
-              >
+        <Drawer
+          open={Boolean(selectedCard)}
+          onClose={() => setSelectedCardId(null)}
+          width="min(560px, 100vw)"
+          ariaLabel={tr("카드 상세", "Card details")}
+        >
+          {selectedCard && (
+            <div className="space-y-4 pb-[max(2rem,calc(2rem+env(safe-area-inset-bottom)))]">
                 <SurfaceSection
+                  data-testid="kanban-card-drawer"
                   eyebrow={tr("Selected Card", "Selected Card")}
                   title={selectedCard.title}
                   description={selectedCardHeroDescription}
@@ -2706,7 +2728,7 @@ export default function KanbanTab({
                           <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.created_at, locale)}</div>
                         </SurfaceCard>
                         <SurfaceCard className="space-y-1.5 p-3" style={{ ...SURFACE_PANEL_STYLE }}>
-                          <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("요청", "Requested")}</div>
+                          <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("준비됨", "Ready")}</div>
                           <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.requested_at, locale)}</div>
                         </SurfaceCard>
                         <SurfaceCard className="space-y-1.5 p-3" style={{ ...SURFACE_PANEL_STYLE }}>
@@ -2723,6 +2745,7 @@ export default function KanbanTab({
                 </SurfaceSection>
 
                 <SurfaceSection
+                  data-testid="kanban-execution-trace"
                   eyebrow={tr("Execution Trace", "Execution Trace")}
                   title={tr("Dispatch · Audit · Timeline", "Dispatch · Audit · Timeline")}
                   description={tr(
@@ -2839,6 +2862,7 @@ export default function KanbanTab({
 
                     {auditLog.length > 0 && (
                       <SurfaceSubsection
+                        data-testid="kanban-state-history"
                         title={tr("상태 전환 이력", "State Transition History")}
                         description={tr(
                           "누가 상태를 바꿨는지와 결과 메시지를 추적합니다.",
@@ -2969,11 +2993,69 @@ export default function KanbanTab({
                     )}
                   </div>
                 </SurfaceSection>
+            </div>
+          )}
+        </Drawer>
+      </div>
+
+      {selectedRepo && pipelineHookEntries.length > 0 && (
+        <SurfaceCard
+          data-testid="kanban-pipeline-hooks"
+          className="rounded-[24px] p-4"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+          }}
+        >
+          <div className="flex flex-wrap items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                {tr("Pipeline Hooks", "Pipeline Hooks")}
+              </div>
+              <div className="mt-1 text-sm" style={{ color: "var(--th-text-primary)" }}>
+                {tr(
+                  "현재 repo pipeline에 연결된 hook을 보드 바로 아래에서 확인합니다.",
+                  "Review the currently enabled repo pipeline hooks directly under the board.",
+                )}
               </div>
             </div>
+            <SurfaceMetricPill
+              tone="info"
+              label={tr("활성 Hook", "Enabled Hooks")}
+              value={pipelineHookEntries.length}
+              className="min-w-[112px]"
+            />
           </div>
-        )}
-      </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {pipelineHookNames.map((hookName) => (
+              <span
+                key={hookName}
+                className="rounded-full border px-2 py-1 text-xs"
+                style={{ ...SURFACE_CHIP_STYLE, color: "var(--th-text-secondary)" }}
+              >
+                {hookName}
+              </span>
+            ))}
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {pipelineHookEntries.map((entry) => (
+              <span
+                key={`${entry.state}:${entry.phase}:${entry.hook}`}
+                className="rounded-full border px-2 py-1 text-xs"
+                style={{
+                  ...SURFACE_CHIP_STYLE,
+                  color: entry.phase === "on_enter" ? "#93c5fd" : "#fbbf24",
+                }}
+              >
+                {entry.state} · {entry.phase === "on_enter" ? tr("진입", "Enter") : tr("이탈", "Exit")} · {entry.hook}
+              </span>
+            ))}
+          </div>
+        </SurfaceCard>
+      )}
 
       {selectedRepo && (
         <SurfaceSection

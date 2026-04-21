@@ -12,15 +12,28 @@ import type {
 // Constants
 // ---------------------------------------------------------------------------
 
-export const COLUMN_DEFS: Array<{
-  status: KanbanCardStatus;
+export type KanbanBoardColumnStatus =
+  | "backlog"
+  | "requested"
+  | "in_progress"
+  | "review"
+  | "qa_pending"
+  | "qa_in_progress"
+  | "failed"
+  | "done";
+
+interface KanbanColumnDef<TStatus extends string> {
+  status: TStatus;
   labelKo: string;
   labelEn: string;
   accent: string;
-}> = [
+}
+
+export const COLUMN_DEFS: Array<KanbanColumnDef<KanbanCardStatus | "failed">> = [
   { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
   { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: "#0ea5e9" },
-  { status: "requested", labelKo: "요청됨", labelEn: "Requested", accent: "#10b981" },
+  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: "#10b981" },
+  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: "#f97316" },
   { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
   { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
   { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#06b6d4" },
@@ -29,20 +42,14 @@ export const COLUMN_DEFS: Array<{
   { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
 ];
 
-export const BOARD_COLUMN_DEFS: Array<{
-  status: KanbanCardStatus;
-  labelKo: string;
-  labelEn: string;
-  accent: string;
-}> = [
+export const BOARD_COLUMN_DEFS: Array<KanbanColumnDef<KanbanBoardColumnStatus>> = [
   { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
-  { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: "#0ea5e9" },
-  { status: "requested", labelKo: "요청됨", labelEn: "Requested", accent: "#8b5cf6" },
+  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: "#10b981" },
   { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
   { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
   { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#e879f9" },
   { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#c084fc" },
-  { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: "#fb7185" },
+  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: "#f97316" },
   { status: "done", labelKo: "완료 일감", labelEn: "Completed Work", accent: "#22c55e" },
 ];
 
@@ -121,7 +128,9 @@ export function isReviewCard(card: KanbanCard): boolean {
   return !!(card.latest_dispatch_type && REVIEW_DISPATCH_TYPES.has(card.latest_dispatch_type));
 }
 
-export function getBoardColumnStatus(status: KanbanCardStatus): KanbanCardStatus {
+export function getBoardColumnStatus(status: KanbanCardStatus): KanbanBoardColumnStatus {
+  if (status === "ready" || status === "requested") return "requested";
+  if (status === "blocked" || status === "qa_failed") return "failed";
   return status;
 }
 
@@ -860,7 +869,10 @@ export function getCardDelayBadge(
   return null;
 }
 
-export function labelForStatus(status: KanbanCardStatus, tr: (ko: string, en: string) => string): string {
+export function labelForStatus(
+  status: KanbanCardStatus | "failed",
+  tr: (ko: string, en: string) => string,
+): string {
   const col = COLUMN_DEFS.find((column) => column.status === status);
   if (col) return tr(col.labelKo, col.labelEn);
   const legacy = LEGACY_STATUS_LABELS[String(status)];

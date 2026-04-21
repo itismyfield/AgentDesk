@@ -69,7 +69,7 @@ const defaultCardStyle: CSSProperties = {
   background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
 };
 
-interface SurfaceSectionProps {
+interface SurfaceSectionProps extends Omit<HTMLAttributes<HTMLElement>, "title" | "children"> {
   eyebrow?: string;
   title: string;
   description?: string;
@@ -89,9 +89,11 @@ export function SurfaceSection({
   children,
   className,
   style,
+  ...rest
 }: SurfaceSectionProps) {
   return (
     <section
+      {...rest}
       className={joinClasses("rounded-[28px] border p-5 sm:p-6", className)}
       style={{ ...defaultSectionStyle, ...style }}
     >
@@ -155,7 +157,7 @@ export function SurfaceCard({ children, className, style, ...rest }: SurfaceCard
   );
 }
 
-interface SurfaceSubsectionProps {
+interface SurfaceSubsectionProps extends Omit<HTMLAttributes<HTMLDivElement>, "title" | "children"> {
   title: string;
   description?: string;
   actions?: ReactNode;
@@ -171,9 +173,11 @@ export function SurfaceSubsection({
   children,
   className,
   style,
+  ...rest
 }: SurfaceSubsectionProps) {
   return (
     <SurfaceCard
+      {...rest}
       className={joinClasses("min-w-0 w-full rounded-3xl p-4 sm:p-5", className)}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",

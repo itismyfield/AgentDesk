@@ -12,6 +12,40 @@ const ROUTES = [
   { path: "/settings", label: /설정|Settings/ },
 ];
 
+const DEFAULT_HOME_WIDGET_ORDER = [
+  "m_tokens",
+  "m_cost",
+  "m_progress",
+  "m_streak",
+  "office",
+  "missions",
+  "roster",
+  "activity",
+  "kanban",
+];
+const CUSTOM_HOME_WIDGET_ORDER = [
+  "kanban",
+  "activity",
+  "roster",
+  "missions",
+  "office",
+  "m_streak",
+  "m_progress",
+  "m_cost",
+  "m_tokens",
+];
+const DRAGGED_HOME_WIDGET_ORDER = [
+  "m_tokens",
+  "m_cost",
+  "m_progress",
+  "m_streak",
+  "missions",
+  "office",
+  "roster",
+  "activity",
+  "kanban",
+];
+
 async function expectNoHorizontalOverflow(page: Page) {
   const metrics = await page.evaluate(() => ({
     viewportWidth: window.innerWidth,
@@ -22,6 +56,15 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(
     Math.max(metrics.bodyScrollWidth, metrics.rootScrollWidth),
   ).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+}
+
+async function getHomeWidgetOrder(page: Page) {
+  return page.locator('[data-testid^="home-widget-"]').evaluateAll((elements) =>
+    elements
+      .map((element) => element.getAttribute("data-testid") ?? "")
+      .filter(Boolean)
+      .map((value) => value.replace("home-widget-", "")),
+  );
 }
 
 const MOCK_MEETINGS = [
@@ -571,6 +614,172 @@ const MOCK_BACKLOG_CARDS = [
     latest_dispatch_chain_depth: null,
     child_count: 0,
   },
+  {
+    id: "card-779-1",
+    title: "Kanban failed lane audit visibility",
+    description: "실패 lane에서 dispatch/audit/comment trace를 한 번에 검증합니다.",
+    status: "qa_failed",
+    github_repo: "itismyfield/AgentDesk",
+    owner_agent_id: "agent-ada",
+    requester_agent_id: "agent-luna",
+    assignee_agent_id: "agent-ada",
+    parent_card_id: null,
+    latest_dispatch_id: "dispatch-779-1",
+    sort_order: 2,
+    priority: "urgent",
+    depth: 0,
+    blocked_reason: "Review hook timed out while collecting evidence.",
+    review_notes: null,
+    github_issue_number: 779,
+    github_issue_url: "https://github.com/itismyfield/AgentDesk/issues/779",
+    metadata: null,
+    metadata_json: JSON.stringify({
+      summary: "kanban failed lane trace",
+      timed_out_reason: "Review hook timed out while collecting failure evidence.",
+    }),
+    pipeline_stage_id: "qa",
+    review_status: null,
+    created_at: AGENTS_HUB_NOW - 86_400_000,
+    updated_at: AGENTS_HUB_NOW - 900_000,
+    started_at: AGENTS_HUB_NOW - 43_200_000,
+    requested_at: AGENTS_HUB_NOW - 86_400_000,
+    review_entered_at: AGENTS_HUB_NOW - 7_200_000,
+    completed_at: null,
+    latest_dispatch_status: "failed",
+    latest_dispatch_title: "Review evidence sweep",
+    latest_dispatch_type: "review",
+    latest_dispatch_result_summary: "pipeline hook timed out after evidence capture step",
+    latest_dispatch_chain_depth: 1,
+    child_count: 0,
+  },
+];
+
+const MOCK_KANBAN_REPO_SOURCES = [
+  {
+    id: "repo-agentdesk",
+    repo: "itismyfield/AgentDesk",
+    default_agent_id: "agent-ada",
+    pipeline_config: {
+      hooks: {
+        qa_failed: {
+          on_enter: ["capture_failure_bundle", "notify_ops"],
+          on_exit: ["clear_failure_alert"],
+        },
+      },
+    },
+    created_at: AGENTS_HUB_NOW - 259_200_000,
+  },
+];
+
+const MOCK_KANBAN_DISPATCHES = [
+  {
+    id: "dispatch-779-1",
+    kanban_card_id: "card-779-1",
+    from_agent_id: "agent-luna",
+    to_agent_id: "agent-ada",
+    dispatch_type: "review",
+    status: "failed",
+    title: "Review evidence sweep",
+    context_file: null,
+    result_file: null,
+    result_summary: "Trace bundle capture timed out after review artifact upload.",
+    parent_dispatch_id: null,
+    chain_depth: 1,
+    created_at: AGENTS_HUB_NOW - 7_200_000,
+    dispatched_at: AGENTS_HUB_NOW - 7_100_000,
+    completed_at: AGENTS_HUB_NOW - 6_900_000,
+  },
+];
+
+const MOCK_KANBAN_AUDIT_LOGS = {
+  "card-779-1": [
+    {
+      id: 1,
+      card_id: "card-779-1",
+      from_status: "qa_in_progress",
+      to_status: "qa_failed",
+      source: "playwright-smoke",
+      result: "Failure evidence attached; manual review required.",
+      created_at: new Date(AGENTS_HUB_NOW - 6_800_000).toISOString(),
+    },
+  ],
+};
+
+const MOCK_KANBAN_COMMENTS = {
+  "card-779-1": {
+    body: "Failed lane smoke context",
+    comments: [
+      {
+        author: { login: "adk-dashboard" },
+        body: "Collected review logs and attached the failed trace bundle.",
+        createdAt: new Date(AGENTS_HUB_NOW - 6_700_000).toISOString(),
+      },
+    ],
+  },
+};
+
+const MOCK_GITHUB_ISSUES = [
+  {
+    number: 779,
+    title: "Kanban failed lane fidelity follow-up",
+    body: "Keep the failed lane and trace surfaces visible in smoke.",
+    state: "open",
+    url: "https://github.com/itismyfield/AgentDesk/issues/779",
+    labels: [{ name: "adk-dashboard", color: "2563eb" }],
+    assignees: [{ login: "itismyfield" }],
+    createdAt: new Date(AGENTS_HUB_NOW - 172_800_000).toISOString(),
+    updatedAt: new Date(AGENTS_HUB_NOW - 3_600_000).toISOString(),
+  },
+];
+
+const MOCK_ACHIEVEMENTS = [
+  {
+    id: "achievement-first-task-ada",
+    agent_id: "agent-ada",
+    type: "first_task",
+    name: "첫 번째 태스크",
+    description: "첫 번째 dashboard milestone unlock",
+    earned_at: AGENTS_HUB_NOW - 259_200_000,
+    agent_name: "Ada Dashboard",
+    agent_name_ko: "에이다 대시보드",
+    avatar_emoji: "📊",
+    rarity: "rare",
+    progress: null,
+  },
+];
+
+const MOCK_STREAKS = [
+  {
+    agent_id: "agent-ada",
+    name: "Ada Dashboard",
+    avatar_emoji: "📊",
+    streak: 12,
+    last_active: "2026-04-21",
+  },
+];
+
+const MOCK_DAILY_MISSIONS = [
+  {
+    id: "dispatches_today",
+    label: "Complete 5 dispatches today",
+    current: 3,
+    target: 5,
+    completed: false,
+  },
+  {
+    id: "active_agents_today",
+    label: "Get 3 agents shipping today",
+    current: 2,
+    target: 3,
+    completed: false,
+  },
+  {
+    id: "review_queue_zero",
+    label: "Drain the review queue",
+    current: 0,
+    target: 1,
+    completed: true,
+  },
 ];
 
 async function mockMeetingsHubApis(page: Page) {
@@ -814,7 +1023,7 @@ async function mockDashboardBootstrap(page: Page) {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ dispatches: [] }),
+      body: JSON.stringify({ dispatches: MOCK_KANBAN_DISPATCHES }),
     });
   });
 
@@ -823,6 +1032,64 @@ async function mockDashboardBootstrap(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ cards: MOCK_BACKLOG_CARDS }),
+    });
+  });
+
+  await page.route(/\/api\/kanban-repos$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ repos: MOCK_KANBAN_REPO_SOURCES }),
+    });
+  });
+
+  await page.route(/\/api\/kanban-cards\/[^/]+\/audit-log$/, async (route) => {
+    const cardId = route.request().url().match(/\/api\/kanban-cards\/([^/]+)\/audit-log$/)?.[1] ?? "";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ logs: MOCK_KANBAN_AUDIT_LOGS[cardId as keyof typeof MOCK_KANBAN_AUDIT_LOGS] ?? [] }),
+    });
+  });
+
+  await page.route(/\/api\/kanban-cards\/[^/]+\/comments$/, async (route) => {
+    const cardId = route.request().url().match(/\/api\/kanban-cards\/([^/]+)\/comments$/)?.[1] ?? "";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_KANBAN_COMMENTS[cardId as keyof typeof MOCK_KANBAN_COMMENTS] ?? { comments: [], body: "" }),
+    });
+  });
+
+  await page.route(/\/api\/kanban-cards\/[^/]+\/reviews$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ reviews: [] }),
+    });
+  });
+
+  await page.route(/\/api\/github-issues(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ issues: MOCK_GITHUB_ISSUES, repo: "itismyfield/AgentDesk" }),
+    });
+  });
+
+  await page.route(/\/api\/streaks$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ streaks: MOCK_STREAKS }),
+    });
+  });
+
+  await page.route(/\/api\/v1\/achievements(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ achievements: MOCK_ACHIEVEMENTS, daily_missions: MOCK_DAILY_MISSIONS }),
     });
   });
 
@@ -1085,6 +1352,204 @@ test.describe("Dashboard smoke tests", () => {
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /설정|Settings/ }).click();
     await expect(page).toHaveURL(/\/settings$/);
     await expectNoHorizontalOverflow(page);
+  });
+
+  test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+
+    await page.addInitScript((order) => {
+      window.localStorage.setItem("agentdesk.home.order", JSON.stringify(order));
+    }, CUSTOM_HOME_WIDGET_ORDER);
+
+    await page.goto("/home");
+
+    await expect(page.getByTestId("home-widget-kanban")).toBeVisible({ timeout: 15000 });
+    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
+
+    await page.getByTestId("home-edit-toggle").click();
+    await expect(page.getByTestId("home-reset-order")).toBeVisible();
+    await page.getByTestId("home-reset-order").click();
+
+    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
+    await expect
+      .poll(() =>
+        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
+      )
+      .toEqual(DEFAULT_HOME_WIDGET_ORDER);
+  });
+
+  test("home: desktop edit mode supports drag reorder and persists layout", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+
+    await page.goto("/home");
+
+    await expect(page.getByTestId("home-widget-office")).toBeVisible({ timeout: 15000 });
+    await page.getByTestId("home-edit-toggle").click();
+
+    await page.getByTestId("home-widget-missions").dragTo(page.getByTestId("home-widget-office"));
+
+    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
+    await expect
+      .poll(() =>
+        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
+      )
+      .toEqual(DRAGGED_HOME_WIDGET_ORDER);
+  });
+
+  test("home: renders all handoff widgets and shared gamification blocks", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+
+    await page.goto("/home");
+
+    for (const widgetId of DEFAULT_HOME_WIDGET_ORDER) {
+      await expect(page.getByTestId(`home-widget-${widgetId}`)).toBeVisible({ timeout: 15000 });
+    }
+
+    await expect(page.getByTestId("sidebar-user-level-ring")).toBeVisible();
+    await expect(page.getByTestId("home-streak-counter")).toBeVisible();
+    await expect(page.getByTestId("home-daily-missions")).toBeVisible();
+    await expect(page.getByTestId("home-daily-mission-dispatches_today")).toBeVisible();
+    await expect(page.getByTestId("home-daily-mission-dispatches_today")).toContainText(
+      /오늘 디스패치 5건 완료|Complete 5 dispatches today/,
+    );
+  });
+
+  test("home: mobile stacks widgets and disables edit affordance", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+
+    await page.goto("/home");
+
+    await expect(page.getByTestId("home-widget-m_tokens")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-m_cost")).toBeVisible();
+    await expect(page.getByTestId("home-widget-kanban")).toBeVisible();
+    await expect(page.getByTestId("home-edit-toggle")).toHaveCount(0);
+
+    const [tokensBox, costBox] = await Promise.all([
+      page.getByTestId("home-widget-m_tokens").boundingBox(),
+      page.getByTestId("home-widget-m_cost").boundingBox(),
+    ]);
+
+    expect(tokensBox).not.toBeNull();
+    expect(costBox).not.toBeNull();
+    expect(costBox!.y).toBeGreaterThan(tokensBox!.y + tokensBox!.height - 1);
+  });
+
+  test("achievements: dedicated page renders sections and shared gamification blocks", async ({ page }) => {
+    await page.goto("/achievements");
+
+    await expect(page.getByTestId("achievements-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("achievements-section-earned")).toBeVisible();
+    await expect(page.getByTestId("achievements-section-progress")).toBeVisible();
+    await expect(page.getByTestId("achievements-section-locked")).toBeVisible();
+    await expect(page.getByTestId("achievements-daily-missions")).toBeVisible();
+    await expect(page.getByTestId("achievements-streak")).toBeVisible();
+    await expect(page.getByTestId("achievements-ranking")).toBeVisible();
+
+    await page.getByTestId("achievement-card-earned-achievement-first-task-ada").click();
+    await expect(page.getByTestId("achievements-drawer")).toBeVisible();
+    await expect(page.getByTestId("achievements-details")).toBeVisible();
+    await expect(page.getByTestId("achievements-timeline")).toBeVisible();
+  });
+
+  test("achievements: mobile keeps the badge grid in two columns", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+
+    await page.goto("/achievements");
+
+    const lockedCards = page.locator('[data-testid="achievements-grid-locked"] > button');
+    await expect(lockedCards.first()).toBeVisible({ timeout: 15000 });
+    await expect(lockedCards).toHaveCount(5);
+    await expect(lockedCards.nth(1)).toBeVisible();
+
+    await expect
+      .poll(async () => {
+        const [firstCard, secondCard] = await Promise.all([
+          lockedCards.nth(0).evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          }),
+          lockedCards.nth(1).evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          }),
+        ]);
+
+        return Math.abs(firstCard.y - secondCard.y);
+      })
+      .toBeLessThan(6);
+
+    await expect
+      .poll(async () => {
+        const [firstCard, secondCard] = await Promise.all([
+          lockedCards.nth(0).evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          }),
+          lockedCards.nth(1).evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          }),
+        ]);
+
+        return secondCard.x - firstCard.x;
+      })
+      .toBeGreaterThan(24);
+  });
+
+  test("gamification: operational routes keep home and achievements widgets out of the content area", async ({ page }) => {
+    for (const route of ["/stats", "/kanban", "/ops"]) {
+      await page.goto(route);
+
+      await expect(page.getByTestId("home-daily-missions")).toHaveCount(0);
+      await expect(page.getByTestId("home-streak-counter")).toHaveCount(0);
+      await expect(page.getByTestId("achievements-daily-missions")).toHaveCount(0);
+      await expect(page.getByTestId("achievements-streak")).toHaveCount(0);
+      await expect(page.getByTestId("achievements-ranking")).toHaveCount(0);
+    }
+  });
+
+  test("kanban: failed lane exposes trace, audit history, and pipeline hooks", async ({ page }) => {
+    await page.goto("/kanban");
+
+    await expect(page.getByTestId("kanban-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("kanban-column-failed")).toBeVisible();
+    await expect(page.getByTestId("kanban-pipeline-hooks")).toBeVisible();
+
+    await page.getByTestId("kanban-card-card-779-1").click();
+    await expect(page.getByTestId("kanban-card-drawer")).toBeVisible();
+    await expect(page.getByTestId("kanban-execution-trace")).toBeVisible();
+    await expect(page.getByTestId("kanban-state-history")).toBeVisible();
+  });
+
+  test("kanban: mobile keeps horizontal board scroll and opens card details as a sheet", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+
+    await page.goto("/kanban");
+
+    await expect(page.getByTestId("kanban-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("kanban-mobile-summary-failed")).toBeVisible();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("kanban-board-scroll")
+          .evaluate((element) => element.scrollWidth > element.clientWidth),
+      )
+      .toBe(true);
+
+    await page.getByTestId("kanban-mobile-summary-failed").click();
+    await page.getByTestId("kanban-card-card-779-1").click();
+
+    const sheet = page.getByRole("dialog", { name: /카드 상세|Card details/ });
+    await expect(sheet).toBeVisible();
+    await expect(page.getByTestId("kanban-card-drawer")).toBeVisible();
+
+    const sheetBox = await sheet.boundingBox();
+    const viewportSize = page.viewportSize();
+
+    expect(sheetBox).not.toBeNull();
+    expect(viewportSize).not.toBeNull();
+    expect((sheetBox?.y ?? 0)).toBeGreaterThan((viewportSize?.height ?? 0) * 0.08);
+    expect((sheetBox?.y ?? 0) + (sheetBox?.height ?? 0)).toBeGreaterThan((viewportSize?.height ?? 0) - 12);
   });
 
   test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
