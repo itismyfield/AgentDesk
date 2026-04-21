@@ -197,6 +197,8 @@ const FSM_VIEWBOX = {
   height: 420,
 } as const;
 
+const FSM_MOBILE_CANVAS_MIN_WIDTH = 820;
+
 const FSM_EDGE_BINDINGS_KEY = "fsm_edge_bindings";
 
 const FSM_EVENT_OPTIONS = [
@@ -697,13 +699,35 @@ export default function PipelineVisualEditor({
   }, [fsmDraftScopeKey, level, reloadKey, repo, selectedAgentId]);
 
   const selectedAgentName = selectedAgentLabel(agents, locale, selectedAgentId);
+  const useScrollableMobileFsmCanvas = isFsmVariant && compactGraph;
   const graph = useMemo(
-    () => (pipelineDraft ? buildPipelineGraph(pipelineDraft, compactGraph) : null),
-    [compactGraph, pipelineDraft],
+    () =>
+      (pipelineDraft
+        ? buildPipelineGraph(
+            pipelineDraft,
+            compactGraph && !isFsmVariant,
+          )
+        : null),
+    [compactGraph, isFsmVariant, pipelineDraft],
   );
-  const graphTransform = useMemo(() => {
+  const graphViewport = useMemo(() => {
     if (!graph || !isFsmVariant) {
       return null;
+    }
+    if (useScrollableMobileFsmCanvas) {
+      const paddingX = 28;
+      const paddingY = 24;
+      return {
+        width: Math.max(
+          FSM_MOBILE_CANVAS_MIN_WIDTH,
+          Math.ceil(graph.width + paddingX * 2),
+        ),
+        height: Math.ceil(graph.height + paddingY * 2),
+        scale: 1,
+        translateX: paddingX,
+        translateY: paddingY,
+        scrollable: true,
+      };
     }
     const scale = Math.min(
       FSM_VIEWBOX.width / Math.max(graph.width, 1),
@@ -712,11 +736,14 @@ export default function PipelineVisualEditor({
     const scaledWidth = graph.width * scale;
     const scaledHeight = graph.height * scale;
     return {
+      width: FSM_VIEWBOX.width,
+      height: FSM_VIEWBOX.height,
       scale,
       translateX: (FSM_VIEWBOX.width - scaledWidth) / 2,
       translateY: (FSM_VIEWBOX.height - scaledHeight) / 2,
+      scrollable: false,
     };
-  }, [graph, isFsmVariant]);
+  }, [graph, isFsmVariant, useScrollableMobileFsmCanvas]);
   const selectedState =
     selection?.kind === "state" && pipelineDraft
       ? pipelineDraft.states.find((state) => state.id === selection.stateId) ?? null
@@ -813,8 +840,12 @@ export default function PipelineVisualEditor({
     : "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,0.95fr)]";
   const graphPanelNote = isFsmVariant
     ? tr(
-        "FSM 캔버스는 1100×420 viewBox로 고정되고, 좁은 화면에서는 패널이 아래로 떨어집니다.",
-        "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
+        useScrollableMobileFsmCanvas
+          ? "모바일은 축소 대신 가로 스크롤 가능한 전체 크기 캔버스를 사용하고, 패널은 아래로 떨어집니다."
+          : "FSM 캔버스는 1100×420 viewBox로 고정되고, 좁은 화면에서는 패널이 아래로 떨어집니다.",
+        useScrollableMobileFsmCanvas
+          ? "Mobile keeps the FSM canvas at readable size with horizontal scroll, and drops the side panel below."
+          : "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
       )
     : tr(
         "그래프는 화면 폭에 맞춰 자동 압축됩니다. 모바일은 가로 스크롤 없이 1열 레이아웃을 사용합니다.",
@@ -1832,49 +1863,58 @@ export default function PipelineVisualEditor({
               )}
 
               <div
-                className="overflow-hidden rounded-[24px] border p-3 sm:p-4"
+                className={`${useScrollableMobileFsmCanvas ? "rounded-[24px] border p-3 sm:p-4" : "overflow-hidden rounded-[24px] border p-3 sm:p-4"}`}
                 style={isFsmVariant ? FSM_CANVAS_SHELL_STYLE : CANVAS_SHELL_STYLE}
               >
-                <svg
-                  ref={svgRef}
-                  viewBox={
-                    isFsmVariant
-                      ? `0 0 ${FSM_VIEWBOX.width} ${FSM_VIEWBOX.height}`
-                      : `0 0 ${graph.width} ${graph.height}`
-                  }
-                  className="h-auto w-full select-none"
-                  preserveAspectRatio={isFsmVariant ? "xMidYMid meet" : undefined}
-                  role="img"
-                  aria-label={tr(
-                    "파이프라인 상태와 전환 그래프",
-                    "Pipeline state and transition graph",
-                  )}
-                  onMouseDown={(event) => { if (event.target === svgRef.current) event.preventDefault(); }}
-                  onMouseMove={(event) => {
-                    if (isFsmVariant) return;
-                    if (!dragConnect) return;
-                    const pt = svgPointFromEvent(event);
-                    if (!pt) return;
-                    const hovered = graph.nodes.find(
-                      (n) => n.id !== dragConnect.fromId
-                        && pt.x >= n.x && pt.x <= n.x + n.width
-                        && pt.y >= n.y && pt.y <= n.y + n.height,
-                    );
-                    setDragConnect((prev) => prev ? { ...prev, cursorX: pt.x, cursorY: pt.y, hoverId: hovered?.id ?? null } : null);
-                  }}
-                  onMouseUp={() => {
-                    if (isFsmVariant) return;
-                    if (dragConnect?.hoverId) {
-                      addTransitionBetween(dragConnect.fromId, dragConnect.hoverId);
-                    }
-                    setDragConnect(null);
-                  }}
-                  onMouseLeave={() => {
-                    if (!isFsmVariant) {
-                      setDragConnect(null);
-                    }
-                  }}
+                <div
+                  className={useScrollableMobileFsmCanvas ? "-mx-1 overflow-x-auto overflow-y-hidden px-1 pb-2" : undefined}
+                  data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : undefined}
                 >
+                  <svg
+                    ref={svgRef}
+                    viewBox={
+                      isFsmVariant
+                        ? `0 0 ${graphViewport?.width ?? FSM_VIEWBOX.width} ${graphViewport?.height ?? FSM_VIEWBOX.height}`
+                        : `0 0 ${graph.width} ${graph.height}`
+                    }
+                    className={useScrollableMobileFsmCanvas ? "block h-auto max-w-none select-none" : "h-auto w-full select-none"}
+                    style={
+                      useScrollableMobileFsmCanvas && graphViewport
+                        ? { width: `${graphViewport.width}px`, minWidth: `${graphViewport.width}px` }
+                        : undefined
+                    }
+                    preserveAspectRatio={isFsmVariant ? "xMidYMid meet" : undefined}
+                    role="img"
+                    aria-label={tr(
+                      "파이프라인 상태와 전환 그래프",
+                      "Pipeline state and transition graph",
+                    )}
+                    onMouseDown={(event) => { if (event.target === svgRef.current) event.preventDefault(); }}
+                    onMouseMove={(event) => {
+                      if (isFsmVariant) return;
+                      if (!dragConnect) return;
+                      const pt = svgPointFromEvent(event);
+                      if (!pt) return;
+                      const hovered = graph.nodes.find(
+                        (n) => n.id !== dragConnect.fromId
+                          && pt.x >= n.x && pt.x <= n.x + n.width
+                          && pt.y >= n.y && pt.y <= n.y + n.height,
+                      );
+                      setDragConnect((prev) => prev ? { ...prev, cursorX: pt.x, cursorY: pt.y, hoverId: hovered?.id ?? null } : null);
+                    }}
+                    onMouseUp={() => {
+                      if (isFsmVariant) return;
+                      if (dragConnect?.hoverId) {
+                        addTransitionBetween(dragConnect.fromId, dragConnect.hoverId);
+                      }
+                      setDragConnect(null);
+                    }}
+                    onMouseLeave={() => {
+                      if (!isFsmVariant) {
+                        setDragConnect(null);
+                      }
+                    }}
+                  >
                   <defs>
                     {isFsmVariant && (
                       <>
@@ -1925,10 +1965,14 @@ export default function PipelineVisualEditor({
 
                   {isFsmVariant && (
                     <>
-                      <rect width={FSM_VIEWBOX.width} height={FSM_VIEWBOX.height} fill="#0d1016" />
                       <rect
-                        width={FSM_VIEWBOX.width}
-                        height={FSM_VIEWBOX.height}
+                        width={graphViewport?.width ?? FSM_VIEWBOX.width}
+                        height={graphViewport?.height ?? FSM_VIEWBOX.height}
+                        fill="#0d1016"
+                      />
+                      <rect
+                        width={graphViewport?.width ?? FSM_VIEWBOX.width}
+                        height={graphViewport?.height ?? FSM_VIEWBOX.height}
                         fill="url(#pipeline-grid-fsm)"
                       />
                     </>
@@ -1936,8 +1980,8 @@ export default function PipelineVisualEditor({
 
                   <g
                     transform={
-                      graphTransform
-                        ? `translate(${graphTransform.translateX} ${graphTransform.translateY}) scale(${graphTransform.scale})`
+                      graphViewport
+                        ? `translate(${graphViewport.translateX} ${graphViewport.translateY}) scale(${graphViewport.scale})`
                         : undefined
                     }
                   >
@@ -2145,8 +2189,8 @@ export default function PipelineVisualEditor({
                         )}
                         <text
                           x="12"
-                          y={compactGraph ? 20 : 24}
-                          fontSize={compactGraph ? 10 : 11}
+                          y={compactGraph && !isFsmVariant ? 20 : 24}
+                          fontSize={compactGraph && !isFsmVariant ? 10 : 11}
                           fontFamily="ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
                           fill={
                             isFsmVariant
@@ -2158,8 +2202,8 @@ export default function PipelineVisualEditor({
                         </text>
                         <text
                           x="12"
-                          y={compactGraph ? 38 : 45}
-                          fontSize={compactGraph ? 13 : 14}
+                          y={compactGraph && !isFsmVariant ? 38 : 45}
+                          fontSize={compactGraph && !isFsmVariant ? 13 : 14}
                           fontWeight="700"
                           fill={
                             isFsmVariant
@@ -2173,8 +2217,8 @@ export default function PipelineVisualEditor({
                         </text>
                         <text
                           x="12"
-                          y={compactGraph ? 54 : 66}
-                          fontSize={compactGraph ? 9 : 11}
+                          y={compactGraph && !isFsmVariant ? 54 : 66}
+                          fontSize={compactGraph && !isFsmVariant ? 9 : 11}
                           fill={isFsmVariant ? "rgba(148, 163, 184, 0.74)" : "var(--th-text-muted)"}
                         >
                           {isFsmVariant
@@ -2209,7 +2253,8 @@ export default function PipelineVisualEditor({
                     />
                   )}
                   </g>
-                </svg>
+                  </svg>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-3 text-xs" style={MUTED_TEXT_STYLE}>
