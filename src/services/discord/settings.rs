@@ -594,6 +594,35 @@ memory:
     }
 
     #[test]
+    fn test_resolve_memory_settings_treats_legacy_mem0_alias_as_file() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
+            );
+
+            with_env_vars(&[("MEMENTO_TEST_KEY", Some("memento-key"))], || {
+                let resolved = resolve_memory_settings(
+                    Some(&super::MemoryConfigOverride {
+                        backend: Some("mem0".to_string()),
+                        ..Default::default()
+                    }),
+                    None,
+                );
+                assert_eq!(resolved.backend, super::MemoryBackendKind::File);
+            });
+        });
+    }
+
+    #[test]
     fn test_resolve_memory_settings_explicit_backend_falls_back_to_file_when_unavailable() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {

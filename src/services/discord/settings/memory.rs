@@ -6,6 +6,7 @@ fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
         Some(value) if value.eq_ignore_ascii_case("auto") => Some("auto"),
         Some(value) if value.eq_ignore_ascii_case("file") => Some("file"),
         Some(value) if value.eq_ignore_ascii_case("local") => Some("file"),
+        Some(value) if value.eq_ignore_ascii_case("mem0") => Some("file"),
         Some(value) if value.eq_ignore_ascii_case("memento") => Some("memento"),
         Some(value) => {
             eprintln!(
