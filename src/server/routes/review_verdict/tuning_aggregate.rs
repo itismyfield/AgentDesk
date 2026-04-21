@@ -268,10 +268,6 @@ async fn record_tuning_outcome_pg(
 /// This avoids the old mtime-based debounce that could miss outcomes inserted
 /// shortly after the previous aggregate (e.g. a 5th sample crossing the threshold
 /// 10s after a 4-sample aggregate).
-pub fn spawn_aggregate_if_needed(db: &crate::db::Db) {
-    spawn_aggregate_if_needed_with_pg(db, None);
-}
-
 pub fn spawn_aggregate_if_needed_with_pg(db: &crate::db::Db, pg_pool: Option<sqlx::PgPool>) {
     let db = db.clone();
     tokio::spawn(async move {

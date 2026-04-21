@@ -3,8 +3,6 @@ const BENIGN_BLOCKED_REASON_PREFIXES: &[&str] = &[
     "ci:running",
     "ci:rerunning",
     "ci:rework",
-    "deploy:waiting",
-    "deploy:deploying:",
     // #743: pr:creating marks a card whose create-pr dispatch is in flight;
     // it is a benign progress state, not manual intervention.
     "pr:creating",

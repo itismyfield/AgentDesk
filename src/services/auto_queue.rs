@@ -195,7 +195,6 @@ pub struct AutoQueueRunView {
     pub unified_thread_id: Option<String>,
     pub max_concurrent_threads: i64,
     pub thread_group_count: i64,
-    pub deploy_phases: Vec<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,11 +634,6 @@ impl From<GenerateCandidateRecord> for GenerateCandidate {
 
 impl From<AutoQueueRunRecord> for AutoQueueRunView {
     fn from(record: AutoQueueRunRecord) -> Self {
-        let deploy_phases = record
-            .deploy_phases
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
-            .unwrap_or_default();
         Self {
             id: record.id,
             repo: record.repo,
@@ -654,7 +648,6 @@ impl From<AutoQueueRunRecord> for AutoQueueRunView {
             unified_thread_id: None,
             max_concurrent_threads: record.max_concurrent_threads,
             thread_group_count: record.thread_group_count,
-            deploy_phases,
         }
     }
 }

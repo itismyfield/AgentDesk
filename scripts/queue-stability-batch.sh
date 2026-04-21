@@ -24,9 +24,6 @@ PHASES=(
     ""  # Phase 3:
 )
 
-# Phases that trigger deploy on completion (space-separated indices)
-DEPLOY_PHASES=""  # e.g. "1 3"
-
 AGENT_ID="project-agentdesk"
 RATIONALE="Batch auto-queue run"
 
@@ -136,15 +133,6 @@ for idx in "${!PHASES[@]}"; do
         fi
     done
 done
-
-# ── Set deploy phases ──────────────────────────────────────
-if [ -n "$DEPLOY_PHASES" ]; then
-    DEPLOY_JSON=$(echo "$DEPLOY_PHASES" | tr ' ' '\n' | jq -s '.')
-    /usr/bin/sqlite3 "$DB" "
-        UPDATE auto_queue_runs SET deploy_phases = '$DEPLOY_JSON' WHERE id = '$RUN_ID';
-    " 2>/dev/null
-    log "▸ Deploy phases: $DEPLOY_JSON"
-fi
 
 # ── Submit order + activate ────────────────────────────────
 /usr/bin/sqlite3 "$DB" "UPDATE auto_queue_runs SET status = 'pending' WHERE id = '$RUN_ID';"

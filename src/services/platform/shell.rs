@@ -170,18 +170,10 @@ pub fn resolve_repo_dir() -> Option<String> {
 
     let is_git_dir = |p: &std::path::Path| p.join(".git").exists();
 
-    // Try runtime_root/workspaces/agentdesk first (covers current deployment),
-    // then the sibling root (dev ↔ release) so the dev server can find the
-    // release repo where worktrees actually live.
+    // Try runtime_root/workspaces/agentdesk first (covers current deployment).
     let mut candidates = Vec::new();
     if let Some(root) = crate::config::runtime_root() {
         candidates.push(root.join("workspaces").join("agentdesk"));
-        // Sibling: if runtime_root is .adk/dev, also try .adk/release and vice versa
-        if let Some(parent) = root.parent() {
-            let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let sibling = if name == "dev" { "release" } else { "dev" };
-            candidates.push(parent.join(sibling).join("workspaces").join("agentdesk"));
-        }
     }
     for ws in &candidates {
         if is_git_dir(ws) {

@@ -274,8 +274,8 @@ var reviewAutomation = {
       if (!stampGen) {
         // #743: Missing stamp means this dispatch was created before the
         // generation-stamp contract (pre-v8 rollout). The zero-inflight gate
-        // in deploy scripts should make this impossible, but if we observe
-        // one, reseed the tracking row so the retry loop can start fresh.
+        // should make this impossible, but if we observe one, reseed the
+        // tracking row so the retry loop can start fresh.
         agentdesk.log.warn(
           "[review] create-pr completion for card " + dispatch.kanban_card_id +
           " has no dispatch_generation stamp — reseeding (legacy recovery)"
@@ -314,9 +314,7 @@ var reviewAutomation = {
       if (!repoId || !branch) {
         // #701: Seed pr_tracking with last_error so merge-automation's
         // retry loop has a row to find. Use markPrCreateFailed to ensure
-        // the card is terminal — pipeline-originated create-pr dispatches
-        // (from deploy-pipeline's post-pipeline handoff) arrive here still
-        // non-terminal, and the retry loop skips non-terminal cards.
+        // the card is terminal — the retry loop skips non-terminal cards.
         //
         // Lifecycle guard: only force terminal if the card is still in a
         // PR-pending state. A delayed create-pr failure that arrives
@@ -510,7 +508,7 @@ var reviewAutomation = {
   }
 };
 
-// #197: Check if PR has .rs file changes (skip condition for dev-deploy/e2e-test)
+// #197: Check if PR has .rs file changes (skip condition for e2e-test)
 function hasRsChanges(cardId) {
   var card = agentdesk.db.query(
     "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?",
@@ -732,8 +730,7 @@ function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSh
   return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
 }
 
-// #701: Create-PR dispatch helper used by review-pass flow and exposed to
-// deploy-pipeline.js for post-pipeline handoff.
+// #701: Create-PR dispatch helper used by review-pass flow.
 //
 // Returns a structured result:
 //   { status: "dispatched" }                      — create-pr dispatch queued
@@ -1052,26 +1049,24 @@ function processVerdict(cardId, verdict, result, options) {
 
     // #701: PR creation is attempted in the review-pass branches that do NOT
     // queue a running pipeline stage — skip paths and the no-stage else branch.
-    // It is intentionally NOT attempted on the non-skip dev-deploy / e2e-test /
-    // normal-agent dispatch paths: those keep ownership of the card via
-    // `pipeline_stage_id` + `blocked_reason`, and letting pr_tracking enter
-    // `wait-ci` while those pipelines are active would race ci-recovery with
-    // deploy-pipeline (ci-recovery overwrites `blocked_reason` to `ci:*` and
-    // the card would be dropped from the deploy queue — merge could even land
-    // before the deploy/e2e finishes). Those pipelines must trigger their own
-    // create-pr on completion via agentdesk.reviewAutomation.attemptCreatePr.
+    // It is intentionally NOT attempted on the non-skip e2e-test / normal-agent
+    // dispatch paths: those keep ownership of the card via `pipeline_stage_id`
+    // + `blocked_reason`, and letting pr_tracking enter `wait-ci` while those
+    // pipelines are active would race ci-recovery with the pipeline stage
+    // (ci-recovery overwrites `blocked_reason` to `ci:*`). Those pipelines
+    // must trigger their own create-pr on completion via
+    // agentdesk.reviewAutomation.attemptCreatePr.
     var prDispatched = false;
 
     // #701: noop_verification short-circuit. If the review passed on a
     // review whose work was "no changes needed", skip pipeline entry
-    // entirely and go straight to terminal. Pipeline stages (dev-deploy,
-    // e2e-test) are meaningless for noop work, and — more importantly —
-    // without this short-circuit a noop card would enter a non-skip
-    // pipeline and, on completion, deploy-pipeline.js calls
-    // agentdesk.reviewAutomation.attemptCreatePr(cardId) which drops the
-    // noop_verification context, resulting in a real create-pr dispatch
-    // being created for noop work (empty PRs, wasted CI, possible
-    // auto-merge of "no changes").
+    // entirely and go straight to terminal. Pipeline stages (e2e-test)
+    // are meaningless for noop work, and without this short-circuit a
+    // noop card would enter a non-skip pipeline and, on completion, the
+    // stage would call agentdesk.reviewAutomation.attemptCreatePr(cardId)
+    // which drops the noop_verification context, resulting in a real
+    // create-pr dispatch being created for noop work (empty PRs, wasted
+    // CI, possible auto-merge of "no changes").
     if (noopVerification) {
       agentdesk.log.info("[review] Card " + cardId + " noop_verification pass — skipping pipeline, going terminal directly");
       agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
@@ -1123,9 +1118,9 @@ function processVerdict(cardId, verdict, result, options) {
           [cardId]
         );
         // #701: create-pr must fire here because the pipeline is being skipped
-        // entirely — there is no dev-deploy / e2e-test to create the PR later.
+        // entirely — there is no e2e-test to create the PR later.
         // Safe relative to ci-recovery: the pipeline stage is cleared in the
-        // same statement above, so the card has no active deploy ownership.
+        // same statement above, so the card has no active pipeline ownership.
         // All 3 outcomes go terminal so merge-automation.processTrackedMergeQueue
         // can retry `state='create-pr'` rows (it requires terminal status);
         // errors additionally stamp blocked_reason='pr:create_failed:...'
@@ -1152,17 +1147,8 @@ function processVerdict(cardId, verdict, result, options) {
         );
         agentdesk.log.info("[review] Card " + cardId + " passed review, entering pipeline stage: " + nextStage.stage_name);
 
-        // #197: Self-hosted stage (dev-deploy) — queue for internal execution
-        if (nextStage.provider === "self") {
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET blocked_reason = 'deploy:waiting' WHERE id = ?",
-            [cardId]
-          );
-          agentdesk.kanban.setStatus(cardId, inProgressState);
-          agentdesk.log.info("[review] Card " + cardId + " queued for self-hosted stage: " + nextStage.stage_name);
-        }
         // #197: Counter-model stage (e2e-test) — dispatch only if DoD contains e2e item
-        else if (nextStage.provider === "counter") {
+        if (nextStage.provider === "counter") {
           // Skip e2e if DoD doesn't mention it — review pass goes straight to done
           var dodCheck = agentdesk.db.query(
             "SELECT description FROM kanban_cards WHERE id = ?", [cardId]
@@ -1458,9 +1444,9 @@ function processVerdict(cardId, verdict, result, options) {
 
 agentdesk.registerPolicy(reviewAutomation);
 
-// #701: Expose the create-pr dispatch helper so deploy-pipeline.js can hand
-// cards back into the PR/CI flow after non-skip pipeline stages (dev-deploy,
-// e2e-test, normal agent) complete. Without this, cards finishing pipeline
+// #701: Expose the create-pr dispatch helper so pipeline stage policies can
+// hand cards back into the PR/CI flow after non-skip pipeline stages
+// (e2e-test, normal agent) complete. Without this, cards finishing pipeline
 // stages reach terminal state with no PR or tracking row, and ci-recovery /
 // merge-automation never get a chance to close the loop.
 //

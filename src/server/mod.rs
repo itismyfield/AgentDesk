@@ -7,8 +7,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use libsql_rusqlite::Connection;
-use serde_json::json;
 use sqlx::pool::PoolConnection;
 use sqlx::{PgPool, Postgres, Row};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,14 +21,11 @@ use crate::services::discord::health::HealthRegistry;
 const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
 const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
-const ESCALATION_PENDING_TTL_SEC: i64 = 600;
 const MESSAGE_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 const POLICY_TICK_ADVISORY_LOCK_ID: i64 = 7_801_001;
 const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
 const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
-
-static DEPLOY_GATE_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Monotonically increasing count of policy tick hook timeouts (#747).
 /// Incremented each time `fire_tick_hook_by_name_with_timeout` returns
@@ -101,10 +96,6 @@ struct PolicyTickHookExecution {
     error: Option<String>,
 }
 
-fn deploy_gate_title(phase: i64) -> String {
-    format!("[Deploy Gate] Phase {phase} 빌드+배포")
-}
-
 async fn try_acquire_pg_singleton_lock(
     pool: &PgPool,
     lock_id: i64,
@@ -134,218 +125,6 @@ async fn release_pg_singleton_lock(
     {
         tracing::warn!("[{job_name}] failed to release advisory lock {lock_id}: {error}");
     }
-}
-
-fn deploy_gate_failure_reason(phase: i64, detail: &str) -> String {
-    format!("{} 실패: {}", deploy_gate_title(phase), detail.trim())
-}
-
-fn phase_live_entry_count(conn: &Connection, run_id: &str, phase: i64) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(*)
-         FROM auto_queue_entries
-         WHERE run_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND COALESCE(batch_phase, 0) = ?2",
-        libsql_rusqlite::params![run_id, phase],
-        |row| row.get(0),
-    )
-    .unwrap_or(0)
-}
-
-fn deploy_gate_anchor_title(conn: &Connection, card_id: &str) -> String {
-    conn.query_row(
-        "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-            ))
-        },
-    )
-    .map(|(title, issue)| match (issue, title) {
-        (Some(issue), Some(title)) if !title.trim().is_empty() => format!("#{issue} {title}"),
-        (_, Some(title)) if !title.trim().is_empty() => title,
-        _ => card_id.to_string(),
-    })
-    .unwrap_or_else(|_| card_id.to_string())
-}
-
-fn enqueue_deploy_gate_escalation(conn: &Connection, card_id: &str, reason: &str) {
-    if card_id.trim().is_empty() || reason.trim().is_empty() {
-        return;
-    }
-
-    let pending_key = format!("pm_pending:{card_id}");
-    let mut entry = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
-            [&pending_key],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .filter(|value| value.is_object())
-        .unwrap_or_else(|| json!({}));
-
-    entry["title"] = json!(deploy_gate_anchor_title(conn, card_id));
-
-    let mut reasons = entry
-        .get("reasons")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if !reasons
-        .iter()
-        .any(|value| value.as_str().map(|s| s == reason).unwrap_or(false))
-    {
-        reasons.push(json!(reason));
-    }
-    entry["reasons"] = serde_json::Value::Array(reasons);
-
-    if let Ok(payload) = serde_json::to_string(&entry) {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at)
-             VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'))",
-            libsql_rusqlite::params![pending_key, payload, ESCALATION_PENDING_TTL_SEC.to_string()],
-        )
-        .ok();
-    }
-}
-
-fn poll_deploy_gates(db: &Db) {
-    if DEPLOY_GATE_RUNNING.load(Ordering::Acquire) {
-        return;
-    }
-
-    let gate = {
-        let Ok(conn) = db.lock() else { return };
-        let mut stmt = match conn.prepare(
-            "SELECT pg.run_id, pg.phase, r.deploy_phases, pg.anchor_card_id
-             FROM auto_queue_phase_gates pg
-             JOIN auto_queue_runs r ON r.id = pg.run_id
-             WHERE pg.status = 'pending' AND r.deploy_phases IS NOT NULL
-             LIMIT 1",
-        ) {
-            Ok(stmt) => stmt,
-            Err(_) => return,
-        };
-        let result: Option<(String, i64, String, Option<String>)> = stmt
-            .query_row([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .ok();
-        let Some((run_id, phase, deploy_phases_json, anchor_card_id)) = result else {
-            return;
-        };
-        let deploy_phases: Vec<i64> = serde_json::from_str(&deploy_phases_json).unwrap_or_default();
-        if !deploy_phases.contains(&phase) {
-            return;
-        }
-        let live_phase_entries = phase_live_entry_count(&conn, &run_id, phase);
-        if live_phase_entries > 0 {
-            tracing::info!(
-                "[deploy-gate] clearing stale gate for run {} phase {} — {} live entries remain",
-                &run_id[..8.min(run_id.len())],
-                phase,
-                live_phase_entries
-            );
-            conn.execute(
-                "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                libsql_rusqlite::params![run_id, phase],
-            )
-            .ok();
-            conn.execute(
-                "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
-                libsql_rusqlite::params![run_id],
-            )
-            .ok();
-            return;
-        }
-        (run_id, phase, anchor_card_id)
-    };
-
-    let (run_id, phase, anchor_card_id) = gate;
-    let db = db.clone();
-    DEPLOY_GATE_RUNNING.store(true, Ordering::Release);
-
-    std::thread::spawn(move || {
-        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tracing::info!(
-                "[deploy-gate] starting deploy for run {} phase {}",
-                &run_id[..8.min(run_id.len())],
-                phase
-            );
-
-            let result = crate::engine::ops::deploy_ops::run_deploy();
-            let success = result
-                .get("ok")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            let summary = result
-                .get("summary")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-
-            if let Ok(conn) = db.lock() {
-                if success {
-                    tracing::info!(
-                        "[deploy-gate] deploy succeeded for run {} phase {}: {}",
-                        &run_id[..8.min(run_id.len())],
-                        phase,
-                        summary
-                    );
-                    conn.execute(
-                        "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-                        libsql_rusqlite::params![run_id, phase],
-                    )
-                    .ok();
-                    conn.execute(
-                        "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ?1 AND status = 'paused'",
-                        libsql_rusqlite::params![run_id],
-                    )
-                    .ok();
-                } else {
-                    let error = result
-                        .get("error")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("deploy failed");
-                    tracing::warn!(
-                        "[deploy-gate] deploy failed for run {} phase {}: {}",
-                        &run_id[..8.min(run_id.len())],
-                        phase,
-                        error
-                    );
-                    conn.execute(
-                        "UPDATE auto_queue_phase_gates
-                         SET status = 'failed', failure_reason = ?3
-                         WHERE run_id = ?1 AND phase = ?2",
-                        libsql_rusqlite::params![run_id, phase, error],
-                    )
-                    .ok();
-                    if let Some(anchor_card_id) = anchor_card_id.as_deref() {
-                        enqueue_deploy_gate_escalation(
-                            &conn,
-                            anchor_card_id,
-                            &deploy_gate_failure_reason(phase, error),
-                        );
-                    }
-                }
-            }
-        }));
-
-        if let Err(panic) = body {
-            let msg = panic
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            tracing::error!("[deploy-gate] thread panicked: {}", msg);
-        }
-
-        DEPLOY_GATE_RUNNING.store(false, Ordering::Release);
-    });
 }
 
 async fn refresh_memory_health_for_startup() {
@@ -539,8 +318,6 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         } else {
             None
         };
-
-        poll_deploy_gates(&db);
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
         fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s").await;
@@ -915,15 +692,6 @@ mod tests {
         PolicyEngine::new(&config, db.clone()).unwrap()
     }
 
-    fn insert_agent(conn: &Connection, agent_id: &str) {
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, created_at, updated_at)
-             VALUES (?1, ?2, 'codex', datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![agent_id, format!("Agent {agent_id}")],
-        )
-        .unwrap();
-    }
-
     fn kv_value(db: &Db, key: &str) -> Option<String> {
         let conn = db.lock().unwrap();
         conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
@@ -946,19 +714,6 @@ mod tests {
             .prepare("SELECT id FROM agents ORDER BY id ASC")
             .unwrap();
         stmt.query_map([], |row| row.get(0))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect()
-    }
-
-    fn pipeline_stage_names(db: &Db, repo_id: &str) -> Vec<String> {
-        let conn = db.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT stage_name FROM pipeline_stages WHERE repo_id = ?1 ORDER BY stage_order ASC",
-            )
-            .unwrap();
-        stmt.query_map([repo_id], |row| row.get(0))
             .unwrap()
             .map(|row| row.unwrap())
             .collect()
@@ -1166,124 +921,6 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_deploy_gate_escalation_uses_phase_title() {
-        let db = test_db();
-        let conn = db.lock().unwrap();
-        insert_agent(&conn, "agent-1");
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, github_issue_number, status, assigned_agent_id, created_at, updated_at)
-             VALUES ('card-deploy-escalation', 'Deploy Anchor', 621, 'done', 'agent-1', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-
-        let reason = deploy_gate_failure_reason(1, "deploy-dev failed");
-        enqueue_deploy_gate_escalation(&conn, "card-deploy-escalation", &reason);
-        enqueue_deploy_gate_escalation(&conn, "card-deploy-escalation", &reason);
-
-        let raw: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'pm_pending:card-deploy-escalation'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let reasons = payload["reasons"].as_array().cloned().unwrap_or_default();
-
-        assert_eq!(payload["title"], json!("#621 Deploy Anchor"));
-        assert_eq!(
-            reasons.len(),
-            1,
-            "duplicate deploy gate reasons should be deduped"
-        );
-        assert_eq!(
-            reasons[0],
-            json!("[Deploy Gate] Phase 1 빌드+배포 실패: deploy-dev failed")
-        );
-    }
-
-    #[test]
-    fn poll_deploy_gates_clears_stale_gate_when_phase_still_has_live_entries() {
-        DEPLOY_GATE_RUNNING.store(false, Ordering::Release);
-        let db = test_db();
-        {
-            let conn = db.lock().unwrap();
-            insert_agent(&conn, "agent-1");
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, deploy_phases, created_at)
-                 VALUES ('run-stale-deploy-gate', 'test/repo', 'agent-1', 'paused', '[1]', datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-stale-deploy-anchor', 'Deploy Anchor', 'done', 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-stale-deploy-live', 'Deploy Live', 'ready', 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank, created_at)
-                 VALUES ('entry-stale-deploy-live', 'run-stale-deploy-gate', 'card-stale-deploy-live', 'agent-1', 'pending', 1, 0, datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_phase_gates (
-                    run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
-                 ) VALUES (
-                    'run-stale-deploy-gate', 1, 'pending', NULL, NULL, 'phase_gate_passed', 2,
-                    0, 'card-stale-deploy-anchor', NULL, datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
-        }
-
-        poll_deploy_gates(&db);
-
-        let conn = db.lock().unwrap();
-        let run_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_runs WHERE id = 'run-stale-deploy-gate'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let gate_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = 'run-stale-deploy-gate' AND phase = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let escalation_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM kv_meta WHERE key = 'pm_pending:card-stale-deploy-anchor'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(run_status, "active");
-        assert_eq!(
-            gate_count, 0,
-            "stale deploy gates must be cleared before deploy starts"
-        );
-        assert_eq!(
-            escalation_count, 0,
-            "stale gate cleanup must not enqueue a PM escalation"
-        );
-    }
-
-    #[test]
     fn seed_startup_runtime_state_records_server_port_and_registered_repos() {
         let db = test_db();
         let mut config = crate::config::Config::default();
@@ -1308,21 +945,6 @@ mod tests {
             vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()]
         );
         assert_eq!(agent_ids(&db), vec!["project-agentdesk".to_string()]);
-    }
-
-    #[test]
-    fn seed_startup_runtime_state_seeds_builtin_pipeline_stages_for_agentdesk_repo() {
-        let db = test_db();
-        let mut config = crate::config::Config::default();
-        config.github.repos = vec!["itismyfield/AgentDesk".to_string()];
-
-        seed_startup_runtime_state(&db, &config);
-        seed_startup_runtime_state(&db, &config);
-
-        assert_eq!(
-            pipeline_stage_names(&db, "itismyfield/AgentDesk"),
-            vec!["dev-deploy".to_string(), "e2e-test".to_string()]
-        );
     }
 
     #[test]

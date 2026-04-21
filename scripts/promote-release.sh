@@ -5,9 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
-ADK_DEV="$HOME/.adk/dev"
 ADK_REL="$HOME/.adk/release"
-PLIST_DEV="com.agentdesk.dev"
 PLIST_REL="com.agentdesk.release"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
@@ -30,11 +28,10 @@ CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonc
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
 
-SKIP_HEALTH=false
 for arg in "$@"; do
     case "$arg" in
         --skip-review) ;; # accepted-and-ignored for backward compatibility
-        --skip-health) SKIP_HEALTH=true ;;
+        --skip-health) ;; # accepted-and-ignored for backward compatibility
     esac
 done
 
@@ -126,13 +123,9 @@ _notify_channel() {
     payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
 
     local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
-    local dev_port="${AGENTDESK_DEV_PORT:-8799}"
     curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/send" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
-        || curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${dev_port}/api/send" \
-            -H 'Content-Type: application/json' \
-            --data-binary "$payload" >/dev/null 2>&1 \
         || true
 }
 
@@ -143,19 +136,16 @@ _tail_for_summary() {
 }
 
 _resolve_dashboard_source() {
-    # Dev dashboard may be a symlink (deploy-dashboard.sh dev uses ln -sfn).
     # Resolve to the real path so cp -r copies actual files, not dangling links.
-    local candidate
-    for candidate in "$ADK_DEV/dashboard/dist" "$REPO/dashboard/dist"; do
-        if [ -d "$candidate" ]; then
-            local resolved
-            resolved="$(cd "$candidate" && pwd -P)"
-            if [ -f "$resolved/index.html" ]; then
-                printf '%s\n' "$resolved"
-                return 0
-            fi
+    local candidate="$REPO/dashboard/dist"
+    if [ -d "$candidate" ]; then
+        local resolved
+        resolved="$(cd "$candidate" && pwd -P)"
+        if [ -f "$resolved/index.html" ]; then
+            printf '%s\n' "$resolved"
+            return 0
         fi
-    done
+    fi
     return 1
 }
 
@@ -233,29 +223,6 @@ EOF
     echo "  current turn will finish before dcserver restart; final result will be reported automatically"
 }
 
-# Safety check: dev must be healthy
-DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
-if [ "$SKIP_HEALTH" = true ]; then
-    echo "▸ Skipping dev health check (--skip-health)"
-else
-    echo "▸ Waiting for dev health on :${DEV_PORT}..."
-    DEV_READY=false
-    if wait_for_http_service_health "$PLIST_DEV" "$DEV_PORT" "$PROMOTE_HEALTH_RETRIES" "$PROMOTE_HEALTH_DELAY_SECS" 0 1; then
-        DEV_READY=true
-    fi
-
-    if [ "$DEV_READY" != true ]; then
-        echo "✗ Dev is not healthy after $PROMOTE_HEALTH_RETRIES attempts — aborting promotion"
-        exit 1
-    fi
-
-    if _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
-        echo "▸ Dev is serving (provider reconcile in progress) — proceeding"
-    else
-        echo "▸ Dev is healthy — proceeding"
-    fi
-fi
-
 # #743: Zero-inflight gate for create-pr dispatches on the release runtime.
 # A restart during an in-flight create-pr dispatch leaves its completion
 # unstamped after the new code rolls out. If the release API is unreachable
@@ -277,18 +244,13 @@ else
 fi
 
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
-    echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
+    echo "✗ Dashboard dist not found in workspace — aborting promotion"
     echo "  looked for:"
-    echo "    - $ADK_DEV/dashboard/dist/index.html"
     echo "    - $REPO/dashboard/dist/index.html"
     echo "  Run 'cd $REPO/dashboard && npm run build' to generate it"
     exit 1
 fi
-if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ] && [ ! -f "$ADK_DEV/dashboard/dist/index.html" ]; then
-    echo "▸ Dashboard source: workspace fallback ($DASHBOARD_SOURCE)"
-else
-    echo "▸ Dashboard source: $DASHBOARD_SOURCE"
-fi
+echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 if [ ! -d "$REPO/skills" ]; then
     echo "✗ Managed skills not found in workspace — aborting promotion"
     echo "  expected: $REPO/skills"
@@ -374,13 +336,20 @@ else
     sleep 2
 fi
 
-# Copy binary from dev — atomic: sign in tmp, then mv to replace inode.
-# In-place codesign can corrupt the OS signing cache if it fails mid-write,
-# causing SIGKILL on subsequent launches even though the binary is valid.
-echo "▸ Copying binary from dev..."
+# Copy binary from the release build output — atomic: sign in tmp, then mv
+# to replace the inode. In-place codesign can corrupt the OS signing cache
+# if it fails mid-write, causing SIGKILL on subsequent launches even though
+# the binary is valid.
+SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
+if [ ! -x "$SOURCE_BINARY" ]; then
+    echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
+    echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
+    exit 1
+fi
+echo "▸ Copying binary from $SOURCE_BINARY..."
 STAGED_BINARY="$(_staged_promote_binary_path)"
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-cp "$ADK_DEV/bin/agentdesk" "$STAGED_BINARY"
+cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"

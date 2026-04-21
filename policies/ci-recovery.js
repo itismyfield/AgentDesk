@@ -1,6 +1,6 @@
 /**
  * ci-recovery.js — ADK Policy: CI Failure Auto-Recovery (#257)
- * priority: 46 (between deploy-pipeline=45 and review-automation=50)
+ * priority: 46 (between pipeline policies=45 and review-automation=50)
  *
  * Hooks:
  *   onTick1min — Poll CI status for cards in wait-ci phase

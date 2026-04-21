@@ -5825,102 +5825,6 @@ fn seed_agent(db: &Db, agent_id: &str) {
 }
 
 #[tokio::test]
-async fn create_repo_seeds_builtin_agentdesk_pipeline_stages_for_new_db() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/kanban-repos")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"repo":"itismyfield/AgentDesk"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
-    let conn = db.lock().unwrap();
-    let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
-        .prepare(
-            "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
-             FROM pipeline_stages
-             WHERE repo_id = 'itismyfield/AgentDesk'
-             ORDER BY stage_order ASC",
-        )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
-
-    assert_eq!(
-        rows,
-        vec![
-            (
-                "dev-deploy".to_string(),
-                100,
-                Some("review_pass".to_string()),
-                Some("self".to_string()),
-                Some("no_rs_changes".to_string()),
-            ),
-            (
-                "e2e-test".to_string(),
-                200,
-                None,
-                Some("counter".to_string()),
-                Some("no_rs_changes".to_string()),
-            ),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn create_repo_does_not_duplicate_builtin_agentdesk_pipeline_stages() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-
-    for _ in 0..2 {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/kanban-repos")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"repo":"itismyfield/AgentDesk"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-    }
-
-    let conn = db.lock().unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = 'itismyfield/AgentDesk'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-
-    assert_eq!(count, 2);
-}
-
-#[tokio::test]
 async fn kanban_repos_pg_create_update_delete_round_trip() {
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -9574,54 +9478,6 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
-async fn auto_queue_dispatch_rejects_deploy_phases_when_auth_token_is_not_configured() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "project-agentdesk");
-    ensure_auto_queue_tables(&db);
-    seed_auto_queue_card(
-        &db,
-        "card-dq-deploy-phase-reject",
-        7401,
-        "ready",
-        "project-agentdesk",
-    );
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/dispatch")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "agent_id": "project-agentdesk",
-                        "groups": [{"issues": [7401]}],
-                        "deploy_phases": [1],
-                        "activate": false
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        json["error"],
-        "deploy_phases requires server.auth_token to be configured"
-    );
-}
-
-#[tokio::test]
 async fn auto_queue_dispatch_rejects_when_live_run_exists_without_force() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -10065,41 +9921,6 @@ async fn auto_queue_add_run_entry_rejects_non_active_runs() {
             .unwrap_or("")
             .contains("status=cancelled"),
         "inactive runs must be rejected with status details: {json}"
-    );
-}
-
-#[tokio::test]
-async fn auto_queue_update_run_rejects_deploy_phases_when_auth_token_is_not_configured() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/auto-queue/runs/run-does-not-matter")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&json!({
-                        "deploy_phases": [2]
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        json["error"],
-        "deploy_phases requires server.auth_token to be configured"
     );
 }
 
