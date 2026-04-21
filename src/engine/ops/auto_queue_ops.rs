@@ -331,12 +331,15 @@ fn activate_raw(
         return match crate::utils::async_bridge::block_on_pg_result(
             pool,
             {
+                let db = db.cloned();
                 let body = body;
                 let engine = engine.clone();
                 move |_bridge_pool| async move {
                     let (_status, response) =
-                        crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body)
-                            .await;
+                        crate::server::routes::auto_queue::activate_with_bridge_pg(
+                            db, engine, body,
+                        )
+                        .await;
                     Ok(response.0.to_string())
                 }
             },

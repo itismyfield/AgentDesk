@@ -1959,6 +1959,45 @@ pub fn list_backlog_cards(
     rows.collect()
 }
 
+pub async fn list_backlog_cards_pg(
+    pool: &PgPool,
+    filter: &GenerateCardFilter,
+) -> Result<Vec<BacklogCardRecord>, sqlx::Error> {
+    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let issue_numbers = filter
+        .issue_numbers
+        .as_ref()
+        .filter(|nums| !nums.is_empty())
+        .cloned();
+
+    let rows = sqlx::query(
+        "SELECT kc.id,
+                kc.repo_id,
+                kc.assigned_agent_id
+         FROM kanban_cards kc
+         WHERE kc.status = 'backlog'
+           AND ($1::TEXT IS NULL OR kc.repo_id = $1)
+           AND ($2::TEXT IS NULL OR kc.assigned_agent_id = $2)
+           AND ($3::BIGINT[] IS NULL OR kc.github_issue_number::BIGINT = ANY($3::BIGINT[]))",
+    )
+    .bind(repo)
+    .bind(agent_id)
+    .bind(issue_numbers)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(BacklogCardRecord {
+                card_id: row.try_get("id")?,
+                repo_id: row.try_get("repo_id")?,
+                assigned_agent_id: row.try_get("assigned_agent_id")?,
+            })
+        })
+        .collect()
+}
+
 pub fn list_generate_candidates(
     conn: &Connection,
     filter: &GenerateCardFilter,
@@ -2011,6 +2050,66 @@ pub fn list_generate_candidates(
         })
     })?;
     rows.collect()
+}
+
+pub async fn list_generate_candidates_pg(
+    pool: &PgPool,
+    filter: &GenerateCardFilter,
+    enqueueable_states: &[String],
+) -> Result<Vec<GenerateCandidateRecord>, sqlx::Error> {
+    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let issue_numbers = filter
+        .issue_numbers
+        .as_ref()
+        .filter(|nums| !nums.is_empty())
+        .cloned();
+
+    let rows = sqlx::query(
+        "SELECT kc.id,
+                kc.assigned_agent_id,
+                kc.priority,
+                kc.description,
+                kc.metadata,
+                kc.github_issue_number::BIGINT AS github_issue_number
+         FROM kanban_cards kc
+         WHERE kc.status = ANY($1::TEXT[])
+           AND ($2::TEXT IS NULL OR kc.repo_id = $2)
+           AND ($3::TEXT IS NULL OR kc.assigned_agent_id = $3)
+           AND ($4::BIGINT[] IS NULL OR kc.github_issue_number::BIGINT = ANY($4::BIGINT[]))
+         ORDER BY
+           CASE kc.priority
+             WHEN 'urgent' THEN 0
+             WHEN 'high' THEN 1
+             WHEN 'medium' THEN 2
+             WHEN 'low' THEN 3
+             ELSE 4
+           END,
+           kc.created_at ASC",
+    )
+    .bind(enqueueable_states)
+    .bind(repo)
+    .bind(agent_id)
+    .bind(issue_numbers)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(GenerateCandidateRecord {
+                card_id: row.try_get("id")?,
+                agent_id: row
+                    .try_get::<Option<String>, _>("assigned_agent_id")?
+                    .unwrap_or_default(),
+                priority: row
+                    .try_get::<Option<String>, _>("priority")?
+                    .unwrap_or_else(|| "medium".to_string()),
+                description: row.try_get("description")?,
+                metadata: row.try_get("metadata")?,
+                github_issue_number: row.try_get("github_issue_number")?,
+            })
+        })
+        .collect()
 }
 
 pub fn count_cards_by_status(
