@@ -211,7 +211,7 @@ export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_PROMOTE_DETACHED_CHILD=1
 export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_PROMOTE_TEST_MODE=$(printf '%q' "$PROMOTE_TEST_MODE")
-export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-0}")
+export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_PROMOTE_BINARY=$(printf '%q' "${AGENTDESK_PROMOTE_BINARY:-}")
 cd $(printf '%q' "$REPO")
@@ -311,8 +311,12 @@ rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 # dcserver SIGTERM preserves turn state (#43e3cacc): tmux sessions stay alive
 # and the watcher silent-reattaches after restart. What the drain gate guards
 # against is mid-stream output truncation to Discord during the SIGTERM window.
-# Skip the wait with AGENTDESK_SKIP_TURN_DRAIN=1 when a brief stream hiccup is
-# acceptable for the planned restart.
+# #899: the default is now AGENTDESK_SKIP_TURN_DRAIN=1 (bypass) — in practice
+# every self-hosted promotion carries a live turn (the operator agent's own
+# turn), so blocking on drain is a near-permanent false-negative; the brief
+# stream hiccup is acceptable and #826/#896 already guarantee recovery via
+# watcher silent-reattach + inflight rebind. Set AGENTDESK_SKIP_TURN_DRAIN=0
+# to force the classic drain-wait when a clean restart is genuinely required.
 # REL_PORT already assigned earlier for the zero-inflight gate.
 if ! wait_for_live_turns_to_drain_or_fail "release" "$PLIST_REL" "$REL_PORT" 120 2; then
     exit 1

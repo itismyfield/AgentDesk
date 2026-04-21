@@ -322,7 +322,13 @@ wait_for_live_turns_to_drain_or_fail() {
   # Turns themselves are preserved across restart via silent reattach (#43e3cacc);
   # this flag only skips the drain wait, at the cost of possibly truncating a
   # mid-stream Discord response during the SIGTERM window.
-  local skip_drain="${AGENTDESK_SKIP_TURN_DRAIN:-0}"
+  #
+  # #899: default is now `1` (bypass). In the self-hosted promote topology the
+  # operator agent running the promote IS a live turn on release, so drain
+  # would time out nearly always. The stream hiccup is acceptable and #826 /
+  # #896 guarantee recovery via watcher silent-reattach + inflight rebind.
+  # Set `AGENTDESK_SKIP_TURN_DRAIN=0` to force the classic drain-wait.
+  local skip_drain="${AGENTDESK_SKIP_TURN_DRAIN:-1}"
   local waited=0
   local active=0 finalizing=0 queue_depth=0 live_turns=0 job_state=""
 
@@ -341,7 +347,8 @@ EOF
     fi
     echo "✗ [gate] Unable to confirm ${scope} turn drain on :${port} (launchd state: ${job_state:-unknown})"
     echo "  Refusing restart to avoid truncating mid-stream output."
-    echo "  Override only if stream hiccup is acceptable: AGENTDESK_SKIP_TURN_DRAIN=1"
+    echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
+    echo "  remove that override (default=1) if a brief stream hiccup is acceptable."
     return 1
   fi
 
@@ -370,7 +377,8 @@ EOF
       fi
       echo "✗ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown})"
       echo "  Refusing restart to avoid truncating mid-stream output."
-      echo "  Override only if stream hiccup is acceptable: AGENTDESK_SKIP_TURN_DRAIN=1"
+      echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
+      echo "  remove that override (default=1) if a brief stream hiccup is acceptable."
       return 1
     fi
     live_turns=$(( active + finalizing ))
@@ -383,7 +391,8 @@ EOF
     fi
     echo "✗ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s (queued=${queue_depth})"
     echo "  Refusing restart to avoid truncating mid-stream output."
-    echo "  Retry after work finishes, or override with AGENTDESK_SKIP_TURN_DRAIN=1 when a brief stream hiccup is acceptable."
+    echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
+    echo "  retry after work finishes or remove that override (default=1) when a brief stream hiccup is acceptable."
     return 1
   fi
 
