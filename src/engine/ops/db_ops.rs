@@ -16,7 +16,7 @@ const POLICY_DB_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
 pub(super) fn register_db_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -28,7 +28,7 @@ pub(super) fn register_db_ops<'js>(
     let query_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_raw(&db_q, pg_q.clone(), &sql, &params_json)
+            db_query_raw(db_q.as_ref(), pg_q.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__query_raw", query_raw)?;
@@ -39,7 +39,7 @@ pub(super) fn register_db_ops<'js>(
     let execute_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_execute_raw(&db_e, pg_e.clone(), &sql, &params_json)
+            db_execute_raw(db_e.as_ref(), pg_e.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__execute_raw", execute_raw)?;
@@ -98,7 +98,7 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
     }
 }
 
-fn db_query_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
+fn db_query_raw(db: Option<&Db>, pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     let started = std::time::Instant::now();
     let params: Vec<serde_json::Value> =
         match parse_params_json(params_json, "agentdesk.db.query.parse_params", sql) {
@@ -109,6 +109,13 @@ fn db_query_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str) 
     if let Some(pg_pool) = pg_pool {
         return db_query_raw_pg(&pg_pool, sql, &params, started);
     }
+    let Some(db) = db else {
+        return policy_db_error_json(
+            "agentdesk.db.query.sqlite_backend",
+            sql,
+            "sqlite backend is unavailable".to_string(),
+        );
+    };
 
     let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 
@@ -251,7 +258,12 @@ fn db_query_raw_pg(
     })
 }
 
-fn db_execute_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
+fn db_execute_raw(
+    db: Option<&Db>,
+    pg_pool: Option<PgPool>,
+    sql: &str,
+    params_json: &str,
+) -> String {
     let started = std::time::Instant::now();
     if let Some(violation) = detect_core_table_write(sql) {
         return serde_json::json!({ "error": violation.error_message() }).to_string();
@@ -266,6 +278,13 @@ fn db_execute_raw(db: &Db, pg_pool: Option<PgPool>, sql: &str, params_json: &str
     if let Some(pg_pool) = pg_pool {
         return db_execute_raw_pg(&pg_pool, sql, &params, started);
     }
+    let Some(db) = db else {
+        return policy_db_error_json(
+            "agentdesk.db.execute.sqlite_backend",
+            sql,
+            "sqlite backend is unavailable".to_string(),
+        );
+    };
 
     let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 

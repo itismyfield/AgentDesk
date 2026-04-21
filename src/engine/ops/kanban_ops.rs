@@ -10,7 +10,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 
 pub(super) fn register_kanban_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -26,6 +26,9 @@ pub(super) fn register_kanban_ops<'js>(
                 if let Some(pool) = pg_set.as_ref() {
                     return set_status_raw_pg(pool, &card_id, &new_status, force.unwrap_or(false));
                 }
+                let Some(db_set) = db_set.as_ref() else {
+                    return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+                };
                 let conn = match db_set.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
@@ -233,6 +236,9 @@ pub(super) fn register_kanban_ops<'js>(
     kanban_obj.set(
         "__reopenRaw",
         Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+            let Some(db_reopen) = db_reopen.as_ref() else {
+                return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+            };
             let conn = match db_reopen.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
@@ -322,7 +328,7 @@ pub(super) fn register_kanban_ops<'js>(
                 }
             }
 
-            crate::kanban::correct_tn_to_fn_on_reopen(&db_reopen, pg_reopen.as_ref(), &card_id);
+            crate::kanban::correct_tn_to_fn_on_reopen(db_reopen, pg_reopen.as_ref(), &card_id);
 
             let has_hooks = pipeline
                 .hooks_for_state(&new_status)
@@ -357,6 +363,9 @@ pub(super) fn register_kanban_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return get_card_raw_pg(pool, &card_id);
             }
+            let Some(db_get) = db_get.as_ref() else {
+                return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+            };
             let conn = match db_get.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -396,6 +405,9 @@ pub(super) fn register_kanban_ops<'js>(
                         expected_dispatch_id.as_deref(),
                     );
                 }
+                let Some(db_clear_latest) = db_clear_latest.as_ref() else {
+                    return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+                };
                 let conn = match db_clear_latest.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -440,6 +452,9 @@ pub(super) fn register_kanban_ops<'js>(
                 let opts: serde_json::Value = match serde_json::from_str(&opts_json) {
                     Ok(v) => v,
                     Err(e) => return format!(r#"{{"error":"bad opts: {}"}}"#, e),
+                };
+                let Some(db_review) = db_review.as_ref() else {
+                    return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
                 };
                 let conn = match db_review.separate_conn() {
                     Ok(c) => c,
@@ -1054,6 +1069,20 @@ pub(super) fn review_state_sync(db: &Db, json_str: &str) -> String {
     review_state_sync_on_conn(&conn, json_str)
 }
 
+pub(super) fn review_state_sync_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    json_str: &str,
+) -> String {
+    if let Some(pool) = pg_pool {
+        return review_state_sync_pg(pool, json_str);
+    }
+    let Some(db) = db else {
+        return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+    };
+    review_state_sync(db, json_str)
+}
+
 /// Best-effort auto-queue cleanup for terminal cards.
 ///
 /// When a card finishes, its active dispatch entry should become `done` and any
@@ -1239,5 +1268,124 @@ pub(super) fn review_state_sync_on_conn(
     match result {
         Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
         Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+    }
+}
+
+fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
+    let params: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+    };
+
+    let card_id = params["card_id"].as_str().unwrap_or("");
+    let state = params["state"].as_str().unwrap_or("");
+    if card_id.is_empty() || state.is_empty() {
+        return r#"{"error":"card_id and state are required"}"#.to_string();
+    }
+
+    let card_id = card_id.to_string();
+    let state = state.to_string();
+    let review_round = params["review_round"].as_i64();
+    let last_verdict = params["last_verdict"].as_str().map(str::to_string);
+    let last_decision = params["last_decision"].as_str().map(str::to_string);
+    let pending_dispatch_id = params["pending_dispatch_id"].as_str().map(str::to_string);
+    let approach_change_round = params["approach_change_round"].as_i64();
+    let session_reset_round = params["session_reset_round"].as_i64();
+    let review_entered_at = params["review_entered_at"].as_str().map(str::to_string);
+
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            if state == "clear_verdict" {
+                let rows_affected = sqlx::query(
+                    "UPDATE card_review_state
+                     SET last_verdict = NULL,
+                         updated_at = NOW()
+                     WHERE card_id = $1",
+                )
+                .bind(&card_id)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| format!("clear postgres review verdict for {card_id}: {error}"))?
+                .rows_affected();
+                return Ok(format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#));
+            }
+
+            let rows_affected = sqlx::query(
+                "INSERT INTO card_review_state (
+                    card_id,
+                    state,
+                    review_round,
+                    last_verdict,
+                    last_decision,
+                    pending_dispatch_id,
+                    approach_change_round,
+                    session_reset_round,
+                    review_entered_at,
+                    updated_at
+                 ) VALUES (
+                    $1,
+                    $2,
+                    COALESCE(
+                        $3,
+                        (SELECT COALESCE(review_round, 0)::BIGINT FROM kanban_cards WHERE id = $1),
+                        0
+                    ),
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    COALESCE($9, CASE WHEN $2 = 'reviewing' THEN NOW()::TEXT ELSE NULL END),
+                    NOW()
+                 )
+                 ON CONFLICT(card_id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    review_round = COALESCE(EXCLUDED.review_round, card_review_state.review_round),
+                    last_verdict = COALESCE(EXCLUDED.last_verdict, card_review_state.last_verdict),
+                    last_decision = COALESCE(EXCLUDED.last_decision, card_review_state.last_decision),
+                    pending_dispatch_id = CASE
+                        WHEN EXCLUDED.pending_dispatch_id IS NOT NULL THEN EXCLUDED.pending_dispatch_id
+                        WHEN EXCLUDED.state = 'suggestion_pending' THEN card_review_state.pending_dispatch_id
+                        ELSE NULL
+                    END,
+                    approach_change_round = COALESCE(
+                        EXCLUDED.approach_change_round,
+                        card_review_state.approach_change_round
+                    ),
+                    session_reset_round = COALESCE(
+                        EXCLUDED.session_reset_round,
+                        card_review_state.session_reset_round
+                    ),
+                    review_entered_at = COALESCE(
+                        EXCLUDED.review_entered_at,
+                        CASE
+                            WHEN EXCLUDED.state = 'reviewing' THEN NOW()::TEXT
+                            ELSE card_review_state.review_entered_at
+                        END
+                    ),
+                    updated_at = NOW()",
+            )
+            .bind(&card_id)
+            .bind(&state)
+            .bind(review_round)
+            .bind(last_verdict)
+            .bind(last_decision)
+            .bind(pending_dispatch_id)
+            .bind(approach_change_round)
+            .bind(session_reset_round)
+            .bind(review_entered_at)
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| format!("upsert postgres review state for {card_id}: {error}"))?
+            .rows_affected();
+            Ok(format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#))
+        },
+        |error| format!(r#"{{"error":"{}"}}"#, error),
+    );
+
+    match result {
+        Ok(value) => value,
+        Err(error_json) => error_json,
     }
 }

@@ -42,7 +42,7 @@ pub struct GenerateBody {
     pub max_concurrent_per_agent: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ActivateBody {
     pub run_id: Option<String>,
     pub repo: Option<String>,
@@ -2467,8 +2467,28 @@ impl AutoQueueActivateDeps {
         }
     }
 
+    pub(crate) fn for_bridge_pg(engine: crate::engine::PolicyEngine) -> Self {
+        let db = engine.legacy_db().cloned().unwrap_or_else(|| {
+            let conn =
+                libsql_rusqlite::Connection::open_in_memory().expect("open sqlite bridge db");
+            crate::db::schema::migrate(&conn).expect("migrate sqlite bridge db");
+            crate::db::wrap_conn(conn)
+        });
+        Self {
+            db,
+            pg_pool: engine.pg_pool().cloned(),
+            engine,
+            config: Arc::new(crate::config::Config::default()),
+            health_registry: None,
+            guild_id: None,
+        }
+    }
+
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
+        crate::services::auto_queue::AutoQueueService::new(
+            Some(self.db.clone()),
+            self.engine.clone(),
+        )
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -4751,6 +4771,24 @@ pub async fn activate(
     } else {
         activate_with_deps(&deps, body)
     }
+}
+
+pub(crate) async fn activate_with_bridge_pg(
+    engine: crate::engine::PolicyEngine,
+    body: ActivateBody,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let deps = AutoQueueActivateDeps::for_bridge_pg(engine);
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool is not configured"})),
+        );
+    };
+    let body = match activate_preflight_with_pg(pool, body).await {
+        ActivatePgPreflight::Return(response) => return response,
+        ActivatePgPreflight::Continue(body) => body,
+    };
+    activate_with_deps_pg(&deps, body).await
 }
 
 enum ActivatePgPreflight {

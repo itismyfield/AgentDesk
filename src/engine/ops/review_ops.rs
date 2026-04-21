@@ -8,7 +8,7 @@ pub(crate) const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_
 
 pub(super) fn register_review_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -22,7 +22,10 @@ pub(super) fn register_review_ops<'js>(
             if let Some(pool) = pg_verdict.as_ref() {
                 return review_get_verdict_raw_pg(pool, &card_id);
             }
-            review_get_verdict_raw(&db_verdict, &card_id)
+            db_verdict
+                .as_ref()
+                .map(|db| review_get_verdict_raw(db, &card_id))
+                .unwrap_or_else(|| json!({ "error": "sqlite backend is unavailable" }).to_string())
         })?,
     )?;
 
@@ -34,7 +37,10 @@ pub(super) fn register_review_ops<'js>(
             if let Some(pool) = pg_entry.as_ref() {
                 return review_entry_context_raw_pg(pool, &card_id);
             }
-            review_entry_context_raw(&db_entry, &card_id)
+            db_entry
+                .as_ref()
+                .map(|db| review_entry_context_raw(db, &card_id))
+                .unwrap_or_else(|| json!({ "error": "sqlite backend is unavailable" }).to_string())
         })?,
     )?;
 
@@ -48,7 +54,12 @@ pub(super) fn register_review_ops<'js>(
                 if let Some(pool) = pg_record.as_ref() {
                     return review_record_entry_raw_pg(pool, &card_id, &opts_json);
                 }
-                review_record_entry_raw(&db_record, &card_id, &opts_json)
+                db_record
+                    .as_ref()
+                    .map(|db| review_record_entry_raw(db, &card_id, &opts_json))
+                    .unwrap_or_else(|| {
+                        json!({ "error": "sqlite backend is unavailable" }).to_string()
+                    })
             },
         )?,
     )?;
@@ -61,7 +72,10 @@ pub(super) fn register_review_ops<'js>(
             if let Some(pool) = pg_active_work.as_ref() {
                 return review_has_active_work_raw_pg(pool, &card_id);
             }
-            review_has_active_work_raw(&db_active_work, &card_id)
+            db_active_work
+                .as_ref()
+                .map(|db| review_has_active_work_raw(db, &card_id))
+                .unwrap_or_else(|| json!({ "error": "sqlite backend is unavailable" }).to_string())
         })?,
     )?;
 

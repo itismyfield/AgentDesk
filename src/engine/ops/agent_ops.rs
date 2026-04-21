@@ -11,7 +11,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 pub(super) fn register_agent_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -25,6 +25,9 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return agent_get_raw_pg(pool, &agent_id);
             }
+            let Some(db_get) = db_get.as_ref() else {
+                return json!({ "error": "sqlite backend is unavailable" }).to_string();
+            };
             let result = (|| -> anyhow::Result<serde_json::Value> {
                 let conn = db_get.read_conn()?;
                 let agent = conn
@@ -83,6 +86,9 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_primary.as_ref() {
                 return resolve_agent_primary_channel_pg_raw(pool, &agent_id);
             }
+            let Some(db_primary) = db_primary.as_ref() else {
+                return String::new();
+            };
             match db_primary.separate_conn() {
                 Ok(conn) => {
                     match crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_id)
@@ -105,6 +111,9 @@ pub(super) fn register_agent_ops<'js>(
             if let Some(pool) = pg_counter.as_ref() {
                 return resolve_agent_counter_channel_pg_raw(pool, &agent_id);
             }
+            let Some(db_counter) = db_counter.as_ref() else {
+                return String::new();
+            };
             match db_counter.separate_conn() {
                 Ok(conn) => {
                     match crate::db::agents::resolve_agent_counter_model_channel_on_conn(
@@ -138,6 +147,9 @@ pub(super) fn register_agent_ops<'js>(
                         },
                     );
                 }
+                let Some(db_dispatch) = db_dispatch.as_ref() else {
+                    return String::new();
+                };
                 match db_dispatch.separate_conn() {
                     Ok(conn) => {
                         let dtype = if dispatch_type.is_empty() {

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use libsql_rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::Db;
 use crate::engine::{PolicyEngine, PolicyEngineHandle};
@@ -69,18 +70,24 @@ impl BridgeHandle {
             .ok_or_else(|| "policy engine is no longer available".to_string())
     }
 
-    fn runtime_supervisor(&self, db: Db) -> Result<RuntimeSupervisor, String> {
+    fn runtime_supervisor(&self) -> Result<RuntimeSupervisor, String> {
         let engine = self.upgrade_engine()?;
-        Ok(RuntimeSupervisor::new(db, engine))
+        Ok(RuntimeSupervisor::new(
+            engine.legacy_db().cloned(),
+            engine.pg_pool().cloned(),
+            engine,
+        ))
     }
 }
 
 #[derive(Clone)]
 pub struct RuntimeSupervisor {
-    db: Db,
+    db: Option<Db>,
+    pg_pool: Option<PgPool>,
     engine: PolicyEngine,
 }
 
+#[derive(Clone)]
 struct OrphanCandidate {
     card_id: String,
     card_status: String,
@@ -97,8 +104,12 @@ struct OrphanConfirmMarker {
 }
 
 impl RuntimeSupervisor {
-    pub fn new(db: Db, engine: PolicyEngine) -> Self {
-        Self { db, engine }
+    pub fn new(db: Option<Db>, pg_pool: Option<PgPool>, engine: PolicyEngine) -> Self {
+        Self {
+            db,
+            pg_pool,
+            engine,
+        }
     }
 
     pub fn emit_signal(
@@ -163,22 +174,47 @@ impl RuntimeSupervisor {
 
                     // Return card to ready for re-dispatch instead of advancing to review
                     let ready_target = {
-                        let conn = self
-                            .db
-                            .separate_conn()
-                            .map_err(|e| format!("db connection: {e}"))?;
-                        crate::pipeline::ensure_loaded();
-                        let effective = crate::pipeline::resolve_for_card(
-                            &conn,
-                            candidate.repo_id.as_deref(),
-                            candidate.assigned_agent_id.as_deref(),
-                        );
-                        // Use the dispatchable state (ready) as target
-                        effective
-                            .dispatchable_states()
-                            .first()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "ready".to_string())
+                        if let Some(db) = self.db.as_ref() {
+                            let conn = db
+                                .separate_conn()
+                                .map_err(|e| format!("db connection: {e}"))?;
+                            crate::pipeline::ensure_loaded();
+                            let effective = crate::pipeline::resolve_for_card(
+                                &conn,
+                                candidate.repo_id.as_deref(),
+                                candidate.assigned_agent_id.as_deref(),
+                            );
+                            effective
+                                .dispatchable_states()
+                                .first()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "ready".to_string())
+                        } else if let Some(pool) = self.pg_pool.as_ref() {
+                            let repo_id = candidate.repo_id.clone();
+                            let agent_id = candidate.assigned_agent_id.clone();
+                            crate::utils::async_bridge::block_on_pg_result(
+                                pool,
+                                move |bridge_pool| async move {
+                                    crate::pipeline::ensure_loaded();
+                                    let effective = crate::pipeline::resolve_for_card_pg(
+                                        &bridge_pool,
+                                        repo_id.as_deref(),
+                                        agent_id.as_deref(),
+                                    )
+                                    .await;
+                                    Ok::<String, String>(
+                                        effective
+                                            .dispatchable_states()
+                                            .first()
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| "ready".to_string()),
+                                    )
+                                },
+                                |error| error,
+                            )?
+                        } else {
+                            return Err("runtime supervisor backend is unavailable".to_string());
+                        }
                     };
 
                     let current = self.current_card_head(&candidate.card_id)?;
@@ -189,14 +225,43 @@ impl RuntimeSupervisor {
                                 && latest_dispatch_id.as_deref() == Some(dispatch_id.as_str())
                         })
                     {
-                        match crate::kanban::transition_status_with_opts(
-                            &self.db,
-                            &self.engine,
-                            &candidate.card_id,
-                            &ready_target,
-                            SUPERVISOR_ACTOR,
-                            crate::engine::transition::ForceIntent::SystemRecovery,
-                        ) {
+                        let transition_result = if let Some(db) = self.db.as_ref() {
+                            crate::kanban::transition_status_with_opts(
+                                db,
+                                &self.engine,
+                                &candidate.card_id,
+                                &ready_target,
+                                SUPERVISOR_ACTOR,
+                                crate::engine::transition::ForceIntent::SystemRecovery,
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                        } else if let Some(pool) = self.pg_pool.as_ref() {
+                            let engine = self.engine.clone();
+                            let card_id = candidate.card_id.clone();
+                            let ready_target = ready_target.clone();
+                            crate::utils::async_bridge::block_on_pg_result(
+                                pool,
+                                move |bridge_pool| async move {
+                                    crate::kanban::transition_status_with_opts_pg(
+                                        None,
+                                        &bridge_pool,
+                                        &engine,
+                                        &card_id,
+                                        &ready_target,
+                                        SUPERVISOR_ACTOR,
+                                        crate::engine::transition::ForceIntent::SystemRecovery,
+                                    )
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|error| error.to_string())
+                                },
+                                |error| error,
+                            )
+                        } else {
+                            Err("runtime supervisor backend is unavailable".to_string())
+                        };
+                        match transition_result {
                             Ok(_) => {
                                 executed = true;
                                 self.notify_orphan_recovery(&candidate, &ready_target);
@@ -248,63 +313,149 @@ impl RuntimeSupervisor {
     }
 
     fn load_orphan_candidate(&self, dispatch_id: &str) -> Result<Option<OrphanCandidate>, String> {
-        let conn = self
-            .db
-            .separate_conn()
-            .map_err(|e| format!("db connection: {e}"))?;
-        conn.query_row(
-            "SELECT td.kanban_card_id,
-                    kc.status,
-                    kc.title,
-                    kc.assigned_agent_id,
-                    kc.repo_id
-             FROM task_dispatches td
-             JOIN kanban_cards kc ON kc.id = td.kanban_card_id
-             WHERE td.id = ?1
-               AND td.status = 'pending'
-               AND kc.latest_dispatch_id = td.id
-               AND td.dispatch_type IN ('implementation', 'rework')
-               AND td.created_at < datetime('now', '-5 minutes')
-               AND NOT EXISTS (
-                 SELECT 1 FROM sessions s
-                 WHERE s.active_dispatch_id = td.id AND s.status = 'working'
-               )",
-            [dispatch_id],
-            |row| {
-                Ok(OrphanCandidate {
-                    card_id: row.get(0)?,
-                    card_status: row.get(1)?,
-                    title: row.get(2)?,
-                    assigned_agent_id: row.get(3)?,
-                    repo_id: row.get(4)?,
-                })
+        if let Some(db) = self.db.as_ref() {
+            let conn = db
+                .separate_conn()
+                .map_err(|e| format!("db connection: {e}"))?;
+            return conn
+                .query_row(
+                    "SELECT td.kanban_card_id,
+                            kc.status,
+                            kc.title,
+                            kc.assigned_agent_id,
+                            kc.repo_id
+                     FROM task_dispatches td
+                     JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+                     WHERE td.id = ?1
+                       AND td.status = 'pending'
+                       AND kc.latest_dispatch_id = td.id
+                       AND td.dispatch_type IN ('implementation', 'rework')
+                       AND td.created_at < datetime('now', '-5 minutes')
+                       AND NOT EXISTS (
+                         SELECT 1 FROM sessions s
+                         WHERE s.active_dispatch_id = td.id AND s.status = 'working'
+                       )",
+                    [dispatch_id],
+                    |row| {
+                        Ok(OrphanCandidate {
+                            card_id: row.get(0)?,
+                            card_status: row.get(1)?,
+                            title: row.get(2)?,
+                            assigned_agent_id: row.get(3)?,
+                            repo_id: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| format!("load orphan candidate: {e}"));
+        }
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor backend is unavailable".to_string());
+        };
+        let dispatch_id = dispatch_id.to_string();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let row = sqlx::query(
+                    "SELECT td.kanban_card_id,
+                            kc.status,
+                            kc.title,
+                            kc.assigned_agent_id,
+                            kc.repo_id
+                     FROM task_dispatches td
+                     JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+                     WHERE td.id = $1
+                       AND td.status = 'pending'
+                       AND kc.latest_dispatch_id = td.id
+                       AND td.dispatch_type IN ('implementation', 'rework')
+                       AND td.created_at < NOW() - INTERVAL '5 minutes'
+                       AND NOT EXISTS (
+                         SELECT 1 FROM sessions s
+                         WHERE s.active_dispatch_id = td.id AND s.status = 'working'
+                       )",
+                )
+                .bind(&dispatch_id)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| format!("load orphan candidate {dispatch_id}: {error}"))?;
+                Ok(row.map(|row| OrphanCandidate {
+                    card_id: row.try_get("kanban_card_id").unwrap_or_default(),
+                    card_status: row.try_get("status").unwrap_or_default(),
+                    title: row.try_get("title").unwrap_or_default(),
+                    assigned_agent_id: row.try_get("assigned_agent_id").ok().flatten(),
+                    repo_id: row.try_get("repo_id").ok().flatten(),
+                }))
             },
+            |error| error,
         )
-        .optional()
-        .map_err(|e| format!("load orphan candidate: {e}"))
     }
 
     fn clear_orphan_confirmation(&self, dispatch_id: &str) {
-        let Ok(conn) = self.db.separate_conn() else {
+        if let Some(db) = self.db.as_ref() {
+            let Ok(conn) = db.separate_conn() else {
+                return;
+            };
+            let _ = conn.execute(
+                "DELETE FROM kv_meta WHERE key = ?1",
+                [format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}")],
+            );
             return;
-        };
-        let _ = conn.execute(
-            "DELETE FROM kv_meta WHERE key = ?1",
-            [format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}")],
-        );
+        }
+        if let Some(pool) = self.pg_pool.as_ref() {
+            let dispatch_id = dispatch_id.to_string();
+            let _ = crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                        .bind(format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}"))
+                        .execute(&bridge_pool)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| {
+                            format!("clear orphan confirmation {dispatch_id}: {error}")
+                        })
+                },
+                |error| error,
+            );
+        }
     }
 
     fn load_orphan_confirmation(&self, dispatch_id: &str) -> Option<OrphanConfirmMarker> {
-        let conn = self.db.separate_conn().ok()?;
-        let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
-        let raw: Option<String> = conn
-            .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()
-            .ok()
-            .flatten();
-        raw.and_then(|value| serde_json::from_str::<OrphanConfirmMarker>(&value).ok())
+        if let Some(db) = self.db.as_ref() {
+            let conn = db.separate_conn().ok()?;
+            let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
+            let raw: Option<String> = conn
+                .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .ok()
+                .flatten();
+            return raw.and_then(|value| serde_json::from_str::<OrphanConfirmMarker>(&value).ok());
+        }
+        let pool = self.pg_pool.as_ref()?;
+        let dispatch_id = dispatch_id.to_string();
+        match crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let raw =
+                    sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+                        .bind(format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}"))
+                        .fetch_optional(&bridge_pool)
+                        .await
+                        .map_err(|error| {
+                            format!("load orphan confirmation {dispatch_id}: {error}")
+                        })?;
+                Ok(raw.and_then(|value| serde_json::from_str::<OrphanConfirmMarker>(&value).ok()))
+            },
+            |error| error,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("failed to load orphan confirmation: {error}");
+                None
+            }
+        }
     }
 
     fn confirm_orphan_candidate(
@@ -323,26 +474,50 @@ impl RuntimeSupervisor {
             return Ok(true);
         }
 
-        let conn = self
-            .db
-            .separate_conn()
-            .map_err(|e| format!("db connection: {e}"))?;
         let key = format!("{ORPHAN_CONFIRM_KEY_PREFIX}{dispatch_id}");
         let marker_json =
             serde_json::to_string(&marker).map_err(|e| format!("serialize orphan marker: {e}"))?;
-
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![key, marker_json],
+        if let Some(db) = self.db.as_ref() {
+            let conn = db
+                .separate_conn()
+                .map_err(|e| format!("db connection: {e}"))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![key, marker_json],
+            )
+            .map_err(|e| format!("store orphan marker: {e}"))?;
+            return Ok(false);
+        }
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor backend is unavailable".to_string());
+        };
+        let dispatch_id = dispatch_id.to_string();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value)
+                     VALUES ($1, $2)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                )
+                .bind(&key)
+                .bind(&marker_json)
+                .execute(&bridge_pool)
+                .await
+                .map(|_| false)
+                .map_err(|error| format!("store orphan marker {dispatch_id}: {error}"))
+            },
+            |error| error,
         )
-        .map_err(|e| format!("store orphan marker: {e}"))?;
-        Ok(false)
     }
 
     #[allow(dead_code)]
     fn mark_dispatch_completed(&self, dispatch_id: &str) -> Result<usize, String> {
-        let conn = self
+        let db = self
             .db
+            .as_ref()
+            .ok_or_else(|| "sqlite backend is unavailable".to_string())?;
+        let conn = db
             .separate_conn()
             .map_err(|e| format!("db connection: {e}"))?;
         crate::dispatch::set_dispatch_status_on_conn(
@@ -361,37 +536,161 @@ impl RuntimeSupervisor {
     }
 
     fn mark_dispatch_failed(&self, dispatch_id: &str) -> Result<usize, String> {
-        let conn = self
-            .db
-            .separate_conn()
-            .map_err(|e| format!("db connection: {e}"))?;
-        crate::dispatch::set_dispatch_status_on_conn(
-            &conn,
-            dispatch_id,
-            "failed",
-            Some(&json!({
-                "orphan_failed": true,
-                "completion_source": "orphan_recovery_rollback"
-            })),
-            "orphan_recovery_rollback",
-            Some(&["pending", "dispatched"]),
-            false,
+        if let Some(db) = self.db.as_ref() {
+            let conn = db
+                .separate_conn()
+                .map_err(|e| format!("db connection: {e}"))?;
+            return crate::dispatch::set_dispatch_status_on_conn(
+                &conn,
+                dispatch_id,
+                "failed",
+                Some(&json!({
+                    "orphan_failed": true,
+                    "completion_source": "orphan_recovery_rollback"
+                })),
+                "orphan_recovery_rollback",
+                Some(&["pending", "dispatched"]),
+                false,
+            )
+            .map_err(|e| format!("mark dispatch failed: {e}"));
+        }
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor backend is unavailable".to_string());
+        };
+        let dispatch_id = dispatch_id.to_string();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let payload = json!({
+                    "orphan_failed": true,
+                    "completion_source": "orphan_recovery_rollback"
+                })
+                .to_string();
+                let current = sqlx::query(
+                    "SELECT status, kanban_card_id, dispatch_type
+                     FROM task_dispatches
+                     WHERE id = $1",
+                )
+                .bind(&dispatch_id)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| format!("load dispatch {dispatch_id}: {error}"))?;
+                let Some(current) = current else {
+                    return Ok(0);
+                };
+                let status = current
+                    .try_get::<Option<String>, _>("status")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if !matches!(status.as_str(), "pending" | "dispatched") {
+                    return Ok(0);
+                }
+                let changed = sqlx::query(
+                    "UPDATE task_dispatches
+                     SET status = 'failed',
+                         result = $1,
+                         updated_at = NOW()
+                     WHERE id = $2
+                       AND status = $3",
+                )
+                .bind(&payload)
+                .bind(&dispatch_id)
+                .bind(&status)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| format!("mark dispatch failed {dispatch_id}: {error}"))?
+                .rows_affected() as usize;
+                if changed == 0 {
+                    return Ok(0);
+                }
+                let _ = sqlx::query(
+                    "INSERT INTO dispatch_events (
+                        dispatch_id,
+                        kanban_card_id,
+                        dispatch_type,
+                        from_status,
+                        to_status,
+                        transition_source,
+                        payload_json
+                     ) VALUES ($1, $2, $3, $4, 'failed', 'orphan_recovery_rollback', $5)",
+                )
+                .bind(&dispatch_id)
+                .bind(
+                    current
+                        .try_get::<Option<String>, _>("kanban_card_id")
+                        .ok()
+                        .flatten(),
+                )
+                .bind(
+                    current
+                        .try_get::<Option<String>, _>("dispatch_type")
+                        .ok()
+                        .flatten(),
+                )
+                .bind(&status)
+                .bind(&payload)
+                .execute(&bridge_pool)
+                .await;
+                let _ = sqlx::query(
+                    "INSERT INTO dispatch_outbox (dispatch_id, action)
+                     SELECT $1, 'status_reaction'
+                     WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM dispatch_outbox
+                         WHERE dispatch_id = $1
+                           AND action = 'status_reaction'
+                           AND status IN ('pending', 'processing')
+                     )",
+                )
+                .bind(&dispatch_id)
+                .execute(&bridge_pool)
+                .await;
+                Ok(changed)
+            },
+            |error| error,
         )
-        .map_err(|e| format!("mark dispatch failed: {e}"))
     }
 
     fn current_card_head(&self, card_id: &str) -> Result<Option<(String, Option<String>)>, String> {
-        let conn = self
-            .db
-            .separate_conn()
-            .map_err(|e| format!("db connection: {e}"))?;
-        conn.query_row(
-            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+        if let Some(db) = self.db.as_ref() {
+            let conn = db
+                .separate_conn()
+                .map_err(|e| format!("db connection: {e}"))?;
+            return conn
+                .query_row(
+                    "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("current card head: {e}"));
+        }
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor backend is unavailable".to_string());
+        };
+        let card_id = card_id.to_string();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let row = sqlx::query(
+                    "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| format!("current card head {card_id}: {error}"))?;
+                Ok(row.map(|row| {
+                    (
+                        row.try_get::<String, _>("status").unwrap_or_default(),
+                        row.try_get::<Option<String>, _>("latest_dispatch_id")
+                            .ok()
+                            .flatten(),
+                    )
+                }))
+            },
+            |error| error,
         )
-        .optional()
-        .map_err(|e| format!("current card head: {e}"))
     }
 
     fn record_decision(
@@ -402,38 +701,90 @@ impl RuntimeSupervisor {
         session_key: Option<&str>,
         dispatch_id: Option<&str>,
     ) -> Result<(), String> {
-        let conn = self
-            .db
-            .separate_conn()
-            .map_err(|e| format!("db connection: {e}"))?;
-        conn.execute(
-            "INSERT INTO runtime_decisions
-             (signal, evidence_json, chosen_action, actor, session_key, dispatch_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql_rusqlite::params![
-                signal.to_string(),
-                evidence.to_string(),
-                chosen_action.to_string(),
-                SUPERVISOR_ACTOR,
-                session_key,
-                dispatch_id,
-            ],
+        if let Some(db) = self.db.as_ref() {
+            let conn = db
+                .separate_conn()
+                .map_err(|e| format!("db connection: {e}"))?;
+            conn.execute(
+                "INSERT INTO runtime_decisions
+                 (signal, evidence_json, chosen_action, actor, session_key, dispatch_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                libsql_rusqlite::params![
+                    signal.to_string(),
+                    evidence.to_string(),
+                    chosen_action.to_string(),
+                    SUPERVISOR_ACTOR,
+                    session_key,
+                    dispatch_id,
+                ],
+            )
+            .map_err(|e| format!("record runtime decision: {e}"))?;
+            return Ok(());
+        }
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor backend is unavailable".to_string());
+        };
+        let evidence_json = evidence.to_string();
+        let signal = signal.to_string();
+        let chosen_action = chosen_action.to_string();
+        let session_key = session_key.map(str::to_string);
+        let dispatch_id = dispatch_id.map(str::to_string);
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query(
+                    "INSERT INTO runtime_decisions
+                     (signal, evidence_json, chosen_action, actor, session_key, dispatch_id)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&signal)
+                .bind(&evidence_json)
+                .bind(&chosen_action)
+                .bind(SUPERVISOR_ACTOR)
+                .bind(session_key.as_deref())
+                .bind(dispatch_id.as_deref())
+                .execute(&bridge_pool)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("record runtime decision: {error}"))
+            },
+            |error| error,
         )
-        .map_err(|e| format!("record runtime decision: {e}"))?;
-        Ok(())
     }
 
     fn notify_orphan_recovery(&self, candidate: &OrphanCandidate, review_target: &str) {
-        let Ok(conn) = self.db.separate_conn() else {
-            return;
-        };
-        let channel_id: Option<String> = conn
-            .query_row(
+        let channel_id: Option<String> = if let Some(db) = self.db.as_ref() {
+            let Ok(conn) = db.separate_conn() else {
+                return;
+            };
+            conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
                 [],
                 |row| row.get(0),
             )
-            .ok();
+            .ok()
+        } else if let Some(pool) = self.pg_pool.as_ref() {
+            match crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
+                    )
+                    .fetch_optional(&bridge_pool)
+                    .await
+                    .map_err(|error| format!("load kanban_manager_channel_id: {error}"))
+                },
+                |error| error,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!("failed to load orphan recovery channel id: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let Some(channel_id) = channel_id.filter(|id| !id.trim().is_empty()) else {
             return;
         };
@@ -446,22 +797,51 @@ impl RuntimeSupervisor {
             "🔄 [고아 디스패치 복구] {} — {}\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → {} 전이",
             agent, candidate.title, review_target
         );
-        let _ = enqueue(
-            &conn,
-            crate::services::message_outbox::OutboxMessage {
-                target: &format!("channel:{channel_id}"),
-                content: &content,
-                bot: "announce",
-                source: "system",
-                reason_code: Some("lifecycle.orphan_recovery"),
-                session_key: Some(&candidate.card_id),
-            },
-        );
+        if let Some(db) = self.db.as_ref() {
+            if let Ok(conn) = db.separate_conn() {
+                let _ = enqueue(
+                    &conn,
+                    crate::services::message_outbox::OutboxMessage {
+                        target: &format!("channel:{channel_id}"),
+                        content: &content,
+                        bot: "announce",
+                        source: "system",
+                        reason_code: Some("lifecycle.orphan_recovery"),
+                        session_key: Some(&candidate.card_id),
+                    },
+                );
+            }
+            return;
+        }
+        if let Some(pool) = self.pg_pool.as_ref() {
+            let channel_id = channel_id.clone();
+            let content = content.clone();
+            let card_id = candidate.card_id.clone();
+            let _ = crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    crate::services::message_outbox::enqueue_lifecycle_notification_pg(
+                        &bridge_pool,
+                        &format!("channel:{channel_id}"),
+                        Some(&card_id),
+                        "lifecycle.orphan_recovery",
+                        &content,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("enqueue orphan recovery notification: {error}"))
+                },
+                |error| error,
+            );
+        }
     }
 
     #[cfg(test)]
     fn apply_orphan_fault_injection(&self, dispatch_id: &str, card_id: &str) {
-        let Ok(conn) = self.db.separate_conn() else {
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+        let Ok(conn) = db.separate_conn() else {
             return;
         };
         let key = format!("test:runtime_supervisor:orphan_post_complete_override:{dispatch_id}");
@@ -485,12 +865,7 @@ impl RuntimeSupervisor {
     }
 }
 
-pub fn emit_signal_json(
-    db: &Db,
-    bridge: &BridgeHandle,
-    signal_name: &str,
-    evidence_json: &str,
-) -> String {
+pub fn emit_signal_json(bridge: &BridgeHandle, signal_name: &str, evidence_json: &str) -> String {
     let signal = match SupervisorSignal::try_from(signal_name) {
         Ok(signal) => signal,
         Err(err) => {
@@ -511,7 +886,7 @@ pub fn emit_signal_json(
                 .into_policy_json_string();
         }
     };
-    let supervisor = match bridge.runtime_supervisor(db.clone()) {
+    let supervisor = match bridge.runtime_supervisor() {
         Ok(supervisor) => supervisor,
         Err(err) => {
             return AppError::internal(err)
@@ -628,7 +1003,7 @@ mod tests {
         let bridge = BridgeHandle::new();
 
         let value: Value =
-            serde_json::from_str(&emit_signal_json(&db, &bridge, "Nope", r#"{}"#)).unwrap();
+            serde_json::from_str(&emit_signal_json(&bridge, "Nope", r#"{}"#)).unwrap();
 
         assert_eq!(value["ok"], false);
         assert_eq!(value["code"], "policy");

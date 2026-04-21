@@ -3165,7 +3165,11 @@ mod tests {
     }
 
     fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
-        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap()
+        crate::engine::PolicyEngine::new_with_legacy_db(
+            &crate::config::Config::default(),
+            db.clone(),
+        )
+        .unwrap()
     }
 
     const VALID_OWNER_ID: &str = "123456789012345678";

@@ -30,12 +30,12 @@ fn seed_test_agents(db: &Db) {
 
 fn test_engine(db: &Db) -> PolicyEngine {
     let config = crate::config::Config::default();
-    PolicyEngine::new(&config, db.clone()).unwrap()
+    PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
 }
 
-fn test_engine_with_pg(db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
+fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
     let config = crate::config::Config::default();
-    PolicyEngine::new_with_pg(&config, db.clone(), Some(pg_pool)).unwrap()
+    PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
 }
 
 fn test_api_router(
@@ -5150,7 +5150,7 @@ async fn kanban_terminal_status_fires_hook() {
         },
         ..crate::config::Config::default()
     };
-    let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+    let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
 
     {
         let conn = db.lock().unwrap();
@@ -7235,7 +7235,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     let db = test_db();
     let mut config = crate::config::Config::default();
     config.policies.dir = policy_dir.path().to_path_buf();
-    let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+    let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
     seed_agent(&db, "agent-ft-terminal");
     seed_repo(&db, "test/repo");
     set_pmd_channel(&db, "pmd-chan-123");
@@ -8495,7 +8495,6 @@ async fn transition_to_done_records_true_negative_in_postgres_review_tuning() {
     let pg_pool = pg_db.connect_and_migrate().await;
     let engine = crate::engine::PolicyEngine::new_with_pg(
         &crate::config::Config::default(),
-        db.clone(),
         Some(pg_pool.clone()),
     )
     .unwrap();

@@ -689,7 +689,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     fn kv_value(db: &Db, key: &str) -> Option<String> {

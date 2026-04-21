@@ -201,7 +201,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
 
     let pg_pool = crate::db::postgres::connect_and_migrate(&config).await?;
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, db.clone(), pg_pool.clone())
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
     let batch_buffer = crate::server::ws::spawn_batch_flusher(broadcast_tx.clone());

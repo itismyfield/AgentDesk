@@ -26,17 +26,18 @@ use uuid::Uuid;
 
 pub(super) fn register_review_automation_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let obj = Object::new(ctx.clone())?;
 
+    let db_handoff = db.clone();
     let pg_handoff = pg_pool.clone();
     obj.set(
         "__handoffCreatePrRaw",
         Function::new(ctx.clone(), move |payload_json: String| -> String {
-            handoff_create_pr_raw(pg_handoff.as_ref(), &payload_json)
+            handoff_create_pr_raw(db_handoff.as_ref(), pg_handoff.as_ref(), &payload_json)
         })?,
     )?;
 
@@ -48,7 +49,7 @@ pub(super) fn register_review_automation_ops<'js>(
             ctx.clone(),
             move |card_id: String, error: String, stamp_gen: String| -> String {
                 record_pr_create_failure_raw(
-                    &db_record,
+                    db_record.as_ref(),
                     pg_record.as_ref(),
                     &card_id,
                     &error,
@@ -63,7 +64,7 @@ pub(super) fn register_review_automation_ops<'js>(
     obj.set(
         "__reseedPrTrackingRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
-            reseed_pr_tracking_raw(&db_reseed, pg_reseed.as_ref(), &card_id)
+            reseed_pr_tracking_raw(db_reseed.as_ref(), pg_reseed.as_ref(), &card_id)
         })?,
     )?;
 
@@ -118,7 +119,7 @@ struct HandoffPayload {
     title: String,
 }
 
-fn handoff_create_pr_raw(pg_pool: Option<&PgPool>, payload_json: &str) -> String {
+fn handoff_create_pr_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, payload_json: &str) -> String {
     let payload: HandoffPayload = match serde_json::from_str(payload_json) {
         Ok(p) => p,
         Err(e) => return json!({"error": format!("invalid payload: {e}")}).to_string(),
@@ -132,18 +133,21 @@ fn handoff_create_pr_raw(pg_pool: Option<&PgPool>, payload_json: &str) -> String
     if payload.branch.trim().is_empty() {
         return json!({"error": "branch is required"}).to_string();
     }
-    let Some(pool) = pg_pool else {
-        return json!({"error": "postgres pool required for reviewAutomation.handoffCreatePr"})
-            .to_string();
+    let result = if let Some(pool) = pg_pool {
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            {
+                let payload = payload.clone();
+                move |bridge_pool| async move { handoff_create_pr_pg(&bridge_pool, &payload).await }
+            },
+            |error| error,
+        )
+    } else {
+        let Some(db) = db else {
+            return json!({"error": "sqlite backend is unavailable"}).to_string();
+        };
+        handoff_create_pr_sqlite_test(db, &payload).map_err(|error| error.to_string())
     };
-    let result = crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        {
-            let payload = payload.clone();
-            move |bridge_pool| async move { handoff_create_pr_pg(&bridge_pool, &payload).await }
-        },
-        |error| error,
-    );
     match result {
         Ok(v) => v.to_string(),
         Err(e) => json!({"error": e}).to_string(),
@@ -539,6 +543,101 @@ async fn handoff_create_pr_pg(
 }
 
 #[cfg(test)]
+fn handoff_create_pr_sqlite_test(
+    db: &Db,
+    payload: &HandoffPayload,
+) -> anyhow::Result<serde_json::Value> {
+    let mut conn = db
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+    let tx = conn.transaction()?;
+
+    let current_round: i64 = tx
+        .query_row(
+            "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+            [&payload.card_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if let Some((dispatch_id, generation)) =
+        lookup_active_create_pr_dispatch(&tx, &payload.card_id)?
+    {
+        refresh_pr_tracking_reuse_state(&tx, payload, &generation, current_round)?;
+        tx.execute(
+            "UPDATE kanban_cards
+             SET blocked_reason = 'pr:creating',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            [&payload.card_id],
+        )?;
+        tx.commit()?;
+        return Ok(json!({
+            "ok": true,
+            "reused": true,
+            "dispatch_id": dispatch_id,
+            "generation": generation,
+        }));
+    }
+
+    tx.commit()?;
+
+    let generation = Uuid::new_v4().to_string();
+    let dispatch_id = Uuid::new_v4().to_string();
+    let context = json!({
+        "dispatch_generation": generation,
+        "review_round_at_dispatch": current_round,
+        "sidecar_dispatch": true,
+        "worktree_path": payload.worktree_path,
+        "worktree_branch": payload.branch,
+        "branch": payload.branch,
+    });
+
+    crate::dispatch::create_dispatch_record_with_id_sqlite_test(
+        db,
+        &dispatch_id,
+        &payload.card_id,
+        &payload.agent_id,
+        "create-pr",
+        &payload.title,
+        &context,
+        DispatchCreateOptions {
+            sidecar_dispatch: true,
+            ..Default::default()
+        },
+    )?;
+
+    let mut conn = db
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+    let tx = conn.transaction()?;
+    seed_pr_tracking_handoff_state(&tx, payload, &generation, current_round)?;
+    tx.execute(
+        "UPDATE kanban_cards
+         SET blocked_reason = 'pr:creating',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+        [&payload.card_id],
+    )?;
+    tx.commit()?;
+
+    Ok(json!({
+        "ok": true,
+        "reused": false,
+        "dispatch_id": dispatch_id,
+        "generation": generation,
+    }))
+}
+
+#[cfg(not(test))]
+fn handoff_create_pr_sqlite_test(
+    _db: &Db,
+    _payload: &HandoffPayload,
+) -> anyhow::Result<serde_json::Value> {
+    anyhow::bail!("postgres pool required for reviewAutomation.handoffCreatePr");
+}
+
+#[cfg(test)]
 fn lookup_active_create_pr_dispatch(
     conn: &libsql_rusqlite::Transaction<'_>,
     card_id: &str,
@@ -630,7 +729,7 @@ fn refresh_pr_tracking_reuse_state(
 // ── recordPrCreateFailure ──────────────────────────────────────────────
 
 fn record_pr_create_failure_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     error: &str,
@@ -651,6 +750,9 @@ fn record_pr_create_failure_raw(
             |runtime_error| runtime_error,
         )
     } else {
+        let Some(db) = db else {
+            return json!({"error": "sqlite backend is unavailable"}).to_string();
+        };
         record_pr_create_failure_tx(db, card_id, error, stamp_gen).map_err(|e| format!("{e}"))
     };
     match result {
@@ -846,7 +948,7 @@ fn record_pr_create_failure_tx(
 
 // ── reseedPrTracking ──────────────────────────────────────────────────
 
-fn reseed_pr_tracking_raw(db: &Db, pg_pool: Option<&PgPool>, card_id: &str) -> String {
+fn reseed_pr_tracking_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
     if card_id.trim().is_empty() {
         return json!({"error": "card_id is required"}).to_string();
     }
@@ -858,6 +960,9 @@ fn reseed_pr_tracking_raw(db: &Db, pg_pool: Option<&PgPool>, card_id: &str) -> S
             |runtime_error| runtime_error,
         )
     } else {
+        let Some(db) = db else {
+            return json!({"error": "sqlite backend is unavailable"}).to_string();
+        };
         reseed_pr_tracking_tx(db, card_id).map_err(|e| format!("{e}"))
     };
     match result {

@@ -879,7 +879,7 @@ mod tests {
 
     fn test_engine(db: &Db) -> PolicyEngine {
         let config = crate::config::Config::default();
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     #[tokio::test]

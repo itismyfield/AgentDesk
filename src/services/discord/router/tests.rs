@@ -191,7 +191,7 @@ fn intake_gate_enqueue_stays_responsive_while_policy_tick_times_out() {
         },
         ..Default::default()
     };
-    let engine = crate::engine::PolicyEngine::new(&config, db.clone()).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();

@@ -371,8 +371,8 @@ impl SupervisedWorkerRegistry {
                 // cannot back up the main engine's actor queue and starve
                 // HTTP/Discord hook paths. The two engines share the same
                 // policies directory (each with its own hot-reload watcher)
-                // and the same SQLite DB.
-                let tick_engine = PolicyEngine::new_for_tick(&self.config, self.db.clone())
+                // and the same PostgreSQL backend.
+                let tick_engine = PolicyEngine::new_for_tick(&self.config, self.pg_pool.clone())
                     .map_err(|e| {
                         anyhow!("failed to initialize dedicated policy tick engine: {e}")
                     })?;

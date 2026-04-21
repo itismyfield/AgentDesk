@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 pub(super) fn register_message_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -22,7 +22,7 @@ pub(super) fn register_message_ops<'js>(
         rquickjs::function::MutFn::from(
             move |target: String, content: String, bot: String, source: String| -> String {
                 message_queue_raw(
-                    &db_clone,
+                    db_clone.as_ref(),
                     pg_clone.as_ref(),
                     &target,
                     &content,
@@ -54,7 +54,7 @@ pub(super) fn register_message_ops<'js>(
 }
 
 pub(crate) fn queue_message(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -88,6 +88,9 @@ pub(crate) fn queue_message(
         );
     }
 
+    let Some(db) = db else {
+        return Err("sqlite backend is unavailable".to_string());
+    };
     let conn = db
         .separate_conn()
         .map_err(|e| format!("db connection: {e}"))?;
@@ -100,7 +103,7 @@ pub(crate) fn queue_message(
 }
 
 fn message_queue_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -222,7 +225,7 @@ mod tests {
         let sqlite_db = crate::db::test_db();
 
         let id = queue_message(
-            &sqlite_db,
+            Some(&sqlite_db),
             Some(&pool),
             "channel:alerts",
             "hello from pg",

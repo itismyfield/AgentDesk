@@ -197,8 +197,17 @@ function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) 
     return;
   }
 
-  if (!_dispatchTouchedSrcSinceCreated(worktreePath, dispatch.created_at)) {
-    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no src changes since dispatch start");
+  try {
+    if (!_dispatchTouchedSrcSinceCreated(worktreePath, dispatch.created_at)) {
+      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no src changes since dispatch start");
+      return;
+    }
+  } catch (e) {
+    var probeError = e && e.message ? e.message : String(e);
+    agentdesk.log.warn(
+      "[inventory] dispatch " + dispatch.id + " skipped: src-change probe failed for " +
+      worktreePath + ": " + probeError
+    );
     return;
   }
 

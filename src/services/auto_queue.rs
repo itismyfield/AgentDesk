@@ -143,7 +143,7 @@ macro_rules! auto_queue_log {
 
 #[derive(Clone)]
 pub struct AutoQueueService {
-    db: Db,
+    db: Option<Db>,
     engine: PolicyEngine,
 }
 
@@ -279,7 +279,7 @@ struct ThreadLinkCandidate {
 }
 
 impl AutoQueueService {
-    pub fn new(db: Db, engine: PolicyEngine) -> Self {
+    pub fn new(db: Option<Db>, engine: PolicyEngine) -> Self {
         Self { db, engine }
     }
 
@@ -315,11 +315,20 @@ impl AutoQueueService {
     ) -> ServiceResult<Vec<GenerateCandidate>> {
         if let Some(issue_numbers) = input.issue_numbers.as_ref().filter(|nums| !nums.is_empty()) {
             let transition_plan = {
-                let conn = self.db.read_conn().map_err(|error| {
-                    ServiceError::internal(format!("{error}"))
-                        .with_code(ErrorCode::Database)
-                        .with_operation("prepare_generate_cards.read_conn.transition_plan")
-                })?;
+                let conn = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ServiceError::internal("sqlite backend is unavailable")
+                            .with_code(ErrorCode::Database)
+                            .with_operation("prepare_generate_cards.read_conn.transition_plan")
+                    })?
+                    .read_conn()
+                    .map_err(|error| {
+                        ServiceError::internal(format!("{error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("prepare_generate_cards.read_conn.transition_plan")
+                    })?;
                 crate::pipeline::ensure_loaded();
                 let backlog_cards = auto_queue::list_backlog_cards(
                     &conn,
@@ -364,8 +373,13 @@ impl AutoQueueService {
 
             for (card_id, path) in transition_plan {
                 for step in &path {
+                    let Some(db) = self.db.as_ref() else {
+                        return Err(ServiceError::internal("sqlite backend is unavailable")
+                            .with_code(ErrorCode::Database)
+                            .with_operation("prepare_generate_cards.transition_status"));
+                    };
                     crate::kanban::transition_status_with_opts(
-                        &self.db,
+                        db,
                         &self.engine,
                         &card_id,
                         step,
@@ -384,11 +398,20 @@ impl AutoQueueService {
             }
         }
 
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("prepare_generate_cards.read_conn.generate_candidates")
-        })?;
+        let conn = self
+            .db
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::internal("sqlite backend is unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("prepare_generate_cards.read_conn.generate_candidates")
+            })?
+            .read_conn()
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("prepare_generate_cards.read_conn.generate_candidates")
+            })?;
         crate::pipeline::ensure_loaded();
         let enqueueable_states = crate::pipeline::try_get()
             .map(enqueueable_states_for)
@@ -417,12 +440,22 @@ impl AutoQueueService {
         agent_id: Option<&str>,
         status: &str,
     ) -> ServiceResult<i64> {
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("count_cards_by_status.read_conn")
-                .with_context("status", status)
-        })?;
+        let conn = self
+            .db
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::internal("sqlite backend is unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("count_cards_by_status.read_conn")
+                    .with_context("status", status)
+            })?
+            .read_conn()
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("count_cards_by_status.read_conn")
+                    .with_context("status", status)
+            })?;
         auto_queue::count_cards_by_status(&conn, repo, agent_id, status).map_err(|error| {
             ServiceError::internal(format!("count cards: {error}"))
                 .with_code(ErrorCode::Database)
@@ -432,12 +465,22 @@ impl AutoQueueService {
     }
 
     pub fn run_view(&self, run_id: &str) -> ServiceResult<Option<AutoQueueRunView>> {
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("run_view.read_conn")
-                .with_context("run_id", run_id)
-        })?;
+        let conn = self
+            .db
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::internal("sqlite backend is unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("run_view.read_conn")
+                    .with_context("run_id", run_id)
+            })?
+            .read_conn()
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("run_view.read_conn")
+                    .with_context("run_id", run_id)
+            })?;
         auto_queue::get_run(&conn, run_id)
             .map(|record| record.map(AutoQueueRunView::from))
             .map_err(|error| {
@@ -460,12 +503,22 @@ impl AutoQueueService {
         entry_id: &str,
         guild_id: Option<&str>,
     ) -> ServiceResult<Option<AutoQueueStatusEntryView>> {
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("entry_view.read_conn")
-                .with_context("entry_id", entry_id)
-        })?;
+        let conn = self
+            .db
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::internal("sqlite backend is unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("entry_view.read_conn")
+                    .with_context("entry_id", entry_id)
+            })?
+            .read_conn()
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("entry_view.read_conn")
+                    .with_context("entry_id", entry_id)
+            })?;
         let Some(record) = auto_queue::get_status_entry(&conn, entry_id).map_err(|error| {
             ServiceError::internal(format!("load status entry: {error}"))
                 .with_code(ErrorCode::Database)
@@ -518,12 +571,22 @@ impl AutoQueueService {
         run_id: &str,
         input: StatusInput,
     ) -> ServiceResult<AutoQueueStatusResponse> {
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("status_for_run.read_conn")
-                .with_context("run_id", run_id)
-        })?;
+        let conn = self
+            .db
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::internal("sqlite backend is unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("status_for_run.read_conn")
+                    .with_context("run_id", run_id)
+            })?
+            .read_conn()
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("status_for_run.read_conn")
+                    .with_context("run_id", run_id)
+            })?;
         let Some(run) = auto_queue::get_run(&conn, run_id).map_err(|error| {
             ServiceError::internal(format!("load run: {error}"))
                 .with_code(ErrorCode::Database)
@@ -557,11 +620,20 @@ impl AutoQueueService {
 
     pub fn status(&self, input: StatusInput) -> ServiceResult<AutoQueueStatusResponse> {
         let run_id = {
-            let conn = self.db.read_conn().map_err(|error| {
-                ServiceError::internal(format!("{error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("status.read_conn")
-            })?;
+            let conn = self
+                .db
+                .as_ref()
+                .ok_or_else(|| {
+                    ServiceError::internal("sqlite backend is unavailable")
+                        .with_code(ErrorCode::Database)
+                        .with_operation("status.read_conn")
+                })?
+                .read_conn()
+                .map_err(|error| {
+                    ServiceError::internal(format!("{error}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("status.read_conn")
+                })?;
             auto_queue::find_latest_run_id(
                 &conn,
                 &StatusFilter {

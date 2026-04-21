@@ -545,7 +545,7 @@ where
 }
 
 pub async fn transition_status_with_opts_pg(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,
     card_id: &str,
@@ -749,6 +749,7 @@ pub async fn transition_status_with_opts_pg(
     );
     if old_manual_intervention
         && !new_manual_intervention
+        && let Some(db) = db
         && let Ok(conn) = db.lock()
         && let Err(error) = clear_escalation_alert_state_on_conn(&conn, card_id)
     {
@@ -768,7 +769,8 @@ pub async fn transition_status_with_opts_pg(
     );
 
     if effective.is_terminal(new_status)
-        && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
+        && record_true_negative_if_pass_with_backends(db, engine.pg_pool(), card_id)
+        && let Some(db) = db
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
             db,
@@ -1147,9 +1149,28 @@ pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &s
 /// Fire hooks for a status transition that already happened in the DB.
 /// Use this when the DB UPDATE was done elsewhere (e.g., update_card with mixed fields).
 pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
+    fire_transition_hooks_with_backends(Some(db), engine.pg_pool(), engine, card_id, from, to);
+}
+
+pub fn fire_transition_hooks_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    engine: &PolicyEngine,
+    card_id: &str,
+    from: &str,
+    to: &str,
+) {
     if from == to {
         return;
     }
+
+    if let Some(pg_pool) = pg_pool {
+        fire_transition_hooks_pg(db, pg_pool, engine, card_id, from, to);
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
 
     // Audit log
     if let Ok(conn) = db.lock() {
@@ -1197,6 +1218,172 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     }
 
     drain_hook_side_effects(db, engine);
+}
+
+fn fire_transition_hooks_pg(
+    db: Option<&Db>,
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    from: &str,
+    to: &str,
+) {
+    let card_id_owned = card_id.to_string();
+    let from_owned = from.to_string();
+    let to_owned = to.to_string();
+    let effective = match crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |bridge_pool| async move {
+            sqlx::query(
+                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
+                 VALUES ($1, $2, $3, 'hook', 'OK')",
+            )
+            .bind(&card_id_owned)
+            .bind(&from_owned)
+            .bind(&to_owned)
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| {
+                format!("insert postgres kanban audit for {card_id_owned}: {error}")
+            })?;
+            sqlx::query(
+                "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+                 VALUES ('kanban_card', $1, $2, 'hook')",
+            )
+            .bind(&card_id_owned)
+            .bind(format!("{from_owned}->{to_owned} (OK)"))
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| format!("insert postgres audit log for {card_id_owned}: {error}"))?;
+
+            crate::pipeline::ensure_loaded();
+            let row = sqlx::query(
+                "SELECT repo_id, assigned_agent_id
+                 FROM kanban_cards
+                 WHERE id = $1",
+            )
+            .bind(&card_id_owned)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|error| {
+                format!("load postgres card transition context {card_id_owned}: {error}")
+            })?;
+            let (repo_id, agent_id) = if let Some(row) = row {
+                (
+                    row.try_get::<Option<String>, _>("repo_id")
+                        .map_err(|error| {
+                            format!("decode postgres repo_id for {card_id_owned}: {error}")
+                        })?,
+                    row.try_get::<Option<String>, _>("assigned_agent_id")
+                        .map_err(|error| {
+                            format!(
+                                "decode postgres assigned_agent_id for {card_id_owned}: {error}"
+                            )
+                        })?,
+                )
+            } else {
+                (None, None)
+            };
+            Ok(Some(
+                crate::pipeline::resolve_for_card_pg(
+                    &bridge_pool,
+                    repo_id.as_deref(),
+                    agent_id.as_deref(),
+                )
+                .await,
+            ))
+        },
+        |error| error,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!("failed to fire postgres transition hooks for {card_id}: {error}");
+            None
+        }
+    };
+
+    if let Some(ref pipeline) = effective {
+        if pipeline.is_terminal(to) {
+            let card_id_owned = card_id.to_string();
+            let terminal_followup = crate::utils::async_bridge::block_on_pg_result(
+                pg_pool,
+                move |bridge_pool| async move {
+                    let mut tx = bridge_pool.begin().await.map_err(|error| {
+                        format!("begin postgres terminal follow-up tx: {error}")
+                    })?;
+                    crate::github::sync::sync_auto_queue_terminal_on_pg(&mut tx, &card_id_owned)
+                        .await
+                        .map_err(|error| format!("{error}"))?;
+                    let dispatch_ids = sqlx::query_scalar::<_, String>(
+                        "SELECT id
+                         FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type IN ('review-decision', 'rework')
+                           AND status IN ('pending', 'dispatched')",
+                    )
+                    .bind(&card_id_owned)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "load postgres terminal follow-up dispatches {card_id_owned}: {error}"
+                        )
+                    })?;
+                    for dispatch_id in dispatch_ids {
+                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                            &mut tx,
+                            &dispatch_id,
+                            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+                        )
+                        .await
+                        .map_err(|error| format!("{error}"))?;
+                    }
+                    tx.commit().await.map_err(|error| {
+                        format!("commit postgres terminal follow-up tx: {error}")
+                    })?;
+                    Ok(())
+                },
+                |error| error,
+            );
+            if let Err(error) = terminal_followup {
+                tracing::warn!(
+                    "[kanban] failed postgres terminal follow-up sync for {}: {}",
+                    card_id,
+                    error
+                );
+            }
+        }
+
+        let pg_pool_owned = pg_pool.clone();
+        let pipeline_owned = pipeline.clone();
+        let card_id_owned = card_id.to_string();
+        let to_owned = to.to_string();
+        let _ = crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |_bridge_pool| async move {
+                github_sync_on_transition_pg(
+                    &pg_pool_owned,
+                    &pipeline_owned,
+                    &card_id_owned,
+                    &to_owned,
+                )
+                .await;
+                Ok(())
+            },
+            |_error| (),
+        );
+        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+
+        if pipeline.is_terminal(to)
+            && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
+            && let Some(db) = db
+        {
+            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+                db,
+                engine.pg_pool().cloned(),
+            );
+        }
+    }
 }
 
 /// Sync GitHub issue state when kanban card transitions (pipeline-driven).
@@ -1337,6 +1524,14 @@ fn log_audit(
 /// tuning outcome. This confirms the review was correct in not finding issues.
 /// Returns true if a TN was actually inserted.
 fn record_true_negative_if_pass(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) -> bool {
+    record_true_negative_if_pass_with_backends(Some(db), pg_pool, card_id)
+}
+
+fn record_true_negative_if_pass_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    card_id: &str,
+) -> bool {
     if let Some(pool) = pg_pool {
         let card_id = card_id.to_string();
         return crate::utils::async_bridge::block_on_pg_result(
@@ -1433,7 +1628,9 @@ fn record_true_negative_if_pass(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id
         .unwrap_or(false);
     }
 
-    if let Ok(conn) = db.lock() {
+    if let Some(db) = db
+        && let Ok(conn) = db.lock()
+    {
         // Check if the card's last review verdict was "pass" or "approved"
         let last_verdict: Option<String> = conn
             .query_row(
@@ -1750,14 +1947,14 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     fn test_engine_with_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
         let mut config = crate::config::Config::default();
         config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     struct EnvVarGuard {

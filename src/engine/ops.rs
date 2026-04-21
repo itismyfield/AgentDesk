@@ -35,7 +35,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 /// Register all `agentdesk.*` globals in the given JS context.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
-    register_globals_with_supervisor_and_pg(ctx, db, None, BridgeHandle::new())
+    register_globals_with_supervisor_and_pg(ctx, Some(db), None, BridgeHandle::new())
 }
 
 #[allow(dead_code)]
@@ -44,12 +44,12 @@ pub fn register_globals_with_supervisor(
     db: Db,
     supervisor_bridge: BridgeHandle,
 ) -> JsResult<()> {
-    register_globals_with_supervisor_and_pg(ctx, db, None, supervisor_bridge)
+    register_globals_with_supervisor_and_pg(ctx, Some(db), None, supervisor_bridge)
 }
 
 pub fn register_globals_with_supervisor_and_pg(
     ctx: &Ctx<'_>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<sqlx::PgPool>,
     supervisor_bridge: BridgeHandle,
 ) -> JsResult<()> {
@@ -86,13 +86,13 @@ pub fn register_globals_with_supervisor_and_pg(
     log_ops::register_log_ops(ctx)?;
 
     // ── agentdesk.config ─────────────────────────────────────────
-    config_ops::register_config_ops(ctx, db.clone())?;
+    config_ops::register_config_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.http ────────────────────────────────────────────
     http_ops::register_http_ops(ctx)?;
 
     // ── agentdesk.dispatch ────────────────────────────────────────
-    dispatch_ops::register_dispatch_ops(ctx, pg_pool.clone())?;
+    dispatch_ops::register_dispatch_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.kanban ────────────────────────────────────────
     kanban_ops::register_kanban_ops(ctx, db.clone(), pg_pool.clone())?;
@@ -125,13 +125,13 @@ pub fn register_globals_with_supervisor_and_pg(
     let db_for_dm_reply = db.clone();
     let pg_for_dm_reply = pg_pool.clone();
     let db_for_agents = db.clone();
-    message_ops::register_message_ops(ctx, db, pg_pool.clone())?;
+    message_ops::register_message_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.exec ──────────────────────────────────────────
     exec_ops::register_exec_ops(ctx)?;
 
     // ── agentdesk.pipeline ────────────────────────────────────────
-    pipeline_ops::register_pipeline_ops(ctx, db_for_pipeline)?;
+    pipeline_ops::register_pipeline_ops(ctx, db_for_pipeline, pg_pool.clone())?;
 
     // ── agentdesk.dmReply ────────────────────────────────────
     dm_reply_ops::register_dm_reply_ops(ctx, db_for_dm_reply, pg_for_dm_reply)?;
@@ -147,6 +147,14 @@ pub fn register_globals_with_supervisor_and_pg(
 /// Used by both the JS bridge and Rust route handlers.
 pub fn review_state_sync(db: &Db, json_str: &str) -> String {
     kanban_ops::review_state_sync(db, json_str)
+}
+
+pub fn review_state_sync_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    json_str: &str,
+) -> String {
+    kanban_ops::review_state_sync_with_backends(db, pg_pool, json_str)
 }
 
 /// Best-effort auto-queue cleanup for terminal cards.

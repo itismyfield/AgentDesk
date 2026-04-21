@@ -11,7 +11,7 @@ use sqlx::PgPool;
 
 pub(super) fn register_kv_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -28,6 +28,9 @@ pub(super) fn register_kv_ops<'js>(
                 if let Some(pool) = pg_set.as_ref() {
                     return kv_set_raw_pg(pool, &key, &value, ttl_seconds);
                 }
+                let Some(db_set) = db_set.as_ref() else {
+                    return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+                };
                 let conn = match db_set.separate_conn() {
                     Ok(c) => c,
                     Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -63,6 +66,9 @@ pub(super) fn register_kv_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return kv_get_raw_pg(pool, &key);
             }
+            let Some(db_get) = db_get.as_ref() else {
+                return r#"{"found":false}"#.to_string();
+            };
             let conn = match db_get.separate_conn() {
                 Ok(c) => c,
                 Err(_) => return r#"{"found":false}"#.to_string(),
@@ -80,13 +86,16 @@ pub(super) fn register_kv_ops<'js>(
 
     // kv.delete(key)
     let db_del = db.clone();
-    let pg_del = pg_pool;
+    let pg_del = pg_pool.clone();
     kv_obj.set(
         "delete",
         Function::new(ctx.clone(), move |key: String| -> String {
             if let Some(pool) = pg_del.as_ref() {
                 return kv_delete_raw_pg(pool, &key);
             }
+            let Some(db_del) = db_del.as_ref() else {
+                return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+            };
             let conn = match db_del.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
@@ -120,8 +129,13 @@ pub(super) fn register_kv_ops<'js>(
     // All review-state mutations go through this single entrypoint.
     {
         let db_rs = db.clone();
+        let pg_rs = pg_pool.clone();
         let sync_raw = Function::new(ctx.clone(), move |json_str: String| -> String {
-            crate::engine::ops::review_state_sync(&db_rs, &json_str)
+            crate::engine::ops::review_state_sync_with_backends(
+                db_rs.as_ref(),
+                pg_rs.as_ref(),
+                &json_str,
+            )
         })?;
 
         let _: rquickjs::Value = ctx.eval(
