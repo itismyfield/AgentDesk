@@ -485,13 +485,13 @@ impl AutoQueueService {
             for (card_id, path) in transition_plan {
                 for step in &path {
                     crate::kanban::transition_status_with_opts_pg(
-                        &self.db,
+                        self.db.as_ref(),
                         pool,
                         &self.engine,
                         &card_id,
                         step,
                         "auto-queue-generate",
-                        false,
+                        crate::engine::transition::ForceIntent::None,
                     )
                     .await
                     .map_err(|error| {

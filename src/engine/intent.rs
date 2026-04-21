@@ -508,20 +508,22 @@ fn execute_activate_auto_queue(
         let pool = pg_pool
             .or_else(|| engine.pg_pool())
             .ok_or_else(|| anyhow::anyhow!("postgres pool is not configured"))?;
-        let (_status, response) = crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            {
-                let engine = engine.clone();
-                let body = body.clone();
-                move |_bridge_pool| async move {
-                    Ok(
-                        crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body)
-                            .await,
-                    )
-                }
-            },
-            |error| anyhow::anyhow!(error),
-        )?;
+        let (_status, response) =
+            crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                {
+                    let db = db.cloned();
+                    let engine = engine.clone();
+                    let body = body;
+                    move |_bridge_pool| async move {
+                        Ok(crate::server::routes::auto_queue::activate_with_bridge_pg(
+                            db, engine, body,
+                        )
+                        .await)
+                    }
+                },
+                |error| anyhow::anyhow!(error),
+            )?;
         if response.0.get("error").is_some() {
             return Err(anyhow::anyhow!(
                 "{}",
