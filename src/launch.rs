@@ -21,7 +21,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         .map_err(anyhow::Error::msg)
         .context("Failed to init PostgreSQL")?;
 
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, db.clone(), pg_pool)
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool)
         .context("Failed to init policy engine")?;
 
     tracing::info!(

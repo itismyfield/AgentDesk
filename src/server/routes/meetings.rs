@@ -1782,7 +1782,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     fn transcript_counts(conn: &libsql_rusqlite::Connection, meeting_id: &str) -> (i64, i64) {

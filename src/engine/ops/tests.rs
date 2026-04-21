@@ -1068,8 +1068,11 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
         .unwrap();
     }
 
-    let engine =
-        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
+        &crate::config::Config::default(),
+        db.clone(),
+    )
+    .unwrap();
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
@@ -1158,8 +1161,11 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
         .unwrap();
     }
 
-    let engine =
-        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
+        &crate::config::Config::default(),
+        db.clone(),
+    )
+    .unwrap();
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
@@ -1289,8 +1295,11 @@ fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
         .unwrap();
     }
 
-    let engine =
-        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
+        &crate::config::Config::default(),
+        db.clone(),
+    )
+    .unwrap();
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
@@ -1416,8 +1425,11 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
         .unwrap();
     }
 
-    let engine =
-        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
+        &crate::config::Config::default(),
+        db.clone(),
+    )
+    .unwrap();
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 

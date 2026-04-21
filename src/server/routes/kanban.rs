@@ -702,7 +702,7 @@ pub async fn assign_card(
             if let Some(path) = pipeline.free_path_to_dispatchable(&old_status) {
                 for step in &path {
                     if let Err(error) = crate::kanban::transition_status_with_opts_pg(
-                        &state.db,
+                        Some(&state.db),
                         pool,
                         &state.engine,
                         &id,
@@ -719,7 +719,7 @@ pub async fn assign_card(
                     }
                 }
             } else if let Err(error) = crate::kanban::transition_status_with_opts_pg(
-                &state.db,
+                Some(&state.db),
                 pool,
                 &state.engine,
                 &id,

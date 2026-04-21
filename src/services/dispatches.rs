@@ -1,5 +1,6 @@
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use crate::db::Db;
 use crate::dispatch;
@@ -119,79 +120,43 @@ impl DispatchService {
         let dispatch_type = input
             .dispatch_type
             .unwrap_or_else(|| "implementation".to_string());
+        let to_agent_id = if let Some(pg_pool) = self.engine.pg_pool() {
+            resolve_dispatch_target_agent_id_with_pg(pg_pool, &input.to_agent_id)
+                .await
+                .unwrap_or_else(|| input.to_agent_id.clone())
+        } else {
+            self.db
+                .lock()
+                .ok()
+                .and_then(|conn| {
+                    resolve_dispatch_target_agent_id_on_conn(&conn, &input.to_agent_id)
+                })
+                .unwrap_or_else(|| input.to_agent_id.clone())
+        };
         let context = input.context.unwrap_or_else(|| json!({}));
-        let base_options = dispatch::DispatchCreateOptions {
-            skip_outbox: input.skip_outbox.unwrap_or(false),
-            ..Default::default()
-        };
-        let Some(pg_pool) = self.engine.pg_pool() else {
-            return Err(
-                ServiceError::internal("postgres pool required for dispatch.create")
-                    .with_code(ErrorCode::Dispatch),
-            );
-        };
         let options = dispatch::DispatchCreateOptions {
-            sidecar_dispatch: base_options.sidecar_dispatch
-                || context
-                    .get("sidecar_dispatch")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false)
+            skip_outbox: input.skip_outbox.unwrap_or(false),
+            sidecar_dispatch: context
+                .get("sidecar_dispatch")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
                 || context
                     .get("phase_gate")
                     .and_then(|value| value.as_object())
                     .is_some(),
-            ..base_options
         };
 
-        let result: anyhow::Result<serde_json::Value> = async {
-            let (dispatch_id, old_status, reused) = dispatch::create_dispatch_core_with_options(
-                pg_pool,
-                &input.kanban_card_id,
-                &input.to_agent_id,
-                &dispatch_type,
-                &input.title,
-                &context,
-                options,
-            )
-            .await?;
-            let mut dispatch = dispatch::query_dispatch_row_pg(pg_pool, &dispatch_id).await?;
-            if reused {
-                dispatch["__reused"] = json!(true);
-                return Ok(dispatch);
-            }
-            if !options.sidecar_dispatch {
-                crate::pipeline::ensure_loaded();
-                let (card_repo_id, card_agent_id) =
-                    sqlx::query_as::<_, (Option<String>, Option<String>)>(
-                        "SELECT repo_id, assigned_agent_id
-                         FROM kanban_cards
-                         WHERE id = $1",
-                    )
-                    .bind(&input.kanban_card_id)
-                    .fetch_optional(pg_pool)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("Card not found: {}", input.kanban_card_id))?;
-                let effective = crate::pipeline::resolve_for_card_pg(
-                    pg_pool,
-                    card_repo_id.as_deref(),
-                    card_agent_id.as_deref(),
-                )
-                .await;
-                let kickoff_owned = effective.kickoff_for(&old_status).unwrap_or_else(|| {
-                    tracing::error!("Pipeline has no kickoff state for hook firing");
-                    effective.initial_state().to_string()
-                });
-                crate::kanban::fire_state_hooks(
-                    &self.db,
-                    &self.engine,
-                    &input.kanban_card_id,
-                    &old_status,
-                    &kickoff_owned,
-                );
-            }
-            Ok(dispatch)
-        }
-        .await;
+        let result = dispatch::create_dispatch_with_options(
+            &self.db,
+            self.engine.pg_pool(),
+            &self.engine,
+            &input.kanban_card_id,
+            &to_agent_id,
+            &dispatch_type,
+            &input.title,
+            &context,
+            options,
+        );
 
         match result {
             Ok(dispatch) => {
@@ -335,6 +300,62 @@ impl DispatchService {
                 .with_context("dispatch_id", id)
         })
     }
+}
+
+fn resolve_dispatch_target_agent_id_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    raw_target: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM agents WHERE id = ?1 LIMIT 1",
+        [raw_target],
+        |row| row.get(0),
+    )
+    .ok()
+    .or_else(|| {
+        conn.query_row(
+            "SELECT id FROM agents
+             WHERE discord_channel_id = ?1
+                OR discord_channel_alt = ?1
+                OR discord_channel_cc = ?1
+                OR discord_channel_cdx = ?1
+             LIMIT 1",
+            [raw_target],
+            |row| row.get(0),
+        )
+        .ok()
+    })
+}
+
+async fn resolve_dispatch_target_agent_id_with_pg(
+    pool: &sqlx::PgPool,
+    raw_target: &str,
+) -> Option<String> {
+    let exact_match = sqlx::query("SELECT id FROM agents WHERE id = $1 LIMIT 1")
+        .bind(raw_target)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.try_get::<String, _>("id").ok());
+    if exact_match.is_some() {
+        return exact_match;
+    }
+
+    sqlx::query(
+        "SELECT id FROM agents
+         WHERE discord_channel_id = $1
+            OR discord_channel_alt = $1
+            OR discord_channel_cc = $1
+            OR discord_channel_cdx = $1
+         LIMIT 1",
+    )
+    .bind(raw_target)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|row| row.try_get::<String, _>("id").ok())
 }
 
 fn dispatch_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<Value> {

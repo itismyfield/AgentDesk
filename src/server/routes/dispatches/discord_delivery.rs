@@ -3101,21 +3101,14 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             );
         }
 
-        let Some(pool) = transport.pg_pool() else {
-            return Err(
-                "Postgres pool required for review-decision follow-up dispatch".to_string(),
-            );
-        };
-        return match crate::dispatch::create_dispatch_core(
-            pool,
+        return match create_review_decision_followup_dispatch(
+            db,
+            transport.pg_pool(),
             card_id,
             &agent_id,
-            "review-decision",
             &format!("[리뷰 검토] {title}"),
             &serde_json::Value::Object(decision_context),
-        )
-        .await
-        {
+        ) {
             Ok((id, _old_status, _reused)) => {
                 if let Ok(conn) = db.lock() {
                     crate::engine::ops::review_state_sync_on_conn(
@@ -3209,6 +3202,72 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             kind,
         )
         .await
+}
+
+fn create_review_decision_followup_dispatch(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    card_id: &str,
+    agent_id: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool), String> {
+    if let Some(pool) = pg_pool {
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            {
+                let card_id = card_id.to_string();
+                let agent_id = agent_id.to_string();
+                let title = title.to_string();
+                let context = context.clone();
+                move |bridge_pool| async move {
+                    crate::dispatch::create_dispatch_core(
+                        &bridge_pool,
+                        &card_id,
+                        &agent_id,
+                        "review-decision",
+                        &title,
+                        &context,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+                }
+            },
+            |error| error,
+        );
+    }
+    create_review_decision_followup_dispatch_sqlite_test(db, card_id, agent_id, title, context)
+}
+
+#[cfg(test)]
+fn create_review_decision_followup_dispatch_sqlite_test(
+    db: &crate::db::Db,
+    card_id: &str,
+    agent_id: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<(String, String, bool), String> {
+    crate::dispatch::create_dispatch_record_sqlite_test(
+        db,
+        card_id,
+        agent_id,
+        "review-decision",
+        title,
+        context,
+        crate::dispatch::DispatchCreateOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(test))]
+fn create_review_decision_followup_dispatch_sqlite_test(
+    _db: &crate::db::Db,
+    _card_id: &str,
+    _agent_id: &str,
+    _title: &str,
+    _context: &serde_json::Value,
+) -> Result<(String, String, bool), String> {
+    Err("Postgres pool required for review-decision follow-up dispatch".to_string())
 }
 
 async fn send_review_result_message_via_http(

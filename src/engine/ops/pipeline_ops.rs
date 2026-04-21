@@ -1,12 +1,17 @@
 use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use sqlx::{PgPool, Row as SqlxRow};
 
 // ── Pipeline ops ─────────────────────────────────────────────────
 //
 // Exposes pipeline config to JS policies so they can look up transitions,
 // terminal states, etc. instead of hardcoding state names.
 
-pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+pub(super) fn register_pipeline_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Option<Db>,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let pipeline_obj = Object::new(ctx.clone())?;
 
@@ -26,10 +31,21 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
 
     // __resolveForCardRaw(cardId): returns the effective pipeline for a card
     let db_resolve = db;
+    let pg_resolve = pg_pool;
     pipeline_obj.set(
         "__resolveForCardRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             crate::pipeline::ensure_loaded();
+            if let Some(pool) = pg_resolve.as_ref() {
+                return resolve_for_card_raw_pg(pool, &card_id);
+            }
+            let Some(db_resolve) = db_resolve.as_ref() else {
+                return crate::pipeline::try_get()
+                    .map(|p| {
+                        serde_json::to_string(&p.to_json()).unwrap_or_else(|_| "null".to_string())
+                    })
+                    .unwrap_or_else(|| "null".to_string());
+            };
             let conn = match db_resolve.lock() {
                 Ok(c) => c,
                 Err(_) => {
@@ -203,4 +219,47 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     "#)?;
 
     Ok(())
+}
+
+fn resolve_for_card_raw_pg(pool: &PgPool, card_id: &str) -> String {
+    let card_id = card_id.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let row = sqlx::query(
+                "SELECT repo_id, assigned_agent_id
+                 FROM kanban_cards
+                 WHERE id = $1",
+            )
+            .bind(&card_id)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|error| format!("load postgres card pipeline context {card_id}: {error}"))?;
+            let (repo_id, agent_id) = if let Some(row) = row {
+                (
+                    row.try_get::<Option<String>, _>("repo_id")
+                        .map_err(|error| {
+                            format!("decode postgres repo_id for {card_id}: {error}")
+                        })?,
+                    row.try_get::<Option<String>, _>("assigned_agent_id")
+                        .map_err(|error| {
+                            format!("decode postgres assigned_agent_id for {card_id}: {error}")
+                        })?,
+                )
+            } else {
+                (None, None)
+            };
+            let effective = crate::pipeline::resolve_for_card_pg(
+                &bridge_pool,
+                repo_id.as_deref(),
+                agent_id.as_deref(),
+            )
+            .await;
+            Ok(serde_json::to_string(&effective.to_json()).unwrap_or_else(|_| "null".to_string()))
+        },
+        |_error| "null".to_string(),
+    ) {
+        Ok(result) => result,
+        Err(result) => result,
+    }
 }

@@ -1289,11 +1289,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 // Start axum HTTP server (background task) — now serves all API
                 // endpoints including /api/send, /api/senddm, /api/health
                 let http_port = ad_config.server.port;
-                match PolicyEngine::new_with_pg(
-                    &ad_config,
-                    ad_db.clone(),
-                    discord_pg_pool.clone(),
-                ) {
+                match PolicyEngine::new_with_pg(&ad_config, discord_pg_pool.clone()) {
                     Ok(engine) => {
                         // Clone for Discord bot — direct finalize_dispatch access (#143)
                         discord_db = Some(ad_db.clone());

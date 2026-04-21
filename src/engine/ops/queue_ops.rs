@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 pub(super) fn register_queue_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -17,7 +17,7 @@ pub(super) fn register_queue_ops<'js>(
     queue_obj.set(
         "__statusRaw",
         Function::new(ctx.clone(), move || -> String {
-            queue_status_raw(&db_status, pg_status.as_ref())
+            queue_status_raw(db_status.as_ref(), pg_status.as_ref())
         })?,
     )?;
 
@@ -38,10 +38,13 @@ pub(super) fn register_queue_ops<'js>(
     Ok(())
 }
 
-fn queue_status_raw(db: &Db, pg_pool: Option<&PgPool>) -> String {
+fn queue_status_raw(db: Option<&Db>, pg_pool: Option<&PgPool>) -> String {
     if let Some(pool) = pg_pool {
         return queue_status_raw_pg(pool);
     }
+    let Some(db) = db else {
+        return json!({ "error": "sqlite backend is unavailable" }).to_string();
+    };
 
     let result = (|| -> anyhow::Result<serde_json::Value> {
         let conn = db.read_conn()?;

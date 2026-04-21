@@ -28,7 +28,7 @@ struct CardListFilter {
 
 pub(super) fn register_card_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -42,7 +42,10 @@ pub(super) fn register_card_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return card_get_raw_pg(pool, &card_id);
             }
-            card_get_raw(&db_get, &card_id)
+            db_get
+                .as_ref()
+                .map(|db| card_get_raw(db, &card_id))
+                .unwrap_or_else(|| json_result(Err(anyhow!("sqlite backend is unavailable"))))
         })?,
     )?;
 
@@ -54,7 +57,10 @@ pub(super) fn register_card_ops<'js>(
             if let Some(pool) = pg_list.as_ref() {
                 return card_list_raw_pg(pool, &filter_json);
             }
-            card_list_raw(&db_list, &filter_json)
+            db_list
+                .as_ref()
+                .map(|db| card_list_raw(db, &filter_json))
+                .unwrap_or_else(|| json_result(Err(anyhow!("sqlite backend is unavailable"))))
         })?,
     )?;
 
@@ -68,7 +74,10 @@ pub(super) fn register_card_ops<'js>(
                 if let Some(pool) = pg_assign.as_ref() {
                     return card_assign_raw_pg(pool, &card_id, &agent_id);
                 }
-                card_assign_raw(&db_assign, &card_id, &agent_id)
+                db_assign
+                    .as_ref()
+                    .map(|db| card_assign_raw(db, &card_id, &agent_id))
+                    .unwrap_or_else(|| json_result(Err(anyhow!("sqlite backend is unavailable"))))
             },
         )?,
     )?;
@@ -83,7 +92,10 @@ pub(super) fn register_card_ops<'js>(
                 if let Some(pool) = pg_priority.as_ref() {
                     return card_set_priority_raw_pg(pool, &card_id, &priority);
                 }
-                card_set_priority_raw(&db_priority, &card_id, &priority)
+                db_priority
+                    .as_ref()
+                    .map(|db| card_set_priority_raw(db, &card_id, &priority))
+                    .unwrap_or_else(|| json_result(Err(anyhow!("sqlite backend is unavailable"))))
             },
         )?,
     )?;

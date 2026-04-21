@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 pub(super) fn register_auto_queue_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
@@ -21,7 +21,7 @@ pub(super) fn register_auto_queue_ops<'js>(
             ctx.clone(),
             move |entry_id: String, status: String, source: String, opts_json: String| -> String {
                 update_entry_status_raw(
-                    &db_update,
+                    db_update.as_ref(),
                     pg_update.as_ref(),
                     &entry_id,
                     &status,
@@ -33,11 +33,17 @@ pub(super) fn register_auto_queue_ops<'js>(
     )?;
 
     let db_activate = db.clone();
+    let pg_activate = pg_pool.clone();
     let bridge_activate = bridge.clone();
     auto_queue_obj.set(
         "__activateRaw",
         Function::new(ctx.clone(), move |body_json: String| -> String {
-            activate_raw(&db_activate, &bridge_activate, &body_json)
+            activate_raw(
+                db_activate.as_ref(),
+                pg_activate.as_ref(),
+                &bridge_activate,
+                &body_json,
+            )
         })?,
     )?;
     let db_pause_run = db.clone();
@@ -47,7 +53,12 @@ pub(super) fn register_auto_queue_ops<'js>(
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                pause_run_raw(&db_pause_run, pg_pause_run.as_ref(), &run_id, &source)
+                pause_run_raw(
+                    db_pause_run.as_ref(),
+                    pg_pause_run.as_ref(),
+                    &run_id,
+                    &source,
+                )
             },
         )?,
     )?;
@@ -58,7 +69,12 @@ pub(super) fn register_auto_queue_ops<'js>(
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                resume_run_raw(&db_resume_run, pg_resume_run.as_ref(), &run_id, &source)
+                resume_run_raw(
+                    db_resume_run.as_ref(),
+                    pg_resume_run.as_ref(),
+                    &run_id,
+                    &source,
+                )
             },
         )?,
     )?;
@@ -70,7 +86,7 @@ pub(super) fn register_auto_queue_ops<'js>(
             ctx.clone(),
             move |run_id: String, source: String, opts_json: String| -> String {
                 complete_run_raw(
-                    &db_complete_run,
+                    db_complete_run.as_ref(),
                     pg_complete_run.as_ref(),
                     &run_id,
                     &source,
@@ -87,7 +103,7 @@ pub(super) fn register_auto_queue_ops<'js>(
             ctx.clone(),
             move |run_id: String, phase: i64, state_json: String| -> String {
                 save_phase_gate_state_raw(
-                    &db_save_phase_gate,
+                    db_save_phase_gate.as_ref(),
                     pg_save_phase_gate.as_ref(),
                     &run_id,
                     phase,
@@ -102,7 +118,7 @@ pub(super) fn register_auto_queue_ops<'js>(
         "__clearPhaseGateStateRaw",
         Function::new(ctx.clone(), move |run_id: String, phase: i64| -> String {
             clear_phase_gate_state_raw(
-                &db_clear_phase_gate,
+                db_clear_phase_gate.as_ref(),
                 pg_clear_phase_gate.as_ref(),
                 &run_id,
                 phase,
@@ -122,7 +138,7 @@ pub(super) fn register_auto_queue_ops<'js>(
                   metadata_json: String|
                   -> String {
                 record_consultation_dispatch_raw(
-                    &db_record_consultation,
+                    db_record_consultation.as_ref(),
                     pg_record_consultation.as_ref(),
                     &entry_id,
                     &card_id,
@@ -141,7 +157,7 @@ pub(super) fn register_auto_queue_ops<'js>(
             ctx.clone(),
             move |entry_id: String, max_retries: i64, source: String| -> String {
                 record_entry_dispatch_failure_raw(
-                    &db_record_dispatch_failure,
+                    db_record_dispatch_failure.as_ref(),
                     pg_record_dispatch_failure.as_ref(),
                     &entry_id,
                     max_retries,
@@ -281,7 +297,12 @@ pub(super) fn register_auto_queue_ops<'js>(
     Ok(())
 }
 
-fn activate_raw(db: &Db, bridge: &BridgeHandle, body_json: &str) -> String {
+fn activate_raw(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    bridge: &BridgeHandle,
+    body_json: &str,
+) -> String {
     let body: crate::server::routes::auto_queue::ActivateBody =
         match serde_json::from_str(body_json) {
             Ok(body) => body,
@@ -303,6 +324,35 @@ fn activate_raw(db: &Db, bridge: &BridgeHandle, body_json: &str) -> String {
         }
     };
 
+    if pg_pool.is_some() || engine.pg_pool().is_some() {
+        let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) else {
+            return serde_json::json!({"error": "postgres pool is not configured"}).to_string();
+        };
+        return match crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            {
+                let body = body;
+                let engine = engine.clone();
+                move |_bridge_pool| async move {
+                    let (_status, response) =
+                        crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body)
+                            .await;
+                    Ok(response.0.to_string())
+                }
+            },
+            |error| serde_json::json!({ "error": error }).to_string(),
+        ) {
+            Ok(json) => json,
+            Err(error_json) => error_json,
+        };
+    }
+
+    let Some(db) = db else {
+        return serde_json::json!({
+            "error": "sqlite backend is unavailable"
+        })
+        .to_string();
+    };
     let deps =
         crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(db.clone(), engine);
     let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
@@ -316,7 +366,7 @@ fn should_defer_activate(bridge: &BridgeHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn pause_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+fn pause_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
@@ -327,6 +377,9 @@ fn pause_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) 
             crate::db::auto_queue::pause_run_on_pg(&pool, &run_id).await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -352,7 +405,7 @@ fn pause_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) 
     }
 }
 
-fn resume_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+fn resume_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
@@ -363,6 +416,9 @@ fn resume_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str)
             crate::db::auto_queue::resume_run_on_pg(&pool, &run_id).await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -389,7 +445,7 @@ fn resume_run_raw(db: &Db, pg_pool: Option<&PgPool>, run_id: &str, source: &str)
 }
 
 fn complete_run_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     source: &str,
@@ -424,6 +480,9 @@ fn complete_run_raw(
             crate::db::auto_queue::complete_run_on_pg(&pool, &run_id).await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -482,7 +541,7 @@ struct PhaseGateStatePayload {
 }
 
 fn save_phase_gate_state_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     phase: i64,
@@ -518,6 +577,9 @@ fn save_phase_gate_state_raw(
             crate::db::auto_queue::save_phase_gate_state_on_pg(&pool, &run_id, phase, &write).await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -546,7 +608,7 @@ fn save_phase_gate_state_raw(
 }
 
 fn clear_phase_gate_state_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     phase: i64,
@@ -557,6 +619,9 @@ fn clear_phase_gate_state_raw(
             crate::db::auto_queue::clear_phase_gate_state_on_pg(&pool, &run_id, phase).await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -584,7 +649,7 @@ fn clear_phase_gate_state_raw(
 }
 
 fn record_consultation_dispatch_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     card_id: &str,
@@ -610,6 +675,9 @@ fn record_consultation_dispatch_raw(
             .await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let mut conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -647,7 +715,7 @@ fn record_consultation_dispatch_raw(
 }
 
 fn record_entry_dispatch_failure_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     max_retries: i64,
@@ -670,6 +738,9 @@ fn record_entry_dispatch_failure_raw(
             .await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
@@ -708,7 +779,7 @@ fn record_entry_dispatch_failure_raw(
 }
 
 fn update_entry_status_raw(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     status: &str,
@@ -748,6 +819,9 @@ fn update_entry_status_raw(
             .await
         })
     } else {
+        let Some(db) = db else {
+            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
+        };
         let conn = match db.separate_conn() {
             Ok(conn) => conn,
             Err(error) => {

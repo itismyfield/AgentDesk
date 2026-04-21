@@ -20,7 +20,7 @@ fn test_engine(db: &Db) -> PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    PolicyEngine::new(&config, db.clone()).unwrap()
+    PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -1251,7 +1251,7 @@ async fn duplicate_accept_returns_conflict() {
     let state = AppState::test_state(db.clone(), engine);
 
     // First accept should succeed
-    let (status1, _) = submit_review_decision(
+    let (status1, body1) = submit_review_decision(
         State(state.clone()),
         Json(ReviewDecisionBody {
             card_id: "card-dup".to_string(),
@@ -1261,7 +1261,12 @@ async fn duplicate_accept_returns_conflict() {
         }),
     )
     .await;
-    assert_eq!(status1, StatusCode::OK);
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "unexpected first accept body: {}",
+        body1.0
+    );
 
     let conn = db.lock().unwrap();
     let latest_dispatch_id: String = conn

@@ -256,7 +256,7 @@ pub async fn trigger_rework(
         };
 
         return match crate::kanban::transition_status_with_opts_pg(
-            &state.db,
+            Some(&state.db),
             pg_pool,
             &state.engine,
             &card_id,
@@ -348,7 +348,7 @@ mod tests {
 
     fn test_engine(db: &Db) -> PolicyEngine {
         let config = crate::config::Config::default();
-        PolicyEngine::new(&config, db.clone()).unwrap()
+        PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
     fn test_state_with_pg(db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> AppState {

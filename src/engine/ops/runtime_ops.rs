@@ -1,4 +1,3 @@
-use crate::db::Db;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 use crate::supervisor::BridgeHandle;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
@@ -130,13 +129,12 @@ fn refresh_inventory_docs_json(worktree_path: &str, timeout_ms: Option<u64>) -> 
 
 pub(super) fn register_runtime_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Db,
+    db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let runtime_obj = Object::new(ctx.clone())?;
-    let db_for_signal = db.clone();
     let bridge_for_signal = bridge.clone();
 
     runtime_obj.set(
@@ -145,7 +143,6 @@ pub(super) fn register_runtime_ops<'js>(
             ctx.clone(),
             move |signal_name: String, evidence_json: String| -> String {
                 crate::supervisor::emit_signal_json(
-                    &db_for_signal,
                     &bridge_for_signal,
                     &signal_name,
                     &evidence_json,
@@ -168,7 +165,7 @@ pub(super) fn register_runtime_ops<'js>(
             ctx.clone(),
             move |card_id: String, terminal_status: String| -> String {
                 crate::services::retrospectives::record_card_retrospective_json(
-                    &db_for_retrospective,
+                    db_for_retrospective.as_ref(),
                     pg_for_retrospective.as_ref(),
                     &card_id,
                     &terminal_status,
