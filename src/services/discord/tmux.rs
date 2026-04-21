@@ -120,6 +120,15 @@ fn build_monitor_completion_message(response: &str) -> String {
 /// the notify-bot outbox may not be available in every deployment, which
 /// would silently drop the reply.
 ///
+/// **Provider coverage (important):** the `system/task_notification` JSONL
+/// event is emitted by `session_backend.rs::parse_stream_message` when the
+/// Claude Code harness auto-fires a turn. The codex provider does NOT emit
+/// this event — its stream parser (`codex_tmux_wrapper.rs`) only produces
+/// `system/init` and `item.*` records. As a result this predicate is
+/// **Claude-only** and codex background-trigger completions currently bypass
+/// the notify-bot path (existing pre-#826 behaviour, silent drop). Codex
+/// coverage is tracked as a follow-up in #898.
+///
 /// Returns `true` only when ALL of the following hold:
 /// 1. The turn produced an assistant response (no use rerouting emptiness).
 /// 2. A `system/task_notification` event was observed in the turn's JSONL
@@ -194,10 +203,50 @@ pub(super) fn notify_path_offset_advance_decision(
     OffsetAdvanceDecision::default()
 }
 
+/// #826: Build the dedupe session_key for a background-trigger outbox row.
+/// Includes the tmux output offset and a short content hash so distinct
+/// completions land as separate rows (different offsets ⇒ different keys)
+/// while a retry of the exact same range within the dedupe window (same
+/// offset + identical content) collapses into one. The resulting key is
+/// compact (≤~64 chars) and safe to use as a dedupe column.
+///
+/// Pure function so the #897 counter-model review P1 (dedupe reason_code
+/// AND session_key must BOTH be present for the lifecycle dedupe to arm)
+/// has a testable contract.
+#[inline]
+pub(super) fn build_bg_trigger_session_key(
+    channel_id: u64,
+    data_start_offset: u64,
+    content: &str,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!(
+        "bg_trigger:ch:{channel_id}:off:{data_start_offset}:h:{:016x}",
+        hasher.finish()
+    )
+}
+
 /// #826: Enqueue a background-trigger turn's terminal response on the
 /// notify-bot outbox so it reaches the channel without going through the
 /// command bot. The notify-bot is dropped at the intake gate, which is what
 /// keeps the auto-trigger path from feeding back into a new turn.
+///
+/// **Dedupe** (#897 counter-model review P1): both `reason_code` and
+/// `session_key` are set so `message_outbox::enqueue`'s lifecycle-notification
+/// dedupe arms. `session_key` encodes `channel_id + data_start_offset +
+/// content hash`, so:
+///   * Distinct background completions in the same channel produce distinct
+///     session_keys (different offsets or different content) → each lands
+///     as its own outbox row.
+///   * A duplicate retry of the exact same tmux range within the dedupe TTL
+///     (same offset, identical content) collapses into the single existing
+///     row, which guards against the watcher re-enqueuing while the outbox
+///     worker is still delivering.
+///   * The dedupe lookup filters out `status='failed'` rows, so a permanently
+///     failed prior attempt is NOT allowed to suppress a fresh re-stage.
 ///
 /// Returns `false` only when the database handle is unavailable or the SQL
 /// insert fails — the caller falls back to a direct command-bot send in that
@@ -206,6 +255,7 @@ pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
     db: Option<&crate::db::Db>,
     channel_id: ChannelId,
     content: &str,
+    data_start_offset: u64,
 ) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -215,21 +265,160 @@ pub(super) fn enqueue_background_trigger_response_to_notify_outbox(
         return false;
     };
     let target = format!("channel:{}", channel_id.get());
-    // Intentionally omit reason_code so the lifecycle dedupe in
-    // `message_outbox::enqueue` does not suppress consecutive auto-trigger
-    // responses on the same channel — each background-task completion is its
-    // own event the user must see.
-    crate::services::message_outbox::enqueue_with_db(
-        db,
-        crate::services::message_outbox::OutboxMessage {
-            target: target.as_str(),
-            content,
-            bot: "notify",
-            source: "system",
-            reason_code: None,
-            session_key: None,
-        },
-    )
+    let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
+    // Call `enqueue` directly (instead of `enqueue_with_db`) so we can
+    // distinguish a dedupe-skip (`Ok(false)` — an EARLIER retry already wrote
+    // the row, so this call is conceptually successful) from a genuine SQL
+    // error (`Err(_)` — caller must fall back to direct send). The legacy
+    // `enqueue_with_db` collapses both into `false`, which would spuriously
+    // trigger the direct-send fallback on a dedupe and write the same
+    // message twice.
+    match db.separate_conn() {
+        Ok(conn) => {
+            match crate::services::message_outbox::enqueue(
+                &conn,
+                crate::services::message_outbox::OutboxMessage {
+                    target: target.as_str(),
+                    content,
+                    bot: "notify",
+                    source: "system",
+                    reason_code: Some("bg_trigger.auto_turn"),
+                    session_key: Some(session_key.as_str()),
+                },
+            ) {
+                Ok(_inserted_or_deduped) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        "background-trigger outbox enqueue failed for channel {}: {}",
+                        channel_id,
+                        error
+                    );
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "background-trigger outbox connection failed for channel {}: {}",
+                channel_id,
+                error
+            );
+            false
+        }
+    }
+}
+
+/// #897 counter-model review P1 #2: Find permanently-failed notify-bot
+/// outbox rows that originated from this watcher's background-trigger
+/// enqueues, extract the tmux offsets that caused them, and delete the
+/// rows so they don't accumulate. Returns the MINIMUM observed
+/// `data_start_offset` encoded in `session_key`, which the caller uses to
+/// roll `last_enqueued_offset` back and re-stage the same tmux range on
+/// the next watcher tick.
+///
+/// Why this is safe to re-stage:
+/// * `message_outbox::enqueue`'s lifecycle dedupe filters out rows where
+///   `status='failed'`, so re-inserting at the same session_key produces a
+///   fresh pending row rather than collapsing into the dead one.
+/// * We delete the failed rows here so they no longer pollute `SELECT *`
+///   queries or eat unbounded table space.
+///
+/// Without this reconciliation a single transient notify-bot or Discord
+/// failure permanently suppresses re-enqueue for the remainder of the
+/// watcher's lifetime — the exact P1 gap the counter-model reviewer
+/// flagged. See PR #897.
+fn reconcile_failed_bg_trigger_enqueues_for_channel(
+    db: Option<&crate::db::Db>,
+    channel_id: ChannelId,
+) -> Option<u64> {
+    let db = db?;
+    let conn = db.separate_conn().ok()?;
+    let target = format!("channel:{}", channel_id.get());
+
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(session_key, '') FROM message_outbox
+                 WHERE target = ?1
+                   AND bot = 'notify'
+                   AND source = 'system'
+                   AND reason_code = 'bg_trigger.auto_turn'
+                   AND status = 'failed'",
+            )
+            .ok()?;
+        stmt.query_map(libsql_rusqlite::params![target.as_str()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect()
+    };
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut min_offset: Option<u64> = None;
+    for (_, session_key) in &rows {
+        if let Some(offset) = parse_bg_trigger_offset_from_session_key(session_key) {
+            min_offset = Some(min_offset.map(|m| m.min(offset)).unwrap_or(offset));
+        }
+    }
+
+    for (id, _) in &rows {
+        let _ = conn.execute(
+            "DELETE FROM message_outbox WHERE id = ?1",
+            libsql_rusqlite::params![id],
+        );
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?})",
+        rows.len(),
+        channel_id,
+        min_offset,
+    );
+
+    min_offset
+}
+
+/// Pure helper: extract the `data_start_offset` encoded in a
+/// background-trigger `session_key`. Format produced by
+/// `build_bg_trigger_session_key` is `bg_trigger:ch:{id}:off:{offset}:h:{hash16}`.
+/// Returns `None` for malformed keys so the caller can safely ignore
+/// outbox rows whose session_key no longer conforms to the expected shape
+/// (e.g. future schema changes or hand-written operator rows).
+#[inline]
+pub(super) fn parse_bg_trigger_offset_from_session_key(session_key: &str) -> Option<u64> {
+    let after_off = session_key.split(":off:").nth(1)?;
+    let off_str = after_off.split(':').next()?;
+    off_str.parse::<u64>().ok()
+}
+
+/// Pure helper for the watermark-rollback policy (#897 P1 #2). Given the
+/// watcher's current `last_enqueued_offset` and the minimum offset from a
+/// reconciled outbox failure, return the new watermark that allows
+/// re-emission of the failed range on the next watcher tick while
+/// preserving progress past other, unaffected ranges.
+///
+/// Rules:
+/// 1. `None → None`: nothing staged, nothing to roll back.
+/// 2. Current ≤ reconciled: the watermark is already at or below the
+///    failed offset, so the next visit will naturally re-emit that range.
+/// 3. Current > reconciled: pull back to `reconciled.saturating_sub(1)` so
+///    the dedupe floor `max(relayed, enqueued)` permits
+///    `data_start_offset < prev_offset` evaluation at the exact failed
+///    offset. Using `saturating_sub` guards against reconciled=0.
+#[inline]
+pub(super) fn rollback_enqueued_offset_for_reconciled_failures(
+    last_enqueued_offset: Option<u64>,
+    reconciled_min_offset: u64,
+) -> Option<u64> {
+    match last_enqueued_offset {
+        None => None,
+        Some(current) if current <= reconciled_min_offset => Some(current),
+        Some(_) => Some(reconciled_min_offset.saturating_sub(1)),
+    }
 }
 
 fn watcher_should_yield_to_active_bridge_turn(
@@ -633,6 +822,12 @@ pub(super) async fn tmux_output_watcher(
     // spin. See issue #892.
     let mut rotation_tick: u32 = 0;
     const ROTATION_CHECK_EVERY: u32 = 60; // ~30s at 500ms base cadence
+    // #897 counter-model review P1 #2: cadence for the failed-bg_trigger
+    // reconciliation poll. Short enough that a transient outbox failure is
+    // re-staged within ~10s, long enough that the watcher doesn't hammer
+    // SQLite every spin. Independent of ROTATION_CHECK_EVERY so each
+    // subsystem can tune its cadence without affecting the other.
+    const BG_FAILURE_RECONCILE_EVERY: u32 = 20; // ~10s at 500ms base cadence
 
     loop {
         // Always consume resume_offset first — the turn bridge may have set it
@@ -673,6 +868,25 @@ pub(super) async fn tmux_output_watcher(
         // the watcher loop keeps the wrapper child process simple while
         // still enforcing a 20 MB soft cap (see issue #892).
         rotation_tick = rotation_tick.wrapping_add(1);
+
+        // #897 P1 #2: reconcile any permanently-failed bg_trigger outbox
+        // rows for THIS channel and roll `last_enqueued_offset` back so
+        // the next tick re-stages the failed range instead of silently
+        // letting the watermark pin the dedupe floor past unresolved
+        // output. Runs on its own cadence (independent of rotation) and
+        // never blocks the rest of the loop — a SQL hiccup just returns
+        // None.
+        if rotation_tick % BG_FAILURE_RECONCILE_EVERY == 0 {
+            if let Some(min_failed_offset) =
+                reconcile_failed_bg_trigger_enqueues_for_channel(shared.db.as_ref(), channel_id)
+            {
+                last_enqueued_offset = rollback_enqueued_offset_for_reconciled_failures(
+                    last_enqueued_offset,
+                    min_failed_offset,
+                );
+            }
+        }
+
         if rotation_tick % ROTATION_CHECK_EVERY == 0 {
             let path = output_path.clone();
             let session = tmux_session_name.clone();
@@ -1681,6 +1895,7 @@ pub(super) async fn tmux_output_watcher(
                         shared.db.as_ref(),
                         channel_id,
                         &prefixed,
+                        data_start_offset,
                     )
                 } else {
                     // No assistant text to deliver — nothing to commit.
@@ -3342,11 +3557,13 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, OffsetAdvanceDecision, WatcherToolState,
-        build_monitor_completion_message, dead_session_cleanup_plan,
+        build_bg_trigger_session_key, build_monitor_completion_message, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox, load_restored_provider_session_id,
-        notify_path_offset_advance_decision, process_watcher_lines,
-        refresh_session_heartbeat_from_tmux_output, should_route_terminal_response_via_notify_bot,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        notify_path_offset_advance_decision, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
+        rollback_enqueued_offset_for_reconciled_failures,
+        should_route_terminal_response_via_notify_bot, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
@@ -3723,19 +3940,40 @@ mod tests {
         let channel = ChannelId::new(987_654_321);
         let content = "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\nPR #825 리뷰 4건 fix 완료";
 
-        let enqueued =
-            enqueue_background_trigger_response_to_notify_outbox(Some(&db), channel, content);
+        let enqueued = enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            content,
+            /*data_start_offset*/ 4096,
+        );
         assert!(
             enqueued,
             "background-trigger enqueue must succeed when db is present"
         );
 
         let conn = db.lock().unwrap();
-        let (target, stored_content, bot, source): (String, String, String, String) = conn
+        let (target, stored_content, bot, source, reason_code, session_key): (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT target, content, bot, source FROM message_outbox ORDER BY id DESC LIMIT 1",
+                "SELECT target, content, bot, source, reason_code, session_key
+                 FROM message_outbox ORDER BY id DESC LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .expect("expected one outbox row");
 
@@ -3743,24 +3981,36 @@ mod tests {
         assert_eq!(stored_content, content);
         assert_eq!(bot, "notify", "must use notify bot to avoid loop hazard");
         assert_eq!(source, "system");
+        // #897 counter-model review P1 #3: both reason_code and session_key
+        // must be populated so the lifecycle dedupe in message_outbox can arm.
+        assert_eq!(reason_code.as_deref(), Some("bg_trigger.auto_turn"));
+        let session_key = session_key.expect("session_key must be populated for dedupe");
+        assert!(
+            session_key.starts_with(&format!("bg_trigger:ch:{}:off:4096:h:", channel.get())),
+            "session_key must encode channel + offset + content hash; got {session_key}"
+        );
     }
 
-    /// Consecutive background-task completions in the same channel must each
-    /// produce their own outbox row — using a `reason_code` here would trip
-    /// the lifecycle-notification dedupe and silently drop later events.
+    /// #897 P1 #3: consecutive background-task completions in the same
+    /// channel must each produce their own outbox row — each event is a
+    /// distinct tmux range, so the `session_key` (which includes
+    /// `data_start_offset` and a content hash) must differ between them and
+    /// the dedupe must NOT collapse legitimately-separate events into one.
     #[test]
-    fn background_trigger_response_does_not_dedupe_consecutive_events() {
+    fn background_trigger_response_does_not_dedupe_distinct_events() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(555_111_222);
         assert!(enqueue_background_trigger_response_to_notify_outbox(
             Some(&db),
             channel,
-            "first completion"
+            "first completion",
+            /*data_start_offset*/ 1_000,
         ));
         assert!(enqueue_background_trigger_response_to_notify_outbox(
             Some(&db),
             channel,
-            "second completion"
+            "second completion",
+            /*data_start_offset*/ 2_000,
         ));
 
         let count: i64 = db
@@ -3774,7 +4024,43 @@ mod tests {
             .unwrap();
         assert_eq!(
             count, 2,
-            "consecutive background-task events must not dedupe"
+            "consecutive events with distinct offsets/content must land as separate rows"
+        );
+    }
+
+    /// #897 P1 #3: a genuine retry of the SAME tmux range (same offset +
+    /// identical content) within the dedupe TTL must collapse into a single
+    /// outbox row, preventing the watcher from re-enqueuing while the outbox
+    /// worker is still driving the same message to Discord.
+    #[test]
+    fn background_trigger_response_dedupes_identical_retry() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(666_222_333);
+        assert!(enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            "same content",
+            /*data_start_offset*/ 8_192,
+        ));
+        assert!(enqueue_background_trigger_response_to_notify_outbox(
+            Some(&db),
+            channel,
+            "same content",
+            /*data_start_offset*/ 8_192,
+        ));
+
+        let count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM message_outbox WHERE target = ?1 AND bot = 'notify'",
+                [format!("channel:{}", channel.get()).as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "identical retry at the same offset must dedupe to a single row"
         );
     }
 
@@ -3787,7 +4073,8 @@ mod tests {
         assert!(enqueue_background_trigger_response_to_notify_outbox(
             Some(&db),
             channel,
-            "   \n"
+            "   \n",
+            0,
         ));
         let count: i64 = db
             .lock()
@@ -3807,8 +4094,173 @@ mod tests {
             None,
             channel,
             "would-have-been-delivered",
+            0,
         );
         assert!(!ok, "missing db must surface as failure to enable fallback");
+    }
+
+    /// #897 P1 #2 guard: `parse_bg_trigger_offset_from_session_key` must
+    /// round-trip the exact offset that `build_bg_trigger_session_key`
+    /// embedded, across a spread of offsets. Without a stable inverse, the
+    /// reconciliation poll cannot identify which tmux range to re-stage
+    /// after an outbox failure.
+    #[test]
+    fn parse_bg_trigger_offset_roundtrips_build_key() {
+        for offset in [0u64, 1, 4096, 1 << 32, 1 << 48, u64::MAX] {
+            let key = build_bg_trigger_session_key(42, offset, "payload");
+            let parsed = parse_bg_trigger_offset_from_session_key(&key);
+            assert_eq!(
+                parsed,
+                Some(offset),
+                "offset {} must round-trip through session_key",
+                offset
+            );
+        }
+    }
+
+    /// #897 P1 #2: malformed / foreign session_keys must not panic or
+    /// produce spurious offsets — the reconcile poll has to be robust to
+    /// hand-written rows or schema drift.
+    #[test]
+    fn parse_bg_trigger_offset_returns_none_for_non_matching_keys() {
+        assert_eq!(parse_bg_trigger_offset_from_session_key(""), None);
+        assert_eq!(
+            parse_bg_trigger_offset_from_session_key("random:session:key"),
+            None
+        );
+        assert_eq!(
+            parse_bg_trigger_offset_from_session_key("bg_trigger:ch:1:off:not-a-number:h:abcd"),
+            None
+        );
+        assert_eq!(
+            parse_bg_trigger_offset_from_session_key("bg_trigger:ch:1:off:"),
+            None
+        );
+    }
+
+    /// #897 P1 #2 policy guard: rollback must pull the watermark back
+    /// below the failed offset when it has moved past, but must NOT
+    /// accidentally advance the watermark when it is already behind the
+    /// failure. And it must never panic on a failed offset of 0.
+    #[test]
+    fn rollback_enqueued_offset_pulls_back_only_when_ahead_of_failure() {
+        // Nothing staged → nothing to roll back.
+        assert_eq!(
+            rollback_enqueued_offset_for_reconciled_failures(None, 12_000),
+            None,
+        );
+
+        // Watermark already at or below the failed offset → unchanged.
+        assert_eq!(
+            rollback_enqueued_offset_for_reconciled_failures(Some(8_000), 12_000),
+            Some(8_000),
+        );
+        assert_eq!(
+            rollback_enqueued_offset_for_reconciled_failures(Some(12_000), 12_000),
+            Some(12_000),
+        );
+
+        // Watermark ahead of the failure → pulled back to just before it.
+        assert_eq!(
+            rollback_enqueued_offset_for_reconciled_failures(Some(20_000), 12_000),
+            Some(11_999),
+        );
+
+        // Reconciled offset 0 must saturate at 0, not wrap.
+        assert_eq!(
+            rollback_enqueued_offset_for_reconciled_failures(Some(5), 0),
+            Some(0),
+        );
+    }
+
+    /// #897 P1 #2 end-to-end: after a bg_trigger row transitions to
+    /// `status='failed'`, `reconcile_failed_bg_trigger_enqueues_for_channel`
+    /// must (a) report the minimum offset so the watcher can roll back and
+    /// (b) delete the row so it doesn't accumulate. Combined with the
+    /// dedupe lookup's `status != 'failed'` filter, this lets a subsequent
+    /// enqueue at the same session_key land as a fresh row.
+    #[test]
+    fn reconcile_failed_bg_trigger_rows_returns_min_offset_and_deletes_them() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(777_444_111);
+
+        // Seed three bg_trigger rows at different offsets, mark two as
+        // failed and leave one pending. Only the failed pair should be
+        // reconciled; the pending row stays.
+        for (offset, status) in [
+            (1_000u64, "failed"),
+            (5_000u64, "failed"),
+            (9_000u64, "pending"),
+        ] {
+            let session_key = build_bg_trigger_session_key(channel.get(), offset, "c");
+            let target = format!("channel:{}", channel.get());
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO message_outbox
+                 (target, content, bot, source, reason_code, session_key, status)
+                 VALUES (?1, 'c', 'notify', 'system', 'bg_trigger.auto_turn', ?2, ?3)",
+                libsql_rusqlite::params![target.as_str(), session_key.as_str(), status],
+            )
+            .unwrap();
+        }
+
+        let min = super::reconcile_failed_bg_trigger_enqueues_for_channel(Some(&db), channel);
+        assert_eq!(
+            min,
+            Some(1_000),
+            "smallest failed offset must be returned so watermark rollback lands there"
+        );
+
+        // Failed rows deleted; pending row still present.
+        let (failed_left, pending_left): (i64, i64) = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
+                 FROM message_outbox WHERE target = ?1",
+                [format!("channel:{}", channel.get()).as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failed_left, 0, "reconciled rows must be deleted");
+        assert_eq!(pending_left, 1, "pending rows must be preserved");
+    }
+
+    /// #897 P1 #2: when there are no failed rows the reconciler returns
+    /// `None` (no rollback needed) without side effects.
+    #[test]
+    fn reconcile_returns_none_when_no_failed_rows() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(888_555_222);
+        let min = super::reconcile_failed_bg_trigger_enqueues_for_channel(Some(&db), channel);
+        assert_eq!(min, None);
+    }
+
+    /// #897 P1 #3 guard: `build_bg_trigger_session_key` must produce the
+    /// same key for identical inputs (so dedupe can arm) and differing keys
+    /// when EITHER the offset OR the content changes.
+    #[test]
+    fn build_bg_trigger_session_key_is_stable_and_offset_sensitive() {
+        let a = build_bg_trigger_session_key(100, 4096, "payload");
+        let b = build_bg_trigger_session_key(100, 4096, "payload");
+        assert_eq!(a, b, "identical inputs must yield identical keys");
+
+        let different_offset = build_bg_trigger_session_key(100, 8192, "payload");
+        assert_ne!(a, different_offset, "different offset must yield a new key");
+
+        let different_content = build_bg_trigger_session_key(100, 4096, "payload2");
+        assert_ne!(
+            a, different_content,
+            "different content must yield a new key"
+        );
+
+        let different_channel = build_bg_trigger_session_key(200, 4096, "payload");
+        assert_ne!(
+            a, different_channel,
+            "different channel must yield a new key"
+        );
     }
 
     /// #826 P1 #1 regression guard: a turn whose inflight file is absent but
