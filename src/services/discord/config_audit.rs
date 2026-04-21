@@ -222,29 +222,78 @@ pub(crate) fn audit_and_reconcile(
     Ok(AuditRunOutcome { config, report })
 }
 
-pub(crate) fn load_persisted_report(db: &Db) -> Option<ConfigAuditReport> {
+fn direct_api_context_unavailable(error: &str) -> bool {
+    error.contains("direct runtime API context is unavailable")
+}
+
+fn load_persisted_report_sqlite(db: &Db) -> Option<String> {
     let conn = db.read_conn().ok()?;
-    let raw: String = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
-            [CONFIG_AUDIT_KV_KEY],
-            |row| row.get(0),
-        )
-        .ok()?;
+    conn.query_row(
+        "SELECT value FROM kv_meta WHERE key = ?1",
+        [CONFIG_AUDIT_KV_KEY],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn load_persisted_report_pg(pg_pool: Option<&sqlx::PgPool>) -> Option<String> {
+    let pg_pool = pg_pool?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        |pool| async move {
+            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                .bind(CONFIG_AUDIT_KV_KEY)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load config audit report from pg: {error}"))
+        },
+        |message| message,
+    )
+    .ok()
+    .flatten()
+}
+
+pub(crate) fn load_persisted_report(
+    db: &Db,
+    pg_pool: Option<&sqlx::PgPool>,
+) -> Option<ConfigAuditReport> {
+    match super::internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
+        Ok(Some(raw)) => return serde_json::from_str(&raw).ok(),
+        Ok(None) => return None,
+        Err(error) if !direct_api_context_unavailable(&error) => return None,
+        Err(_) => {}
+    }
+
+    let raw = if pg_pool.is_some() {
+        load_persisted_report_pg(pg_pool)
+    } else {
+        load_persisted_report_sqlite(db)
+    }?;
     serde_json::from_str(&raw).ok()
+}
+
+fn persist_report_sqlite(db: &Db, rendered: &str) {
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        [CONFIG_AUDIT_KV_KEY, rendered],
+    );
 }
 
 fn persist_report(db: &Db, report: &ConfigAuditReport) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
-    let Ok(conn) = db.lock() else {
-        return;
-    };
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        [CONFIG_AUDIT_KV_KEY, rendered.as_str()],
-    );
+
+    match super::internal_api::set_kv_value(CONFIG_AUDIT_KV_KEY, &rendered) {
+        Ok(()) => return,
+        Err(error) if !direct_api_context_unavailable(&error) => return,
+        Err(_) => {}
+    }
+
+    persist_report_sqlite(db, &rendered);
 }
 
 fn audit_role_map(

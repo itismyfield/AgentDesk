@@ -33,13 +33,12 @@ impl DispatchTmuxProtection {
 
 pub(super) fn resolve_dispatch_tmux_protection(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     tmux_session_name: &str,
     channel_name_hint: Option<&str>,
 ) -> Option<DispatchTmuxProtection> {
-    let db = db?;
-    let conn = db.read_conn().ok()?;
     let parsed_channel_name = parse_provider_and_channel_from_tmux_name(tmux_session_name)
         .and_then(|(parsed_provider, channel_name)| {
             (parsed_provider == *provider).then_some(channel_name)
@@ -57,6 +56,104 @@ pub(super) fn resolve_dispatch_tmux_protection(
 
     let session_keys =
         super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
+    if let Some(pg_pool) = pg_pool {
+        let session_keys = session_keys.clone();
+        let thread_channel_id = thread_channel_id.clone();
+        let provider_name = provider.as_str().to_string();
+        let namespaced_session_key_prefix = namespaced_session_key_prefix.clone();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                if let Some((dispatch_id, session_status)) = sqlx::query_as::<_, (String, String)>(
+                    "SELECT s.active_dispatch_id, s.status
+                     FROM sessions s
+                     JOIN task_dispatches td
+                       ON td.id = s.active_dispatch_id
+                     WHERE s.active_dispatch_id IS NOT NULL
+                       AND s.status != 'disconnected'
+                       AND (
+                         s.session_key = $1
+                         OR s.session_key = $2
+                         OR (
+                           $3 != ''
+                           AND s.thread_channel_id = $3
+                           AND s.provider = $4
+                           AND s.session_key LIKE $5
+                         )
+                       )
+                     ORDER BY
+                       CASE s.status
+                         WHEN 'working' THEN 0
+                         WHEN 'idle' THEN 1
+                         ELSE 2
+                       END,
+                       COALESCE(s.last_heartbeat, s.created_at) DESC,
+                       s.id DESC
+                     LIMIT 1",
+                )
+                .bind(&session_keys[0])
+                .bind(&session_keys[1])
+                .bind(&thread_channel_id)
+                .bind(&provider_name)
+                .bind(&namespaced_session_key_prefix)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load pg tmux dispatch protection session row: {error}"))?
+                {
+                    return Ok(Some(DispatchTmuxProtection::SessionRow {
+                        dispatch_id,
+                        session_status,
+                    }));
+                }
+
+                if thread_channel_id.is_empty() {
+                    return Ok(None);
+                }
+
+                let protection = sqlx::query_as::<_, (String, String)>(
+                    "SELECT td.id, td.status
+                     FROM task_dispatches td
+                     WHERE td.thread_id = $1
+                       AND td.status IN ('pending', 'dispatched')
+                       AND EXISTS (
+                         SELECT 1
+                         FROM sessions s
+                         WHERE s.thread_channel_id = $1
+                           AND s.provider = $2
+                           AND s.session_key LIKE $3
+                       )
+                     ORDER BY
+                       CASE td.status
+                         WHEN 'dispatched' THEN 0
+                         WHEN 'pending' THEN 1
+                         ELSE 2
+                       END,
+                       td.created_at DESC,
+                       td.id DESC
+                     LIMIT 1",
+                )
+                .bind(&thread_channel_id)
+                .bind(&provider_name)
+                .bind(&namespaced_session_key_prefix)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load pg tmux dispatch protection thread row: {error}"))?
+                .map(|(dispatch_id, dispatch_status)| {
+                    DispatchTmuxProtection::ThreadDispatch {
+                        dispatch_id,
+                        dispatch_status,
+                    }
+                });
+                Ok(protection)
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten();
+    }
+
+    let db = db?;
+    let conn = db.read_conn().ok()?;
     if let Ok(protection) = conn.query_row(
         "SELECT s.active_dispatch_id, s.status
          FROM sessions s
@@ -204,6 +301,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -236,8 +334,14 @@ mod tests {
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
-        let protection =
-            resolve_dispatch_tmux_protection(Some(&db), "tokenxyz", &provider, &tmux_name, None);
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
+            None,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            None,
+        );
 
         assert_eq!(protection, None);
     }
@@ -257,8 +361,14 @@ mod tests {
 
         let provider = ProviderKind::Codex;
         let tmux_name = sample_tmux_name();
-        let protection =
-            resolve_dispatch_tmux_protection(Some(&db), "tokenxyz", &provider, &tmux_name, None);
+        let protection = resolve_dispatch_tmux_protection(
+            Some(&db),
+            None,
+            "tokenxyz",
+            &provider,
+            &tmux_name,
+            None,
+        );
 
         assert_eq!(protection, None);
     }
@@ -291,6 +401,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -327,6 +438,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -361,6 +473,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -401,6 +514,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -441,6 +555,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -483,6 +598,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -529,6 +645,7 @@ mod tests {
 
         let protection = resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -573,6 +690,7 @@ mod tests {
 
         let protection = super::resolve_dispatch_tmux_protection(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,

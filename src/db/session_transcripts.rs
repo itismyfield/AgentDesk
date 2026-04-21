@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::Db;
-use crate::db::session_agent_resolution::resolve_agent_id_for_session;
+use crate::db::session_agent_resolution::{
+    resolve_agent_id_for_session, resolve_agent_id_for_session_pg,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,20 +110,16 @@ pub fn persist_turn(db: &Db, entry: PersistSessionTranscript<'_>) -> Result<bool
 }
 
 pub async fn persist_turn_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,
 ) -> Result<bool> {
     let Some(pool) = pg_pool else {
+        let db = db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
         return persist_turn(db, entry);
     };
 
-    let prepared = {
-        let conn = db
-            .lock()
-            .map_err(|e| anyhow!("db lock failed while preparing transcript: {e}"))?;
-        prepare_persist_entry(&conn, entry)?
-    };
+    let prepared = prepare_persist_entry_pg(pool, db, &entry).await?;
     let Some(prepared) = prepared else {
         return Ok(false);
     };
@@ -134,7 +132,7 @@ pub fn persist_turn_on_conn(
     conn: &mut Connection,
     entry: PersistSessionTranscript<'_>,
 ) -> Result<bool> {
-    let Some(prepared) = prepare_persist_entry(conn, entry)? else {
+    let Some(prepared) = prepare_persist_entry(conn, &entry)? else {
         return Ok(false);
     };
 
@@ -221,9 +219,8 @@ async fn persist_turn_pg(pool: &PgPool, entry: &PreparedSessionTranscript) -> Re
     Ok(())
 }
 
-fn prepare_persist_entry(
-    conn: &Connection,
-    entry: PersistSessionTranscript<'_>,
+fn prepare_persist_entry_base(
+    entry: &PersistSessionTranscript<'_>,
 ) -> Result<Option<PreparedSessionTranscript>> {
     let turn_id = entry.turn_id.trim();
     if turn_id.is_empty() {
@@ -237,32 +234,78 @@ fn prepare_persist_entry(
         return Ok(None);
     }
 
-    let session_key = normalized_opt(entry.session_key);
-    let channel_id = normalized_opt(entry.channel_id);
-    let provider = normalized_opt(entry.provider);
-    let dispatch_id = normalized_opt(entry.dispatch_id);
-    let agent_id = resolve_agent_id_for_session(
-        conn,
-        entry.agent_id,
-        session_key.as_deref(),
-        None,
-        None,
-        dispatch_id.as_deref(),
-    );
     let events_json = serde_json::to_string(&events)?;
 
     Ok(Some(PreparedSessionTranscript {
         turn_id: turn_id.to_string(),
-        session_key,
-        channel_id,
-        agent_id,
-        provider,
-        dispatch_id,
+        session_key: normalized_opt(entry.session_key),
+        channel_id: normalized_opt(entry.channel_id),
+        agent_id: None,
+        provider: normalized_opt(entry.provider),
+        dispatch_id: normalized_opt(entry.dispatch_id),
         user_message: user_message.to_string(),
         assistant_message: assistant_message.to_string(),
         events_json,
         duration_ms: entry.duration_ms,
     }))
+}
+
+fn prepare_persist_entry(
+    conn: &Connection,
+    entry: &PersistSessionTranscript<'_>,
+) -> Result<Option<PreparedSessionTranscript>> {
+    let Some(mut prepared) = prepare_persist_entry_base(entry)? else {
+        return Ok(None);
+    };
+
+    prepared.agent_id = resolve_agent_id_for_session(
+        conn,
+        entry.agent_id,
+        prepared.session_key.as_deref(),
+        None,
+        None,
+        prepared.dispatch_id.as_deref(),
+    );
+
+    Ok(Some(prepared))
+}
+
+async fn prepare_persist_entry_pg(
+    pool: &PgPool,
+    db: Option<&Db>,
+    entry: &PersistSessionTranscript<'_>,
+) -> Result<Option<PreparedSessionTranscript>> {
+    let Some(mut prepared) = prepare_persist_entry_base(entry)? else {
+        return Ok(None);
+    };
+
+    prepared.agent_id = resolve_agent_id_for_session_pg(
+        pool,
+        entry.agent_id,
+        prepared.session_key.as_deref(),
+        None,
+        None,
+        prepared.dispatch_id.as_deref(),
+    )
+    .await;
+
+    if prepared.agent_id.is_none() {
+        if let Some(db) = db {
+            let conn = db
+                .lock()
+                .map_err(|e| anyhow!("db lock failed while preparing transcript fallback: {e}"))?;
+            prepared.agent_id = resolve_agent_id_for_session(
+                &conn,
+                entry.agent_id,
+                prepared.session_key.as_deref(),
+                None,
+                None,
+                prepared.dispatch_id.as_deref(),
+            );
+        }
+    }
+
+    Ok(Some(prepared))
 }
 
 pub fn list_transcripts_for_agent(
@@ -1018,7 +1061,7 @@ mod tests {
             is_error: false,
         }];
         persist_turn_db(
-            &db,
+            Some(&db),
             Some(&pool),
             PersistSessionTranscript {
                 turn_id: "discord:2:3",

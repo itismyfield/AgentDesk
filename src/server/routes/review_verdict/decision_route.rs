@@ -233,6 +233,126 @@ fn latest_active_review_dispatch(
     })
 }
 
+async fn cancel_dispatch_pg_first(
+    state: &AppState,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> Result<usize, String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            pool,
+            dispatch_id,
+            reason,
+        )
+        .await;
+    }
+
+    let conn = state
+        .db
+        .lock()
+        .map_err(|error| format!("database lock poisoned: {error}"))?;
+    crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, reason)
+        .map_err(|error| error.to_string())
+}
+
+async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Result<(), String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin dismiss cleanup tx for {card_id}: {error}"))?;
+
+        let dispatch_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND status IN ('pending', 'dispatched')
+               AND dispatch_type IN ('review', 'review-decision')",
+        )
+        .bind(card_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("load dismiss cleanup dispatches for {card_id}: {error}"))?;
+
+        for dispatch_id in &dispatch_ids {
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                &mut tx,
+                dispatch_id,
+                None,
+            )
+            .await?;
+        }
+
+        let clear_review_status = crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        };
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(
+            &mut tx,
+            &clear_review_status,
+        )
+        .await?;
+
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET channel_thread_map = NULL,
+                 active_thread_id = NULL
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("clear dismiss thread mappings for {card_id}: {error}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit dismiss cleanup tx for {card_id}: {error}"))?;
+        return Ok(());
+    }
+
+    let conn = state
+        .db
+        .lock()
+        .map_err(|error| format!("database lock poisoned: {error}"))?;
+    let dispatch_ids: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+             AND dispatch_type IN ('review', 'review-decision')",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([card_id], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("begin sqlite dismiss cleanup tx for {card_id}: {error}"))?;
+    for dispatch_id in &dispatch_ids {
+        if let Err(error) =
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, None)
+        {
+            conn.execute_batch("ROLLBACK").ok();
+            return Err(error.to_string());
+        }
+    }
+    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+    if let Err(error) = execute_intent_on_conn(
+        &conn,
+        &TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    ) {
+        conn.execute_batch("ROLLBACK").ok();
+        return Err(error.to_string());
+    }
+    super::super::dispatches::clear_all_threads(&conn, card_id);
+    conn.execute_batch("COMMIT")
+        .map_err(|error| format!("commit sqlite dismiss cleanup tx for {card_id}: {error}"))?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct ReviewDecisionBody {
@@ -950,38 +1070,47 @@ pub async fn submit_review_decision(
             // #229: Cancel stale pending/dispatched review dispatches for this card.
             // Without this, the dispatch-core dedup guard blocks
             // OnReviewEnter from creating a fresh review dispatch after dispute.
-            if let Ok(conn) = state.db.lock() {
-                let mut stmt = conn
-                    .prepare(
+            let stale_ids: Vec<String> = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|conn| {
+                    conn.prepare(
                         "SELECT id FROM task_dispatches \
-                     WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
-                     AND status IN ('pending', 'dispatched')",
+                         WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                         AND status IN ('pending', 'dispatched')",
                     )
-                    .ok();
-                if let Some(ref mut s) = stmt {
-                    let stale_ids: Vec<String> = s
-                        .query_map([&body.card_id], |row| row.get::<_, String>(0))
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|r| r.ok())
-                        .collect();
-                    for stale_id in &stale_ids {
-                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                            &conn,
-                            stale_id,
-                            Some("superseded_by_dispute_re_review"),
-                        )
-                        .ok();
-                    }
-                    if !stale_ids.is_empty() {
-                        tracing::info!(
-                            "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
-                            stale_ids.len(),
-                            body.card_id
-                        );
-                    }
+                    .ok()
+                    .map(|mut stmt| {
+                        stmt.query_map([&body.card_id], |row| row.get::<_, String>(0))
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|row| row.ok())
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            let mut cancelled = 0usize;
+            for stale_id in &stale_ids {
+                if cancel_dispatch_pg_first(
+                    &state,
+                    stale_id,
+                    Some("superseded_by_dispute_re_review"),
+                )
+                .await
+                .unwrap_or(0)
+                    > 0
+                {
+                    cancelled += 1;
                 }
+            }
+            if cancelled > 0 {
+                tracing::info!(
+                    "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
+                    cancelled,
+                    body.card_id
+                );
             }
 
             // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
@@ -1081,13 +1210,12 @@ pub async fn submit_review_decision(
                     reviewed_commit,
                     live_review.target_repo.as_deref(),
                 ) {
-                    if let Ok(conn) = state.db.lock() {
-                        let _ = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                            &conn,
-                            &live_review.id,
-                            Some("invalid_dispute_rereview_target"),
-                        );
-                    }
+                    let _ = cancel_dispatch_pg_first(
+                        &state,
+                        &live_review.id,
+                        Some("invalid_dispute_rereview_target"),
+                    )
+                    .await;
                     tracing::error!(
                         card_id = %body.card_id,
                         pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
@@ -1227,58 +1355,11 @@ pub async fn submit_review_decision(
 
             // Post-transition cleanup: cancel remaining pending review dispatches to prevent
             // stale dispatches from re-triggering review loops after dismiss.
-            if let Ok(conn) = state.db.lock() {
-                let dispatch_ids: Vec<String> = conn
-                    .prepare(
-                        "SELECT id FROM task_dispatches \
-                         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
-                         AND dispatch_type IN ('review', 'review-decision')",
-                    )
-                    .ok()
-                    .and_then(|mut stmt| {
-                        stmt.query_map([&body.card_id], |row| row.get::<_, String>(0))
-                            .ok()
-                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    })
-                    .unwrap_or_default();
-                conn.execute_batch("BEGIN").ok();
-                for dispatch_id in &dispatch_ids {
-                    if let Err(e) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                        &conn,
-                        dispatch_id,
-                        None,
-                    ) {
-                        conn.execute_batch("ROLLBACK").ok();
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{e}")})),
-                        );
-                    }
-                }
-                // #155: Belt-and-suspenders via intent (executor boundary)
-                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                if let Err(e) = execute_intent_on_conn(
-                    &conn,
-                    &TransitionIntent::SetReviewStatus {
-                        card_id: body.card_id.clone(),
-                        review_status: None,
-                    },
-                ) {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{e}")})),
-                    );
-                }
-                // Clear thread mappings so dismissed review threads are not reused.
-                super::super::dispatches::clear_all_threads(&conn, &body.card_id);
-                if let Err(e) = conn.execute_batch("COMMIT") {
-                    conn.execute_batch("ROLLBACK").ok();
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{e}")})),
-                    );
-                }
+            if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
             }
         }
         _ => {}

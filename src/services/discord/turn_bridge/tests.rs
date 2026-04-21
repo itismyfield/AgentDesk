@@ -593,7 +593,7 @@ fn retry_context_history_keeps_last_ten_visible_messages() {
 #[test]
 fn stored_retry_context_is_consumed_once() {
     let db = crate::db::test_db();
-    store_session_retry_context(Some(&db), 42, "User: hi\nAssistant: hello")
+    store_session_retry_context(Some(&db), None, 42, "User: hi\nAssistant: hello")
         .expect("store retry context");
 
     assert_eq!(
@@ -609,7 +609,8 @@ fn storing_retry_context_enqueues_deduped_lifecycle_notification() {
 
     assert!(
         store_session_retry_context_with_notify(
-            &db,
+            Some(&db),
+            None,
             42,
             "User: hi\nAssistant: hello",
             Some("session-a"),
@@ -618,7 +619,8 @@ fn storing_retry_context_enqueues_deduped_lifecycle_notification() {
     );
     assert!(
         !store_session_retry_context_with_notify(
-            &db,
+            Some(&db),
+            None,
             42,
             "User: hi\nAssistant: hello again",
             Some("session-a"),

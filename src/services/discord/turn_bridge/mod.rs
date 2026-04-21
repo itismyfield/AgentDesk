@@ -139,41 +139,21 @@ async fn enqueue_headless_delivery(
 ) -> Result<(), String> {
     let target = format!("channel:{}", channel_id.get());
 
-    if let Some(pool) = shared.pg_pool.as_ref() {
-        sqlx::query(
-            "INSERT INTO message_outbox (target, content, bot, source, session_key)
-             VALUES ($1, $2, 'notify', 'headless_turn', $3)",
-        )
-        .bind(&target)
-        .bind(content)
-        .bind(session_key)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("enqueue postgres headless delivery: {error}"))?;
-        return Ok(());
-    }
-
-    if let Some(db) = shared.db.as_ref() {
-        let conn = db
-            .separate_conn()
-            .map_err(|error| format!("open sqlite outbox connection: {error}"))?;
-        crate::services::message_outbox::enqueue(
-            &conn,
-            crate::services::message_outbox::OutboxMessage {
-                target: &target,
-                content,
-                bot: "notify",
-                source: "headless_turn",
-                // #897 counter-model review P1 #3: explicit reason_code so
-                // `message_outbox::enqueue` can arm its lifecycle dedupe
-                // (it requires reason_code AND session_key to both be Some).
-                // Prevents duplicate delivery if the headless-turn finalize
-                // path retries within the dedupe TTL.
-                reason_code: Some("headless.delivery"),
-                session_key,
-            },
-        )
-        .map_err(|error| format!("enqueue sqlite headless delivery: {error}"))?;
+    if crate::services::message_outbox::enqueue_outbox_best_effort(
+        shared.pg_pool.as_ref(),
+        shared.db.as_ref(),
+        crate::services::message_outbox::OutboxMessage {
+            target: &target,
+            content,
+            bot: "notify",
+            source: "headless_turn",
+            // Explicit reason_code keeps dedupe consistent across PG/SQLite.
+            reason_code: Some("headless.delivery"),
+            session_key,
+        },
+    )
+    .await
+    {
         return Ok(());
     }
 
@@ -286,6 +266,36 @@ pub(super) fn persist_turn_analytics_row(
     token_usage: TurnTokenUsage,
     duration_ms: i64,
 ) {
+    persist_turn_analytics_row_with_handles(
+        Some(db),
+        None,
+        provider,
+        channel_id,
+        user_msg_id,
+        role_binding,
+        dispatch_id,
+        session_key,
+        session_id,
+        inflight_state,
+        token_usage,
+        duration_ms,
+    );
+}
+
+pub(super) fn persist_turn_analytics_row_with_handles(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    role_binding: Option<&RoleBinding>,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    session_id: Option<&str>,
+    inflight_state: &InflightTurnState,
+    token_usage: TurnTokenUsage,
+    duration_ms: i64,
+) {
     let thread_id = inflight_state
         .thread_id
         .map(|value| value.to_string())
@@ -311,35 +321,67 @@ pub(super) fn persist_turn_analytics_row(
     let started_at = inflight_state.started_at.clone();
     let analytics_snapshot =
         TurnAnalyticsSnapshot::capture(inflight_state, session_id, token_usage);
-    let db = db.clone();
-    let persist = move || {
-        let (resolved_session_id, resolved_token_usage) =
-            resolve_output_analytics_snapshot(&analytics_snapshot);
-        let entry = PersistTurnOwned {
-            turn_id,
-            session_key,
-            thread_id,
-            thread_title,
-            channel_id: persisted_channel_id,
-            agent_id,
-            provider: Some(provider_name),
-            session_id: resolved_session_id,
-            dispatch_id,
-            started_at: Some(started_at),
-            finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-            duration_ms: Some(duration_ms),
-            token_usage: resolved_token_usage,
-        };
+    let (resolved_session_id, resolved_token_usage) =
+        resolve_output_analytics_snapshot(&analytics_snapshot);
+    let entry = PersistTurnOwned {
+        turn_id,
+        session_key,
+        thread_id,
+        thread_title,
+        channel_id: persisted_channel_id,
+        agent_id,
+        provider: Some(provider_name),
+        session_id: resolved_session_id,
+        dispatch_id,
+        started_at: Some(started_at),
+        finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        duration_ms: Some(duration_ms),
+        token_usage: resolved_token_usage,
+    };
+    let db = db.cloned();
+    let pg_pool = pg_pool.cloned();
+    let persist_sqlite = move |db: crate::db::Db, entry: PersistTurnOwned| {
         if let Err(error) = upsert_turn_owned_on_separate_conn(&db, &entry) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
         }
     };
+    let persist_pg = move |db: Option<crate::db::Db>,
+                           pg_pool: sqlx::PgPool,
+                           entry: PersistTurnOwned| async move {
+        if let Err(error) =
+            crate::db::turns::upsert_turn_owned_db(db.as_ref(), Some(&pg_pool), &entry).await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
+        }
+    };
 
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let _ = runtime.spawn_blocking(persist);
-    } else {
-        persist();
+    if let Some(pg_pool) = pg_pool {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let _ = runtime.spawn(persist_pg(db, pg_pool, entry));
+            return;
+        }
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => {
+                runtime.block_on(persist_pg(db, pg_pool, entry));
+            }
+            Err(error) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ failed to create runtime for turn analytics persistence: {error}"
+                );
+            }
+        }
+    } else if let Some(db) = db {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let _ = runtime.spawn_blocking(move || persist_sqlite(db, entry));
+        } else {
+            persist_sqlite(db, entry);
+        }
     }
 }
 
@@ -563,14 +605,17 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
-                            if let Some(db) = shared_owned.db.as_ref() {
+                            if shared_owned.db.is_some() || shared_owned.pg_pool.is_some() {
                                 match record_skill_usage_from_tool_use(
-                                    db,
+                                    shared_owned.db.as_ref(),
+                                    shared_owned.pg_pool.as_ref(),
                                     &name,
                                     &input,
                                     adk_session_key.as_deref(),
                                     role_binding.as_ref(),
-                                ) {
+                                )
+                                .await
+                                {
                                     Ok(Some(_)) => {}
                                     Ok(None) => {}
                                     Err(e) => {
@@ -1225,28 +1270,42 @@ pub(super) fn spawn_turn_bridge(
                 crate::services::process::kill_pid_tree(pid);
             }
 
-            if let (Some(db), Some(dispatch_id)) =
-                (shared_owned.db.as_ref(), dispatch_id.as_deref())
-            {
-                if let Ok(conn) = db.lock() {
-                    if let Err(error) =
-                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                            &conn,
-                            dispatch_id,
-                            Some("turn_bridge_cancelled"),
-                        )
+            if let Some(dispatch_id) = dispatch_id.as_deref() {
+                if let Some(pg_pool) = shared_owned.pg_pool.as_ref() {
+                    if let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                        pg_pool,
+                        dispatch_id,
+                        Some("turn_bridge_cancelled"),
+                    )
+                    .await
                     {
                         tracing::warn!(
-                            "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
+                            "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup in postgres: {}",
                             dispatch_id,
                             error
                         );
                     }
-                } else {
-                    tracing::warn!(
-                        "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
-                        dispatch_id
-                    );
+                } else if let Some(db) = shared_owned.db.as_ref() {
+                    if let Ok(conn) = db.lock() {
+                        if let Err(error) =
+                            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                                &conn,
+                                dispatch_id,
+                                Some("turn_bridge_cancelled"),
+                            )
+                        {
+                            tracing::warn!(
+                                "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
+                                dispatch_id,
+                                error
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
+                            dispatch_id
+                        );
+                    }
                 }
             }
 
@@ -1665,6 +1724,7 @@ pub(super) fn spawn_turn_bridge(
         if let Some(retry_context) = retry_context_to_store.as_deref()
             && let Err(err) = store_session_retry_context(
                 shared_owned.db.as_ref(),
+                shared_owned.pg_pool.as_ref(),
                 channel_id.get(),
                 retry_context,
             )
@@ -1684,7 +1744,9 @@ pub(super) fn spawn_turn_bridge(
                 super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
                     .await;
                 if session_end_reason == Some(SessionEndReason::TurnCapReached) {
-                    crate::services::termination_audit::record_termination(
+                    crate::services::termination_audit::record_termination_with_handles(
+                        shared_owned.db.as_ref(),
+                        shared_owned.pg_pool.as_ref(),
                         session_key,
                         dispatch_id.as_deref(),
                         "turn_bridge",
@@ -1725,10 +1787,12 @@ pub(super) fn spawn_turn_bridge(
             output_tokens: accumulated_output_tokens,
         };
 
-        if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
+        if should_persist_transcript
+            && (shared_owned.db.is_some() || shared_owned.pg_pool.is_some())
+        {
             let channel_id_text = channel_id.get().to_string();
             if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                db,
+                shared_owned.db.as_ref(),
                 shared_owned.pg_pool.as_ref(),
                 crate::db::session_transcripts::PersistSessionTranscript {
                     turn_id: turn_id.as_str(),
@@ -1750,44 +1814,46 @@ pub(super) fn spawn_turn_bridge(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!("  [{ts}] ⚠ failed to persist session transcript: {e}");
             }
+        }
 
-            if !api_friction_reports.is_empty() {
-                match crate::services::api_friction::record_api_friction_reports(
-                    db,
-                    &capture_memory_settings,
-                    crate::services::api_friction::ApiFrictionRecordContext {
-                        channel_id: channel_id.get(),
-                        session_key: adk_session_key.as_deref(),
-                        dispatch_id: dispatch_id.as_deref(),
-                        provider: provider.as_str(),
-                    },
-                    &api_friction_reports,
-                )
-                .await
-                {
-                    Ok(summary) => {
-                        accumulated_memory_input_tokens = accumulated_memory_input_tokens
-                            .saturating_add(summary.token_usage.input_tokens);
-                        accumulated_memory_output_tokens = accumulated_memory_output_tokens
-                            .saturating_add(summary.token_usage.output_tokens);
-                        for error in summary.memory_errors {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
-                                "  [{ts}] ⚠ failed to store API friction memory: {error}"
-                            );
-                        }
-                    }
-                    Err(error) => {
+        if (shared_owned.db.is_some() || shared_owned.pg_pool.is_some())
+            && !api_friction_reports.is_empty()
+        {
+            match crate::services::api_friction::record_api_friction_reports(
+                shared_owned.db.as_ref(),
+                shared_owned.pg_pool.as_ref(),
+                &capture_memory_settings,
+                crate::services::api_friction::ApiFrictionRecordContext {
+                    channel_id: channel_id.get(),
+                    session_key: adk_session_key.as_deref(),
+                    dispatch_id: dispatch_id.as_deref(),
+                    provider: provider.as_str(),
+                },
+                &api_friction_reports,
+            )
+            .await
+            {
+                Ok(summary) => {
+                    accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                        .saturating_add(summary.token_usage.input_tokens);
+                    accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                        .saturating_add(summary.token_usage.output_tokens);
+                    for error in summary.memory_errors {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!("  [{ts}] ⚠ failed to record API friction: {error}");
+                        tracing::warn!("  [{ts}] ⚠ failed to store API friction memory: {error}");
                     }
+                }
+                Err(error) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!("  [{ts}] ⚠ failed to record API friction: {error}");
                 }
             }
         }
 
-        if let Some(db) = shared_owned.db.as_ref() {
-            persist_turn_analytics_row(
-                db,
+        if shared_owned.db.is_some() || shared_owned.pg_pool.is_some() {
+            persist_turn_analytics_row_with_handles(
+                shared_owned.db.as_ref(),
+                shared_owned.pg_pool.as_ref(),
                 &provider,
                 channel_id,
                 user_msg_id,

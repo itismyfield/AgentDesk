@@ -49,7 +49,7 @@ pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bo
 /// in the consumed row's context (as `_answer`), and a notification is sent
 /// to the source agent's Discord channel so its session can process the reply.
 pub(super) async fn try_handle_pending_dm_reply(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     msg: &serenity::Message,
 ) -> bool {
@@ -75,7 +75,7 @@ pub(super) async fn try_handle_pending_dm_reply(
 
             // Notify the source agent's Discord channel (inline, not fire-and-forget)
             if let Err(e) = notify_source_agent(
-                Some(&info.db),
+                info.db.as_ref(),
                 pg_pool,
                 &info.source_agent,
                 info.id,
@@ -92,7 +92,7 @@ pub(super) async fn try_handle_pending_dm_reply(
                 let reply_id = info.id;
                 let err_msg = format!("{e}");
                 let _ = crate::services::discord::dm_reply_store::mark_pending_dm_reply_notify_failed_db(
-                    &db3,
+                    db3.as_ref(),
                     pg_pool,
                     reply_id,
                     &err_msg,
@@ -260,11 +260,11 @@ struct ConsumedDmReply {
     answer: String,
     context: serde_json::Value,
     channel_id: Option<String>,
-    db: crate::db::Db,
+    db: Option<crate::db::Db>,
 }
 
 async fn consume_pending_dm_reply(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     user_id: &str,
     answer: &str,
@@ -301,7 +301,7 @@ async fn consume_pending_dm_reply(
         answer: answer.to_string(),
         context: notification_context,
         channel_id: row.channel_id,
-        db: db.clone(),
+        db: db.cloned(),
     })
 }
 
@@ -508,7 +508,7 @@ mod tests {
         )
         .expect("insert should succeed");
 
-        let consumed = consume_pending_dm_reply(&db, None, "12345", "지난주에 했어")
+        let consumed = consume_pending_dm_reply(Some(&db), None, "12345", "지난주에 했어")
             .await
             .expect("reply should consume");
 

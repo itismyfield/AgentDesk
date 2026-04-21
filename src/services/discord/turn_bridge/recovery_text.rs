@@ -12,6 +12,67 @@ fn session_retry_context_key(channel_id: u64) -> String {
     format!("session_retry_context:{channel_id}")
 }
 
+fn direct_api_context_unavailable(error: &str) -> bool {
+    error.contains("direct runtime API context is unavailable")
+}
+
+fn store_session_retry_context_sqlite(
+    db: &crate::db::Db,
+    key: &str,
+    history: &str,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|err| format!("db lock failed: {err}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        [key, history],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn store_session_retry_context_pg(
+    pg_pool: &sqlx::PgPool,
+    key: &str,
+    history: &str,
+) -> Result<(), String> {
+    let key = key.to_string();
+    let history = history.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |pool| async move {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value",
+            )
+            .bind(&key)
+            .bind(&history)
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("store retry context {key}: {error}"))?;
+            Ok(())
+        },
+        |message| message,
+    )
+}
+
+fn take_session_retry_context_sqlite(db: &crate::db::Db, key: &str) -> Option<String> {
+    let conn = db.lock().ok()?;
+    let history = conn
+        .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()?;
+    let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key]);
+    let history = history.trim().to_string();
+    if history.is_empty() {
+        None
+    } else {
+        Some(history)
+    }
+}
+
 pub(in crate::services::discord) fn build_session_retry_context_from_history(
     history: &[HistoryItem],
 ) -> Option<String> {
@@ -51,6 +112,7 @@ pub(in crate::services::discord) fn build_session_retry_context_from_history(
 
 pub(in crate::services::discord) fn store_session_retry_context(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
 ) -> Result<(), String> {
@@ -59,30 +121,35 @@ pub(in crate::services::discord) fn store_session_retry_context(
         return Ok(());
     }
 
-    if let Some(db) = db {
-        let conn = db.lock().map_err(|err| format!("db lock failed: {err}"))?;
-        let key = session_retry_context_key(channel_id);
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            [key.as_str(), history],
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(())
-    } else {
-        super::super::internal_api::set_kv_value(&session_retry_context_key(channel_id), history)
+    let key = session_retry_context_key(channel_id);
+    match super::super::internal_api::set_kv_value(&key, history) {
+        Ok(()) => Ok(()),
+        Err(err) if direct_api_context_unavailable(&err) => {
+            if let Some(pg_pool) = pg_pool {
+                store_session_retry_context_pg(pg_pool, &key, history)
+            } else if let Some(db) = db {
+                store_session_retry_context_sqlite(db, &key, history)
+            } else {
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
     }
 }
 
 pub(in crate::services::discord) fn store_session_retry_context_with_notify(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
     session_key: Option<&str>,
 ) -> Result<bool, String> {
-    store_session_retry_context(Some(db), channel_id, history)?;
+    store_session_retry_context(db, pg_pool, channel_id, history)?;
+    let sqlite_runtime_db = if pg_pool.is_some() { None } else { db };
     Ok(
-        crate::services::message_outbox::enqueue_lifecycle_notification(
-            db,
+        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+            sqlite_runtime_db,
+            pg_pool,
             &format!("channel:{channel_id}"),
             session_key,
             "lifecycle.recovery_context",
@@ -95,20 +162,21 @@ pub(in crate::services::discord) fn take_session_retry_context(
     db: Option<&crate::db::Db>,
     channel_id: u64,
 ) -> Option<String> {
-    let db = db?;
     let key = session_retry_context_key(channel_id);
-    let conn = db.lock().ok()?;
-    let history = conn
-        .query_row("SELECT value FROM kv_meta WHERE key = ?1", [&key], |row| {
-            row.get::<_, String>(0)
-        })
-        .ok()?;
-    let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&key]);
-    let history = history.trim().to_string();
-    if history.is_empty() {
-        None
-    } else {
-        Some(history)
+    match super::super::internal_api::take_kv_value(&key) {
+        Ok(Some(history)) => {
+            let history = history.trim().to_string();
+            if history.is_empty() {
+                None
+            } else {
+                Some(history)
+            }
+        }
+        Ok(None) => None,
+        Err(err) if direct_api_context_unavailable(&err) => {
+            db.and_then(|db| take_session_retry_context_sqlite(db, &key))
+        }
+        Err(_) => None,
     }
 }
 
@@ -173,20 +241,17 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some(ref hist) = history {
-        if let Some(db) = shared.db.as_ref() {
-            let session_key =
-                super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
-                    .await
-                    .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
-            let _ = store_session_retry_context_with_notify(
-                db,
-                channel_id.get(),
-                hist,
-                Some(session_key.as_str()),
-            );
-        } else {
-            let _ = store_session_retry_context(shared.db.as_ref(), channel_id.get(), hist);
-        }
+        let session_key =
+            super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
+                .await
+                .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
+        let _ = store_session_retry_context_with_notify(
+            shared.db.as_ref(),
+            shared.pg_pool.as_ref(),
+            channel_id.get(),
+            hist,
+            Some(session_key.as_str()),
+        );
     }
 
     // Discord message: short notice only — history stays LLM-side

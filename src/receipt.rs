@@ -3,6 +3,7 @@
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -1078,15 +1079,8 @@ fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
 
 // ── Rate limit window ──────────────────────────────────────────
 
-pub fn ratelimit_window_start(conn: &libsql_rusqlite::Connection) -> Option<DateTime<Utc>> {
-    let data: String = conn
-        .query_row(
-            "SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .ok()?;
-    let parsed: Value = serde_json::from_str(&data).ok()?;
+fn parse_ratelimit_window_start_data(data: &str) -> Option<DateTime<Utc>> {
+    let parsed: Value = serde_json::from_str(data).ok()?;
     let buckets = parsed.get("buckets")?.as_array()?;
     for b in buckets {
         let name = b.get("name")?.as_str()?;
@@ -1096,6 +1090,26 @@ pub fn ratelimit_window_start(conn: &libsql_rusqlite::Connection) -> Option<Date
         }
     }
     None
+}
+
+pub fn ratelimit_window_start(conn: &libsql_rusqlite::Connection) -> Option<DateTime<Utc>> {
+    let data: String = conn
+        .query_row(
+            "SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    parse_ratelimit_window_start_data(&data)
+}
+
+pub async fn ratelimit_window_start_pg(pool: &sqlx::PgPool) -> Option<DateTime<Utc>> {
+    let row = sqlx::query("SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .ok()??;
+    let data: String = row.get("data");
+    parse_ratelimit_window_start_data(&data)
 }
 
 // ── Collection entry point ─────────────────────────────────────

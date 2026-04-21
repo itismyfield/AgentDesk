@@ -633,12 +633,14 @@ pub(in crate::services::discord) async fn handle_event(
             // Consumed DM answers must stop here; falling through into normal
             // message handling produces a bogus "No active session" error in DMs.
             if !text.is_empty() {
-                if let Some(ref db) = data.shared.db {
-                    if try_handle_pending_dm_reply(db, data.shared.pg_pool.as_ref(), new_message)
-                        .await
-                    {
-                        return Ok(());
-                    }
+                if try_handle_pending_dm_reply(
+                    data.shared.db.as_ref(),
+                    data.shared.pg_pool.as_ref(),
+                    new_message,
+                )
+                .await
+                {
+                    return Ok(());
                 }
             }
 

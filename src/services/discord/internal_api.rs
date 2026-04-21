@@ -94,6 +94,14 @@ pub(super) async fn lookup_dispatch_info(dispatch_id: &str) -> Result<Value, Str
     into_result(status, body)
 }
 
+pub(super) async fn lookup_dispatch_type(dispatch_id: &str) -> Result<Option<String>, String> {
+    let body = lookup_dispatch_info(dispatch_id).await?;
+    Ok(body
+        .get("dispatch_type")
+        .and_then(|value| value.as_str())
+        .map(str::to_string))
+}
+
 pub(super) async fn link_dispatch_thread(
     body: routes::dispatches::LinkDispatchThreadBody,
 ) -> Result<Value, String> {
@@ -228,6 +236,29 @@ pub(super) async fn upsert_meeting(
 
 pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     let ctx = load_context()?;
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        let key = key.to_string();
+        let value = value.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value, expires_at)
+                     VALUES ($1, $2, NULL)
+                     ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+                )
+                .bind(&key)
+                .bind(&value)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|err| format!("upsert pg kv_meta {key}: {err}"))?;
+                Ok(())
+            },
+            |error| error,
+        );
+    }
     let conn = ctx
         .db
         .lock()
@@ -240,8 +271,66 @@ pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn get_kv_value(key: &str) -> Result<Option<String>, String> {
+    let ctx = load_context()?;
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        let key = key.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT value
+                     FROM kv_meta
+                     WHERE key = $1
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                     LIMIT 1",
+                )
+                .bind(&key)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|err| format!("load pg kv_meta {key}: {err}"))
+            },
+            |error| error,
+        );
+    }
+    let conn = ctx
+        .db
+        .lock()
+        .map_err(|err| format!("db lock failed: {err}"))?;
+    conn.query_row(
+        "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
+        libsql_rusqlite::params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|err| match err {
+        libsql_rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+    .map_err(|err| err.to_string())
+}
+
 pub(super) fn take_kv_value(key: &str) -> Result<Option<String>, String> {
     let ctx = load_context()?;
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        let key = key.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "DELETE FROM kv_meta
+                     WHERE key = $1
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                     RETURNING value",
+                )
+                .bind(&key)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|err| format!("take pg kv_meta {key}: {err}"))
+            },
+            |error| error,
+        );
+    }
     let conn = ctx
         .db
         .lock()
@@ -263,6 +352,65 @@ pub(super) fn take_kv_value(key: &str) -> Result<Option<String>, String> {
         .map_err(|err| err.to_string())?;
     }
     Ok(value)
+}
+
+pub(super) fn delete_kv_value(key: &str) -> Result<(), String> {
+    let ctx = load_context()?;
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        let key = key.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(&key)
+                    .execute(&bridge_pool)
+                    .await
+                    .map_err(|err| format!("delete pg kv_meta {key}: {err}"))?;
+                Ok(())
+            },
+            |error| error,
+        );
+    }
+    let conn = ctx
+        .db
+        .lock()
+        .map_err(|err| format!("db lock failed: {err}"))?;
+    conn.execute(
+        "DELETE FROM kv_meta WHERE key = ?1",
+        libsql_rusqlite::params![key],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+pub(super) fn clear_kv_prefix(prefix: &str) -> Result<(), String> {
+    let ctx = load_context()?;
+    let prefix_text = prefix.to_string();
+    let pattern = format!("{prefix}%");
+    if let Some(pool) = ctx.pg_pool.as_ref() {
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query("DELETE FROM kv_meta WHERE key LIKE $1")
+                    .bind(&pattern)
+                    .execute(&bridge_pool)
+                    .await
+                    .map_err(|err| format!("delete pg kv_meta prefix {prefix_text}: {err}"))?;
+                Ok(())
+            },
+            |error| error,
+        );
+    }
+    let conn = ctx
+        .db
+        .lock()
+        .map_err(|err| format!("db lock failed: {err}"))?;
+    conn.execute(
+        "DELETE FROM kv_meta WHERE key LIKE ?1",
+        libsql_rusqlite::params![pattern],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 pub(super) async fn gc_stale_thread_sessions() -> Result<usize, String> {

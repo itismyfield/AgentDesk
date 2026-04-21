@@ -159,7 +159,7 @@ fn fallback_legacy_vec<T>(
     }
 }
 
-fn load_kv_meta_value(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
+fn load_kv_meta_value_sqlite(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
     let db = db?;
     let conn = db.read_conn().ok()?;
     conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
@@ -169,29 +169,145 @@ fn load_kv_meta_value(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
     .filter(|value| !value.trim().is_empty())
 }
 
+fn load_kv_meta_value_pg(pg_pool: Option<&sqlx::PgPool>, key: &str) -> Option<String> {
+    let pg_pool = pg_pool?;
+    let key = key.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |pool| async move {
+            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                .bind(&key)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load kv_meta {key}: {error}"))
+        },
+        |message| message,
+    )
+    .ok()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+}
+
+fn load_kv_meta_value(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    key: &str,
+) -> Option<String> {
+    if let Ok(value) = crate::services::discord::internal_api::get_kv_value(key) {
+        return value.filter(|value| !value.trim().is_empty());
+    }
+
+    if pg_pool.is_some() {
+        return load_kv_meta_value_pg(pg_pool, key);
+    }
+
+    load_kv_meta_value_sqlite(db, key)
+}
+
 pub(crate) fn load_last_session_path(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
 ) -> Option<String> {
-    load_kv_meta_value(db, &last_session_path_key(token_hash, channel_id))
+    load_kv_meta_value(db, pg_pool, &last_session_path_key(token_hash, channel_id))
 }
 
 pub(crate) fn load_last_remote_profile(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
 ) -> Option<String> {
-    load_kv_meta_value(db, &last_remote_profile_key(token_hash, channel_id))
+    load_kv_meta_value(
+        db,
+        pg_pool,
+        &last_remote_profile_key(token_hash, channel_id),
+    )
 }
 
 pub(crate) fn save_last_session_runtime(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
     current_path: &str,
     remote_profile_name: Option<&str>,
 ) {
+    let session_key = last_session_path_key(token_hash, channel_id);
+    let remote_key = last_remote_profile_key(token_hash, channel_id);
+    let remote_value = remote_profile_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    let helper_write_ok =
+        crate::services::discord::internal_api::set_kv_value(&session_key, current_path).is_ok()
+            && match remote_value.as_deref() {
+                Some(remote) => {
+                    crate::services::discord::internal_api::set_kv_value(&remote_key, remote)
+                        .is_ok()
+                }
+                None => {
+                    crate::services::discord::internal_api::delete_kv_value(&remote_key).is_ok()
+                }
+            };
+    if helper_write_ok {
+        return;
+    }
+
+    if let Some(pg_pool) = pg_pool {
+        let session_value = current_path.to_string();
+        let _ = crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                let mut tx = pool
+                    .begin()
+                    .await
+                    .map_err(|error| format!("begin discord runtime metadata tx: {error}"))?;
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value)
+                     VALUES ($1, $2)
+                     ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
+                )
+                .bind(&session_key)
+                .bind(&session_value)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("save {session_key}: {error}"))?;
+
+                match remote_value {
+                    Some(remote) => {
+                        sqlx::query(
+                            "INSERT INTO kv_meta (key, value)
+                             VALUES ($1, $2)
+                             ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
+                        )
+                        .bind(&remote_key)
+                        .bind(remote)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| format!("save {remote_key}: {error}"))?;
+                    }
+                    None => {
+                        sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                            .bind(&remote_key)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|error| format!("delete {remote_key}: {error}"))?;
+                    }
+                }
+
+                tx.commit()
+                    .await
+                    .map_err(|error| format!("commit discord runtime metadata tx: {error}"))?;
+                Ok(())
+            },
+            |message| message,
+        );
+        return;
+    }
+
     let Some(db) = db else {
         return;
     };

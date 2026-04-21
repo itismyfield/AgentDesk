@@ -1614,6 +1614,152 @@ pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
     }
 }
 
+pub(crate) fn queue_dispatch_followup_sync(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) {
+    if let Some(pool) = pg_pool {
+        let dispatch_id_owned = dispatch_id.to_string();
+        if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                queue_dispatch_followup_pg(&bridge_pool, &dispatch_id_owned).await
+            },
+            |error| error,
+        ) {
+            tracing::warn!(
+                dispatch_id = %dispatch_id,
+                "failed to enqueue postgres followup: {error}"
+            );
+        }
+        return;
+    }
+
+    queue_dispatch_followup(db, dispatch_id);
+}
+
+pub(crate) async fn queue_dispatch_followup_pg(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action)
+         VALUES ($1, 'followup')
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(dispatch_id)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| format!("enqueue postgres followup for {dispatch_id}: {error}"))?;
+    Ok(())
+}
+
+pub(crate) async fn requeue_dispatch_notify_pg(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    let dispatch = sqlx::query(
+        "SELECT status, to_agent_id, kanban_card_id, title
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| format!("load postgres dispatch {dispatch_id} for notify requeue: {error}"))?;
+
+    let Some(dispatch) = dispatch else {
+        return Ok(false);
+    };
+
+    let status = dispatch
+        .try_get::<String, _>("status")
+        .map_err(|error| format!("read postgres dispatch status for {dispatch_id}: {error}"))?;
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        return Ok(false);
+    }
+
+    let agent_id = dispatch
+        .try_get::<Option<String>, _>("to_agent_id")
+        .map_err(|error| format!("read postgres dispatch agent for {dispatch_id}: {error}"))?
+        .ok_or_else(|| format!("postgres dispatch {dispatch_id} missing to_agent_id"))?;
+    let card_id = dispatch
+        .try_get::<Option<String>, _>("kanban_card_id")
+        .map_err(|error| format!("read postgres dispatch card for {dispatch_id}: {error}"))?
+        .ok_or_else(|| format!("postgres dispatch {dispatch_id} missing kanban_card_id"))?;
+    let title = dispatch
+        .try_get::<Option<String>, _>("title")
+        .map_err(|error| format!("read postgres dispatch title for {dispatch_id}: {error}"))?
+        .ok_or_else(|| format!("postgres dispatch {dispatch_id} missing title"))?;
+
+    let updated = sqlx::query(
+        "UPDATE dispatch_outbox
+            SET agent_id = $2,
+                card_id = $3,
+                title = $4,
+                status = 'pending',
+                retry_count = 0,
+                next_attempt_at = NULL,
+                processed_at = NULL,
+                error = NULL
+          WHERE dispatch_id = $1
+            AND action = 'notify'",
+    )
+    .bind(dispatch_id)
+    .bind(&agent_id)
+    .bind(&card_id)
+    .bind(&title)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| format!("reset postgres notify outbox for {dispatch_id}: {error}"))?
+    .rows_affected();
+    if updated > 0 {
+        return Ok(true);
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, agent_id, card_id, title, status, retry_count
+         ) VALUES ($1, 'notify', $2, $3, $4, 'pending', 0)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(dispatch_id)
+    .bind(&agent_id)
+    .bind(&card_id)
+    .bind(&title)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| format!("insert postgres notify outbox for {dispatch_id}: {error}"))?
+    .rows_affected();
+    if inserted > 0 {
+        return Ok(true);
+    }
+
+    let rearmed = sqlx::query(
+        "UPDATE dispatch_outbox
+            SET agent_id = $2,
+                card_id = $3,
+                title = $4,
+                status = 'pending',
+                retry_count = 0,
+                next_attempt_at = NULL,
+                processed_at = NULL,
+                error = NULL
+          WHERE dispatch_id = $1
+            AND action = 'notify'",
+    )
+    .bind(dispatch_id)
+    .bind(&agent_id)
+    .bind(&card_id)
+    .bind(&title)
+    .execute(pg_pool)
+    .await
+    .map_err(|error| format!("rearm postgres notify outbox for {dispatch_id}: {error}"))?
+    .rows_affected();
+    Ok(rearmed > 0)
+}
+
 /// Worker loop that drains dispatch_outbox and executes Discord side-effects.
 ///
 /// This is the SINGLE place where dispatch-related Discord HTTP calls originate.
@@ -1978,6 +2124,186 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reaction_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn queue_dispatch_followup_pg_inserts_one_shot_row() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        queue_dispatch_followup_pg(&pool, "dispatch-pg-followup")
+            .await
+            .unwrap();
+        queue_dispatch_followup_pg(&pool, "dispatch-pg-followup")
+            .await
+            .unwrap();
+
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT dispatch_id, action, status
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1",
+        )
+        .bind("dispatch-pg-followup")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "dispatch-pg-followup");
+        assert_eq!(row.1, "followup");
+        assert_eq!(row.2, "pending");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1
+                AND action = 'followup'",
+        )
+        .bind("dispatch-pg-followup")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn requeue_dispatch_notify_pg_inserts_and_rearms_notify_row() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (
+                id, name, created_at, updated_at
+             ) VALUES ($1, $2, NOW(), NOW())",
+        )
+        .bind("agent-requeue")
+        .bind("Agent Requeue")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-requeue")
+        .bind("PG Requeue Card")
+        .bind("todo")
+        .bind("agent-requeue")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-requeue")
+        .bind("card-requeue")
+        .bind("agent-requeue")
+        .bind("implementation")
+        .bind("pending")
+        .bind("PG Requeue Card")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            requeue_dispatch_notify_pg(&pool, "dispatch-requeue")
+                .await
+                .unwrap()
+        );
+
+        sqlx::query(
+            "UPDATE dispatch_outbox
+                SET status = 'failed',
+                    retry_count = 3,
+                    next_attempt_at = NOW() + INTERVAL '10 minutes',
+                    processed_at = NOW(),
+                    error = 'boom'
+              WHERE dispatch_id = $1
+                AND action = 'notify'",
+        )
+        .bind("dispatch-requeue")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            requeue_dispatch_notify_pg(&pool, "dispatch-requeue")
+                .await
+                .unwrap()
+        );
+
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            i32,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT agent_id, card_id, title, status, retry_count,
+                        next_attempt_at::text, processed_at::text, error
+                   FROM dispatch_outbox
+                  WHERE dispatch_id = $1
+                    AND action = 'notify'",
+        )
+        .bind("dispatch-requeue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "agent-requeue");
+        assert_eq!(row.1, "card-requeue");
+        assert_eq!(row.2, "PG Requeue Card");
+        assert_eq!(row.3, "pending");
+        assert_eq!(row.4, 0);
+        assert!(row.5.is_none());
+        assert!(row.6.is_none());
+        assert!(row.7.is_none());
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1
+                AND action = 'notify'",
+        )
+        .bind("dispatch-requeue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn queue_dispatch_followup_sync_prefers_postgres_when_available() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        queue_dispatch_followup_sync(&sqlite, Some(&pool), "dispatch-sync-followup");
+        queue_dispatch_followup_sync(&sqlite, Some(&pool), "dispatch-sync-followup");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1
+                AND action = 'followup'",
+        )
+        .bind("dispatch-sync-followup")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
 
         pool.close().await;
         pg_db.drop().await;

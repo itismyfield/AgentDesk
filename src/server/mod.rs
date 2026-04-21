@@ -1629,7 +1629,7 @@ mod tests {
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "hello");
         let delivered = Arc::new(Mutex::new(Vec::new()));
 
-        let processed = drain_message_outbox_batch_once(&db, None, None, {
+        let processed = drain_message_outbox_batch_once(Some(&db), None, None, {
             let delivered = delivered.clone();
             move |target, content, source, bot| {
                 let delivered = delivered.clone();
@@ -1666,7 +1666,7 @@ mod tests {
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
 
         let processed = drain_message_outbox_batch_once(
-            &db,
+            Some(&db),
             None,
             None,
             |_target, _content, _source, _bot| async {
@@ -1749,22 +1749,23 @@ mod tests {
         .await
         .unwrap();
 
-        let processed = drain_message_outbox_batch_once(&db, Some(&pg_pool), Some("test-owner"), {
-            let delivered = delivered.clone();
-            move |target, content, source, bot| {
+        let processed =
+            drain_message_outbox_batch_once(Some(&db), Some(&pg_pool), Some("test-owner"), {
                 let delivered = delivered.clone();
-                async move {
-                    delivered.lock().unwrap().push(json!({
-                        "target": target,
-                        "content": content,
-                        "source": source,
-                        "bot": bot,
-                    }));
-                    ("200 OK".to_string(), json!({"ok": true}).to_string())
+                move |target, content, source, bot| {
+                    let delivered = delivered.clone();
+                    async move {
+                        delivered.lock().unwrap().push(json!({
+                            "target": target,
+                            "content": content,
+                            "source": source,
+                            "bot": bot,
+                        }));
+                        ("200 OK".to_string(), json!({"ok": true}).to_string())
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await;
 
         assert_eq!(processed, 1);
         let captured = delivered.lock().unwrap().clone();

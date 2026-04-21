@@ -1818,7 +1818,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
 
     if tmux_killed && !lifecycle.termination_recorded {
         crate::services::termination_audit::record_termination_with_handles(
-            &state.db,
+            Some(&state.db),
             state.pg_pool.as_ref(),
             session_key,
             active_dispatch_id.as_deref(),

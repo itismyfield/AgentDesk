@@ -208,7 +208,11 @@ impl DispatchService {
                             .with_context("dispatch_id", id)
                     }
                 })?;
-            crate::server::routes::dispatches::queue_dispatch_followup(&self.db, id);
+            crate::server::routes::dispatches::queue_dispatch_followup_sync(
+                &self.db,
+                self.engine.pg_pool(),
+                id,
+            );
             return Ok(dispatch);
         }
 

@@ -82,7 +82,7 @@ pub fn record_termination(
         last_offset,
         tmux_alive,
     );
-    persist_record(db, runtime.pg_pool.clone(), record);
+    persist_record(Some(db), runtime.pg_pool.clone(), record);
 }
 
 /// Record a session termination event against an explicit DB handle.
@@ -112,7 +112,7 @@ pub fn record_termination_with_db(
 
 /// Record against explicit handles; prefers PostgreSQL when available and falls back to SQLite.
 pub fn record_termination_with_handles(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
     dispatch_id: Option<&str>,
@@ -133,16 +133,18 @@ pub fn record_termination_with_handles(
         last_offset,
         tmux_alive,
     );
-    persist_record(db.clone(), pg_pool.cloned(), record);
+    persist_record(db.cloned(), pg_pool.cloned(), record);
 }
 
 fn persist_record(
-    db: crate::db::Db,
+    db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
     record: TerminationAuditRecord,
 ) {
     let Some(pool) = pg_pool else {
-        insert_record_sqlite(&db, &record);
+        if let Some(db) = db.as_ref() {
+            insert_record_sqlite(db, &record);
+        }
         return;
     };
 
@@ -151,7 +153,9 @@ fn persist_record(
     let write_task = async move {
         if let Err(error) = insert_record_pg(&pool, &record_for_task).await {
             tracing::warn!("  [termination_audit] postgres insert failed: {error}");
-            insert_record_sqlite(&db_for_task, &record_for_task);
+            if let Some(db) = db_for_task.as_ref() {
+                insert_record_sqlite(db, &record_for_task);
+            }
         }
     };
 
@@ -168,7 +172,9 @@ fn persist_record(
             Ok(runtime) => runtime.block_on(write_task),
             Err(error) => {
                 tracing::warn!("  [termination_audit] runtime bootstrap failed: {error}");
-                insert_record_sqlite(&db, &record);
+                if let Some(db) = db.as_ref() {
+                    insert_record_sqlite(db, &record);
+                }
             }
         }
     });
@@ -362,7 +368,7 @@ mod tests {
         let pool = pg_db.connect_and_migrate().await;
 
         record_termination_with_handles(
-            &sqlite,
+            Some(&sqlite),
             Some(&pool),
             "host:pg-audit",
             Some("dispatch-1"),
@@ -393,6 +399,49 @@ mod tests {
         assert!(
             persisted,
             "postgres termination audit row was not persisted"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn record_termination_with_handles_persists_to_postgres_without_sqlite_handle() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        record_termination_with_handles(
+            None,
+            Some(&pool),
+            "host:pg-only-audit",
+            Some("dispatch-2"),
+            "cleanup",
+            "idle_session_expiry",
+            Some("expired"),
+            None,
+            Some(7),
+            Some(false),
+        );
+
+        let mut persisted = false;
+        for _ in 0..40 {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM session_termination_events WHERE session_key = $1",
+            )
+            .bind("host:pg-only-audit")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if count == 1 {
+                persisted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            persisted,
+            "postgres termination audit row was not persisted without sqlite"
         );
 
         pool.close().await;

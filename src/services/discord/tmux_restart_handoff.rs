@@ -114,8 +114,47 @@ fn resolve_dispatched_thread_dispatch(
 
 pub(super) fn resolve_dispatched_thread_dispatch_from_db(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     thread_channel_id: u64,
 ) -> Option<String> {
+    if let Some(pg_pool) = pg_pool {
+        let thread_channel_id = thread_channel_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                if let Some(dispatch_id) = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM task_dispatches
+                     WHERE status = 'dispatched' AND thread_id = $1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1",
+                )
+                .bind(&thread_channel_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load pg dispatched thread dispatch: {error}"))?
+                {
+                    return Ok(Some(dispatch_id));
+                }
+
+                sqlx::query_scalar::<_, String>(
+                    "SELECT active_dispatch_id FROM sessions
+                     WHERE thread_channel_id = $1
+                       AND status = 'working'
+                       AND active_dispatch_id IS NOT NULL
+                     ORDER BY COALESCE(last_heartbeat, created_at) DESC, id DESC
+                     LIMIT 1",
+                )
+                .bind(&thread_channel_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load pg session dispatch fallback: {error}"))
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten();
+    }
+
     resolve_dispatched_thread_dispatch(db?, thread_channel_id)
 }
 
@@ -465,8 +504,11 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let resolved =
-            super::resolve_dispatched_thread_dispatch_from_db(Some(&db), 1_492_091_375_422_930_966);
+        let resolved = super::resolve_dispatched_thread_dispatch_from_db(
+            Some(&db),
+            None,
+            1_492_091_375_422_930_966,
+        );
         assert_eq!(resolved.as_deref(), Some("latest-dispatch"));
     }
 
@@ -499,8 +541,11 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let resolved =
-            super::resolve_dispatched_thread_dispatch_from_db(Some(&db), 1_492_091_380_045_189_131);
+        let resolved = super::resolve_dispatched_thread_dispatch_from_db(
+            Some(&db),
+            None,
+            1_492_091_380_045_189_131,
+        );
         assert_eq!(resolved.as_deref(), Some("session-dispatch"));
     }
 }

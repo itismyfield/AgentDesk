@@ -234,10 +234,10 @@ async fn broadcast_credential_change(
     window: Duration,
     notify_message: &str,
 ) {
-    let Some(db) = shared.db.as_ref() else {
-        tracing::debug!("MCP credential watcher: no DB handle, skipping broadcast");
+    if shared.db.is_none() && shared.pg_pool.is_none() {
+        tracing::debug!("MCP credential watcher: no DB or PG handle, skipping broadcast");
         return;
-    };
+    }
 
     // Snapshot the active session channel set under a single lock.
     let channels: Vec<ChannelId> = {
@@ -253,8 +253,14 @@ async fn broadcast_credential_change(
             continue;
         }
         let target = format!("channel:{}", channel_id.get());
-        crate::services::message_outbox::enqueue_lifecycle_notification(
-            db,
+        let sqlite_runtime_db = if shared.pg_pool.is_some() {
+            None
+        } else {
+            shared.db.as_ref()
+        };
+        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+            sqlite_runtime_db,
+            shared.pg_pool.as_ref(),
             &target,
             None,
             "lifecycle.mcp_credential_change",

@@ -183,10 +183,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         return;
     }
 
-    let db = match shared.db.as_ref() {
-        Some(d) => d,
-        None => return,
-    };
+    let db = shared.db.as_ref();
     let pg_pool = shared.pg_pool.as_ref();
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
@@ -265,6 +262,9 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             }
         }
     } else {
+        let Some(db) = db else {
+            return;
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
@@ -320,46 +320,56 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         // Clear any existing dispatch_notified marker — the 5-condition query already
         // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
-            if let Some(pool) = pg_pool {
-                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                    .bind(format!("dispatch_notified:{dispatch_id}"))
-                    .execute(pool)
-                    .await
+            let dispatch_notified_key = format!("dispatch_notified:{dispatch_id}");
+            if super::internal_api::delete_kv_value(&dispatch_notified_key).is_err() {
+                if let Some(pool) = pg_pool {
+                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                        .bind(&dispatch_notified_key)
+                        .execute(pool)
+                        .await
+                        .ok();
+                } else {
+                    let Some(db) = db else {
+                        continue;
+                    };
+                    let conn = match db.lock() {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    conn.execute(
+                        "DELETE FROM kv_meta WHERE key = ?1",
+                        [&dispatch_notified_key],
+                    )
                     .ok();
-            } else {
-                let conn = match db.lock() {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                conn.execute(
-                    "DELETE FROM kv_meta WHERE key = ?1",
-                    [&format!("dispatch_notified:{dispatch_id}")],
-                )
-                .ok();
+                }
             }
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}]   ↻ Re-delivering {dtype} dispatch {id} → {agent} (card {card})",
+            "  [{ts}]   ↻ Recovering {dtype} dispatch {id} → {agent} (card {card})",
             id = &dispatch_id[..8],
             agent = agent_id,
             card = &card_id[..8.min(card_id.len())],
         );
 
-        // send_dispatch_to_discord handles its own two-phase delivery guard
-        // (reserving → send → notified), so no manual marker management needed here.
-        let send_result = if let Some(pool) = pg_pool {
-            crate::server::routes::dispatches::send_dispatch_to_discord_with_pg(
-                db,
-                Some(pool),
-                agent_id,
-                title,
-                card_id,
-                dispatch_id,
-            )
-            .await
+        let recovery_result = if let Some(pool) = pg_pool {
+            crate::server::routes::dispatches::requeue_dispatch_notify_pg(pool, dispatch_id)
+                .await
+                .map(|queued| {
+                    if !queued {
+                        tracing::info!(
+                            "  [{}]   · Skipped orphan recovery for {id} (dispatch not requeueable)",
+                            chrono::Local::now().format("%H:%M:%S"),
+                            id = &dispatch_id[..8],
+                        );
+                    }
+                    queued
+                })
         } else {
+            let Some(db) = db else {
+                continue;
+            };
             crate::server::routes::dispatches::send_dispatch_to_discord(
                 db,
                 agent_id,
@@ -368,11 +378,13 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                 dispatch_id,
             )
             .await
+            .map(|_| true)
         };
-        match send_result {
-            Ok(()) => {
+        match recovery_result {
+            Ok(true) => {
                 delivered += 1;
             }
+            Ok(false) => {}
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -974,39 +986,22 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             // Mark all channels that recovery touched as "recently handled"
                             // by inserting a recovery_handled marker in kv_meta.
                             // restore_tmux_watchers checks this and skips those channels.
-                            if let Some(ref db) = shared_for_tmux2.db {
-                                if let Ok(conn) = db.lock() {
-                                    let recovery_channels: Vec<u64> = shared_for_tmux2
-                                        .recovering_channels
-                                        .iter()
-                                        .map(|entry| entry.key().get())
-                                        .collect();
-                                    for ch in &recovery_channels {
-                                        conn.execute(
-                                            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                            libsql_rusqlite::params![
-                                                format!("recovery_handled_channel:{ch}"),
-                                                chrono::Utc::now().timestamp().to_string(),
-                                            ],
-                                        )
-                                        .ok();
-                                    }
-                                }
-                            }
+                            let recovery_channels: Vec<u64> = shared_for_tmux2
+                                .recovering_channels
+                                .iter()
+                                .map(|entry| entry.key().get())
+                                .collect();
+                            super::tmux::store_recovery_handled_channels(
+                                &shared_for_tmux2,
+                                &recovery_channels,
+                            )
+                            .await;
 
                             restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
                             cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
 
                             // Clean up recovery markers
-                            if let Some(ref db) = shared_for_tmux2.db {
-                                if let Ok(conn) = db.lock() {
-                                    conn.execute(
-                                        "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
-                                        [],
-                                    )
-                                    .ok();
-                                }
-                            }
+                            super::tmux::clear_recovery_handled_channels(&shared_for_tmux2).await;
                         }
 
                         // Suppress durable handoffs so restart does not synthesize a new turn.

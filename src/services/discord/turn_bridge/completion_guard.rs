@@ -1116,7 +1116,22 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             ) {
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch");
-                    crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+                    if let Some(pool) = shared.pg_pool.as_ref() {
+                        if let Err(error) =
+                            crate::server::routes::dispatches::queue_dispatch_followup_pg(
+                                pool,
+                                dispatch_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                dispatch_id = %dispatch_id,
+                                "failed to enqueue turn-bridge followup: {error}"
+                            );
+                        }
+                    } else {
+                        crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+                    }
                     return;
                 }
                 Err(e) => {
@@ -1154,11 +1169,13 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             .unwrap_or(0);
             if changed > 0 {
                 let reconcile_key = runtime_postgres_reconcile_key(dispatch_id);
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    [reconcile_key.as_str(), dispatch_id],
-                )
-                .ok();
+                if super::super::internal_api::set_kv_value(&reconcile_key, dispatch_id).is_err() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                        [reconcile_key.as_str(), dispatch_id],
+                    )
+                    .ok();
+                }
             }
             changed > 0
         });

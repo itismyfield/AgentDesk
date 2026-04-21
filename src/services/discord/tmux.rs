@@ -6,7 +6,9 @@ use serenity::ChannelId;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
-use crate::services::message_outbox::enqueue_lifecycle_notification;
+use crate::services::message_outbox::{
+    OutboxMessage, enqueue_lifecycle_notification_best_effort, enqueue_outbox_best_effort,
+};
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_backend::StreamLineState;
 use crate::services::tmux_diagnostics::{
@@ -630,8 +632,36 @@ fn extract_result_error_text(value: &serde_json::Value) -> String {
 
 fn load_restored_session_cwd(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     session_keys: &[String],
 ) -> Option<String> {
+    if let Some(pg_pool) = pg_pool {
+        let session_keys = session_keys.to_vec();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                for session_key in session_keys {
+                    let path = sqlx::query_scalar::<_, String>(
+                        "SELECT cwd FROM sessions WHERE session_key = $1 LIMIT 1",
+                    )
+                    .bind(&session_key)
+                    .fetch_optional(&pool)
+                    .await
+                    .map_err(|error| format!("load tmux restore cwd {session_key}: {error}"))?;
+                    if let Some(path) =
+                        path.filter(|path| !path.is_empty() && std::path::Path::new(path).is_dir())
+                    {
+                        return Ok(Some(path));
+                    }
+                }
+                Ok(None)
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten();
+    }
+
     let conn = db?.read_conn().ok()?;
     session_keys.iter().find_map(|session_key| {
         conn.query_row(
@@ -680,6 +710,7 @@ fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
 
 fn load_restored_provider_session_id(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     channel_name: &str,
@@ -687,6 +718,38 @@ fn load_restored_provider_session_id(
     let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_keys =
         super::adk_session::build_session_key_candidates(token_hash, provider, &tmux_name);
+
+    if let Some(pg_pool) = pg_pool {
+        let session_keys = session_keys.clone();
+        let provider_name = provider.as_str().to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                for session_key in session_keys {
+                    let session_id = sqlx::query_scalar::<_, Option<String>>(
+                        "SELECT claude_session_id
+                         FROM sessions
+                         WHERE session_key = $1 AND provider = $2
+                         LIMIT 1",
+                    )
+                    .bind(&session_key)
+                    .bind(&provider_name)
+                    .fetch_optional(&pool)
+                    .await
+                    .map_err(|error| format!("load tmux provider session {session_key}: {error}"))?
+                    .flatten();
+                    if let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty())
+                    {
+                        return Ok(Some(session_id));
+                    }
+                }
+                Ok(None)
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten();
+    }
 
     db.and_then(|db| {
         db.read_conn().ok().and_then(|conn| {
@@ -704,24 +767,228 @@ fn load_restored_provider_session_id(
     })
 }
 
+fn recovery_handled_channel_key(channel_id: u64) -> String {
+    format!("recovery_handled_channel:{channel_id}")
+}
+
+fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
+    if shared.pg_pool.is_some() {
+        None
+    } else {
+        shared.db.as_ref()
+    }
+}
+
+pub(super) fn recovery_handled_channel_exists(shared: &SharedData, channel_id: u64) -> bool {
+    let key = recovery_handled_channel_key(channel_id);
+
+    if let Ok(value) = super::internal_api::get_kv_value(&key) {
+        return value.is_some();
+    }
+
+    if let Some(pg_pool) = shared.pg_pool.as_ref() {
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM kv_meta
+                         WHERE key = $1
+                           AND (expires_at IS NULL OR expires_at > NOW())
+                     )",
+                )
+                .bind(&key)
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| format!("load recovery handled marker {key}: {error}"))
+            },
+            |message| message,
+        )
+        .unwrap_or(false);
+    }
+
+    shared
+        .db
+        .as_ref()
+        .and_then(|db| {
+            db.lock().ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
+                    [key],
+                    |row| row.get::<_, bool>(0),
+                )
+                .ok()
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub(super) async fn store_recovery_handled_channels(shared: &SharedData, channel_ids: &[u64]) {
+    if channel_ids.is_empty() {
+        return;
+    }
+
+    let marker_value = chrono::Utc::now().timestamp().to_string();
+    let mut stored_via_internal_api = true;
+    for channel_id in channel_ids {
+        let key = recovery_handled_channel_key(*channel_id);
+        if let Err(error) = super::internal_api::set_kv_value(&key, &marker_value) {
+            tracing::debug!(
+                "recovery handled marker fallback for {key}: direct runtime API unavailable: {error}"
+            );
+            stored_via_internal_api = false;
+            break;
+        }
+    }
+    if stored_via_internal_api {
+        return;
+    }
+
+    if let Some(pg_pool) = shared.pg_pool.as_ref() {
+        match pg_pool.begin().await {
+            Ok(mut tx) => {
+                for channel_id in channel_ids {
+                    let key = recovery_handled_channel_key(*channel_id);
+                    if let Err(error) = sqlx::query(
+                        "INSERT INTO kv_meta (key, value, expires_at)
+                         VALUES ($1, $2, NULL)
+                         ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value,
+                             expires_at = EXCLUDED.expires_at",
+                    )
+                    .bind(&key)
+                    .bind(&marker_value)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        tracing::warn!(
+                            "failed to persist recovery handled marker {key} in postgres: {error}"
+                        );
+                        return;
+                    }
+                }
+                if let Err(error) = tx.commit().await {
+                    tracing::warn!("failed to commit recovery handled marker tx: {error}");
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to begin recovery handled marker tx: {error}");
+            }
+        }
+        return;
+    }
+
+    if let Some(db) = shared.db.as_ref()
+        && let Ok(conn) = db.lock()
+    {
+        for channel_id in channel_ids {
+            let key = recovery_handled_channel_key(*channel_id);
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![key, chrono::Utc::now().timestamp().to_string()],
+            )
+            .ok();
+        }
+    }
+}
+
+pub(super) async fn clear_recovery_handled_channels(shared: &SharedData) {
+    if let Err(error) = super::internal_api::clear_kv_prefix("recovery_handled_channel:") {
+        tracing::debug!(
+            "recovery handled marker clear fallback: direct runtime API unavailable: {error}"
+        );
+    } else {
+        return;
+    }
+
+    if let Some(pg_pool) = shared.pg_pool.as_ref() {
+        if let Err(error) =
+            sqlx::query("DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'")
+                .execute(pg_pool)
+                .await
+        {
+            tracing::warn!("failed to clear recovery handled markers in postgres: {error}");
+        }
+        return;
+    }
+
+    if let Some(db) = shared.db.as_ref()
+        && let Ok(conn) = db.lock()
+    {
+        conn.execute(
+            "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
+            [],
+        )
+        .ok();
+    }
+}
+
 // Tmux watcher output is activity, but reusing hook_session here would also
 // overwrite status/tokens defaults. Touch only last_heartbeat instead.
 fn refresh_session_heartbeat_from_tmux_output(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     tmux_session_name: &str,
     thread_channel_id: Option<u64>,
 ) -> bool {
+    let session_keys =
+        super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
+
+    if let Some(pg_pool) = pg_pool {
+        let provider_name = provider.as_str().to_string();
+        let thread_channel_id = thread_channel_id.map(|value| value.to_string());
+        return crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |pool| async move {
+                let updated = sqlx::query(
+                    "UPDATE sessions
+                     SET last_heartbeat = NOW()
+                     WHERE session_key = $1 OR session_key = $2",
+                )
+                .bind(&session_keys[0])
+                .bind(&session_keys[1])
+                .execute(&pool)
+                .await
+                .map_err(|error| format!("refresh pg watcher heartbeat by session key: {error}"))?
+                .rows_affected();
+                if updated > 0 {
+                    return Ok(true);
+                }
+
+                let Some(thread_channel_id) = thread_channel_id else {
+                    return Ok(false);
+                };
+                let updated = sqlx::query(
+                    "UPDATE sessions
+                     SET last_heartbeat = NOW()
+                     WHERE provider = $1
+                       AND thread_channel_id = $2
+                       AND status IN ('idle', 'working')",
+                )
+                .bind(&provider_name)
+                .bind(&thread_channel_id)
+                .execute(&pool)
+                .await
+                .map_err(|error| {
+                    format!("refresh pg watcher heartbeat by thread channel: {error}")
+                })?
+                .rows_affected();
+                Ok(updated > 0)
+            },
+            |message| message,
+        )
+        .unwrap_or(false);
+    }
+
     let Some(db) = db else {
         return false;
     };
     let Ok(conn) = db.lock() else {
         return false;
     };
-
-    let session_keys =
-        super::adk_session::build_session_key_candidates(token_hash, provider, tmux_session_name);
     let updated = conn
         .execute(
             "UPDATE sessions
@@ -751,6 +1018,7 @@ fn refresh_session_heartbeat_from_tmux_output(
 
 fn maybe_refresh_watcher_activity_heartbeat(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     tmux_session_name: &str,
@@ -766,6 +1034,7 @@ fn maybe_refresh_watcher_activity_heartbeat(
 
     if refresh_session_heartbeat_from_tmux_output(
         db,
+        pg_pool,
         token_hash,
         provider,
         tmux_session_name,
@@ -822,7 +1091,11 @@ async fn resolve_watcher_dispatch_id(
         )
         .await)
         .or_else(|| {
-            resolve_dispatched_thread_dispatch_from_db(shared.db.as_ref(), channel_id.get())
+            resolve_dispatched_thread_dispatch_from_db(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                channel_id.get(),
+            )
         })
 }
 
@@ -1134,15 +1407,14 @@ pub(super) async fn tmux_output_watcher(
                             tmux_session_name
                         )
                     });
-                    if let Some(ref db) = shared.db {
-                        enqueue_lifecycle_notification(
-                            db,
-                            &format!("channel:{}", channel_id.get()),
-                            Some(session_key.as_str()),
-                            lifecycle_reason_code_for_tmux_exit(reason_text),
-                            &format!("🔴 세션 종료: {reason_truncated}"),
-                        );
-                    }
+                    enqueue_lifecycle_notification_best_effort(
+                        sqlite_runtime_db(shared.as_ref()),
+                        shared.pg_pool.as_ref(),
+                        &format!("channel:{}", channel_id.get()),
+                        Some(session_key.as_str()),
+                        lifecycle_reason_code_for_tmux_exit(reason_text),
+                        &format!("🔴 세션 종료: {reason_truncated}"),
+                    );
                 }
             }
             if !prompt_too_long_killed && !turn_result_relayed {
@@ -1203,6 +1475,7 @@ pub(super) async fn tmux_output_watcher(
         current_offset = new_offset;
         maybe_refresh_watcher_activity_heartbeat(
             shared.db.as_ref(),
+            shared.pg_pool.as_ref(),
             &shared.token_hash,
             &watcher_provider,
             &tmux_session_name,
@@ -1292,6 +1565,7 @@ pub(super) async fn tmux_output_watcher(
                         current_offset = off;
                         maybe_refresh_watcher_activity_heartbeat(
                             shared.db.as_ref(),
+                            shared.pg_pool.as_ref(),
                             &shared.token_hash,
                             &watcher_provider,
                             &tmux_session_name,
@@ -1323,15 +1597,20 @@ pub(super) async fn tmux_output_watcher(
                         }
                         // Notify when auto-compaction is detected in output
                         if outcome.auto_compacted {
-                            if let Some(ref db) = shared.db {
-                                if let Ok(conn) = db.lock() {
-                                    let target = format!("channel:{}", channel_id.get());
-                                    let _ = conn.execute(
-                                        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                                        [target.as_str(), "🗜️ 자동 컨텍스트 압축 감지"],
-                                    );
-                                }
-                            }
+                            let target = format!("channel:{}", channel_id.get());
+                            let _ = enqueue_outbox_best_effort(
+                                shared.pg_pool.as_ref(),
+                                sqlite_runtime_db(shared.as_ref()),
+                                OutboxMessage {
+                                    target: target.as_str(),
+                                    content: "🗜️ 자동 컨텍스트 압축 감지",
+                                    bot: "notify",
+                                    source: "system",
+                                    reason_code: None,
+                                    session_key: None,
+                                },
+                            )
+                            .await;
                         }
                     }
                     Ok(Ok(Ok((_, off)))) => {
@@ -2250,7 +2529,7 @@ pub(super) async fn tmux_output_watcher(
             super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
 
-            if has_assistant_response && let Some(db) = shared.db.as_ref() {
+            if has_assistant_response && (shared.db.is_some() || shared.pg_pool.is_some()) {
                 let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
                 let channel_id_text = channel_id.get().to_string();
                 let resolved_did = inflight_state
@@ -2265,11 +2544,13 @@ pub(super) async fn tmux_output_watcher(
                     .or_else(|| {
                         resolve_dispatched_thread_dispatch_from_db(
                             shared.db.as_ref(),
+                            shared.pg_pool.as_ref(),
                             channel_id.get(),
                         )
                     });
-                if let Err(e) = crate::db::session_transcripts::persist_turn(
-                    db,
+                if let Err(e) = crate::db::session_transcripts::persist_turn_db(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
                     crate::db::session_transcripts::PersistSessionTranscript {
                         turn_id: &turn_id,
                         session_key: state.session_key.as_deref(),
@@ -2284,13 +2565,16 @@ pub(super) async fn tmux_output_watcher(
                         events: &tool_state.transcript_events,
                         duration_ms: inflight_duration_ms(Some(state.started_at.as_str())),
                     },
-                ) {
+                )
+                .await
+                {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
                 }
 
-                super::turn_bridge::persist_turn_analytics_row(
-                    db,
+                super::turn_bridge::persist_turn_analytics_row_with_handles(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
                     &provider_kind,
                     channel_id,
                     user_msg_id,
@@ -2321,7 +2605,11 @@ pub(super) async fn tmux_output_watcher(
             )
             .await)
             .or_else(|| {
-                resolve_dispatched_thread_dispatch_from_db(shared.db.as_ref(), channel_id.get())
+                resolve_dispatched_thread_dispatch_from_db(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
+                    channel_id.get(),
+                )
             });
 
         if resolved_did.is_none() && has_assistant_response {
@@ -2339,16 +2627,10 @@ pub(super) async fn tmux_output_watcher(
         };
 
         let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
-            let dispatch_type = shared.db.as_ref().and_then(|db| {
-                db.separate_conn().ok().and_then(|conn| {
-                    conn.query_row(
-                        "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
-                        [did],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok()
-                })
-            });
+            let dispatch_type = super::internal_api::lookup_dispatch_type(did)
+                .await
+                .ok()
+                .flatten();
 
             match dispatch_type.as_deref() {
                 Some("implementation") | Some("rework") => {
@@ -2386,7 +2668,22 @@ pub(super) async fn tmux_output_watcher(
                                 tracing::info!(
                                     "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
                                 );
-                                crate::server::routes::dispatches::queue_dispatch_followup(db, did);
+                                if let Some(pool) = shared.pg_pool.as_ref() {
+                                    if let Err(error) =
+                                        crate::server::routes::dispatches::queue_dispatch_followup_pg(
+                                            pool, did,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "  [{ts}] ⚠ watcher: failed to enqueue followup for {did}: {error}"
+                                        );
+                                    }
+                                } else {
+                                    crate::server::routes::dispatches::queue_dispatch_followup(
+                                        db, did,
+                                    );
+                                }
                                 true
                             }
                             Err(e) => {
@@ -2539,25 +2836,48 @@ pub(super) async fn tmux_output_watcher(
             let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
             // #227: Re-enabled with 5-min cooldown (matches turn_bridge path).
             // Without cooldown, the compact turn's own result could re-trigger compact.
-            let compact_cooldown_ok = shared.db.as_ref().map_or(true, |db| {
-                db.lock().ok().map_or(true, |conn| {
-                    let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
-                    let last: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM kv_meta WHERE key = ?1",
-                            [&cooldown_key],
-                            |row| row.get(0),
+            let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
+            let cooldown_value = match super::internal_api::get_kv_value(&cooldown_key) {
+                Ok(value) => value,
+                Err(_) => {
+                    if let Some(pg_pool) = shared.pg_pool.as_ref() {
+                        sqlx::query_scalar::<_, Option<String>>(
+                            "SELECT value
+                             FROM kv_meta
+                             WHERE key = $1
+                               AND (expires_at IS NULL OR expires_at > NOW())
+                             LIMIT 1",
                         )
-                        .ok();
-                    last.and_then(|v| v.parse::<i64>().ok()).map_or(true, |ts| {
+                        .bind(&cooldown_key)
+                        .fetch_optional(pg_pool)
+                        .await
+                        .ok()
+                        .flatten()
+                        .flatten()
+                    } else {
+                        sqlite_runtime_db(shared.as_ref()).and_then(|db| {
+                            db.lock().ok().and_then(|conn| {
+                                conn.query_row(
+                                    "SELECT value FROM kv_meta WHERE key = ?1",
+                                    [&cooldown_key],
+                                    |row| row.get(0),
+                                )
+                                .ok()
+                            })
+                        })
+                    }
+                }
+            };
+            let compact_cooldown_ok =
+                cooldown_value
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .map_or(true, |ts| {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64;
                         now - ts > 300 // 5 min cooldown
-                    })
-                })
-            });
+                    });
             // DISABLED — token counting still unreliable
             if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2571,14 +2891,28 @@ pub(super) async fn tmux_output_watcher(
                 })
                 .await;
                 // Set cooldown timestamp
-                if let Some(ref db) = shared.db {
-                    if let Ok(conn) = db.lock() {
-                        let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let now_text = now.to_string();
+                let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let now_text = now.to_string();
+                if super::internal_api::set_kv_value(&cooldown_key, &now_text).is_err() {
+                    if let Some(pg_pool) = shared.pg_pool.as_ref() {
+                        let _ = sqlx::query(
+                            "INSERT INTO kv_meta (key, value, expires_at)
+                             VALUES ($1, $2, NULL)
+                             ON CONFLICT (key) DO UPDATE
+                             SET value = EXCLUDED.value,
+                                 expires_at = EXCLUDED.expires_at",
+                        )
+                        .bind(&cooldown_key)
+                        .bind(&now_text)
+                        .execute(pg_pool)
+                        .await;
+                    } else if let Some(db) = sqlite_runtime_db(shared.as_ref())
+                        && let Ok(conn) = db.lock()
+                    {
                         conn.execute(
                             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                             [cooldown_key.as_str(), now_text.as_str()],
@@ -2587,16 +2921,21 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
                 // Notify: auto-compact triggered
-                if let Some(ref db) = shared.db {
-                    if let Ok(conn) = db.lock() {
-                        let target = format!("channel:{}", channel_id.get());
-                        let content = format!("🗜️ 자동 컨텍스트 압축 (사용률: {pct}%)");
-                        let _ = conn.execute(
-                            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                            [target.as_str(), content.as_str()],
-                        );
-                    }
-                }
+                let target = format!("channel:{}", channel_id.get());
+                let content = format!("🗜️ 자동 컨텍스트 압축 (사용률: {pct}%)");
+                let _ = enqueue_outbox_best_effort(
+                    shared.pg_pool.as_ref(),
+                    sqlite_runtime_db(shared.as_ref()),
+                    OutboxMessage {
+                        target: target.as_str(),
+                        content: content.as_str(),
+                        bot: "notify",
+                        source: "system",
+                        reason_code: None,
+                        session_key: None,
+                    },
+                )
+                .await;
             }
         }
     }
@@ -2620,6 +2959,7 @@ pub(super) async fn tmux_output_watcher(
     };
     let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
         shared.db.as_ref(),
+        shared.pg_pool.as_ref(),
         &shared.token_hash,
         &provider,
         &tmux_session_name,
@@ -3373,13 +3713,27 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     // and message handlers find an active session with current_path
     if !owned_sessions.is_empty() {
         let mut data = shared.core.lock().await;
+        let sqlite_settings_db = if shared.pg_pool.is_some() {
+            None
+        } else {
+            shared.db.as_ref()
+        };
         for (channel_id, channel_name) in &owned_sessions {
-            let persisted_path =
-                load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
-            let remote_profile =
-                load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+            let persisted_path = load_last_session_path(
+                sqlite_settings_db,
+                shared.pg_pool.as_ref(),
+                &shared.token_hash,
+                channel_id.get(),
+            );
+            let remote_profile = load_last_remote_profile(
+                sqlite_settings_db,
+                shared.pg_pool.as_ref(),
+                &shared.token_hash,
+                channel_id.get(),
+            );
             let persisted_session_id = load_restored_provider_session_id(
-                shared.db.as_ref(),
+                sqlite_settings_db,
+                shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
                 channel_name,
@@ -3392,10 +3746,11 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 &provider,
                 &tmux_name,
             );
-            let db_cwd = shared
-                .db
-                .as_ref()
-                .and_then(|db| load_restored_session_cwd(Some(db), &session_keys));
+            let db_cwd = load_restored_session_cwd(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                &session_keys,
+            );
 
             let session =
                 data.sessions
@@ -3460,20 +3815,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         // #226: Skip channels that recovery already handled — their watchers may have
         // ended quickly (session died), removing themselves from the DashMap, but we
         // should not create a second watcher because recovery already processed the turn.
-        let recovery_handled = shared
-            .db
-            .as_ref()
-            .and_then(|db| {
-                db.lock().ok().and_then(|conn| {
-                    conn.query_row(
-                        "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
-                        [format!("recovery_handled_channel:{}", pw.channel_id.get())],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .ok()
-                })
-            })
-            .unwrap_or(false);
+        let recovery_handled =
+            recovery_handled_channel_exists(shared.as_ref(), pw.channel_id.get());
         if recovery_handled {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -3536,6 +3879,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         for dc in &dead_cleanups {
             let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
                 shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
                 &dc.session_name,
@@ -3773,7 +4117,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            load_restored_provider_session_id(Some(&db), "tokenxyz", &provider, "adk-cdx")
+            load_restored_provider_session_id(Some(&db), None, "tokenxyz", &provider, "adk-cdx",)
                 .as_deref(),
             Some("persisted-sid-1")
         );
@@ -3812,7 +4156,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            load_restored_provider_session_id(Some(&db), "tokenxyz", &provider, "adk-cdx")
+            load_restored_provider_session_id(Some(&db), None, "tokenxyz", &provider, "adk-cdx",)
                 .as_deref(),
             Some("legacy-sid-1")
         );
@@ -3839,6 +4183,7 @@ mod tests {
 
         assert!(refresh_session_heartbeat_from_tmux_output(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,
@@ -3940,6 +4285,7 @@ mod tests {
 
         assert!(refresh_session_heartbeat_from_tmux_output(
             Some(&db),
+            None,
             "tokenxyz",
             &provider,
             &tmux_name,

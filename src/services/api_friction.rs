@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use libsql_rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 use crate::db::Db;
 use crate::services::discord::settings::{
@@ -167,7 +168,8 @@ pub(crate) fn extract_api_friction_reports(full_response: &str) -> ApiFrictionEx
 }
 
 pub(crate) async fn record_api_friction_reports(
-    db: &Db,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
     memory_settings: &ResolvedMemorySettings,
     context: ApiFrictionRecordContext<'_>,
     reports: &[ApiFrictionReport],
@@ -176,7 +178,12 @@ pub(crate) async fn record_api_friction_reports(
         return Ok(ApiFrictionRecordResult::default());
     }
 
-    let inserted_events = {
+    let inserted_events = if let Some(pg_pool) = pg_pool {
+        let source_context =
+            load_source_context_pg(pg_pool, context.dispatch_id, context.session_key).await?;
+        persist_event_rows_pg(pg_pool, &source_context, &context, reports).await?
+    } else {
+        let db = db.ok_or_else(|| "no runtime database handle for API friction".to_string())?;
         let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
         let source_context = load_source_context(
             &mut conn,
@@ -201,10 +208,12 @@ pub(crate) async fn record_api_friction_reports(
         let Some(backend) = memory_backend.as_ref() else {
             mark_event_memory_status(
                 db,
+                pg_pool,
                 &memory_draft.event_id,
                 "skipped_backend",
                 Some("memento backend is not active for API friction".to_string()),
-            );
+            )
+            .await;
             continue;
         };
 
@@ -212,11 +221,18 @@ pub(crate) async fn record_api_friction_reports(
             Ok(token_usage) => {
                 result.memory_stored_count += 1;
                 result.token_usage.saturating_add_assign(token_usage);
-                mark_event_memory_status(db, &memory_draft.event_id, "stored", None);
+                mark_event_memory_status(db, pg_pool, &memory_draft.event_id, "stored", None).await;
             }
             Err(error) => {
                 result.memory_errors.push(error.clone());
-                mark_event_memory_status(db, &memory_draft.event_id, "failed", Some(error));
+                mark_event_memory_status(
+                    db,
+                    pg_pool,
+                    &memory_draft.event_id,
+                    "failed",
+                    Some(error),
+                )
+                .await;
             }
         }
     }
@@ -588,6 +604,93 @@ fn load_source_context(
     Ok(SourceContext::default())
 }
 
+async fn load_dispatch_source_context_pg(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<Option<SourceContext>, String> {
+    sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT td.kanban_card_id,
+                kc.repo_id,
+                kc.github_issue_number,
+                COALESCE(NULLIF(TRIM(kc.title), ''), NULLIF(TRIM(td.title), '')),
+                td.to_agent_id
+         FROM task_dispatches td
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
+         WHERE td.id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map(|row| {
+        row.map(
+            |(card_id, repo_id, issue_number, task_summary, agent_id)| SourceContext {
+                card_id,
+                repo_id,
+                issue_number: issue_number.map(i64::from),
+                task_summary,
+                agent_id,
+            },
+        )
+    })
+    .map_err(|err| format!("load task_dispatches source context: {err}"))
+}
+
+async fn load_source_context_pg(
+    pg_pool: &PgPool,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+) -> Result<SourceContext, String> {
+    if let Some(dispatch_id) = dispatch_id
+        && let Some(context) = load_dispatch_source_context_pg(pg_pool, dispatch_id).await?
+    {
+        return Ok(context);
+    }
+
+    if let Some(session_key) = session_key
+        && let Some((agent_id, active_dispatch_id, session_info)) =
+            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+                "SELECT agent_id, active_dispatch_id, session_info
+             FROM sessions
+             WHERE session_key = $1",
+            )
+            .bind(session_key)
+            .fetch_optional(pg_pool)
+            .await
+            .map_err(|err| format!("load sessions source context: {err}"))?
+    {
+        if let Some(active_dispatch_id) = active_dispatch_id {
+            let mut active = load_dispatch_source_context_pg(pg_pool, active_dispatch_id.as_str())
+                .await?
+                .unwrap_or_default();
+            if active.agent_id.is_none() {
+                active.agent_id = agent_id;
+            }
+            if active.task_summary.is_none() {
+                active.task_summary = session_info;
+            }
+            return Ok(active);
+        }
+
+        return Ok(SourceContext {
+            agent_id,
+            task_summary: session_info,
+            ..SourceContext::default()
+        });
+    }
+
+    Ok(SourceContext::default())
+}
+
 fn persist_event_rows(
     conn: &mut Connection,
     source_context: &SourceContext,
@@ -658,6 +761,87 @@ fn persist_event_rows(
     }
 
     tx.commit()
+        .map_err(|err| format!("commit api_friction transaction: {err}"))?;
+    Ok(memory_drafts)
+}
+
+async fn persist_event_rows_pg(
+    pg_pool: &PgPool,
+    source_context: &SourceContext,
+    context: &ApiFrictionRecordContext<'_>,
+    reports: &[ApiFrictionReport],
+) -> Result<Vec<EventMemoryDraft>, String> {
+    let mut tx = pg_pool
+        .begin()
+        .await
+        .map_err(|err| format!("begin api_friction transaction: {err}"))?;
+    let mut memory_drafts = Vec::new();
+
+    for report in reports {
+        let fingerprint = build_fingerprint(&report.endpoint, &report.friction_type);
+        let id = uuid::Uuid::new_v4().to_string();
+        let payload_json = serde_json::to_value(report)
+            .map_err(|err| format!("serialize api_friction payload: {err}"))?;
+        let keywords_json = serde_json::to_value(&report.keywords)
+            .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
+        let repo_id = source_context
+            .repo_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_API_FRICTION_REPO.to_string());
+        let github_issue_number = source_context
+            .issue_number
+            .and_then(|value| i32::try_from(value).ok());
+
+        sqlx::query(
+            "INSERT INTO api_friction_events (
+                id, fingerprint, endpoint, friction_type, summary, workaround, suggested_fix,
+                docs_category, keywords_json, payload_json, session_key, channel_id, provider,
+                dispatch_id, card_id, repo_id, github_issue_number, task_summary, agent_id,
+                memory_backend
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19,
+                $20
+             )",
+        )
+        .bind(&id)
+        .bind(&fingerprint)
+        .bind(&report.endpoint)
+        .bind(&report.friction_type)
+        .bind(&report.summary)
+        .bind(report.workaround.as_deref())
+        .bind(report.suggested_fix.as_deref())
+        .bind(report.docs_category.as_deref())
+        .bind(keywords_json)
+        .bind(payload_json)
+        .bind(context.session_key)
+        .bind(context.channel_id.to_string())
+        .bind(context.provider)
+        .bind(context.dispatch_id)
+        .bind(source_context.card_id.as_deref())
+        .bind(repo_id)
+        .bind(github_issue_number)
+        .bind(source_context.task_summary.as_deref())
+        .bind(source_context.agent_id.as_deref())
+        .bind("memento")
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| format!("insert api_friction_events: {err}"))?;
+
+        memory_drafts.push(EventMemoryDraft {
+            event_id: id,
+            request: build_memento_request(
+                source_context,
+                report,
+                &fingerprint,
+                context.dispatch_id,
+            ),
+        });
+    }
+
+    tx.commit()
+        .await
         .map_err(|err| format!("commit api_friction transaction: {err}"))?;
     Ok(memory_drafts)
 }
@@ -756,7 +940,30 @@ fn build_fingerprint(endpoint: &str, friction_type: &str) -> String {
     format!("{endpoint}::{friction_type}")
 }
 
-fn mark_event_memory_status(db: &Db, event_id: &str, status: &str, error: Option<String>) {
+async fn mark_event_memory_status(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    event_id: &str,
+    status: &str,
+    error: Option<String>,
+) {
+    if let Some(pg_pool) = pg_pool {
+        let _ = sqlx::query(
+            "UPDATE api_friction_events
+             SET memory_status = $1, memory_error = $2
+             WHERE id = $3",
+        )
+        .bind(status)
+        .bind(error.as_deref())
+        .bind(event_id)
+        .execute(pg_pool)
+        .await;
+        return;
+    }
+
+    let Some(db) = db else {
+        return;
+    };
     let Ok(conn) = db.lock() else {
         return;
     };
@@ -1216,7 +1423,8 @@ mod tests {
 
         let db = crate::db::test_db();
         let result = record_api_friction_reports(
-            &db,
+            Some(&db),
+            None,
             &ResolvedMemorySettings {
                 backend: MemoryBackendKind::Memento,
                 ..ResolvedMemorySettings::default()

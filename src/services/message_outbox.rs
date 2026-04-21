@@ -112,6 +112,160 @@ pub(crate) fn enqueue_lifecycle_notification(
     )
 }
 
+pub(crate) fn enqueue_lifecycle_notification_best_effort(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    session_key: Option<&str>,
+    reason_code: &str,
+    content: &str,
+) -> bool {
+    if let Some(pool) = pg_pool {
+        let target_owned = target.to_string();
+        let session_key_owned = session_key.map(str::to_string);
+        let reason_code_owned = reason_code.to_string();
+        let content_owned = content.to_string();
+        match crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |pool| async move {
+                enqueue_lifecycle_notification_pg(
+                    &pool,
+                    &target_owned,
+                    session_key_owned.as_deref(),
+                    &reason_code_owned,
+                    &content_owned,
+                )
+                .await
+                .map_err(|error| format!("enqueue lifecycle notification via postgres: {error}"))
+            },
+            |message| message,
+        ) {
+            Ok(enqueued) => return enqueued,
+            Err(error) => {
+                tracing::warn!(
+                    target,
+                    reason_code,
+                    "failed to enqueue lifecycle notification via postgres: {error}"
+                );
+                return false;
+            }
+        }
+    }
+
+    db.is_some_and(|db| {
+        enqueue_lifecycle_notification(db, target, session_key, reason_code, content)
+    })
+}
+
+pub(crate) async fn enqueue_outbox_pg(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+) -> Result<bool, sqlx::Error> {
+    let reason_code = message
+        .reason_code
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session_key = normalized_session_key(message.target, message.session_key);
+
+    if let (Some(reason_code), Some(session_key)) = (reason_code, session_key.as_deref()) {
+        let duplicate_id = sqlx::query_scalar::<_, i64>(
+            "SELECT id
+             FROM message_outbox
+             WHERE target = $1
+               AND reason_code = $2
+               AND session_key = $3
+               AND status != 'failed'
+               AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(message.target)
+        .bind(reason_code)
+        .bind(session_key)
+        .bind(LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(existing_id) = duplicate_id {
+            tracing::info!(
+                target = message.target,
+                reason_code,
+                session_key,
+                existing_id,
+                "suppressed duplicate outbox message"
+            );
+            return Ok(false);
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .execute(pool)
+    .await?;
+
+    Ok(true)
+}
+
+// When PG is configured, its outbox is authoritative; falling back to SQLite
+// would write rows no release worker is polling. In that mode, insert failures
+// must surface to the caller so it can choose a visible fallback.
+pub(crate) async fn enqueue_outbox_best_effort(
+    pg_pool: Option<&PgPool>,
+    db: Option<&Db>,
+    message: OutboxMessage<'_>,
+) -> bool {
+    if let Some(pool) = pg_pool {
+        return match enqueue_outbox_pg(pool, message).await {
+            Ok(enqueued) => enqueued,
+            Err(error) => {
+                tracing::warn!(
+                    target = message.target,
+                    bot = message.bot,
+                    source = message.source,
+                    "failed to enqueue outbox message via postgres: {error}"
+                );
+                false
+            }
+        };
+    }
+
+    let Some(db) = db else {
+        return false;
+    };
+    match db.separate_conn() {
+        Ok(conn) => match enqueue(&conn, message) {
+            Ok(enqueued) => enqueued,
+            Err(error) => {
+                tracing::warn!(
+                    target = message.target,
+                    bot = message.bot,
+                    source = message.source,
+                    "failed to enqueue outbox message via sqlite: {error}"
+                );
+                false
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                target = message.target,
+                bot = message.bot,
+                source = message.source,
+                "failed to open sqlite outbox connection: {error}"
+            );
+            false
+        }
+    }
+}
+
 pub(crate) async fn enqueue_lifecycle_notification_pg(
     pool: &PgPool,
     target: &str,

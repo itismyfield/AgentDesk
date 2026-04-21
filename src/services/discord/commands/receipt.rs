@@ -30,11 +30,15 @@ pub(in crate::services::discord) async fn cmd_receipt(
     let now = chrono::Utc::now();
     let (start, label) = match period_str {
         "ratelimit" => {
-            let window_start = ctx.data().shared.db.as_ref().and_then(|db| {
-                db.lock()
-                    .ok()
-                    .and_then(|conn| receipt::ratelimit_window_start(&conn))
-            });
+            let window_start = if let Some(pg_pool) = ctx.data().shared.pg_pool.as_ref() {
+                receipt::ratelimit_window_start_pg(pg_pool).await
+            } else {
+                ctx.data().shared.db.as_ref().and_then(|db| {
+                    db.lock()
+                        .ok()
+                        .and_then(|conn| receipt::ratelimit_window_start(&conn))
+                })
+            };
             (
                 window_start.unwrap_or_else(|| now - chrono::Duration::days(7)),
                 "Rate Limit Window",

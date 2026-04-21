@@ -148,7 +148,7 @@ pub(crate) async fn delete_pending_dm_reply_db(
 }
 
 pub(crate) async fn load_oldest_pending_dm_reply_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<Option<PendingDmReplyRecord>, String> {
@@ -175,6 +175,7 @@ pub(crate) async fn load_oldest_pending_dm_reply_db(
     }
 
     let conn = db
+        .ok_or("sqlite db unavailable for pending_dm_replies lookup")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     match conn.query_row(
@@ -248,7 +249,7 @@ pub(crate) async fn load_most_recent_consumed_dm_reply_db(
 }
 
 pub(crate) async fn mark_pending_dm_reply_consumed_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     reply_id: i64,
     updated_context_json: &str,
@@ -271,6 +272,7 @@ pub(crate) async fn mark_pending_dm_reply_consumed_db(
     }
 
     let conn = db
+        .ok_or("sqlite db unavailable for pending_dm_replies update")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     let updated = conn
@@ -337,7 +339,7 @@ pub(crate) async fn load_failed_consumed_dm_replies_db(
 }
 
 pub(crate) async fn mark_pending_dm_reply_notify_failed_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     reply_id: i64,
     error_text: &str,
@@ -362,6 +364,7 @@ pub(crate) async fn mark_pending_dm_reply_notify_failed_db(
     }
 
     let conn = db
+        .ok_or("sqlite db unavailable for pending_dm_replies update")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     conn.execute(

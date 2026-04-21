@@ -268,7 +268,7 @@ fn dm_reply_pending_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str)
         let db = db.clone();
         let user_id = user_id.to_string();
         return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            load_oldest_pending_dm_reply_db(&db, Some(&pool), &user_id).await
+            load_oldest_pending_dm_reply_db(Some(&db), Some(&pool), &user_id).await
         }) {
             Ok(Some(record)) => dm_reply_record_json(record, true),
             Ok(None) => r#"{"ok":false}"#.to_string(),
@@ -372,12 +372,13 @@ async fn consume_pending_dm_reply_db(
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<ConsumePendingDmReplyResult, String> {
-    let Some(record) = load_oldest_pending_dm_reply_db(db, pg_pool, user_id).await? else {
+    let Some(record) = load_oldest_pending_dm_reply_db(Some(db), pg_pool, user_id).await? else {
         return Ok(ConsumePendingDmReplyResult::NoPending);
     };
 
     let updated =
-        mark_pending_dm_reply_consumed_db(db, pg_pool, record.id, &record.context_json).await?;
+        mark_pending_dm_reply_consumed_db(Some(db), pg_pool, record.id, &record.context_json)
+            .await?;
     if !updated {
         return Ok(ConsumePendingDmReplyResult::AlreadyConsumed);
     }

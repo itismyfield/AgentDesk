@@ -4,8 +4,8 @@ use super::outbox::{
 };
 use super::resolve_channel_alias;
 use super::thread_reuse::{
-    clear_thread_for_channel, get_thread_for_channel, get_thread_for_channel_pg,
-    set_thread_for_channel, set_thread_for_channel_pg, try_reuse_thread,
+    clear_thread_for_channel, clear_thread_for_channel_pg, get_thread_for_channel,
+    get_thread_for_channel_pg, set_thread_for_channel, set_thread_for_channel_pg, try_reuse_thread,
 };
 use crate::db::agents::{
     resolve_agent_channel_for_provider_on_conn, resolve_agent_channel_for_provider_pg,
@@ -360,6 +360,7 @@ impl DispatchTransport for HttpDispatchTransport {
                 .ok_or_else(|| "no announce bot token".to_string())?;
             send_review_result_message_via_http(
                 &db,
+                transport.pg_pool.as_ref(),
                 &card_id,
                 channel_id_num,
                 &message,
@@ -2835,13 +2836,19 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
 
 async fn resolve_review_followup_target_channel(
     db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
     client: &reqwest::Client,
     token: &str,
     discord_api_base: &str,
     card_id: &str,
     channel_id_num: u64,
 ) -> Result<String, String> {
-    let active_thread_id: Option<String> = {
+    let active_thread_id: Option<String> = if let Some(pool) = pg_pool {
+        match get_thread_for_channel_pg(pool, card_id, channel_id_num).await? {
+            Some(thread_id) => Some(thread_id),
+            None => latest_work_dispatch_thread_pg(pool, card_id).await?,
+        }
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for thread lookup".into()),
@@ -2876,7 +2883,13 @@ async fn resolve_review_followup_target_channel(
             "[review] Thread {thread_id} unavailable for review followup: HTTP {}",
             response.status()
         );
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            if let Err(error) = clear_thread_for_channel_pg(pool, card_id, channel_id_num).await {
+                tracing::warn!(
+                    "[review] failed to clear postgres thread mapping for {card_id}/{channel_id_num}: {error}"
+                );
+            }
+        } else if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, channel_id_num);
         }
         return Ok(channel_id);
@@ -2899,7 +2912,13 @@ async fn resolve_review_followup_target_channel(
         .unwrap_or(false);
     if locked {
         tracing::warn!("[review] Thread {thread_id} is locked, falling back to channel");
-        if let Ok(conn) = db.lock() {
+        if let Some(pool) = pg_pool {
+            if let Err(error) = clear_thread_for_channel_pg(pool, card_id, channel_id_num).await {
+                tracing::warn!(
+                    "[review] failed to clear locked postgres thread mapping for {card_id}/{channel_id_num}: {error}"
+                );
+            }
+        } else if let Ok(conn) = db.lock() {
             clear_thread_for_channel(&conn, card_id, channel_id_num);
         }
         return Ok(channel_id);
@@ -3010,8 +3029,42 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
     verdict: &str,
     transport: &T,
 ) -> Result<(), String> {
+    let pg_pool = transport.pg_pool();
+
     // Look up card info
-    let (agent_id, title, issue_url): (String, String, Option<String>) = {
+    let (agent_id, title, issue_url): (String, String, Option<String>) = if let Some(pool) = pg_pool
+    {
+        let row = sqlx::query(
+            "SELECT assigned_agent_id, title, github_issue_url
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres card {card_id} for review followup: {error}"))?;
+        let Some(row) = row else {
+            return Err(format!("card {card_id} not found or missing agent"));
+        };
+
+        let agent_id: Option<String> = row
+            .try_get("assigned_agent_id")
+            .map_err(|error| format!("read postgres assigned_agent_id for {card_id}: {error}"))?;
+        let title: String = row
+            .try_get("title")
+            .map_err(|error| format!("read postgres title for {card_id}: {error}"))?;
+        let issue_url: Option<String> = row
+            .try_get("github_issue_url")
+            .map_err(|error| format!("read postgres github_issue_url for {card_id}: {error}"))?;
+
+        (
+            agent_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("card {card_id} not found or missing agent"))?,
+            title,
+            issue_url,
+        )
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for card lookup".into()),
@@ -3028,7 +3081,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
     };
-    let review_dispatch_context: Option<String> = {
+    let review_dispatch_context: Option<String> = if let Some(pool) = pg_pool {
+        sqlx::query_scalar::<_, Option<String>>("SELECT context FROM task_dispatches WHERE id = $1")
+            .bind(review_dispatch_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                format!("load postgres review dispatch context for {review_dispatch_id}: {error}")
+            })?
+            .flatten()
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for review dispatch lookup".into()),
@@ -3052,20 +3114,33 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         // follow-up state, don't enqueue a generic review-decision dispatch on
         // top of it.
         {
-            let skip = db
-                .lock()
+            let skip = if let Some(pool) = pg_pool {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT review_status FROM kanban_cards WHERE id = $1",
+                )
+                .bind(card_id)
+                .fetch_optional(pool)
+                .await
                 .ok()
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT review_status FROM kanban_cards WHERE id = ?1",
-                        [card_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .ok()
-                    .flatten()
-                })
+                .flatten()
+                .flatten()
                 .map(|s| s == "rework_pending" || s == "dilemma_pending")
-                .unwrap_or(false);
+                .unwrap_or(false)
+            } else {
+                db.lock()
+                    .ok()
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT review_status FROM kanban_cards WHERE id = ?1",
+                            [card_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .map(|s| s == "rework_pending" || s == "dilemma_pending")
+                    .unwrap_or(false)
+            };
             if skip {
                 tracing::info!(
                     "[review-followup] skipping review-decision for {card_id} — review automation already resolved the follow-up state"
@@ -3103,25 +3178,25 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 
         return match create_review_decision_followup_dispatch(
             db,
-            transport.pg_pool(),
+            pg_pool,
             card_id,
             &agent_id,
             &format!("[리뷰 검토] {title}"),
             &serde_json::Value::Object(decision_context),
         ) {
             Ok((id, _old_status, _reused)) => {
-                if let Ok(conn) = db.lock() {
-                    crate::engine::ops::review_state_sync_on_conn(
-                        &conn,
-                        &serde_json::json!({
-                            "card_id": card_id,
-                            "state": "suggestion_pending",
-                            "pending_dispatch_id": id,
-                            "last_verdict": verdict,
-                        })
-                        .to_string(),
-                    );
-                }
+                let payload = serde_json::json!({
+                    "card_id": card_id,
+                    "state": "suggestion_pending",
+                    "pending_dispatch_id": id,
+                    "last_verdict": verdict,
+                })
+                .to_string();
+                let _ = crate::engine::ops::review_state_sync_with_backends(
+                    Some(db),
+                    pg_pool,
+                    &payload,
+                );
                 tracing::info!(
                     "[review-followup] enqueued review-decision dispatch {} for card {}",
                     id,
@@ -3140,7 +3215,13 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         };
     }
 
-    let channel_id = {
+    let channel_id = if let Some(pool) = pg_pool {
+        resolve_review_followup_channel_pg(pool, &agent_id)
+            .await?
+            .ok_or_else(|| {
+                format!("agent {agent_id} missing primary discord channel for review followup")
+            })?
+    } else {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for primary channel lookup".into()),
@@ -3272,6 +3353,7 @@ fn create_review_decision_followup_dispatch_sqlite_test(
 
 async fn send_review_result_message_via_http(
     db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
     card_id: &str,
     channel_id_num: u64,
     message: &str,
@@ -3282,6 +3364,7 @@ async fn send_review_result_message_via_http(
     let client = reqwest::Client::new();
     let target_channel = resolve_review_followup_target_channel(
         db,
+        pg_pool,
         &client,
         token,
         discord_api_base,
@@ -4845,6 +4928,55 @@ mod tests {
         .unwrap();
     }
 
+    async fn insert_review_followup_fixture_pg(pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("agent-1")
+        .bind("Agent 1")
+        .bind("123")
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, channel_thread_map,
+                created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW()
+             )",
+        )
+        .bind("card-review")
+        .bind("Review Card")
+        .bind("review")
+        .bind("agent-1")
+        .bind("dispatch-review")
+        .bind(r#"{"123":"thread-primary"}"#)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                NOW(), NOW()
+             )",
+        )
+        .bind("dispatch-review")
+        .bind("card-review")
+        .bind("agent-1")
+        .bind("review")
+        .bind("completed")
+        .bind("[Review R1] card-review")
+        .bind(r#"{"from_provider":"claude"}"#)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn review_pass_notification_unarchives_and_posts_to_thread() {
         let (base_url, state, server_handle) = spawn_mock_discord_server(true).await;
@@ -5114,6 +5246,45 @@ mod tests {
                 .contains(&"POST /channels/123/messages".to_string()),
             "main channel fallback must not happen when the mapped thread still exists"
         );
+    }
+
+    #[tokio::test]
+    async fn review_pass_notification_uses_postgres_thread_map_and_channel_resolution() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(true).await;
+        let db = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_review_followup_fixture_pg(&pool).await;
+
+        let transport = HttpDispatchTransport {
+            announce_bot_token: Some("announce-token".to_string()),
+            discord_api_base: base_url.clone(),
+            thread_owner_user_id: None,
+            pg_pool: Some(pool.clone()),
+        };
+        send_review_result_to_primary_with_context_and_transport(
+            &db,
+            "card-review",
+            "dispatch-review",
+            "pass",
+            &transport,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-primary",
+                "PATCH /channels/thread-primary",
+                "POST /channels/thread-primary/messages",
+            ]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

@@ -146,7 +146,7 @@ fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
 }
 
 async fn persist_recovered_transcript(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -411,9 +411,10 @@ pub(super) async fn restore_inflight_turns(
                 let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
                 let duration_ms =
                     recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-                let has_completion_evidence = if let Some(db) = shared.db.as_ref() {
-                    super::turn_bridge::persist_turn_analytics_row(
-                        db,
+                let has_completion_evidence = if shared.db.is_some() || shared.pg_pool.is_some() {
+                    super::turn_bridge::persist_turn_analytics_row_with_handles(
+                        shared.db.as_ref(),
+                        shared.pg_pool.as_ref(),
                         provider,
                         channel_id,
                         user_msg_id,
@@ -430,7 +431,7 @@ pub(super) async fn restore_inflight_turns(
                         duration_ms,
                     );
                     persist_recovered_transcript(
-                        db,
+                        shared.db.as_ref(),
                         shared.pg_pool.as_ref(),
                         provider,
                         &state,
@@ -488,9 +489,22 @@ pub(super) async fn restore_inflight_turns(
                                     tracing::info!(
                                         "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
                                     );
-                                    crate::server::routes::dispatches::queue_dispatch_followup(
-                                        db, &did,
-                                    );
+                                    if let Some(pool) = shared.pg_pool.as_ref() {
+                                        if let Err(error) = crate::server::routes::dispatches::queue_dispatch_followup_pg(
+                                            pool,
+                                            &did,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "  [{ts}] ⚠ recovery: failed to enqueue followup for {did}: {error}"
+                                            );
+                                        }
+                                    } else {
+                                        crate::server::routes::dispatches::queue_dispatch_followup(
+                                            db, &did,
+                                        );
+                                    }
                                     dispatch_completed = true;
                                     break;
                                 }
@@ -505,36 +519,14 @@ pub(super) async fn restore_inflight_turns(
                                 }
                             }
                         }
-                        // All retries exhausted — DB fallback via pool, then runtime-root
+                        // All retries exhausted — use the canonical runtime-root
+                        // Postgres fallback instead of mutating legacy SQLite state.
                         if !dispatch_completed {
-                            let pool_ok = db.separate_conn().ok().map_or(false, |conn| {
-                                let changed = crate::dispatch::set_dispatch_status_on_conn(
-                                    &conn,
-                                    did.as_str(),
-                                    "completed",
-                                    Some(&fallback_result),
-                                    "recovery_db_fallback",
-                                    Some(&["pending", "dispatched"]),
-                                    true,
-                                )
-                                .unwrap_or(0);
-                                if changed > 0 {
-                                    conn.execute(
-                                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                        libsql_rusqlite::params![format!("reconcile_dispatch:{did}"), did.as_str()],
-                                    ).ok();
-                                }
-                                changed > 0
-                            });
-                            if pool_ok {
-                                dispatch_completed = true;
-                            } else {
-                                dispatch_completed =
-                                    super::turn_bridge::runtime_db_fallback_complete_with_result(
-                                        did,
-                                        &fallback_result,
-                                    );
-                            }
+                            dispatch_completed =
+                                super::turn_bridge::runtime_db_fallback_complete_with_result(
+                                    did,
+                                    &fallback_result,
+                                );
                         }
                     } else {
                         // Db/Engine not available — fall back to direct dispatch update with retry
@@ -963,9 +955,10 @@ pub(super) async fn restore_inflight_turns(
             let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-            let has_completion_evidence = if let Some(db) = shared.db.as_ref() {
-                super::turn_bridge::persist_turn_analytics_row(
-                    db,
+            let has_completion_evidence = if shared.db.is_some() || shared.pg_pool.is_some() {
+                super::turn_bridge::persist_turn_analytics_row_with_handles(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
                     provider,
                     channel_id,
                     user_msg_id,
@@ -982,7 +975,7 @@ pub(super) async fn restore_inflight_turns(
                     duration_ms,
                 );
                 persist_recovered_transcript(
-                    db,
+                    shared.db.as_ref(),
                     shared.pg_pool.as_ref(),
                     provider,
                     &state,
@@ -1017,16 +1010,10 @@ pub(super) async fn restore_inflight_turns(
                 });
             let mut dispatch_completed = recovered_dispatch_id.is_none();
             if let Some(ref did) = recovered_dispatch_id {
-                let dispatch_type = shared.db.as_ref().and_then(|db| {
-                    db.separate_conn().ok().and_then(|conn| {
-                        conn.query_row(
-                            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
-                            [did.as_str()],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                    })
-                });
+                let dispatch_type = super::internal_api::lookup_dispatch_type(did)
+                    .await
+                    .ok()
+                    .flatten();
 
                 match dispatch_type.as_deref() {
                     Some("implementation") | Some("rework") => {
@@ -1049,9 +1036,22 @@ pub(super) async fn restore_inflight_turns(
                                         tracing::info!(
                                             "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
                                         );
-                                        crate::server::routes::dispatches::queue_dispatch_followup(
-                                            db, did,
-                                        );
+                                        if let Some(pool) = shared.pg_pool.as_ref() {
+                                            if let Err(error) = crate::server::routes::dispatches::queue_dispatch_followup_pg(
+                                                pool,
+                                                did,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "  [{ts}] ⚠ recovery: failed to enqueue followup for {did}: {error}"
+                                                );
+                                            }
+                                        } else {
+                                            crate::server::routes::dispatches::queue_dispatch_followup(
+                                                db, did,
+                                            );
+                                        }
                                         dispatch_completed = true;
                                         break;
                                     }
@@ -1190,7 +1190,9 @@ pub(super) async fn restore_inflight_turns(
             )
             .await;
             if let Some(ref sk) = state.session_key {
-                crate::services::termination_audit::record_termination(
+                crate::services::termination_audit::record_termination_with_handles(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
                     sk,
                     state.dispatch_id.as_deref(),
                     "recovery",
@@ -1254,13 +1256,20 @@ pub(super) async fn restore_inflight_turns(
                 .map(|(_, ch)| ch)
             });
             {
+                let sqlite_settings_db = if shared.pg_pool.is_some() {
+                    None
+                } else {
+                    shared.db.as_ref()
+                };
                 let last_path = load_last_session_path(
-                    shared.db.as_ref(),
+                    sqlite_settings_db,
+                    shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     channel_id.get(),
                 );
                 let saved_remote = load_last_remote_profile(
-                    shared.db.as_ref(),
+                    sqlite_settings_db,
+                    shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     channel_id.get(),
                 );
@@ -1368,10 +1377,23 @@ pub(super) async fn restore_inflight_turns(
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
 
-        let last_path =
-            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
-        let saved_remote =
-            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+        let sqlite_settings_db = if shared.pg_pool.is_some() {
+            None
+        } else {
+            shared.db.as_ref()
+        };
+        let last_path = load_last_session_path(
+            sqlite_settings_db,
+            shared.pg_pool.as_ref(),
+            &shared.token_hash,
+            channel_id.get(),
+        );
+        let saved_remote = load_last_remote_profile(
+            sqlite_settings_db,
+            shared.pg_pool.as_ref(),
+            &shared.token_hash,
+            channel_id.get(),
+        );
 
         let cancel_token = Arc::new(CancelToken::new());
         if let Ok(mut guard) = cancel_token.tmux_session.lock() {
@@ -2126,7 +2148,7 @@ mod tests {
 
         assert!(
             persist_recovered_transcript(
-                &db,
+                Some(&db),
                 None,
                 &ProviderKind::Codex,
                 &state,

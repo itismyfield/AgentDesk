@@ -458,7 +458,50 @@ fn worktree_is_squash_merged(
     Ok(false)
 }
 
-fn disconnect_sessions_for_worktree_path(db: Option<&crate::db::Db>, worktree_path: &str) {
+fn disconnect_sessions_for_worktree_path(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    worktree_path: &str,
+) {
+    if let Some(pool) = pg_pool {
+        let worktree_path_owned = worktree_path.to_string();
+        match crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let updated = sqlx::query(
+                    "UPDATE sessions
+                     SET cwd = NULL,
+                         status = 'disconnected',
+                         active_dispatch_id = NULL,
+                         claude_session_id = NULL
+                     WHERE cwd = $1",
+                )
+                .bind(&worktree_path_owned)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|err| {
+                    format!(
+                        "disconnect pg sessions for removed worktree {worktree_path_owned}: {err}"
+                    )
+                })?
+                .rows_affected();
+                Ok(updated)
+            },
+            |error| error,
+        ) {
+            Ok(updated) if updated > 0 => tracing::info!(
+                "Disconnected {updated} PG session(s) referencing removed worktree {}",
+                worktree_path
+            ),
+            Ok(_) => {}
+            Err(err) => tracing::warn!(
+                "Failed to disconnect PG sessions for removed worktree {}: {}",
+                worktree_path,
+                err
+            ),
+        }
+    }
+
     let Some(db) = db else {
         return;
     };
@@ -481,12 +524,12 @@ fn disconnect_sessions_for_worktree_path(db: Option<&crate::db::Db>, worktree_pa
         [worktree_path],
     ) {
         Ok(updated) if updated > 0 => tracing::info!(
-            "Disconnected {updated} session(s) referencing removed worktree {}",
+            "Disconnected {updated} SQLite session(s) referencing removed worktree {}",
             worktree_path
         ),
         Ok(_) => {}
         Err(err) => tracing::warn!(
-            "Failed to disconnect sessions for removed worktree {}: {}",
+            "Failed to disconnect SQLite sessions for removed worktree {}: {}",
             worktree_path,
             err
         ),
@@ -516,7 +559,11 @@ fn worktree_has_unmerged_commits(wt_info: &WorktreeInfo) -> Result<bool, String>
 }
 
 /// Clean up a git worktree after session ends.
-pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &WorktreeInfo) {
+pub(super) fn cleanup_git_worktree(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    wt_info: &WorktreeInfo,
+) {
     let ts = chrono::Local::now().format("%H:%M:%S");
 
     let has_changes = match worktree_has_local_changes(wt_info) {
@@ -592,7 +639,7 @@ pub(super) fn cleanup_git_worktree(db: Option<&crate::db::Db>, wt_info: &Worktre
             ])
             .output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
-        disconnect_sessions_for_worktree_path(db, &wt_info.worktree_path);
+        disconnect_sessions_for_worktree_path(db, pg_pool, &wt_info.worktree_path);
         if let Ok(output) = branch_delete
             && !output.status.success()
         {
@@ -654,6 +701,11 @@ pub(super) async fn auto_restore_session_with_dm_hint(
     let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let provider = settings.provider.clone();
+        let sqlite_settings_db = if shared.pg_pool.is_some() {
+            None
+        } else {
+            shared.db.as_ref()
+        };
         let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
             .or_else(|| {
                 if is_dm {
@@ -663,8 +715,12 @@ pub(super) async fn auto_restore_session_with_dm_hint(
                     None
                 }
             });
-        let saved_remote =
-            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+        let saved_remote = load_last_remote_profile(
+            sqlite_settings_db,
+            shared.pg_pool.as_ref(),
+            &shared.token_hash,
+            channel_id.get(),
+        );
 
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
@@ -673,6 +729,34 @@ pub(super) async fn auto_restore_session_with_dm_hint(
             let tmux_name = provider.build_tmux_session_name(ch);
             let session_keys =
                 build_session_key_candidates(&shared.token_hash, &provider, &tmux_name);
+            let saved_remote_for_pg = saved_remote.clone();
+            if let Some(pg_pool) = shared.pg_pool.as_ref() {
+                return crate::utils::async_bridge::block_on_pg_result(
+                    pg_pool,
+                    move |pool| async move {
+                        for session_key in session_keys {
+                            let path = sqlx::query_scalar::<_, String>(
+                                "SELECT cwd FROM sessions WHERE session_key = $1 LIMIT 1",
+                            )
+                            .bind(&session_key)
+                            .fetch_optional(&pool)
+                            .await
+                            .map_err(|error| format!("load session cwd {session_key}: {error}"))?;
+                            if let Some(path) = path.filter(|p| {
+                                !p.is_empty()
+                                    && session_path_is_usable(p, saved_remote_for_pg.as_deref())
+                            }) {
+                                return Ok(Some(path));
+                            }
+                        }
+                        Ok(None)
+                    },
+                    |message| message,
+                )
+                .ok()
+                .flatten();
+            }
+
             shared.db.as_ref().and_then(|db| {
                 db.lock().ok().and_then(|conn| {
                     session_keys.iter().find_map(|session_key| {
@@ -689,8 +773,12 @@ pub(super) async fn auto_restore_session_with_dm_hint(
                 })
             })
         });
-        let persisted_path =
-            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+        let persisted_path = load_last_session_path(
+            sqlite_settings_db,
+            shared.pg_pool.as_ref(),
+            &shared.token_hash,
+            channel_id.get(),
+        );
 
         if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref())
             && configured != restored
@@ -1300,6 +1388,7 @@ mod tests {
 
         cleanup_git_worktree(
             None,
+            None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
                 worktree_path: worktree_dir.to_string_lossy().to_string(),
@@ -1343,6 +1432,7 @@ mod tests {
 
         cleanup_git_worktree(
             None,
+            None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
                 worktree_path,
@@ -1381,6 +1471,7 @@ mod tests {
         run_git(repo_dir, &["push", "origin", "main"]);
 
         cleanup_git_worktree(
+            None,
             None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
@@ -1433,6 +1524,7 @@ mod tests {
 
         cleanup_git_worktree(
             None,
+            None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
                 worktree_path: worktree_dir.to_string_lossy().to_string(),
@@ -1470,6 +1562,7 @@ mod tests {
         std::fs::write(worktree_dir.join("dirty.txt"), "keep me\n").unwrap();
 
         cleanup_git_worktree(
+            None,
             None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
@@ -1528,6 +1621,7 @@ mod tests {
 
         cleanup_git_worktree(
             Some(&db),
+            None,
             &WorktreeInfo {
                 original_path: repo_dir.to_string_lossy().to_string(),
                 worktree_path: worktree_dir.to_string_lossy().to_string(),
@@ -1571,6 +1665,7 @@ mod tests {
         );
 
         cleanup_git_worktree(
+            None,
             None,
             &WorktreeInfo {
                 original_path: repo_dir

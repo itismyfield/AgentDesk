@@ -1,9 +1,12 @@
 use anyhow::{Result, anyhow};
 use libsql_rusqlite::{Connection, params}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 use crate::db::Db;
-use crate::db::session_agent_resolution::resolve_agent_id_for_session;
+use crate::db::session_agent_resolution::{
+    resolve_agent_id_for_session, resolve_agent_id_for_session_pg,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
@@ -93,6 +96,19 @@ pub fn upsert_turn_owned_on_separate_conn(db: &Db, entry: &PersistTurnOwned) -> 
         .separate_conn()
         .map_err(|e| anyhow!("db separate_conn failed while persisting turn: {e}"))?;
     upsert_turn_on_conn(&mut conn, entry.as_borrowed())
+}
+
+pub async fn upsert_turn_owned_db(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    entry: &PersistTurnOwned,
+) -> Result<()> {
+    if let Some(pool) = pg_pool {
+        return upsert_turn_owned_pg(pool, entry).await;
+    }
+
+    let db = db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
+    upsert_turn_owned_on_separate_conn(db, entry)
 }
 
 pub fn upsert_turn_on_conn(conn: &mut Connection, entry: PersistTurn<'_>) -> Result<()> {
@@ -189,6 +205,111 @@ pub fn upsert_turn_on_conn(conn: &mut Connection, entry: PersistTurn<'_>) -> Res
             u64_to_i64(entry.token_usage.output_tokens),
         ],
     )?;
+
+    Ok(())
+}
+
+async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result<()> {
+    let turn_id = entry.turn_id.trim();
+    if turn_id.is_empty() {
+        return Err(anyhow!("turn_id is required"));
+    }
+
+    let channel_id = entry.channel_id.trim();
+    if channel_id.is_empty() {
+        return Err(anyhow!("channel_id is required"));
+    }
+
+    let session_key = normalized_opt(entry.session_key.as_deref());
+    let thread_id = normalized_opt(entry.thread_id.as_deref());
+    let thread_title = normalized_opt(entry.thread_title.as_deref());
+    let provider = normalized_opt(entry.provider.as_deref());
+    let session_id = normalized_opt(entry.session_id.as_deref());
+    let dispatch_id = normalized_opt(entry.dispatch_id.as_deref());
+    let started_at = normalized_opt(entry.started_at.as_deref()).unwrap_or_else(now_string);
+    let finished_at = normalized_opt(entry.finished_at.as_deref()).unwrap_or_else(now_string);
+    let agent_id = resolve_agent_id_for_session_pg(
+        pool,
+        entry.agent_id.as_deref(),
+        session_key.as_deref(),
+        None,
+        thread_id.as_deref(),
+        dispatch_id.as_deref(),
+    )
+    .await;
+
+    sqlx::query(
+        "INSERT INTO turns (
+            turn_id,
+            session_key,
+            thread_id,
+            thread_title,
+            channel_id,
+            agent_id,
+            provider,
+            session_id,
+            dispatch_id,
+            started_at,
+            finished_at,
+            duration_ms,
+            input_tokens,
+            cache_create_tokens,
+            cache_read_tokens,
+            output_tokens
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            CAST($10 AS timestamptz),
+            CAST($11 AS timestamptz),
+            $12, $13, $14, $15, $16
+         )
+         ON CONFLICT(turn_id) DO UPDATE SET
+            session_key = COALESCE(EXCLUDED.session_key, turns.session_key),
+            thread_id = COALESCE(EXCLUDED.thread_id, turns.thread_id),
+            thread_title = COALESCE(EXCLUDED.thread_title, turns.thread_title),
+            channel_id = EXCLUDED.channel_id,
+            agent_id = COALESCE(EXCLUDED.agent_id, turns.agent_id),
+            provider = COALESCE(EXCLUDED.provider, turns.provider),
+            session_id = COALESCE(EXCLUDED.session_id, turns.session_id),
+            dispatch_id = COALESCE(EXCLUDED.dispatch_id, turns.dispatch_id),
+            started_at = COALESCE(EXCLUDED.started_at, turns.started_at),
+            finished_at = COALESCE(EXCLUDED.finished_at, turns.finished_at),
+            duration_ms = COALESCE(EXCLUDED.duration_ms, turns.duration_ms),
+            input_tokens = CASE
+                WHEN EXCLUDED.input_tokens > 0 THEN EXCLUDED.input_tokens
+                ELSE turns.input_tokens
+            END,
+            cache_create_tokens = CASE
+                WHEN EXCLUDED.cache_create_tokens > 0 THEN EXCLUDED.cache_create_tokens
+                ELSE turns.cache_create_tokens
+            END,
+            cache_read_tokens = CASE
+                WHEN EXCLUDED.cache_read_tokens > 0 THEN EXCLUDED.cache_read_tokens
+                ELSE turns.cache_read_tokens
+            END,
+            output_tokens = CASE
+                WHEN EXCLUDED.output_tokens > 0 THEN EXCLUDED.output_tokens
+                ELSE turns.output_tokens
+            END",
+    )
+    .bind(turn_id)
+    .bind(session_key)
+    .bind(thread_id)
+    .bind(thread_title)
+    .bind(channel_id)
+    .bind(agent_id)
+    .bind(provider)
+    .bind(session_id)
+    .bind(dispatch_id)
+    .bind(started_at)
+    .bind(finished_at)
+    .bind(entry.duration_ms)
+    .bind(u64_to_i64(entry.token_usage.input_tokens))
+    .bind(u64_to_i64(entry.token_usage.cache_create_tokens))
+    .bind(u64_to_i64(entry.token_usage.cache_read_tokens))
+    .bind(u64_to_i64(entry.token_usage.output_tokens))
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow!("persist postgres turn failed: {e}"))?;
 
     Ok(())
 }

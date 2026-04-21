@@ -182,156 +182,158 @@ pub async fn submit_verdict(
         );
     }
 
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
+    let effective_commit: Option<String> = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
 
-    // A: Validate dispatch_type — only 'review' dispatches should go through the verdict API.
-    //    implementation/rework dispatches have their own completion path (turn_bridge explicit completion),
-    //    review-decision dispatches should use /api/review-decision (accept/dispute/dismiss).
-    let dispatch_type: Option<String> = conn
-        .query_row(
-            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
-            [&body.dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
+        // A: Validate dispatch_type — only 'review' dispatches should go through the verdict API.
+        //    implementation/rework dispatches have their own completion path (turn_bridge explicit completion),
+        //    review-decision dispatches should use /api/review-decision (accept/dispute/dismiss).
+        let dispatch_type: Option<String> = conn
+            .query_row(
+                "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+                [&body.dispatch_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
 
-    match dispatch_type.as_deref() {
-        Some("review") => {} // allowed
-        Some(dtype) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("review-verdict only accepts 'review' dispatches, got '{}'", dtype)
-                })),
-            );
-        }
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "dispatch not found"})),
-            );
-        }
-    }
-
-    // B: Cross-provider validation for counter-model reviews.
-    //    When a review dispatch has from_provider/target_provider in context,
-    //    reject same-provider verdict submissions (self-review).
-    let dispatch_context_str: Option<String> = conn
-        .query_row(
-            "SELECT context FROM task_dispatches WHERE id = ?1",
-            [&body.dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    let dispatch_context: serde_json::Value = dispatch_context_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(json!({}));
-
-    let from_provider = dispatch_context
-        .get("from_provider")
-        .and_then(|v| v.as_str());
-    let target_provider = dispatch_context
-        .get("target_provider")
-        .and_then(|v| v.as_str());
-
-    if let (Some(from_p), Some(target_p)) = (from_provider, target_provider) {
-        // This is a counter-model review dispatch with provider tracking.
-        // Require provider field and normalize via ProviderKind.
-        match &body.provider {
-            None => {
+        match dispatch_type.as_deref() {
+            Some("review") => {} // allowed
+            Some(dtype) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "error": "provider field is required for counter-model review verdicts"
+                        "error": format!("review-verdict only accepts 'review' dispatches, got '{}'", dtype)
                     })),
                 );
             }
-            Some(raw_submitter) => {
-                let submitter = ProviderKind::from_str(raw_submitter);
-                let from_kind = ProviderKind::from_str(from_p);
-                let target_kind = ProviderKind::from_str(target_p);
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "dispatch not found"})),
+                );
+            }
+        }
 
-                match submitter {
-                    None => {
-                        // Unknown/unsupported provider string
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!(
-                                    "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', or 'qwen'",
-                                    raw_submitter
-                                )
-                            })),
-                        );
+        // B: Cross-provider validation for counter-model reviews.
+        //    When a review dispatch has from_provider/target_provider in context,
+        //    reject same-provider verdict submissions (self-review).
+        let dispatch_context_str: Option<String> = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&body.dispatch_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        let dispatch_context: serde_json::Value = dispatch_context_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(json!({}));
+
+        let from_provider = dispatch_context
+            .get("from_provider")
+            .and_then(|v| v.as_str());
+        let target_provider = dispatch_context
+            .get("target_provider")
+            .and_then(|v| v.as_str());
+
+        if let (Some(from_p), Some(target_p)) = (from_provider, target_provider) {
+            // This is a counter-model review dispatch with provider tracking.
+            // Require provider field and normalize via ProviderKind.
+            match &body.provider {
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "provider field is required for counter-model review verdicts"
+                        })),
+                    );
+                }
+                Some(raw_submitter) => {
+                    let submitter = ProviderKind::from_str(raw_submitter);
+                    let from_kind = ProviderKind::from_str(from_p);
+                    let target_kind = ProviderKind::from_str(target_p);
+
+                    match submitter {
+                        None => {
+                            // Unknown/unsupported provider string
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!(
+                                        "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', or 'qwen'",
+                                        raw_submitter
+                                    )
+                                })),
+                            );
+                        }
+                        Some(ref s) if Some(s) == from_kind.as_ref() => {
+                            // Same provider as implementer → self-review blocked
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!(
+                                        "self-review rejected: submitting provider '{}' matches implementing provider",
+                                        s.as_str()
+                                    )
+                                })),
+                            );
+                        }
+                        Some(ref s) if target_kind.is_some() && Some(s) != target_kind.as_ref() => {
+                            // Known provider but doesn't match expected reviewer
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!(
+                                        "provider mismatch: expected '{}' but got '{}'",
+                                        target_p, s.as_str()
+                                    )
+                                })),
+                            );
+                        }
+                        _ => {} // Normalized cross-provider match → allowed
                     }
-                    Some(ref s) if Some(s) == from_kind.as_ref() => {
-                        // Same provider as implementer → self-review blocked
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!(
-                                    "self-review rejected: submitting provider '{}' matches implementing provider",
-                                    s.as_str()
-                                )
-                            })),
-                        );
-                    }
-                    Some(ref s) if target_kind.is_some() && Some(s) != target_kind.as_ref() => {
-                        // Known provider but doesn't match expected reviewer
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!(
-                                    "provider mismatch: expected '{}' but got '{}'",
-                                    target_p, s.as_str()
-                                )
-                            })),
-                        );
-                    }
-                    _ => {} // Normalized cross-provider match → allowed
                 }
             }
         }
-    }
 
-    // C: Validate reviewed commit — the dispatch context stores the HEAD that was
-    //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
-    let stored_reviewed_commit: Option<String> = dispatch_context
-        .get("reviewed_commit")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        // C: Validate reviewed commit — the dispatch context stores the HEAD that was
+        //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
+        let stored_reviewed_commit: Option<String> = dispatch_context
+            .get("reviewed_commit")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-    let effective_commit: Option<String> = match (&body.commit, &stored_reviewed_commit) {
-        (Some(submitted), Some(stored)) => {
-            if submitted != stored {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!(
-                            "commit mismatch: submitted {} but dispatch was created for {}",
-                            submitted, stored
-                        )
-                    })),
-                );
+        match (&body.commit, &stored_reviewed_commit) {
+            (Some(submitted), Some(stored)) => {
+                if submitted != stored {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!(
+                                "commit mismatch: submitted {} but dispatch was created for {}",
+                                submitted, stored
+                            )
+                        })),
+                    );
+                }
+                Some(stored.clone())
             }
-            Some(stored.clone())
+            // body.commit is None → use stored reviewed_commit (no HEAD fallback)
+            (None, stored) => stored.clone(),
+            // No stored commit (legacy dispatch) → accept body.commit as-is
+            (submitted, None) => submitted.clone(),
         }
-        // body.commit is None → use stored reviewed_commit (no HEAD fallback)
-        (None, stored) => stored.clone(),
-        // No stored commit (legacy dispatch) → accept body.commit as-is
-        (submitted, None) => submitted.clone(),
     };
 
     // Build result JSON
@@ -351,7 +353,6 @@ pub async fn submit_verdict(
     // #143: Mark dispatch completed via shared helper (DB-only, no OnDispatchCompleted).
     // Review verdict fires OnReviewVerdict — specialized hook, not the generic completion hook.
     // Cancelled dispatches must NOT be promoted to completed (review loop guard #80).
-    drop(conn);
     let updated = match crate::dispatch::mark_dispatch_completed(
         &state.db,
         &body.dispatch_id,
@@ -471,7 +472,18 @@ pub async fn submit_verdict(
             body.notes.as_deref().or(body.feedback.as_deref()),
         );
 
-        super::super::dispatches::queue_dispatch_followup(&state.db, &body.dispatch_id);
+        if let Some(pool) = state.pg_pool.as_ref() {
+            if let Err(error) =
+                super::super::dispatches::queue_dispatch_followup_pg(pool, &body.dispatch_id).await
+            {
+                tracing::warn!(
+                    dispatch_id = %body.dispatch_id,
+                    "failed to enqueue review followup: {error}"
+                );
+            }
+        } else {
+            super::super::dispatches::queue_dispatch_followup(&state.db, &body.dispatch_id);
+        }
     }
 
     // #119: TN is recorded when a pass-reviewed card reaches done (see kanban.rs

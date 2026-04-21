@@ -245,15 +245,19 @@ pub(in crate::services::discord) async fn notify_turn_stop(
     let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider)
         .await
         .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
-    if let Some(db) = shared.db.as_ref() {
-        crate::services::message_outbox::enqueue_lifecycle_notification(
-            db,
-            &format!("channel:{}", channel_id.get()),
-            Some(&session_key),
-            "lifecycle.stop_turn",
-            &format!("🛑 현재 턴 중단 ({stop_source}) — tmux는 유지됩니다."),
-        );
-    }
+    let sqlite_runtime_db = if shared.pg_pool.is_some() {
+        None
+    } else {
+        shared.db.as_ref()
+    };
+    crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+        sqlite_runtime_db,
+        shared.pg_pool.as_ref(),
+        &format!("channel:{}", channel_id.get()),
+        Some(&session_key),
+        "lifecycle.stop_turn",
+        &format!("🛑 현재 턴 중단 ({stop_source}) — tmux는 유지됩니다."),
+    );
 }
 
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
@@ -392,15 +396,19 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     }
 
     // Notify bot message for session clear visibility
-    if let Some(db) = shared.db.as_ref() {
-        crate::services::message_outbox::enqueue_lifecycle_notification(
-            db,
-            &format!("channel:{}", channel_id.get()),
-            session_key.as_deref(),
-            "lifecycle.soft_clear",
-            &format!("🧹 세션 클리어 ({clear_source})"),
-        );
-    }
+    let sqlite_runtime_db = if shared.pg_pool.is_some() {
+        None
+    } else {
+        shared.db.as_ref()
+    };
+    crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+        sqlite_runtime_db,
+        shared.pg_pool.as_ref(),
+        &format!("channel:{}", channel_id.get()),
+        session_key.as_deref(),
+        "lifecycle.soft_clear",
+        &format!("🧹 세션 클리어 ({clear_source})"),
+    );
 }
 
 /// /stop — Cancel in-progress AI request

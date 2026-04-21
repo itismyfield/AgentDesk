@@ -312,6 +312,7 @@ pub(in crate::services::discord) async fn cmd_start(
         };
         save_last_session_runtime(
             ctx.data().shared.db.as_ref(),
+            ctx.data().shared.pg_pool.as_ref(),
             &ctx.data().shared.token_hash,
             ch_key.parse::<u64>().unwrap_or_default(),
             &canonical_path,

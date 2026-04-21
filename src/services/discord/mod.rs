@@ -1740,7 +1740,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(shared.db.as_ref(), wt);
+                    cleanup_git_worktree(shared.db.as_ref(), shared.pg_pool.as_ref(), wt);
                 }
             }
             data.sessions.remove(&ch);
@@ -1773,70 +1773,85 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     // Record termination audit for cleaned-up sessions
     for expired_session in &expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
-            let should_record =
-                mark_session_disconnected_for_idle_cleanup(shared.db.as_ref(), session_key);
+            let should_record = mark_session_disconnected_for_idle_cleanup(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                session_key,
+            )
+            .await;
             if !should_record {
                 continue;
             }
 
-            if let Some(db) = shared.db.as_ref() {
-                crate::services::termination_audit::record_termination_with_handles(
-                    db,
-                    shared.pg_pool.as_ref(),
-                    session_key,
-                    None,
-                    "cleanup",
-                    "idle_session_expiry",
-                    Some("in-memory session expired due to idle timeout"),
-                    None,
-                    None,
-                    None,
-                );
-            } else {
-                crate::services::termination_audit::record_termination(
-                    session_key,
-                    None,
-                    "cleanup",
-                    "idle_session_expiry",
-                    Some("in-memory session expired due to idle timeout"),
-                    None,
-                    None,
-                    None,
-                );
-            }
+            crate::services::termination_audit::record_termination_with_handles(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                session_key,
+                None,
+                "cleanup",
+                "idle_session_expiry",
+                Some("in-memory session expired due to idle timeout"),
+                None,
+                None,
+                None,
+            );
         }
     }
     tracing::info!("  [cleanup] Removed {} idle session(s)", expired.len());
 }
 
-fn mark_session_disconnected_for_idle_cleanup(
+async fn mark_session_disconnected_for_idle_cleanup(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
 ) -> bool {
-    let Some(db) = db else {
-        return true;
-    };
+    let mut prior_status = None;
 
-    let Ok(conn) = db.lock() else {
-        return true;
-    };
+    if let Some(pool) = pg_pool {
+        prior_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+                .bind(session_key)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
 
-    let prior_status = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [session_key],
-            |row| row.get::<_, String>(0),
+        let _ = sqlx::query(
+            "UPDATE sessions
+             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+             WHERE session_key = $1",
         )
-        .optional()
-        .ok()
-        .flatten();
+        .bind(session_key)
+        .execute(pool)
+        .await;
+    }
 
-    let _ = conn.execute(
-        "UPDATE sessions
-         SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
-         WHERE session_key = ?1",
-        [session_key],
-    );
+    if let Some(db) = db {
+        let Ok(conn) = db.lock() else {
+            return prior_status.as_deref() != Some("disconnected");
+        };
+
+        let sqlite_prior_status = conn
+            .query_row(
+                "SELECT status FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+
+        let _ = conn.execute(
+            "UPDATE sessions
+             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+             WHERE session_key = ?1",
+            [session_key],
+        );
+
+        if prior_status.is_none() {
+            prior_status = sqlite_prior_status;
+        }
+    }
 
     prior_status.as_deref() != Some("disconnected")
 }
@@ -2132,8 +2147,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn idle_cleanup_marks_session_disconnected_before_recording_audit() {
+    #[tokio::test]
+    async fn idle_cleanup_marks_session_disconnected_before_recording_audit() {
         let db = crate::db::test_db();
         let session_key = "host:cleanup-session-status";
 
@@ -2147,10 +2162,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(mark_session_disconnected_for_idle_cleanup(
-            Some(&db),
-            session_key
-        ));
+        assert!(mark_session_disconnected_for_idle_cleanup(Some(&db), None, session_key).await);
 
         let session_row: (String, Option<String>, Option<String>) = db
             .lock()
@@ -2168,8 +2180,8 @@ mod tests {
         assert_eq!(session_row.2, None);
     }
 
-    #[test]
-    fn idle_cleanup_skips_duplicate_audit_when_force_kill_already_disconnected_session() {
+    #[tokio::test]
+    async fn idle_cleanup_skips_duplicate_audit_when_force_kill_already_disconnected_session() {
         let db = crate::db::test_db();
         let session_key = "host:cleanup-session-dedupe";
 
@@ -2195,7 +2207,8 @@ mod tests {
             Some(false),
         );
 
-        let should_record = mark_session_disconnected_for_idle_cleanup(Some(&db), session_key);
+        let should_record =
+            mark_session_disconnected_for_idle_cleanup(Some(&db), None, session_key).await;
         assert!(
             !should_record,
             "cleanup must skip a second termination audit when force-kill already disconnected the session"
