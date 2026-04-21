@@ -274,6 +274,15 @@ fi
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
+# Build the release binary from the current workspace by default so promotion
+# always ships code compiled from the current HEAD. When a validated external
+# artifact is provided explicitly, keep the existing override behavior.
+SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
+if [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
+    echo "▸ Building release binary..."
+    (cd "$REPO" && cargo build --release --bin agentdesk)
+fi
+
 # Rebuild dashboard so promote never ships a stale dist.
 echo "▸ Building dashboard..."
 (cd "$REPO/dashboard" && npm run build --silent)
@@ -324,7 +333,6 @@ fi
 
 # Source binary pre-flight — validate BEFORE bootout so a stale or missing
 # build aborts without leaving release down.
-SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
 if [ ! -x "$SOURCE_BINARY" ]; then
     echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
     echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
