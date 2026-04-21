@@ -761,20 +761,23 @@ export default function AppShell({
           }}
         >
           <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 basis-full sm:flex-1">
               <div
-                className="flex items-center gap-2 text-[12px] font-medium"
+                data-testid="topbar-breadcrumb"
+                className="flex min-w-0 items-center gap-2 overflow-hidden text-[12px] font-medium"
                 style={{ color: "var(--th-text-muted)" }}
               >
-                <span>AgentDesk</span>
-                <ChevronRight size={12} />
-                <span>{currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : (isKo ? "홈" : "Home")}</span>
+                <span className="shrink-0">AgentDesk</span>
+                <ChevronRight size={12} className="shrink-0" />
+                <span className="truncate whitespace-nowrap">
+                  {currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : (isKo ? "홈" : "Home")}
+                </span>
               </div>
             </div>
 
             <label
               data-testid="topbar-search"
-              className="order-3 flex min-w-[11rem] flex-1 items-center gap-2 rounded-2xl border px-3 py-2 text-sm sm:order-none sm:max-w-[18rem]"
+              className="order-3 flex min-w-0 flex-1 items-center gap-2 rounded-2xl border px-3 py-2 text-sm sm:order-none sm:max-w-[18rem]"
               style={{
                 borderColor: "var(--th-border-subtle)",
                 background:
@@ -807,7 +810,7 @@ export default function AppShell({
               </kbd>
             </label>
 
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-2 sm:ml-0">
+            <div className="ml-auto flex shrink-0 items-center justify-end gap-2 sm:ml-0">
               <button
                 type="button"
                 onClick={toggleShellTheme}
