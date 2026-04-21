@@ -111,7 +111,7 @@ export function SurfaceSection({
             {title}
           </h3>
           {description && (
-            <p className="mt-2 max-w-3xl text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+            <p className="mt-2 max-w-3xl text-[13px] leading-5 sm:text-sm sm:leading-6" style={{ color: "var(--th-text-muted)" }}>
               {description}
             </p>
           )}
@@ -191,7 +191,7 @@ export function SurfaceSubsection({
             {title}
           </h4>
           {description && (
-            <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+            <p className="mt-1 text-[13px] leading-5 sm:text-sm sm:leading-6" style={{ color: "var(--th-text-muted)" }}>
               {description}
             </p>
           )}

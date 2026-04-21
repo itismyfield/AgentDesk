@@ -1793,6 +1793,30 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });
 
+  test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/settings");
+
+    const settingsPage = page.getByTestId("settings-page");
+    await expect(settingsPage).toBeVisible({ timeout: 15000 });
+
+    const before = await settingsPage.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      scrollHeight: node.scrollHeight,
+      scrollTop: node.scrollTop,
+    }));
+
+    expect(before.scrollHeight).toBeGreaterThan(before.clientHeight);
+
+    await settingsPage.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+      node.dispatchEvent(new Event("scroll"));
+    });
+
+    const after = await settingsPage.evaluate((node) => node.scrollTop);
+    expect(after).toBeGreaterThan(0);
+  });
+
   test("all app shell routes are directly reachable", async ({ page }) => {
     for (const route of ROUTES) {
       await page.goto(route.path);

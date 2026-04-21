@@ -1215,24 +1215,24 @@ export default function KanbanTab({
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
         }}
       >
-        <div className="mt-4 flex flex-wrap gap-2">
+        <div className="mt-4 grid gap-2 sm:grid-cols-3">
           <SurfaceMetricPill
             tone="info"
             label={tr("가시 범위", "Visible scope")}
             value={initialLoading ? "…" : `${totalVisible}${tr("건", " items")}`}
-            className="flex-1 sm:flex-none"
+            className="w-full"
           />
           <SurfaceMetricPill
             tone="accent"
             label={tr("Repo 초점", "Repo focus")}
             value={selectedRepoLabel}
-            className="flex-1 sm:flex-none"
+            className="w-full"
           />
           <SurfaceMetricPill
             tone="neutral"
             label={tr("담당 범위", "Agent scope")}
             value={selectedAgentScopeLabel}
-            className="flex-1 sm:flex-none"
+            className="w-full"
           />
         </div>
 

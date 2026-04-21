@@ -2125,7 +2125,8 @@ export default function SettingsView({
 
   return (
     <div
-      className="page fade-in mx-auto w-full max-w-6xl min-w-0 overflow-x-hidden px-4 py-4 pb-40 sm:px-6"
+      data-testid="settings-page"
+      className="page fade-in mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden overflow-y-auto px-4 py-4 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <div className="page-header">
