@@ -70,6 +70,23 @@ pub(super) struct InflightTurnState {
     /// Generation that owns the planned restart/handoff lifecycle.
     #[serde(default)]
     pub restart_generation: Option<u64>,
+    /// #897 counter-model re-review — `true` when this inflight was
+    /// synthesised by `POST /api/inflight/rebind` to adopt a live tmux
+    /// session that had no real user-authored turn driving it (zero-valued
+    /// `user_msg_id` / `current_msg_id` / `request_owner_user_id`).
+    ///
+    /// Callers that route based on "is there a live foreground turn" must
+    /// treat a rebind-origin inflight as **absent** — otherwise the
+    /// background-trigger notify-bot predicate in
+    /// `should_route_terminal_response_via_notify_bot` sees a
+    /// non-rebind_origin inflight, routes the recovered auto-trigger
+    /// response back through the command bot, and reintroduces the
+    /// loop-hazard that #826 was fixing. Reactions / transcript writes
+    /// that key off `user_msg_id` should also skip work when this flag is
+    /// set, because the placeholder IDs do not identify a real Discord
+    /// message.
+    #[serde(default)]
+    pub rebind_origin: bool,
 }
 
 impl InflightTurnState {
@@ -121,6 +138,7 @@ impl InflightTurnState {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         }
     }
 
@@ -160,6 +178,88 @@ pub(super) fn save_inflight_state(state: &InflightTurnState) -> Result<(), Strin
         return Err("Home directory not found".to_string());
     };
     save_inflight_state_in_root(&root, state)
+}
+
+/// #897 counter-model review P2 #1 — atomic "create, don't overwrite"
+/// variant of `save_inflight_state`. Used by `POST /api/inflight/rebind` so a
+/// concurrent legitimate turn that wins the mailbox race between the rebind
+/// handler's existence check and its write cannot have its canonical
+/// inflight file silently overwritten by the synthetic rebind state
+/// (`user_msg_id=0`, placeholder ids zeroed). Returns `InflightAlreadyExists`
+/// when the target path is already occupied — the handler translates that
+/// into HTTP 409 and the operator retries (or leaves it to the live turn).
+#[derive(Debug)]
+pub(super) enum CreateNewInflightError {
+    /// A state file already exists at the target path — another path wrote
+    /// it between the caller's preflight check and this call.
+    AlreadyExists,
+    /// Filesystem or serialization failure.
+    Internal(String),
+}
+
+impl std::fmt::Display for CreateNewInflightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists => write!(f, "inflight state already exists"),
+            Self::Internal(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+pub(super) fn save_inflight_state_create_new(
+    state: &InflightTurnState,
+) -> Result<(), CreateNewInflightError> {
+    let Some(root) = inflight_runtime_root() else {
+        return Err(CreateNewInflightError::Internal(
+            "Home directory not found".to_string(),
+        ));
+    };
+    save_inflight_state_create_new_in_root(&root, state)
+}
+
+/// Test-visible inner form of `save_inflight_state_create_new`. Takes an
+/// explicit root so unit tests can exercise the O_CREAT|O_EXCL semantics
+/// without tripping over `AGENTDESK_ROOT_DIR` env-var races.
+fn save_inflight_state_create_new_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+) -> Result<(), CreateNewInflightError> {
+    let Some(provider) = state.provider_kind() else {
+        return Err(CreateNewInflightError::Internal(format!(
+            "Unknown provider '{}'",
+            state.provider
+        )));
+    };
+    let path = inflight_state_path(root, &provider, state.channel_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+    }
+    let mut updated = state.clone();
+    updated.updated_at = now_string();
+    let json = serde_json::to_string_pretty(&updated)
+        .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+
+    // `OpenOptions::create_new(true)` is the canonical atomic check-and-
+    // create primitive on POSIX (O_CREAT | O_EXCL). No reliance on a
+    // preceding `load_inflight_state` — the kernel itself serializes this.
+    use std::io::Write;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(json.as_bytes())
+                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            file.sync_all()
+                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(CreateNewInflightError::AlreadyExists)
+        }
+        Err(e) => Err(CreateNewInflightError::Internal(e.to_string())),
+    }
 }
 
 fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result<(), String> {
@@ -368,8 +468,9 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 #[cfg(test)]
 mod tests {
     use super::{
-        InflightTurnState, latest_request_owner_user_id_for_channel, load_inflight_states,
-        load_inflight_states_from_root, mark_all_inflight_states_restart_mode,
+        CreateNewInflightError, InflightTurnState, latest_request_owner_user_id_for_channel,
+        load_inflight_states, load_inflight_states_from_root,
+        mark_all_inflight_states_restart_mode, save_inflight_state_create_new_in_root,
         save_inflight_state_in_root, stale_removal_reason,
     };
     use crate::services::discord::InflightRestartMode;
@@ -534,5 +635,92 @@ mod tests {
             states[0].restart_generation,
             Some(super::super::runtime_store::load_generation())
         );
+    }
+
+    /// #897 P2 #1: `save_inflight_state_create_new_in_root` must succeed on
+    /// a vacant path (atomic create) and reject a second call at the same
+    /// path with `AlreadyExists` — this is the guarantee that prevents a
+    /// `/api/inflight/rebind` call from overwriting a concurrent live
+    /// turn's canonical inflight state.
+    #[test]
+    fn save_inflight_state_create_new_rejects_existing_path() {
+        let temp = TempDir::new().unwrap();
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            1_234_567,
+            Some("adk-cdx".to_string()),
+            0,
+            0,
+            0,
+            "/api/inflight/rebind".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        save_inflight_state_create_new_in_root(temp.path(), &state)
+            .expect("first atomic create must succeed on a vacant path");
+
+        match save_inflight_state_create_new_in_root(temp.path(), &state) {
+            Err(CreateNewInflightError::AlreadyExists) => {}
+            other => panic!(
+                "second atomic create must report AlreadyExists, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// #897 P2 #1: a previously-saved `save_inflight_state_in_root` write
+    /// must be observed by `save_inflight_state_create_new_in_root` as
+    /// `AlreadyExists`. This is the actual race we need to guard against —
+    /// a legitimate turn writes its state via `save_inflight_state`, then a
+    /// concurrent rebind call must NOT overwrite it.
+    #[test]
+    fn save_inflight_state_create_new_rejects_path_written_by_normal_save() {
+        let temp = TempDir::new().unwrap();
+        let live_turn_state = InflightTurnState::new(
+            ProviderKind::Codex,
+            9_876_543,
+            Some("adk-cdx".to_string()),
+            123, // live user
+            456, // real user_msg_id
+            789, // real current_msg_id
+            "real user input".to_string(),
+            Some("session-live".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        save_inflight_state_in_root(temp.path(), &live_turn_state)
+            .expect("legitimate turn write must succeed");
+
+        let rebind_state = InflightTurnState::new(
+            ProviderKind::Codex,
+            9_876_543,
+            Some("adk-cdx".to_string()),
+            0,
+            0,
+            0,
+            "/api/inflight/rebind".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        match save_inflight_state_create_new_in_root(temp.path(), &rebind_state) {
+            Err(CreateNewInflightError::AlreadyExists) => {}
+            other => panic!("rebind must not overwrite live turn state; got {:?}", other),
+        }
+
+        // Canonical live-turn data must survive.
+        let states = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].request_owner_user_id, 123);
+        assert_eq!(states[0].user_msg_id, 456);
+        assert_eq!(states[0].user_text, "real user input");
     }
 }

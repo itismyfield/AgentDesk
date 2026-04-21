@@ -164,7 +164,12 @@ async fn enqueue_headless_delivery(
                 content,
                 bot: "notify",
                 source: "headless_turn",
-                reason_code: None,
+                // #897 counter-model review P1 #3: explicit reason_code so
+                // `message_outbox::enqueue` can arm its lifecycle dedupe
+                // (it requires reason_code AND session_key to both be Some).
+                // Prevents duplicate delivery if the headless-turn finalize
+                // path retries within the dedupe TTL.
+                reason_code: Some("headless.delivery"),
                 session_key,
             },
         )

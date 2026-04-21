@@ -304,6 +304,27 @@ pub(super) async fn restore_inflight_turns(
     let settings_snapshot = shared.settings.read().await.clone();
 
     for state in states {
+        // #897 round-4 High: rebind_origin inflights are synthetic
+        // placeholders owned by `/api/inflight/rebind` and do NOT carry
+        // a real user message, dispatch context, or placeholder Discord
+        // message. Restart recovery has nothing meaningful to do with
+        // them — running `replace_long_message_raw(msg_id=0)`, writing
+        // `discord:<channel>:0` analytics rows, or emitting reactions
+        // against `MessageId::new(0)` would all produce bogus state
+        // (flagged by #897 round-4 review). The operator is expected to
+        // re-invoke `/api/inflight/rebind` after dcserver comes back up
+        // if the orphan tmux is still alive. Clear the stale state and
+        // skip further processing for this entry.
+        if state.rebind_origin {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏭ recovery: skipping rebind-origin inflight for channel {} — operator must re-invoke /api/inflight/rebind post-restart",
+                state.channel_id
+            );
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
+
         let channel_id = ChannelId::new(state.channel_id);
         let is_dm = matches!(
             channel_id.to_channel(http).await,
@@ -1548,6 +1569,300 @@ pub(super) async fn restore_inflight_turns(
     }
 }
 
+/// #896: Outcome of a successful [`rebind_inflight_for_channel`] call.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RebindOutcome {
+    pub tmux_session: String,
+    pub channel_id: u64,
+    pub initial_offset: u64,
+    /// `true` when a tmux watcher was spawned by this call. On unix this is
+    /// always true on success. On non-unix builds watcher spawning is a
+    /// no-op, so this reads `false` even though the inflight file was
+    /// written.
+    pub watcher_spawned: bool,
+    /// #897 P2 #2 — `true` when a pre-existing watcher handle was present
+    /// for this channel and has been cancelled + replaced by the freshly
+    /// spawned one. Operators use this to distinguish a clean vacant claim
+    /// from a zombie-slot recovery, which is the common case where an old
+    /// watcher kept its DashMap entry after its tmux exited.
+    pub watcher_replaced: bool,
+}
+
+/// #896: Errors from [`rebind_inflight_for_channel`]. Map 1:1 to HTTP status
+/// codes in the `/api/inflight/rebind` handler.
+#[derive(Debug)]
+pub enum RebindError {
+    /// Target tmux session is not alive — nothing to rebind to. 404.
+    TmuxNotAlive { tmux_session: String },
+    /// An inflight state already exists for this channel. Caller must clear
+    /// it (force-kill or natural completion) before rebinding. 409.
+    InflightAlreadyExists,
+    /// Channel is not bound to the requested provider in the role-map. 400.
+    ChannelNotBound,
+    /// `tmux_session` not provided and no in-memory session supplies a
+    /// channel_name — cannot derive the canonical tmux session name. 400.
+    ChannelNameMissing,
+    /// Unrecoverable internal error (inflight write, lock poisoning, etc.). 500.
+    Internal(String),
+}
+
+impl std::fmt::Display for RebindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TmuxNotAlive { tmux_session } => {
+                write!(f, "tmux session not alive: {tmux_session}")
+            }
+            Self::InflightAlreadyExists => {
+                write!(f, "inflight state already exists for this channel")
+            }
+            Self::ChannelNotBound => write!(f, "channel is not bound for this provider"),
+            Self::ChannelNameMissing => write!(
+                f,
+                "channel name missing — pass tmux_session or pre-register the channel"
+            ),
+            Self::Internal(msg) => write!(f, "internal: {msg}"),
+        }
+    }
+}
+
+/// #896: Rebind a live tmux session to a freshly-created inflight state and
+/// (re)spawn the output watcher. Used to recover from orphan states where
+/// the tmux session is alive but the inflight JSON was cleared by a prior
+/// turn's cleanup, leaving subsequent output with no relay path.
+///
+/// Preconditions (enforced — caller gets a typed error on violation):
+/// * Tmux session must be alive. Absent session ⇒ nothing to rebind; the
+///   caller should force-kill + restart instead.
+/// * No existing inflight must exist for the channel. Caller clears first
+///   to avoid racing with a live turn's state.
+/// * Channel must be bound to the requested provider in the role-map.
+///
+/// Side effects on success:
+/// * Writes `~/.adk/release/runtime/discord_inflight/{provider}/{channel}.json`
+///   with `last_offset` set to the tmux output file's current size, so the
+///   watcher only picks up output produced *after* this call. Retroactive
+///   emission of already-dropped output is intentionally out of scope.
+/// * Registers / refreshes the `DiscordSession` entry in `shared.core.sessions`.
+/// * Spawns a `tmux_output_watcher` via `try_claim_watcher`. If a watcher
+///   already owns the channel (e.g. a prior recovery round), the claim is
+///   declined and `watcher_spawned=false` is returned — the inflight we
+///   just created will still be picked up by the existing watcher, so this
+///   is not an error.
+pub(crate) async fn rebind_inflight_for_channel(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_override: Option<String>,
+) -> Result<RebindOutcome, RebindError> {
+    let discord_channel_id = ChannelId::new(channel_id);
+
+    // Preflight existence check — fast 409 before we walk the validation /
+    // tmux-liveness path when the caller obviously shouldn't be rebinding.
+    // This is advisory only; the AUTHORITATIVE guard is the atomic
+    // `save_inflight_state_create_new` below which uses `O_CREAT | O_EXCL`
+    // so a live turn that wins the race between here and the write cannot
+    // be clobbered by the synthetic rebind state.
+    if super::inflight::load_inflight_state(provider, channel_id).is_some() {
+        return Err(RebindError::InflightAlreadyExists);
+    }
+
+    // Resolve tmux session name + channel name from the request, falling back
+    // to the in-memory session map when no override is provided.
+    let (tmux_session_name, channel_name) = match tmux_session_override {
+        Some(name) => {
+            let ch_name =
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(&name)
+                    .map(|(_, ch)| ch);
+            (name, ch_name)
+        }
+        None => {
+            let ch_name = {
+                let data = shared.core.lock().await;
+                data.sessions
+                    .get(&discord_channel_id)
+                    .and_then(|s| s.channel_name.clone())
+            };
+            let ch_name = match ch_name {
+                Some(n) => n,
+                None => return Err(RebindError::ChannelNameMissing),
+            };
+            let tmux = provider.build_tmux_session_name(&ch_name);
+            (tmux, Some(ch_name))
+        }
+    };
+
+    if !tmux_session_alive_with_retry(&tmux_session_name) {
+        return Err(RebindError::TmuxNotAlive {
+            tmux_session: tmux_session_name,
+        });
+    }
+
+    // Validate provider↔channel binding against the settings snapshot,
+    // mirroring what `restore_inflight_turns` requires for watcher revival.
+    let settings_snapshot = shared.settings.read().await.clone();
+    let is_dm = matches!(
+        discord_channel_id.to_channel(http).await,
+        Ok(serenity::model::channel::Channel::Private(_))
+    );
+    let (allowlist_channel_id, provider_channel_name) =
+        if let Some((pid, pname)) = super::resolve_thread_parent(http, discord_channel_id).await {
+            (pid, pname.or(channel_name.clone()))
+        } else {
+            (discord_channel_id, channel_name.clone())
+        };
+    if validate_bot_channel_routing_with_provider_channel(
+        &settings_snapshot,
+        provider,
+        allowlist_channel_id,
+        channel_name.as_deref(),
+        provider_channel_name.as_deref(),
+        is_dm,
+    )
+    .is_err()
+    {
+        return Err(RebindError::ChannelNotBound);
+    }
+
+    let (output_path, input_fifo) = tmux_runtime_paths(&tmux_session_name);
+    let initial_offset = std::fs::metadata(&output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    // Build and persist the new inflight state. No request_owner / msg_ids
+    // apply because this recovery has no originating Discord message.
+    //
+    // #897 counter-model re-review (round 2): flag this as `rebind_origin`
+    // so routing predicates that key off "is there a live foreground turn"
+    // treat it as absent. Without that, the watcher's
+    // `should_route_terminal_response_via_notify_bot` sees a non-empty
+    // inflight and drops background-trigger output back to the command-bot
+    // path — precisely the loop-hazard #826 was avoiding.
+    let mut state = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        channel_name.clone(),
+        0, // request_owner_user_id — no originating Discord user
+        0, // user_msg_id
+        0, // current_msg_id (placeholder)
+        String::from("/api/inflight/rebind"),
+        None, // session_id
+        Some(tmux_session_name.clone()),
+        Some(output_path.clone()),
+        Some(input_fifo.clone()),
+        initial_offset,
+    );
+    state.rebind_origin = true;
+
+    // Atomic create-or-fail: if a legitimate turn created its inflight file
+    // between the preflight check above and this point, the write fails
+    // with `AlreadyExists` and we return 409. Without this guard the
+    // synthetic rebind state (user_msg_id=0, placeholder ids zeroed) would
+    // overwrite the real turn's canonical state and break its completion
+    // path — the exact race the #897 P2 #1 review flagged.
+    match super::inflight::save_inflight_state_create_new(&state) {
+        Ok(()) => {}
+        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
+            return Err(RebindError::InflightAlreadyExists);
+        }
+        Err(super::inflight::CreateNewInflightError::Internal(msg)) => {
+            return Err(RebindError::Internal(msg));
+        }
+    }
+
+    // Register / refresh the in-memory session so downstream handlers can
+    // locate this channel after the rebind.
+    {
+        let mut data = shared.core.lock().await;
+        let session = data
+            .sessions
+            .entry(discord_channel_id)
+            .or_insert_with(|| DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id),
+                channel_name: channel_name.clone(),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: super::runtime_store::load_generation(),
+                assistant_turns: 0,
+            });
+        session.channel_id = Some(channel_id);
+        session.last_active = tokio::time::Instant::now();
+        if session.channel_name.is_none() {
+            session.channel_name = channel_name.clone();
+        }
+    }
+
+    // #897 P2 #2: use `claim_or_replace_watcher` instead of
+    // `try_claim_watcher`. The counter-model review flagged that the old
+    // path returned `watcher_spawned=false` whenever the DashMap entry was
+    // occupied — but occupancy does NOT imply liveness. The common zombie
+    // scenario (a previous watcher that exited without removing its handle)
+    // is exactly what makes `/api/inflight/rebind` necessary in the first
+    // place. `claim_or_replace` cancels any incumbent and always installs
+    // our handle, so the post-condition is "a watcher owned by THIS rebind
+    // is running" rather than the weaker "some watcher might be."
+    let (watcher_spawned, watcher_replaced) = {
+        #[cfg(unix)]
+        {
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
+            let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handle = TmuxWatcherHandle {
+                paused: paused.clone(),
+                resume_offset: resume_offset.clone(),
+                cancel: cancel.clone(),
+                pause_epoch: pause_epoch.clone(),
+                turn_delivered: turn_delivered.clone(),
+            };
+            // `claim_or_replace_watcher` returns `true` when the slot was
+            // vacant (fresh claim) and `false` when an incumbent was
+            // cancelled + replaced. Invert for `watcher_replaced`.
+            let fresh = super::tmux::claim_or_replace_watcher(
+                &shared.tmux_watchers,
+                discord_channel_id,
+                handle,
+            );
+            tokio::spawn(super::tmux::tmux_output_watcher(
+                discord_channel_id,
+                http.clone(),
+                shared.clone(),
+                output_path.clone(),
+                tmux_session_name.clone(),
+                initial_offset,
+                cancel,
+                paused,
+                resume_offset,
+                pause_epoch,
+                turn_delivered,
+            ));
+            (true, !fresh)
+        }
+        #[cfg(not(unix))]
+        {
+            (false, false)
+        }
+    };
+
+    Ok(RebindOutcome {
+        tmux_session: tmux_session_name,
+        channel_id,
+        initial_offset,
+        watcher_spawned,
+        watcher_replaced,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1806,6 +2121,7 @@ mod tests {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         };
 
         assert!(
@@ -1916,6 +2232,7 @@ mod tests {
             last_watcher_relayed_offset: None,
             restart_mode: None,
             restart_generation: None,
+            rebind_origin: false,
         };
 
         save_missing_session_handoff(

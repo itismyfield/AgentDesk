@@ -125,6 +125,51 @@ impl HealthRegistry {
         self.discord_http.lock().await.push((provider, http));
     }
 
+    /// #896: Rebind a live tmux session to a freshly-created inflight state
+    /// for the given provider/channel, routing through the provider's
+    /// registered `SharedData` and Discord HTTP. Returns `None` when the
+    /// provider is not registered with this dcserver (standalone mode or
+    /// cross-runtime target); the HTTP handler maps that to 503. The inner
+    /// `Result` carries typed failures from `rebind_inflight_for_channel`
+    /// so the handler can pick the right HTTP status.
+    ///
+    /// Kept on the registry (rather than exposing `SharedData` directly via
+    /// an accessor) so this crate does not leak the `pub(in crate::services)`
+    /// `SharedData` type across the service boundary.
+    pub(crate) async fn rebind_inflight(
+        &self,
+        provider: &crate::services::provider::ProviderKind,
+        channel_id: u64,
+        tmux_override: Option<String>,
+    ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
+    {
+        let provider_name = provider.as_str().to_string();
+        let shared = self
+            .providers
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.name == provider_name)
+            .map(|entry| entry.shared.clone())?;
+        let http = self
+            .discord_http
+            .lock()
+            .await
+            .iter()
+            .find(|(name, _)| name == &provider_name)
+            .map(|(_, http)| http.clone())?;
+        Some(
+            super::recovery_engine::rebind_inflight_for_channel(
+                &http,
+                &shared,
+                provider,
+                channel_id,
+                tmux_override,
+            )
+            .await,
+        )
+    }
+
     /// Load announce + notify bot tokens from the canonical runtime credential path.
     /// Call once at startup before the axum server begins accepting requests.
     pub async fn init_bot_tokens(&self) {
@@ -1683,6 +1728,148 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
     send_message(registry, db, target, content, source, bot, summary).await
 }
 
+/// #896: Parsed `/api/inflight/rebind` body, extracted for unit-test
+/// coverage of input validation without spinning up a `HealthRegistry`.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedRebindRequest {
+    provider: crate::services::provider::ProviderKind,
+    channel_id: u64,
+    tmux_session: Option<String>,
+}
+
+/// #896: Parse and validate the rebind request body. Returns a status-tuple
+/// error on malformed input so the caller can surface it verbatim.
+fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'static str, String)> {
+    let json: serde_json::Value = serde_json::from_str(body).map_err(|_| {
+        (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
+        )
+    })?;
+
+    let provider_raw = json
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let provider =
+        crate::services::provider::ProviderKind::from_str(provider_raw).ok_or_else(|| {
+            (
+                "400 Bad Request",
+                r#"{"ok":false,"error":"provider must be one of: claude, codex"}"#.to_string(),
+            )
+        })?;
+
+    // Accept channel_id as either a JSON number or a decimal string so
+    // callers can forward snowflake IDs without precision loss.
+    let channel_id: u64 = match json.get("channel_id") {
+        Some(v) if v.is_u64() => v.as_u64().unwrap_or(0),
+        Some(v) if v.is_string() => v.as_str().unwrap_or("").trim().parse::<u64>().unwrap_or(0),
+        _ => 0,
+    };
+    if channel_id == 0 {
+        return Err((
+            "400 Bad Request",
+            r#"{"ok":false,"error":"channel_id is required (non-zero u64)"}"#.to_string(),
+        ));
+    }
+
+    let tmux_session = json
+        .get("tmux_session")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    Ok(ParsedRebindRequest {
+        provider,
+        channel_id,
+        tmux_session,
+    })
+}
+
+/// #896: Handle `POST /api/inflight/rebind` — rebind a live tmux session to
+/// a freshly-created inflight state and respawn the watcher. Used to recover
+/// orphan states where tmux is still running but turn_bridge has no inflight
+/// to track against (e.g. after a prior turn's cleanup cleared the state and
+/// the agent continued work via internal auto-triggers).
+///
+/// Body shape:
+/// ```json
+/// { "provider": "codex" | "claude",
+///   "channel_id": "1234567890",
+///   "tmux_session": "AgentDesk-codex-foo"   // optional — derived otherwise
+/// }
+/// ```
+pub async fn handle_rebind_inflight<'a>(
+    registry: &HealthRegistry,
+    body: &str,
+) -> (&'a str, String) {
+    let parsed = match parse_rebind_body(body) {
+        Ok(p) => p,
+        Err((status, body)) => return (status, body),
+    };
+    let ParsedRebindRequest {
+        provider,
+        channel_id,
+        tmux_session: tmux_override,
+    } = parsed;
+
+    let Some(result) = registry
+        .rebind_inflight(&provider, channel_id, tmux_override)
+        .await
+    else {
+        // #897 counter-model review: dcserver bootstrap registers the
+        // `ProviderEntry` before the provider's Discord HTTP client, so a
+        // lookup miss here can mean EITHER permanent misconfiguration OR a
+        // transient warmup window. The error text now tells operators to
+        // retry instead of assuming the provider is permanently absent.
+        return (
+            "503 Service Unavailable",
+            format!(
+                r#"{{"ok":false,"error":"provider {} is not yet available in this dcserver (still warming up or not registered) — retry in a few seconds"}}"#,
+                provider.as_str()
+            ),
+        );
+    };
+
+    match result {
+        Ok(outcome) => (
+            "200 OK",
+            serde_json::json!({
+                "ok": true,
+                "tmux_session": outcome.tmux_session,
+                "channel_id": outcome.channel_id.to_string(),
+                "initial_offset": outcome.initial_offset,
+                "watcher_spawned": outcome.watcher_spawned,
+                "watcher_replaced": outcome.watcher_replaced,
+            })
+            .to_string(),
+        ),
+        Err(err) => {
+            let (status, message) = match &err {
+                super::recovery_engine::RebindError::TmuxNotAlive { .. } => {
+                    ("404 Not Found", err.to_string())
+                }
+                super::recovery_engine::RebindError::InflightAlreadyExists => {
+                    ("409 Conflict", err.to_string())
+                }
+                super::recovery_engine::RebindError::ChannelNotBound
+                | super::recovery_engine::RebindError::ChannelNameMissing => {
+                    ("400 Bad Request", err.to_string())
+                }
+                super::recovery_engine::RebindError::Internal(_) => {
+                    ("500 Internal Server Error", err.to_string())
+                }
+            };
+            (
+                status,
+                serde_json::json!({ "ok": false, "error": message }).to_string(),
+            )
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedSendToAgentRequest {
     role_id: String,
@@ -2346,5 +2533,79 @@ mod tests {
         .expect_err("ambiguous explicit matches must fail");
 
         assert!(err.contains("multiple runtimes explicitly allow channel 123"));
+    }
+
+    /// #896: `parse_rebind_body` must reject malformed inputs with
+    /// 400 statuses before we touch any runtime state. Each case here is
+    /// an operator footgun that would otherwise raise an opaque error
+    /// deeper in the rebind flow.
+    #[test]
+    fn parse_rebind_body_rejects_invalid_json() {
+        let err = parse_rebind_body("{not-json").expect_err("malformed JSON must fail");
+        assert_eq!(err.0, "400 Bad Request");
+        assert!(err.1.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn parse_rebind_body_rejects_unknown_provider() {
+        let body = r#"{"provider":"gpt","channel_id":"123"}"#;
+        let err = parse_rebind_body(body).expect_err("unknown provider must fail");
+        assert_eq!(err.0, "400 Bad Request");
+        assert!(err.1.contains("provider"));
+    }
+
+    #[test]
+    fn parse_rebind_body_rejects_missing_channel_id() {
+        let body = r#"{"provider":"codex"}"#;
+        let err = parse_rebind_body(body).expect_err("missing channel_id must fail");
+        assert_eq!(err.0, "400 Bad Request");
+        assert!(err.1.contains("channel_id"));
+    }
+
+    #[test]
+    fn parse_rebind_body_rejects_zero_channel_id() {
+        let body = r#"{"provider":"codex","channel_id":"0"}"#;
+        let err = parse_rebind_body(body).expect_err("channel_id=0 must fail");
+        assert_eq!(err.0, "400 Bad Request");
+        assert!(err.1.contains("channel_id"));
+    }
+
+    #[test]
+    fn parse_rebind_body_accepts_numeric_and_string_channel_id() {
+        // Snowflakes exceed i32::MAX so both numeric and string forms
+        // must be accepted to avoid precision loss on the caller side.
+        for body in [
+            r#"{"provider":"codex","channel_id":1490141485167808532}"#,
+            r#"{"provider":"codex","channel_id":"1490141485167808532"}"#,
+        ] {
+            let parsed = parse_rebind_body(body).expect("snowflake channel_id must parse");
+            assert_eq!(parsed.channel_id, 1490141485167808532);
+            assert_eq!(parsed.provider.as_str(), "codex");
+            assert!(parsed.tmux_session.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_rebind_body_keeps_explicit_tmux_session_override() {
+        let body =
+            r#"{"provider":"claude","channel_id":"42","tmux_session":"AgentDesk-claude-foo"}"#;
+        let parsed = parse_rebind_body(body).expect("body should parse");
+        assert_eq!(parsed.provider.as_str(), "claude");
+        assert_eq!(parsed.channel_id, 42);
+        assert_eq!(
+            parsed.tmux_session.as_deref(),
+            Some("AgentDesk-claude-foo"),
+            "explicit tmux_session must survive into rebind call"
+        );
+    }
+
+    #[test]
+    fn parse_rebind_body_treats_blank_tmux_session_as_absent() {
+        let body = r#"{"provider":"claude","channel_id":"42","tmux_session":"  "}"#;
+        let parsed = parse_rebind_body(body).expect("body should parse");
+        assert!(
+            parsed.tmux_session.is_none(),
+            "whitespace-only override must fall back to auto-derivation"
+        );
     }
 }
