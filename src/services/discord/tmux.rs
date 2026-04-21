@@ -482,6 +482,13 @@ pub(super) async fn tmux_output_watcher(
         }
     };
 
+    // Rolling-size-cap rotation state. The watcher loop spins predictably
+    // (~500ms sleeps) so a mod-N gate on an iteration counter gives a
+    // regular-ish cadence for the size check without hitting the fs every
+    // spin. See issue #892.
+    let mut rotation_tick: u32 = 0;
+    const ROTATION_CHECK_EVERY: u32 = 60; // ~30s at 500ms base cadence
+
     loop {
         // Always consume resume_offset first — the turn bridge may have set it
         // between the previous paused check and now, so reading it here prevents
@@ -510,6 +517,48 @@ pub(super) async fn tmux_output_watcher(
         if paused.load(Ordering::Relaxed) {
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             continue;
+        }
+
+        // Periodic size-cap rotation for the session jsonl. Running this off
+        // the watcher loop keeps the wrapper child process simple while
+        // still enforcing a 20 MB soft cap (see issue #892).
+        rotation_tick = rotation_tick.wrapping_add(1);
+        if rotation_tick % ROTATION_CHECK_EVERY == 0 {
+            let path = output_path.clone();
+            let session = tmux_session_name.clone();
+            let prev_offset = current_offset;
+            let rotation = tokio::task::spawn_blocking(move || {
+                crate::services::tmux_common::truncate_jsonl_head_safe(
+                    &path,
+                    crate::services::tmux_common::JSONL_SIZE_CAP_BYTES,
+                    crate::services::tmux_common::JSONL_TARGET_KEEP_BYTES,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join error: {e}")));
+            match rotation {
+                Ok(Some(new_size)) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ✂ rotated jsonl for {} — new size {} bytes (was beyond cap)",
+                        session,
+                        new_size
+                    );
+                    // File was rewritten from the head: reset reader offset
+                    // so the watcher doesn't seek past the new EOF. Also
+                    // reset the duplicate-relay guard.
+                    if prev_offset > new_size {
+                        current_offset = new_size;
+                        last_relayed_offset = Some(new_size);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!("  [{ts}] ⚠ jsonl rotation failed for {}: {}", session, e);
+                }
+            }
         }
 
         // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
@@ -2488,15 +2537,20 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             continue;
         }
 
-        let output_path = crate::services::tmux_common::session_temp_path(session_name, "jsonl");
-        if std::fs::metadata(&output_path).is_err() {
+        // Accept either the new persistent location or the legacy /tmp
+        // location — older wrappers still write to /tmp, and a dcserver
+        // restart that lost /tmp files should not falsely flag a live
+        // session as "no output file". See issue #892.
+        let Some(output_path) =
+            crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl")
+        else {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — no output file",
                 session_name
             );
             continue;
-        }
+        };
 
         // Old-gen sessions: adopt instead of killing.
         // The tmux session and Claude CLI process are still alive from the
@@ -2816,6 +2870,127 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 cleaned_dead_sessions
             );
         }
+
+        // Sweep orphan session temp files (no matching tmux session AND
+        // owner marker older than the threshold). Conservative: skip the
+        // legacy /tmp directory (those files may still be held open by
+        // pre-migration wrappers) — we only clean the new persistent
+        // directory. See issue #892.
+        sweep_orphan_session_files().await;
+    }
+}
+
+/// Remove jsonl/input/prompt/owner/etc files in the persistent sessions
+/// directory that no longer belong to a running tmux session. Conservative:
+/// require an owner marker (or the jsonl) to be older than
+/// `ORPHAN_MIN_AGE_SECS` and require the session to be absent from tmux
+/// before deleting. Legacy `/tmp/` files are *never* swept at startup —
+/// pre-migration wrappers may still be writing into them.
+async fn sweep_orphan_session_files() {
+    const ORPHAN_MIN_AGE_SECS: u64 = 10 * 60; // 10 minutes
+
+    let Some(dir) = crate::services::tmux_common::persistent_sessions_dir() else {
+        return;
+    };
+    if !dir.exists() {
+        return;
+    }
+
+    // List live tmux sessions.
+    let live: std::collections::HashSet<String> = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(crate::services::platform::tmux::list_session_names),
+    )
+    .await
+    {
+        Ok(Ok(Ok(names))) => names.into_iter().collect(),
+        _ => return, // tmux unavailable — skip sweep rather than risk false positives
+    };
+
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+
+    // Group files under the sessions dir by the `agentdesk-<hash>-<host>-<session>`
+    // prefix. Any prefix whose session name is not in `live` *and* whose
+    // oldest file mtime is older than ORPHAN_MIN_AGE_SECS is swept.
+    let mut groups: std::collections::HashMap<String, (String, std::time::SystemTime)> =
+        std::collections::HashMap::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !name.starts_with("agentdesk-") {
+            continue;
+        }
+        // Strip extension.
+        let stem = match name.rsplit_once('.') {
+            Some((s, _)) => s.to_string(),
+            None => name.clone(),
+        };
+        // Session name is the last token after the fourth dash — but our
+        // prefix format is `agentdesk-<12hex>-<host>-<session>` and host
+        // may contain dashes. The simplest robust approach: split_once on
+        // `agentdesk-<hash>-<host>-` is hard to reverse, so instead we use
+        // the owner file's prefix as the grouping key directly — any file
+        // whose stem matches some live session (ends with `-<live>`) is kept.
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or_else(|_| std::time::SystemTime::now());
+        groups
+            .entry(stem.clone())
+            .and_modify(|slot| {
+                if mtime < slot.1 {
+                    *slot = (stem.clone(), mtime);
+                }
+            })
+            .or_insert((stem, mtime));
+    }
+
+    let now = std::time::SystemTime::now();
+    let mut swept = 0usize;
+    for (stem, (_, oldest_mtime)) in groups {
+        // Is this stem associated with any live tmux session? We check
+        // whether ANY live session name appears as a suffix of the stem.
+        // Since session names are distinctive (provider:channel shape), a
+        // conservative suffix match keeps ambiguity low; we also require
+        // that the match is preceded by a dash so we don't match e.g.
+        // "claude:foo" against a stem ending with "-thisisnotclaude:foo".
+        let is_live = live.iter().any(|live_name| {
+            let needle = format!("-{}", live_name);
+            stem.ends_with(&needle) || stem == *live_name
+        });
+        if is_live {
+            continue;
+        }
+        // Conservative: require age threshold.
+        let age = now
+            .duration_since(oldest_mtime)
+            .unwrap_or(std::time::Duration::ZERO);
+        if age.as_secs() < ORPHAN_MIN_AGE_SECS {
+            continue;
+        }
+        // Delete every file under this stem.
+        let Ok(iter) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in iter.flatten() {
+            if let Ok(fname) = entry.file_name().into_string() {
+                if fname.starts_with(&format!("{}.", stem)) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        swept += 1;
+    }
+    if swept > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🧹 Swept {} orphan session file group(s) from {}",
+            swept,
+            dir.display()
+        );
     }
 }
 

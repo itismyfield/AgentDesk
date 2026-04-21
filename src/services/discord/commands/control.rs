@@ -109,10 +109,16 @@ fn recreate_tmux_session(session_name: &str, reset_source: &str) -> bool {
         session_name,
         &format!("hard reset via {reset_source}"),
     );
-    crate::services::platform::tmux::kill_session_with_reason(
+    let killed = crate::services::platform::tmux::kill_session_with_reason(
         session_name,
         &format!("hard reset via {reset_source}"),
-    )
+    );
+    if killed {
+        // #892: delete persistent + legacy session temp files so the next
+        // turn starts from a clean slate in the canonical location.
+        crate::services::tmux_common::cleanup_session_temp_files(session_name);
+    }
+    killed
 }
 
 #[cfg(not(unix))]

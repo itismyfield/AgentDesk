@@ -111,14 +111,21 @@ async fn stop_turn_with_policy(
             record_tmux_exit_reason(&target.tmux_name, &format!("explicit cleanup via {reason}"));
         }
 
-        if crate::services::platform::tmux::has_session(&target.tmux_name) {
+        let killed_now = if crate::services::platform::tmux::has_session(&target.tmux_name) {
             crate::services::platform::tmux::kill_session_with_reason(
                 &target.tmux_name,
                 &format!("explicit cleanup via {reason}"),
             )
         } else {
             tmux_was_alive
+        };
+        // Delete persistent + legacy session temp files alongside the kill
+        // so /tmp and ~/.adk/release/runtime/sessions/ don't accumulate
+        // stale jsonl/FIFO/owner markers after forced termination (#892).
+        if killed_now {
+            crate::services::tmux_common::cleanup_session_temp_files(&target.tmux_name);
         }
+        killed_now
     } else {
         false
     };

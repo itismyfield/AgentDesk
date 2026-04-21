@@ -1162,13 +1162,29 @@ fn execute_streaming_local_tmux(
     let prompt_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "prompt");
     let owner_path = tmux_owner_path(tmux_session_name);
 
-    // Check if tmux session already exists (follow-up to running session)
+    // Check if tmux session already exists (follow-up to running session).
+    // `resolve_session_temp_path` accepts either the new persistent location
+    // (under `runtime_root()/runtime/sessions/`) or the legacy `/tmp/` path
+    // that older wrappers still hold open fds to — so a dcserver restart
+    // that lost its /tmp files does not invalidate a still-alive tmux pane.
     let session_exists = tmux_session_exists(tmux_session_name);
+    let resolved_output =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
+    let resolved_input =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
     let session_usable = tmux_session_has_live_pane(tmux_session_name)
-        && std::fs::metadata(&output_path).is_ok()
-        && std::path::Path::new(&input_fifo_path).exists();
+        && resolved_output.is_some()
+        && resolved_input.is_some();
 
     if session_usable {
+        // Use the resolved paths (which may be the legacy /tmp path) for the
+        // follow-up so we read the jsonl the live wrapper actually writes.
+        let output_path = resolved_output
+            .clone()
+            .unwrap_or_else(|| output_path.clone());
+        let input_fifo_path = resolved_input
+            .clone()
+            .unwrap_or_else(|| input_fifo_path.clone());
         debug_log("Existing tmux session found — sending follow-up message");
         match send_followup_to_tmux(
             prompt,
@@ -1250,15 +1266,8 @@ fn execute_streaming_local_tmux(
     // === Create new tmux session ===
     debug_log("No existing tmux session — creating new one");
 
-    // Clean up any leftover files
-    let _ = std::fs::remove_file(&output_path);
-    let _ = std::fs::remove_file(&input_fifo_path);
-    let _ = std::fs::remove_file(&prompt_path);
-    let _ = std::fs::remove_file(&owner_path);
-    let _ = std::fs::remove_file(crate::services::tmux_common::session_temp_path(
-        tmux_session_name,
-        "sh",
-    ));
+    // Clean up any leftover files in both persistent and legacy locations.
+    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
 
     // Create output file (empty)
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;

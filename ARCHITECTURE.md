@@ -464,6 +464,52 @@ This table is generated from the current `src/` root and fails CI when a new top
 2. Session spawn: `src/services/session_backend.rs`
 3. Cleanup: `src/services/process.rs`
 
+### Session runtime state (issue #892)
+
+Tmux-backed sessions keep four kinds of runtime state alongside each pane:
+the provider jsonl stream (`.jsonl`), the input FIFO (`.input`), the launch
+script (`.sh`), and an owner marker (`.owner`). These files live in a
+**persistent** per-runtime directory rather than `/tmp/` so that a dcserver
+restart does not render a still-alive tmux pane "unusable":
+
+- **Persistent path:** `runtime_root()/runtime/sessions/` (mode `0o700`),
+  resolved via `tmux_common::session_temp_path(session_name, ext)`. The
+  directory is created at dcserver startup in `src/cli/dcserver.rs` and
+  lazily re-created inside `agentdesk_temp_dir()` for early callers.
+- **Legacy `/tmp/` fallback:** wrappers spawned before this migration
+  still hold open fds on `/tmp/agentdesk-*` files. Readers go through
+  `tmux_common::resolve_session_temp_path` which prefers the new path
+  and falls back to the legacy `/tmp` location so `session_usable`
+  checks (`claude::execute_streaming_local_tmux`,
+  `codex::execute_streaming_local_tmux`,
+  `qwen::execute_streaming_local_tmux`) keep re-attaching to live panes.
+  Legacy files are **never** swept at startup — pre-migration wrappers
+  may still be writing into them.
+- **Size cap policy:** 20 MB rolling head-truncate. The watcher in
+  `src/services/discord/tmux.rs::tmux_output_watcher` periodically
+  (~every 60 loop ticks) calls `truncate_jsonl_head_safe(path, 20 MB, 15 MB)`
+  which rewrites the file keeping only the last ~15 MB worth of complete
+  lines. Any partial leading line is dropped so downstream stream-json
+  parsers never observe half-records.
+- **Cleanup triggers:**
+  - Recreate path inside each provider module calls
+    `cleanup_session_temp_files(session_name)` before building a fresh
+    session; it hits both persistent and legacy locations.
+  - `turn_lifecycle::stop_turn_with_policy` calls
+    `cleanup_session_temp_files` after a successful forced kill
+    (force_kill_turn, `/clear`, etc).
+  - `discord::tmux_reaper::reap_orphan_tmux_files` uses the same helper.
+  - Startup orphan sweep: `discord::tmux::sweep_orphan_session_files`
+    removes files in the persistent sessions dir whose stem has no
+    matching live tmux session and whose oldest mtime is older than
+    10 minutes. Deliberately skips `/tmp/` to avoid stomping on
+    pre-migration wrappers.
+- **Key helpers:** `src/services/tmux_common.rs`
+  (`session_temp_path`, `legacy_tmp_session_path`,
+  `resolve_session_temp_path`, `cleanup_session_temp_files`,
+  `truncate_jsonl_head_safe`, `ensure_sessions_dir_on_startup`,
+  `persistent_sessions_dir`).
+
 ## Data Model Anchors
 
 - `src/db/schema.rs` is the authoritative schema.

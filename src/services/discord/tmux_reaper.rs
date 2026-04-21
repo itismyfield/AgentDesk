@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
-use crate::services::tmux_common::{current_tmux_owner_marker, tmux_owner_path};
+use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tmux_diagnostics::{record_tmux_exit_reason, tmux_session_has_live_pane};
 
 /// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
@@ -120,17 +120,8 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
 
         if killed {
             tracing::info!("  [{ts}]   killed orphan: {}", name);
-            // Also clean associated temp files
-            let _ = std::fs::remove_file(crate::services::tmux_common::session_temp_path(
-                name, "jsonl",
-            ));
-            let _ = std::fs::remove_file(crate::services::tmux_common::session_temp_path(
-                name, "input",
-            ));
-            let _ = std::fs::remove_file(crate::services::tmux_common::session_temp_path(
-                name, "prompt",
-            ));
-            let _ = std::fs::remove_file(tmux_owner_path(name));
+            // Clean both persistent and legacy temp files.
+            crate::services::tmux_common::cleanup_session_temp_files(name);
         }
     }
 }

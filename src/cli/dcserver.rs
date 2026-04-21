@@ -1058,6 +1058,13 @@ pub fn handle_dcserver(token: Option<String>) {
         let _ = std::fs::write(runtime_dir.join("dcserver.version"), VERSION);
     }
 
+    // Ensure the persistent session temp-file directory exists so wrappers
+    // spawned after this point write into the canonical location rather
+    // than falling back into /tmp. See issue #892.
+    if let Err(e) = crate::services::tmux_common::ensure_sessions_dir_on_startup() {
+        eprintln!("  ⚠ Failed to prepare sessions dir: {e}");
+    }
+
     // Prevent CLAUDECODE from leaking into child tmux sessions
     // SAFETY: We're single-threaded at this point (before tokio runtime starts).
     unsafe {
