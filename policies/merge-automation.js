@@ -364,6 +364,7 @@ function buildWorkTargetFromDispatchRow(row) {
 
 function inspectLatestCompletedWorkTarget(cardId) {
   var inspected = [];
+  var cancelledFallbackIndex = -1;
   var excludedRows = agentdesk.db.query(
     "SELECT id, status, result, context FROM task_dispatches " +
     "WHERE kanban_card_id = ? " +
@@ -374,13 +375,20 @@ function inspectLatestCompletedWorkTarget(cardId) {
   );
   for (var i = 0; i < excludedRows.length; i++) {
     var excludedRow = excludedRows[i];
+    var excludedTarget = buildWorkTargetFromDispatchRow(excludedRow);
+    var fallbackEligible = excludedRow.status === "cancelled" && !!excludedTarget.worktree_path;
     inspected.push({
       dispatch_id: excludedRow.id,
       status: excludedRow.status,
       selected: false,
-      reason: "status '" + excludedRow.status + "' is not merge-eligible",
-      target: buildWorkTargetFromDispatchRow(excludedRow)
+      reason: fallbackEligible
+        ? "cancelled dispatch retained as terminal fallback candidate"
+        : "status '" + excludedRow.status + "' is not merge-eligible",
+      target: excludedTarget
     });
+    if (fallbackEligible && cancelledFallbackIndex === -1) {
+      cancelledFallbackIndex = inspected.length - 1;
+    }
   }
 
   var rows = agentdesk.db.query(
@@ -409,6 +417,16 @@ function inspectLatestCompletedWorkTarget(cardId) {
       continue;
     }
     return { target: target, inspected: inspected };
+  }
+
+  if (cancelledFallbackIndex !== -1) {
+    inspected[cancelledFallbackIndex].selected = true;
+    inspected[cancelledFallbackIndex].reason =
+      "selected latest cancelled work dispatch as terminal fallback candidate";
+    return {
+      target: inspected[cancelledFallbackIndex].target,
+      inspected: inspected
+    };
   }
 
   return { target: null, inspected: inspected };
