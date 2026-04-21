@@ -319,7 +319,10 @@ wait_for_live_turns_to_drain_or_fail() {
   local port="$3"
   local max_wait="${4:-120}"
   local poll_secs="${5:-2}"
-  local allow_cut="${AGENTDESK_ALLOW_LIVE_TURN_CUT:-0}"
+  # Turns themselves are preserved across restart via silent reattach (#43e3cacc);
+  # this flag only skips the drain wait, at the cost of possibly truncating a
+  # mid-stream Discord response during the SIGTERM window.
+  local skip_drain="${AGENTDESK_SKIP_TURN_DRAIN:-0}"
   local waited=0
   local active=0 finalizing=0 queue_depth=0 live_turns=0 job_state=""
 
@@ -332,13 +335,13 @@ EOF
       echo "▸ [gate] ${scope} launchd job already not running — skipping live-turn drain check"
       return 0
     fi
-    if [ "$allow_cut" = "1" ]; then
-      echo "⚠ [gate] Unable to read ${scope} health on :${port} (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+    if [ "$skip_drain" = "1" ]; then
+      echo "⚠ [gate] Unable to read ${scope} health on :${port} (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1"
       return 0
     fi
     echo "✗ [gate] Unable to confirm ${scope} turn drain on :${port} (launchd state: ${job_state:-unknown})"
-    echo "  Refusing restart to avoid cutting active turns."
-    echo "  Override only if intentional: AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+    echo "  Refusing restart to avoid truncating mid-stream output."
+    echo "  Override only if stream hiccup is acceptable: AGENTDESK_SKIP_TURN_DRAIN=1"
     return 1
   fi
 
@@ -361,26 +364,26 @@ $(health_turn_snapshot "$port")
 EOF
     then
       job_state=$(_launchd_job_state "$label")
-      if [ "$allow_cut" = "1" ]; then
-        echo "⚠ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+      if [ "$skip_drain" = "1" ]; then
+        echo "⚠ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1"
         return 0
       fi
       echo "✗ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown})"
-      echo "  Refusing restart to avoid cutting active turns."
-      echo "  Override only if intentional: AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+      echo "  Refusing restart to avoid truncating mid-stream output."
+      echo "  Override only if stream hiccup is acceptable: AGENTDESK_SKIP_TURN_DRAIN=1"
       return 1
     fi
     live_turns=$(( active + finalizing ))
   done
 
   if [ "$live_turns" -gt 0 ]; then
-    if [ "$allow_cut" = "1" ]; then
-      echo "⚠ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s — proceeding due to AGENTDESK_ALLOW_LIVE_TURN_CUT=1 (queued=${queue_depth})"
+    if [ "$skip_drain" = "1" ]; then
+      echo "⚠ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1 (queued=${queue_depth}); silent reattach will preserve turn state"
       return 0
     fi
     echo "✗ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s (queued=${queue_depth})"
-    echo "  Refusing restart to avoid cutting active turns."
-    echo "  Retry after work finishes, or override intentionally with AGENTDESK_ALLOW_LIVE_TURN_CUT=1"
+    echo "  Refusing restart to avoid truncating mid-stream output."
+    echo "  Retry after work finishes, or override with AGENTDESK_SKIP_TURN_DRAIN=1 when a brief stream hiccup is acceptable."
     return 1
   fi
 
