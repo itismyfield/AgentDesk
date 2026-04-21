@@ -211,6 +211,9 @@ export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_PROMOTE_DETACHED_CHILD=1
 export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_PROMOTE_TEST_MODE=$(printf '%q' "$PROMOTE_TEST_MODE")
+export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-0}")
+export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
+export AGENTDESK_PROMOTE_BINARY=$(printf '%q' "${AGENTDESK_PROMOTE_BINARY:-}")
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/promote-release.sh")${quoted_args}
 EOF
@@ -305,7 +308,11 @@ mkdir -p "$SKILLS_STAGED"
 rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
 # Wait for active turns to finish before stopping the server.
-# Without this, the SIGTERM interrupts mid-response, cutting off output.
+# dcserver SIGTERM preserves turn state (#43e3cacc): tmux sessions stay alive
+# and the watcher silent-reattaches after restart. What the drain gate guards
+# against is mid-stream output truncation to Discord during the SIGTERM window.
+# Skip the wait with AGENTDESK_SKIP_TURN_DRAIN=1 when a brief stream hiccup is
+# acceptable for the planned restart.
 # REL_PORT already assigned earlier for the zero-inflight gate.
 if ! wait_for_live_turns_to_drain_or_fail "release" "$PLIST_REL" "$REL_PORT" 120 2; then
     exit 1
@@ -346,6 +353,28 @@ if [ ! -x "$SOURCE_BINARY" ]; then
     echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
     exit 1
 fi
+
+# Binary freshness check — reject promoting a binary built before the current HEAD.
+# An older binary may miss embedded migrations (sqlx::migrate! is a compile-time
+# macro) or code changes, leading to runtime migration-mismatch errors. Opt out
+# with AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
+# when AGENTDESK_PROMOTE_BINARY points at a validated artifact from elsewhere).
+if [ "${AGENTDESK_PROMOTE_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
+    HEAD_EPOCH=$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || echo 0)
+    BIN_EPOCH=$(stat -f %m "$SOURCE_BINARY" 2>/dev/null || stat -c %Y "$SOURCE_BINARY" 2>/dev/null || echo 0)
+    if [ "$BIN_EPOCH" -lt "$HEAD_EPOCH" ]; then
+        HEAD_SHORT=$(git -C "$REPO" log -1 --format=%h 2>/dev/null || echo "?")
+        BIN_MTIME_HUMAN=$(stat -f '%Sm' "$SOURCE_BINARY" 2>/dev/null || stat -c '%y' "$SOURCE_BINARY" 2>/dev/null || echo "?")
+        HEAD_HUMAN=$(git -C "$REPO" log -1 --format='%ai' 2>/dev/null || echo "?")
+        echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
+        echo "    binary mtime: ${BIN_MTIME_HUMAN}"
+        echo "    HEAD commit:  ${HEAD_HUMAN}"
+        echo "  Rebuild with 'cargo build --release' before promoting, or override with"
+        echo "  AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional."
+        exit 1
+    fi
+fi
+
 echo "▸ Copying binary from $SOURCE_BINARY..."
 STAGED_BINARY="$(_staged_promote_binary_path)"
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
