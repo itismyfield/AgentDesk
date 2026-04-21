@@ -1819,10 +1819,15 @@ pub async fn handle_rebind_inflight<'a>(
         .rebind_inflight(&provider, channel_id, tmux_override)
         .await
     else {
+        // #897 counter-model review: dcserver bootstrap registers the
+        // `ProviderEntry` before the provider's Discord HTTP client, so a
+        // lookup miss here can mean EITHER permanent misconfiguration OR a
+        // transient warmup window. The error text now tells operators to
+        // retry instead of assuming the provider is permanently absent.
         return (
             "503 Service Unavailable",
             format!(
-                r#"{{"ok":false,"error":"provider {} not registered in this dcserver"}}"#,
+                r#"{{"ok":false,"error":"provider {} is not yet available in this dcserver (still warming up or not registered) — retry in a few seconds"}}"#,
                 provider.as_str()
             ),
         );
@@ -1837,6 +1842,7 @@ pub async fn handle_rebind_inflight<'a>(
                 "channel_id": outcome.channel_id.to_string(),
                 "initial_offset": outcome.initial_offset,
                 "watcher_spawned": outcome.watcher_spawned,
+                "watcher_replaced": outcome.watcher_replaced,
             })
             .to_string(),
         ),

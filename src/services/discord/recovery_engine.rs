@@ -1554,7 +1554,17 @@ pub struct RebindOutcome {
     pub tmux_session: String,
     pub channel_id: u64,
     pub initial_offset: u64,
+    /// `true` when a tmux watcher was spawned by this call. On unix this is
+    /// always true on success. On non-unix builds watcher spawning is a
+    /// no-op, so this reads `false` even though the inflight file was
+    /// written.
     pub watcher_spawned: bool,
+    /// #897 P2 #2 — `true` when a pre-existing watcher handle was present
+    /// for this channel and has been cancelled + replaced by the freshly
+    /// spawned one. Operators use this to distinguish a clean vacant claim
+    /// from a zombie-slot recovery, which is the common case where an old
+    /// watcher kept its DashMap entry after its tmux exited.
+    pub watcher_replaced: bool,
 }
 
 /// #896: Errors from [`rebind_inflight_for_channel`]. Map 1:1 to HTTP status
@@ -1626,8 +1636,12 @@ pub(crate) async fn rebind_inflight_for_channel(
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id = ChannelId::new(channel_id);
 
-    // Refuse if inflight already exists — prevents racing with a live turn
-    // whose watcher/turn_bridge is already driving state.
+    // Preflight existence check — fast 409 before we walk the validation /
+    // tmux-liveness path when the caller obviously shouldn't be rebinding.
+    // This is advisory only; the AUTHORITATIVE guard is the atomic
+    // `save_inflight_state_create_new` below which uses `O_CREAT | O_EXCL`
+    // so a live turn that wins the race between here and the write cannot
+    // be clobbered by the synthetic rebind state.
     if super::inflight::load_inflight_state(provider, channel_id).is_some() {
         return Err(RebindError::InflightAlreadyExists);
     }
@@ -1711,7 +1725,21 @@ pub(crate) async fn rebind_inflight_for_channel(
         initial_offset,
     );
 
-    super::inflight::save_inflight_state(&state).map_err(RebindError::Internal)?;
+    // Atomic create-or-fail: if a legitimate turn created its inflight file
+    // between the preflight check above and this point, the write fails
+    // with `AlreadyExists` and we return 409. Without this guard the
+    // synthetic rebind state (user_msg_id=0, placeholder ids zeroed) would
+    // overwrite the real turn's canonical state and break its completion
+    // path — the exact race the #897 P2 #1 review flagged.
+    match super::inflight::save_inflight_state_create_new(&state) {
+        Ok(()) => {}
+        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
+            return Err(RebindError::InflightAlreadyExists);
+        }
+        Err(super::inflight::CreateNewInflightError::Internal(msg)) => {
+            return Err(RebindError::Internal(msg));
+        }
+    }
 
     // Register / refresh the in-memory session so downstream handlers can
     // locate this channel after the rebind.
@@ -1744,11 +1772,16 @@ pub(crate) async fn rebind_inflight_for_channel(
         }
     }
 
-    // Spawn the watcher under a fresh claim. `try_claim_watcher` returns
-    // false when another watcher already owns the channel — that's still a
-    // valid post-condition (the inflight we just wrote will be consumed by
-    // the incumbent watcher), so don't treat it as a rebind failure.
-    let watcher_spawned = {
+    // #897 P2 #2: use `claim_or_replace_watcher` instead of
+    // `try_claim_watcher`. The counter-model review flagged that the old
+    // path returned `watcher_spawned=false` whenever the DashMap entry was
+    // occupied — but occupancy does NOT imply liveness. The common zombie
+    // scenario (a previous watcher that exited without removing its handle)
+    // is exactly what makes `/api/inflight/rebind` necessary in the first
+    // place. `claim_or_replace` cancels any incumbent and always installs
+    // our handle, so the post-condition is "a watcher owned by THIS rebind
+    // is running" rather than the weaker "some watcher might be."
+    let (watcher_spawned, watcher_replaced) = {
         #[cfg(unix)]
         {
             let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1763,30 +1796,32 @@ pub(crate) async fn rebind_inflight_for_channel(
                 pause_epoch: pause_epoch.clone(),
                 turn_delivered: turn_delivered.clone(),
             };
-            let claimed =
-                super::tmux::try_claim_watcher(&shared.tmux_watchers, discord_channel_id, handle);
-            if claimed {
-                tokio::spawn(super::tmux::tmux_output_watcher(
-                    discord_channel_id,
-                    http.clone(),
-                    shared.clone(),
-                    output_path.clone(),
-                    tmux_session_name.clone(),
-                    initial_offset,
-                    cancel,
-                    paused,
-                    resume_offset,
-                    pause_epoch,
-                    turn_delivered,
-                ));
-                true
-            } else {
-                false
-            }
+            // `claim_or_replace_watcher` returns `true` when the slot was
+            // vacant (fresh claim) and `false` when an incumbent was
+            // cancelled + replaced. Invert for `watcher_replaced`.
+            let fresh = super::tmux::claim_or_replace_watcher(
+                &shared.tmux_watchers,
+                discord_channel_id,
+                handle,
+            );
+            tokio::spawn(super::tmux::tmux_output_watcher(
+                discord_channel_id,
+                http.clone(),
+                shared.clone(),
+                output_path.clone(),
+                tmux_session_name.clone(),
+                initial_offset,
+                cancel,
+                paused,
+                resume_offset,
+                pause_epoch,
+                turn_delivered,
+            ));
+            (true, !fresh)
         }
         #[cfg(not(unix))]
         {
-            false
+            (false, false)
         }
     };
 
@@ -1795,6 +1830,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         channel_id,
         initial_offset,
         watcher_spawned,
+        watcher_replaced,
     })
 }
 
