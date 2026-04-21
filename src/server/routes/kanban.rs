@@ -1945,7 +1945,7 @@ pub(super) fn card_row_to_json(
     }))
 }
 
-async fn load_card_json_pg(
+pub(super) async fn load_card_json_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {

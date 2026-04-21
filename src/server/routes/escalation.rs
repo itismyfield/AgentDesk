@@ -154,11 +154,60 @@ fn merged_settings(conn: &libsql_rusqlite::Connection, config: &Config) -> Escal
     load_override(conn).unwrap_or_else(|| escalation_defaults(config))
 }
 
+fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<EscalationSettings, String> {
+    let key = ESCALATION_SETTINGS_OVERRIDE_KEY.to_string();
+    let defaults = escalation_defaults(config);
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let raw = sqlx::query_scalar::<_, String>(
+                "SELECT value
+                 FROM kv_meta
+                 WHERE key = $1
+                 LIMIT 1",
+            )
+            .bind(&key)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|error| {
+                format!("load postgres escalation settings override {key}: {error}")
+            })?;
+            Ok(raw
+                .and_then(|value| serde_json::from_str::<EscalationSettings>(&value).ok())
+                .unwrap_or(defaults))
+        },
+        |error| error,
+    )
+}
+
 pub(in crate::server::routes) fn effective_owner_user_id(
     conn: &libsql_rusqlite::Connection,
     config: &Config,
 ) -> Option<u64> {
     merged_settings(conn, config).owner_user_id
+}
+
+pub(in crate::server::routes) fn effective_owner_user_id_with_backends(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    config: &Config,
+) -> Option<u64> {
+    if let Some(pool) = pg_pool {
+        match merged_settings_pg(pool, config) {
+            Ok(settings) => return settings.owner_user_id,
+            Err(error) => {
+                tracing::warn!(%error, "[escalation] failed to load postgres escalation settings override");
+            }
+        }
+    }
+
+    if let Some(db) = db {
+        if let Ok(conn) = db.lock() {
+            return effective_owner_user_id(&conn, config);
+        }
+    }
+
+    escalation_defaults(config).owner_user_id
 }
 
 fn store_override(

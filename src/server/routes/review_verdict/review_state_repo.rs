@@ -2,6 +2,7 @@
 /// #158: Routes through the unified review_state_sync entrypoint.
 pub(super) fn update_card_review_state(
     db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     decision: &str,
     _dispatch_id: Option<&str>,
@@ -17,5 +18,5 @@ pub(super) fn update_card_review_state(
         "state": state,
         "last_decision": decision,
     });
-    crate::engine::ops::review_state_sync(db, &payload.to_string());
+    crate::engine::ops::review_state_sync_with_backends(Some(db), pg_pool, &payload.to_string());
 }
