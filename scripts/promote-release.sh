@@ -322,6 +322,36 @@ if ! wait_for_live_turns_to_drain_or_fail "release" "$PLIST_REL" "$REL_PORT" 120
     exit 1
 fi
 
+# Source binary pre-flight — validate BEFORE bootout so a stale or missing
+# build aborts without leaving release down.
+SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
+if [ ! -x "$SOURCE_BINARY" ]; then
+    echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
+    echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
+    exit 1
+fi
+
+# Binary freshness check — reject promoting a binary built before the current HEAD.
+# An older binary may miss embedded migrations (sqlx::migrate! is a compile-time
+# macro) or code changes, leading to runtime migration-mismatch errors. Opt out
+# with AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
+# when AGENTDESK_PROMOTE_BINARY points at a validated artifact from elsewhere).
+if [ "${AGENTDESK_PROMOTE_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
+    HEAD_EPOCH=$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || echo 0)
+    BIN_EPOCH=$(stat -f %m "$SOURCE_BINARY" 2>/dev/null || stat -c %Y "$SOURCE_BINARY" 2>/dev/null || echo 0)
+    if [ "$BIN_EPOCH" -lt "$HEAD_EPOCH" ]; then
+        HEAD_SHORT=$(git -C "$REPO" log -1 --format=%h 2>/dev/null || echo "?")
+        BIN_MTIME_HUMAN=$(stat -f '%Sm' "$SOURCE_BINARY" 2>/dev/null || stat -c '%y' "$SOURCE_BINARY" 2>/dev/null || echo "?")
+        HEAD_HUMAN=$(git -C "$REPO" log -1 --format='%ai' 2>/dev/null || echo "?")
+        echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
+        echo "    binary mtime: ${BIN_MTIME_HUMAN}"
+        echo "    HEAD commit:  ${HEAD_HUMAN}"
+        echo "  Rebuild with 'cargo build --release' before promoting, or override with"
+        echo "  AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional."
+        exit 1
+    fi
+fi
+
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
@@ -351,34 +381,6 @@ fi
 # to replace the inode. In-place codesign can corrupt the OS signing cache
 # if it fails mid-write, causing SIGKILL on subsequent launches even though
 # the binary is valid.
-SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
-if [ ! -x "$SOURCE_BINARY" ]; then
-    echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
-    echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
-    exit 1
-fi
-
-# Binary freshness check — reject promoting a binary built before the current HEAD.
-# An older binary may miss embedded migrations (sqlx::migrate! is a compile-time
-# macro) or code changes, leading to runtime migration-mismatch errors. Opt out
-# with AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
-# when AGENTDESK_PROMOTE_BINARY points at a validated artifact from elsewhere).
-if [ "${AGENTDESK_PROMOTE_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
-    HEAD_EPOCH=$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || echo 0)
-    BIN_EPOCH=$(stat -f %m "$SOURCE_BINARY" 2>/dev/null || stat -c %Y "$SOURCE_BINARY" 2>/dev/null || echo 0)
-    if [ "$BIN_EPOCH" -lt "$HEAD_EPOCH" ]; then
-        HEAD_SHORT=$(git -C "$REPO" log -1 --format=%h 2>/dev/null || echo "?")
-        BIN_MTIME_HUMAN=$(stat -f '%Sm' "$SOURCE_BINARY" 2>/dev/null || stat -c '%y' "$SOURCE_BINARY" 2>/dev/null || echo "?")
-        HEAD_HUMAN=$(git -C "$REPO" log -1 --format='%ai' 2>/dev/null || echo "?")
-        echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
-        echo "    binary mtime: ${BIN_MTIME_HUMAN}"
-        echo "    HEAD commit:  ${HEAD_HUMAN}"
-        echo "  Rebuild with 'cargo build --release' before promoting, or override with"
-        echo "  AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional."
-        exit 1
-    fi
-fi
-
 echo "▸ Copying binary from $SOURCE_BINARY..."
 STAGED_BINARY="$(_staged_promote_binary_path)"
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
