@@ -118,6 +118,35 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
     })
 }
 
+async fn emit_card_updated(state: &AppState, card_id: &str) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        match super::super::kanban::load_card_json_pg(pool, card_id).await {
+            Ok(Some(card)) => {
+                crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                return;
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    %error,
+                    "[review-decision] falling back to sqlite kanban_card_updated emit"
+                );
+            }
+        }
+    }
+
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(card) = conn.query_row(
+            &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
+            [card_id],
+            |row| super::super::kanban::card_row_to_json(row),
+        ) {
+            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+        }
+    }
+}
+
 fn mark_next_review_round_advance_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -987,22 +1016,14 @@ pub async fn submit_review_decision(
             if !direct_review_created && !terminal_auto_approved {
                 update_card_review_state(
                     &state.db,
+                    state.pg_pool.as_ref(),
                     &body.card_id,
                     "accept",
                     pending_rd_id.as_deref(),
                 );
             }
 
-            // Emit kanban_card_updated for real-time dashboard
-            if let Ok(conn) = state.db.lock() {
-                if let Ok(card) = conn.query_row(
-                    &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
-                    [&body.card_id],
-                    |row| super::super::kanban::card_row_to_json(row),
-                ) {
-                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
-                }
-            }
+            emit_card_updated(&state, &body.card_id).await;
             let message = if terminal_auto_approved {
                 "Review-decision accepted, review auto-approved (no alternate reviewer)"
             } else if direct_review_created {
@@ -1284,21 +1305,13 @@ pub async fn submit_review_decision(
             // #117: Update canonical review state before returning
             update_card_review_state(
                 &state.db,
+                state.pg_pool.as_ref(),
                 &body.card_id,
                 "dispute",
                 pending_rd_id.as_deref(),
             );
 
-            // Emit kanban_card_updated for real-time dashboard
-            if let Ok(conn) = state.db.lock() {
-                if let Ok(card) = conn.query_row(
-                    &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
-                    [&body.card_id],
-                    |row| super::super::kanban::card_row_to_json(row),
-                ) {
-                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
-                }
-            }
+            emit_card_updated(&state, &body.card_id).await;
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -1368,6 +1381,7 @@ pub async fn submit_review_decision(
     // #117: Update canonical review state for all decision paths
     update_card_review_state(
         &state.db,
+        state.pg_pool.as_ref(),
         &body.card_id,
         &body.decision,
         pending_rd_id.as_deref(),
@@ -1383,16 +1397,7 @@ pub async fn submit_review_decision(
     .await;
     spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
 
-    // Emit kanban_card_updated for real-time dashboard
-    if let Ok(conn) = state.db.lock() {
-        if let Ok(card) = conn.query_row(
-            &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
-            [&body.card_id],
-            |row| super::super::kanban::card_row_to_json(row),
-        ) {
-            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
-        }
-    }
+    emit_card_updated(&state, &body.card_id).await;
 
     (
         StatusCode::OK,

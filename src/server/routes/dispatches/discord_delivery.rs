@@ -51,10 +51,16 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-fn resolve_dispatch_thread_owner_user_id(db: &crate::db::Db) -> Option<u64> {
+fn resolve_dispatch_thread_owner_user_id(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+) -> Option<u64> {
     let config = crate::config::load_graceful();
-    let conn = db.lock().ok()?;
-    crate::server::routes::escalation::effective_owner_user_id(&conn, &config)
+    crate::server::routes::escalation::effective_owner_user_id_with_backends(
+        Some(db),
+        pg_pool,
+        &config,
+    )
 }
 
 fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
@@ -286,7 +292,7 @@ impl HttpDispatchTransport {
         Self {
             announce_bot_token: crate::credential::read_bot_token("announce"),
             discord_api_base: discord_api_base_url(),
-            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db),
+            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db, pg_pool.as_ref()),
             pg_pool,
         }
     }
