@@ -15,6 +15,8 @@ export const STORAGE_KEYS = {
   dashboardActiveTab: "agentdesk.dashboard.active-tab",
   settingsPanel: "agentdesk.settings.active-panel",
   settingsRuntimeCategory: "agentdesk.settings.runtime-category",
+  settingsPipelineRepoCache: "agentdesk.settings.pipeline.repo-cache.v1",
+  settingsPipelineAgentCache: "agentdesk.settings.pipeline.agent-cache.v1",
   onboardingDraft: "agentdesk.onboarding.draft.v1",
   meetingChannelId: "pcd_meeting_channel_id",
   meetingFixedParticipants: "pcd_meeting_fixed_participants",

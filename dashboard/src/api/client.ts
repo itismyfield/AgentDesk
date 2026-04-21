@@ -41,6 +41,7 @@ export function onApiError(listener: ApiErrorListener | null): void {
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;
+  maxRetries?: number;
 }
 
 function composeRequestSignal(
@@ -91,11 +92,26 @@ function readCachedGet<T>(url: string): CachedGetEntry<T> | null {
   return cached as CachedGetEntry<T>;
 }
 
+export interface CachedApiSnapshot<T> {
+  data: T;
+  fetchedAt: number;
+}
+
+function readCachedSnapshot<T>(url: string): CachedApiSnapshot<T> | null {
+  const cached = readCachedGet<T>(url);
+  if (!cached) return null;
+  return {
+    data: cached.data,
+    fetchedAt: cached.fetchedAt,
+  };
+}
+
 async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
   const shouldDedupe = isGet && !opts?.signal;
   const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const maxRetries = opts?.maxRetries ?? MAX_RETRIES;
 
   if (shouldDedupe) {
     const existing = inflightGets.get(url);
@@ -104,7 +120,7 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
 
   const execute = async (): Promise<T> => {
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
         const delay = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -129,7 +145,7 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: "unknown" }));
           const error = new Error(err.error || `HTTP ${res.status}`);
-          if (isGet && isRetryable(res.status) && attempt < MAX_RETRIES) {
+          if (isGet && isRetryable(res.status) && attempt < maxRetries) {
             lastError = error;
             continue;
           }
@@ -151,10 +167,10 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
         if (resolvedError.name === "AbortError") {
           if (externalSignal?.aborted) throw resolvedError;
           lastError = new Error(`Request timeout: ${url}`);
-          if (isGet && attempt < MAX_RETRIES) continue;
+          if (isGet && attempt < maxRetries) continue;
         } else if (
           isGet &&
-          attempt < MAX_RETRIES &&
+          attempt < maxRetries &&
           !resolvedError.message.startsWith("HTTP ")
         ) {
           lastError = resolvedError;
@@ -275,9 +291,22 @@ export async function batchAddAgentsToOffice(
 
 // ── Agents ──
 
-export async function getAgents(officeId?: string): Promise<Agent[]> {
+export function getCachedAgents(officeId?: string): CachedApiSnapshot<Agent[]> | null {
   const q = officeId ? `?officeId=${officeId}` : "";
-  const data = await request<{ agents: Agent[] }>(`/api/agents${q}`);
+  const cached = readCachedSnapshot<{ agents: Agent[] }>(`/api/agents${q}`);
+  if (!cached) return null;
+  return {
+    data: cached.data.agents.map(normalizeAgent),
+    fetchedAt: cached.fetchedAt,
+  };
+}
+
+export async function getAgents(
+  officeId?: string,
+  opts?: RequestOptions,
+): Promise<Agent[]> {
+  const q = officeId ? `?officeId=${officeId}` : "";
+  const data = await request<{ agents: Agent[] }>(`/api/agents${q}`, opts);
   return data.agents.map(normalizeAgent);
 }
 
@@ -1063,8 +1092,12 @@ export interface GitHubReposResponse {
   repos: GitHubRepoOption[];
 }
 
-export async function getGitHubRepos(): Promise<GitHubReposResponse> {
-  return request("/api/github-repos");
+export function getCachedGitHubRepos(): CachedApiSnapshot<GitHubReposResponse> | null {
+  return readCachedSnapshot<GitHubReposResponse>("/api/github-repos");
+}
+
+export async function getGitHubRepos(opts?: RequestOptions): Promise<GitHubReposResponse> {
+  return request("/api/github-repos", opts);
 }
 
 // ── Cron Jobs (global) ──

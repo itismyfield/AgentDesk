@@ -70,6 +70,19 @@ interface AuditNote {
 
 const SETTINGS_PANEL_QUERY_KEY = "settingsPanel";
 const GENERAL_FIELD_KEYS = ["companyName", "ceoName", "language", "theme"] as const;
+const PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS = 5_000;
+const PIPELINE_SELECTOR_CACHE_MAX_AGE_MS = 60_000;
+
+interface PipelineRepoCacheEntry {
+  viewerLogin: string;
+  repos: GitHubRepoOption[];
+  fetchedAt: number;
+}
+
+interface PipelineAgentCacheEntry {
+  agents: Agent[];
+  fetchedAt: number;
+}
 
 const CATEGORIES: Array<{
   id: string;
@@ -549,6 +562,95 @@ function readStoredRuntimeCategory(): string {
   });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isPipelineRepoCacheEntry(value: unknown): value is PipelineRepoCacheEntry {
+  return isRecord(value)
+    && typeof value.viewerLogin === "string"
+    && typeof value.fetchedAt === "number"
+    && Array.isArray(value.repos);
+}
+
+function isPipelineAgentCacheEntry(value: unknown): value is PipelineAgentCacheEntry {
+  return isRecord(value)
+    && typeof value.fetchedAt === "number"
+    && Array.isArray(value.agents);
+}
+
+function readStoredPipelineRepoCache(): PipelineRepoCacheEntry | null {
+  return readLocalStorageValue<PipelineRepoCacheEntry | null>(
+    STORAGE_KEYS.settingsPipelineRepoCache,
+    null,
+    {
+      validate: (value): value is PipelineRepoCacheEntry | null =>
+        value === null || isPipelineRepoCacheEntry(value),
+    },
+  );
+}
+
+function writeStoredPipelineRepoCache(cache: PipelineRepoCacheEntry): void {
+  writeLocalStorageValue(STORAGE_KEYS.settingsPipelineRepoCache, cache);
+}
+
+function readStoredPipelineAgentCache(): PipelineAgentCacheEntry | null {
+  return readLocalStorageValue<PipelineAgentCacheEntry | null>(
+    STORAGE_KEYS.settingsPipelineAgentCache,
+    null,
+    {
+      validate: (value): value is PipelineAgentCacheEntry | null =>
+        value === null || isPipelineAgentCacheEntry(value),
+    },
+  );
+}
+
+function writeStoredPipelineAgentCache(cache: PipelineAgentCacheEntry): void {
+  writeLocalStorageValue(STORAGE_KEYS.settingsPipelineAgentCache, cache);
+}
+
+function pickMostRecentCache<T extends { fetchedAt: number }>(...entries: Array<T | null>): T | null {
+  return entries.reduce<T | null>((latest, entry) => {
+    if (!entry) return latest;
+    if (!latest || entry.fetchedAt > latest.fetchedAt) {
+      return entry;
+    }
+    return latest;
+  }, null);
+}
+
+function isCacheFresh(cache: { fetchedAt: number } | null): boolean {
+  if (!cache) return false;
+  return Date.now() - cache.fetchedAt < PIPELINE_SELECTOR_CACHE_MAX_AGE_MS;
+}
+
+function getCachedPipelineRepoEntry(): PipelineRepoCacheEntry | null {
+  const memoryCache = api.getCachedGitHubRepos();
+  return pickMostRecentCache(
+    memoryCache
+      ? {
+          viewerLogin: memoryCache.data.viewer_login,
+          repos: memoryCache.data.repos,
+          fetchedAt: memoryCache.fetchedAt,
+        }
+      : null,
+    readStoredPipelineRepoCache(),
+  );
+}
+
+function getCachedPipelineAgentEntry(): PipelineAgentCacheEntry | null {
+  const memoryCache = api.getCachedAgents();
+  return pickMostRecentCache(
+    memoryCache
+      ? {
+          agents: memoryCache.data,
+          fetchedAt: memoryCache.fetchedAt,
+        }
+      : null,
+    readStoredPipelineAgentCache(),
+  );
+}
+
 function isBooleanConfigKey(key: string): boolean {
   return BOOLEAN_CONFIG_KEYS.has(key);
 }
@@ -964,7 +1066,6 @@ export default function SettingsView({
   const [pipelineAgents, setPipelineAgents] = useState<Agent[]>([]);
   const [selectedPipelineRepo, setSelectedPipelineRepo] = useState("");
   const [selectedPipelineAgentId, setSelectedPipelineAgentId] = useState<string | null>(null);
-  const [pipelineSelectorLoaded, setPipelineSelectorLoaded] = useState(false);
   const [pipelineSelectorLoading, setPipelineSelectorLoading] = useState(false);
   const [pipelineSelectorError, setPipelineSelectorError] = useState<string | null>(null);
 
@@ -980,6 +1081,21 @@ export default function SettingsView({
     },
     [onNotify, tr],
   );
+  const applyPipelineRepoCache = useCallback((cache: PipelineRepoCacheEntry) => {
+    setPipelineRepos(cache.repos);
+    setSelectedPipelineRepo((current) => {
+      if (current && cache.repos.some((repo) => repo.nameWithOwner === current)) {
+        return current;
+      }
+      return selectDefaultPipelineRepo(cache.repos, cache.viewerLogin);
+    });
+  }, []);
+  const applyPipelineAgentCache = useCallback((cache: PipelineAgentCacheEntry) => {
+    setPipelineAgents(cache.agents);
+    setSelectedPipelineAgentId((current) => (
+      current && cache.agents.some((agent) => agent.id === current) ? current : null
+    ));
+  }, []);
   const loadConfigEntries = useCallback(async () => {
     const response = await fetch("/api/settings/config", { credentials: "include" });
     if (!response.ok) {
@@ -1084,35 +1200,81 @@ export default function SettingsView({
   }, [loadConfigEntries]);
 
   useEffect(() => {
-    if (activePanel !== "pipeline" || pipelineSelectorLoaded || pipelineSelectorLoading) {
+    if (activePanel !== "pipeline") {
       return;
     }
     let stale = false;
+    const cachedRepoEntry = getCachedPipelineRepoEntry();
+    const cachedAgentEntry = getCachedPipelineAgentEntry();
+    const hasCachedRepos = (cachedRepoEntry?.repos.length ?? 0) > 0;
+    const shouldRefreshRepos = !isCacheFresh(cachedRepoEntry);
+    const shouldRefreshAgents = !isCacheFresh(cachedAgentEntry);
+
+    if (cachedRepoEntry) {
+      applyPipelineRepoCache(cachedRepoEntry);
+      setPipelineSelectorError(null);
+    }
+    if (cachedAgentEntry) {
+      applyPipelineAgentCache(cachedAgentEntry);
+    }
+
+    if (!shouldRefreshRepos && !shouldRefreshAgents) {
+      return;
+    }
+
     setPipelineSelectorLoading(true);
-    setPipelineSelectorError(null);
-    void Promise.all([api.getGitHubRepos(), api.getAgents()])
-      .then(([repoResponse, agents]) => {
+    if (!hasCachedRepos) {
+      setPipelineSelectorError(null);
+    }
+
+    const repoPromise = shouldRefreshRepos
+      ? api.getGitHubRepos({
+          timeoutMs: PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS,
+          maxRetries: 0,
+        })
+      : Promise.resolve(null);
+    const agentPromise = shouldRefreshAgents
+      ? api.getAgents(undefined, {
+          timeoutMs: PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS,
+          maxRetries: 0,
+        })
+      : Promise.resolve(null);
+
+    void Promise.allSettled([repoPromise, agentPromise])
+      .then(([repoResult, agentResult]) => {
         if (stale) return;
-        setPipelineRepos(repoResponse.repos);
-        setPipelineAgents(agents);
-        setSelectedPipelineRepo((current) =>
-          current || selectDefaultPipelineRepo(repoResponse.repos, repoResponse.viewer_login),
-        );
-        setPipelineSelectorLoaded(true);
-      })
-      .catch(() => {
-        if (stale) return;
-        setPipelineSelectorError(
-          tr(
-            "파이프라인 에디터용 repo/agent 목록을 불러오지 못했습니다.",
-            "Failed to load repo and agent options for the pipeline editor.",
-          ),
-        );
-        notify(
-          "파이프라인 에디터 목록을 불러오지 못했습니다.",
-          "Failed to load pipeline editor options.",
-          "error",
-        );
+
+        if (repoResult.status === "fulfilled" && repoResult.value) {
+          const nextRepoCache: PipelineRepoCacheEntry = {
+            viewerLogin: repoResult.value.viewer_login,
+            repos: repoResult.value.repos,
+            fetchedAt: Date.now(),
+          };
+          applyPipelineRepoCache(nextRepoCache);
+          writeStoredPipelineRepoCache(nextRepoCache);
+          setPipelineSelectorError(null);
+        } else if (!hasCachedRepos) {
+          setPipelineSelectorError(
+            tr(
+              "파이프라인 에디터용 repo 목록을 불러오지 못했습니다. 마지막 성공값이 없어 에디터를 열 수 없습니다.",
+              "Failed to load repository options for the pipeline editor, and no cached data is available yet.",
+            ),
+          );
+          notify(
+            "파이프라인 에디터용 repo 목록을 불러오지 못했습니다.",
+            "Failed to load repository options for the pipeline editor.",
+            "error",
+          );
+        }
+
+        if (agentResult.status === "fulfilled" && agentResult.value) {
+          const nextAgentCache: PipelineAgentCacheEntry = {
+            agents: agentResult.value,
+            fetchedAt: Date.now(),
+          };
+          applyPipelineAgentCache(nextAgentCache);
+          writeStoredPipelineAgentCache(nextAgentCache);
+        }
       })
       .finally(() => {
         if (!stale) {
@@ -1121,12 +1283,13 @@ export default function SettingsView({
       });
     return () => {
       stale = true;
+      setPipelineSelectorLoading(false);
     };
   }, [
     activePanel,
+    applyPipelineAgentCache,
+    applyPipelineRepoCache,
     notify,
-    pipelineSelectorLoaded,
-    pipelineSelectorLoading,
     tr,
   ]);
 
@@ -1828,7 +1991,7 @@ export default function SettingsView({
               "Pick the repo or agent scope first, then tune transition events, hooks, and policies on the dedicated FSM canvas.",
             )}
           >
-            {pipelineSelectorLoading ? (
+            {pipelineSelectorLoading && pipelineRepos.length === 0 ? (
               <SettingsEmptyState className="text-sm">
                 {tr("파이프라인 에디터 대상을 불러오는 중...", "Loading pipeline editor targets...")}
               </SettingsEmptyState>
