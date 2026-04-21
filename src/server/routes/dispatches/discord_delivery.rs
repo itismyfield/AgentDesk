@@ -2254,8 +2254,16 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
     dispatch_id: &str,
     transport: &T,
 ) -> Result<(), String> {
-    send_dispatch_to_discord_guarded(db, None, agent_id, title, card_id, dispatch_id, transport)
-        .await
+    send_dispatch_to_discord_guarded(
+        db,
+        transport.pg_pool(),
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        transport,
+    )
+    .await
 }
 
 async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
@@ -2267,6 +2275,7 @@ async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
     dispatch_id: &str,
     transport: &T,
 ) -> Result<(), String> {
+    let pg_pool = pg_pool.or_else(|| transport.pg_pool());
     if !claim_dispatch_delivery_guard(db, pg_pool, dispatch_id).await? {
         return Ok(());
     }

@@ -959,7 +959,7 @@ pub(crate) async fn handle_completed_dispatch_followups_with_pg(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime(db);
+    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
     handle_completed_dispatch_followups_internal(
         db,
         pg_pool,
@@ -997,6 +997,7 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
     config: &DispatchFollowupConfig,
     transport: &T,
 ) -> Result<(), String> {
+    let pg_pool = pg_pool.or_else(|| transport.pg_pool());
     let info = load_completed_dispatch_info(db, pg_pool, dispatch_id).await?;
 
     let Some(mut info) = info else {
@@ -1791,6 +1792,7 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db, pg_pool: Option<PgPo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::dispatches::discord_delivery;
     use std::sync::{Arc, Mutex};
 
     fn test_db() -> crate::db::Db {
@@ -1895,6 +1897,53 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockOutboxNotifier {
         calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    struct PgAwareTransport {
+        pg_pool: PgPool,
+        dispatch_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PgAwareTransport {
+        fn new(pg_pool: PgPool) -> Self {
+            Self {
+                pg_pool,
+                dispatch_calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl DispatchTransport for PgAwareTransport {
+        fn pg_pool(&self) -> Option<&PgPool> {
+            Some(&self.pg_pool)
+        }
+
+        async fn send_dispatch(
+            &self,
+            _db: crate::db::Db,
+            agent_id: String,
+            _title: String,
+            _card_id: String,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.dispatch_calls
+                .lock()
+                .unwrap()
+                .push(format!("{agent_id}:{dispatch_id}"));
+            Ok(())
+        }
+
+        async fn send_review_followup(
+            &self,
+            _db: crate::db::Db,
+            _card_id: String,
+            _channel_id_num: u64,
+            _message: String,
+            _kind: discord_delivery::ReviewFollowupKind,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     impl OutboxNotifier for MockOutboxNotifier {
@@ -2021,6 +2070,124 @@ mod tests {
         assert!(
             active_thread.is_none(),
             "done-card followup should clear active_thread_id in postgres"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn handle_completed_dispatch_followups_with_transport_uses_transport_pg_pool() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, active_thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-transport-pg")
+        .bind("Transport PG Card")
+        .bind("done")
+        .bind("thread-transport")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, dispatch_type, status, title, thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-transport-pg")
+        .bind("card-transport-pg")
+        .bind("implementation")
+        .bind("completed")
+        .bind("Transport PG Card")
+        .bind("thread-transport")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let transport = PgAwareTransport::new(pool.clone());
+        let config = DispatchFollowupConfig {
+            discord_api_base: "http://127.0.0.1:9".to_string(),
+            notify_bot_token: None,
+            announce_bot_token: None,
+        };
+
+        handle_completed_dispatch_followups_with_config_and_transport(
+            &sqlite,
+            "dispatch-transport-pg",
+            &config,
+            &transport,
+        )
+        .await
+        .unwrap();
+
+        let active_thread: Option<String> =
+            sqlx::query_scalar("SELECT active_thread_id FROM kanban_cards WHERE id = $1")
+                .bind("card-transport-pg")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            active_thread.is_none(),
+            "transport-backed PG followup should clear active_thread_id without SQLite mirroring"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn send_dispatch_with_transport_uses_transport_pg_pool_for_delivery_guard() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let transport = PgAwareTransport::new(pool.clone());
+
+        discord_delivery::send_dispatch_to_discord_with_transport(
+            &sqlite,
+            "agent-pg-transport",
+            "Transport dispatch",
+            "card-pg-transport",
+            "dispatch-pg-transport",
+            &transport,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *transport.dispatch_calls.lock().unwrap(),
+            vec!["agent-pg-transport:dispatch-pg-transport".to_string()]
+        );
+
+        let notified: Option<String> =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                .bind("dispatch_notified:dispatch-pg-transport")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            notified.as_deref(),
+            Some("dispatch-pg-transport"),
+            "delivery guard should persist notification state in postgres when transport carries a pool"
+        );
+
+        let sqlite_notified: Option<String> = sqlite
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                ["dispatch_notified:dispatch-pg-transport"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            sqlite_notified.is_none(),
+            "transport-backed PG delivery should not backfill SQLite guard keys"
         );
 
         pool.close().await;
