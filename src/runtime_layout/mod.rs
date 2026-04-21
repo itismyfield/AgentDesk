@@ -245,8 +245,8 @@ fn normalize_memory_backend_name(raw: Option<&str>) -> String {
         Some(value) if value.eq_ignore_ascii_case("auto") => "auto".to_string(),
         Some(value) if value.eq_ignore_ascii_case("file") => "file".to_string(),
         Some(value) if value.eq_ignore_ascii_case("local") => "file".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("mem0") => "file".to_string(),
         Some(value) if value.eq_ignore_ascii_case("memento") => "memento".to_string(),
-        Some(value) if value.eq_ignore_ascii_case("mem0") => "mem0".to_string(),
         Some(_) => DEFAULT_MEMORY_BACKEND.to_string(),
     }
 }
@@ -1129,6 +1129,25 @@ memory:
         assert_eq!(backend.mcp.endpoint, "http://127.0.0.1:8765");
         assert_eq!(backend.mcp.access_key_env, "MEMENTO_API_KEY");
         assert!(logs.trim().is_empty());
+    }
+
+    #[test]
+    fn load_memory_backend_treats_legacy_mem0_backend_as_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home_guard = TestHomeGuard::install(&temp.path().join("home"), root);
+        write_text(
+            &config_file_path(root),
+            r#"server:
+  port: 9001
+memory:
+  backend: mem0
+"#,
+        );
+
+        let backend = load_memory_backend(root);
+
+        assert_eq!(backend.backend, "file");
     }
 
     #[test]

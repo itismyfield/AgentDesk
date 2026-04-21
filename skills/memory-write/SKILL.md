@@ -6,7 +6,7 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 
 ## 목적
 에이전트가 메모리에 저장할 때 파일 경로 대신 주제/내용과 계층을 지정한다.
-백엔드가 file, memento, mem0 중 무엇이든 사용자 명령과 보고 형식은 동일해야 한다.
+백엔드가 file 또는 memento여도 사용자 명령과 보고 형식은 동일해야 한다.
 
 ## 입력
 `$ARGUMENTS`: 저장할 내용 (필수)
@@ -32,16 +32,16 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 `memory:` 섹션이 없으면 `~/.adk/release/config/memory-backend.json`을 legacy fallback으로 읽는다.
 
 규칙:
-- `backend`: `auto | memento | mem0 | file`
-- `auto` 해석 순서: `memento` 가능 -> `mem0` 가능 -> 둘 다 불가면 `file`
-- 명시 지정(`memento`, `mem0`, `file`)이면 자동감지를 건너뛴다
+- `backend`: `auto | memento | file`
+- `auto` 해석 순서: `memento` 가능 -> 아니면 `file`
+- 명시 지정(`memento`, `file`)이면 자동감지를 건너뛴다
 - `sam_path`는 `{role_id}.json` 파일들이 저장되는 디렉토리 루트다
 
 ## 실행 전략
 
 ### 1. 백엔드 결정
 1. `agentdesk.yaml`의 `memory:`를 읽고, 없으면 `memory-backend.json` fallback을 읽는다.
-2. `backend=auto`면 `memento -> mem0 -> file` 순서로 사용 가능 여부를 판단한다.
+2. `backend=auto`면 `memento -> file` 순서로 사용 가능 여부를 판단한다.
 3. 명시 지정이면 그대로 사용한다.
 
 ### 2. File 백엔드 저장
@@ -66,17 +66,13 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 1. fact / decision / error / procedure 성격의 내용이면 연결된 Memento write 계열 도구를 우선 사용한다.
 2. 현재 턴에 MCP 도구가 없거나 저장 실패 시 file backend로 fallback하고 짧게 보고한다.
 
-#### mem0
-1. preference / relation / profile 성격의 내용이면 연결된 Mem0 write 계열 도구를 우선 사용한다.
-2. 현재 턴에 MCP 도구가 없거나 현재 내용이 Mem0 성격과 맞지 않으면 file backend로 fallback하고 짧게 보고한다.
-
 ## 결과 포맷
 ```markdown
 ## Memory Write 완료
 - 계층: {SAM|SAK|LTM}
 - 주제: {topic}
 - 동작: {추가|갱신|새 생성|skip}
-- backend: {file|memento|mem0}
+- backend: {file|memento}
 - fallback: {없음|사유}
 ```
 
@@ -85,4 +81,4 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 - SAK 80줄, SAM 10건 제한을 항상 검사한다
 - 동일 내용이 이미 존재하면 중복 저장하지 않는다
 - 파일 경로를 결과에 직접 노출하지 않는다
-- `memento`/`mem0` 선택 시에도 현재 턴에 MCP가 없으면 file fallback을 허용하되, fallback 사실을 짧게 보고한다
+- `memento` 선택 시에도 현재 턴에 MCP가 없으면 file fallback을 허용하되, fallback 사실을 짧게 보고한다

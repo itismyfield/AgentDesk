@@ -16,11 +16,11 @@
 ## Phase 3: 분류
 1. 각 항목을 SAM / SAK / LTM / System Prompt로 분류한다
 2. 동시에 내용 성격을 fact / decision / error / procedure / preference / relation으로 태깅한다
-3. backend가 `memento` 또는 `mem0`일 때는 이 태그를 sink 분기에 사용한다
+3. backend가 `memento`일 때는 이 태그를 sink 분기에 사용한다
 
 ## Phase 4: sink backend 결정
 1. `backend`를 읽는다
-2. `auto`면 `memento -> mem0 -> file` 순서로 감지한다
+2. `auto`면 `memento -> file` 순서로 감지한다
 3. 명시 지정이면 그대로 사용한다
 
 ## Phase 5: file backend 기록
@@ -41,15 +41,11 @@
 2. 있으면 보강하고 없으면 새 파일을 만든다
 
 ## Phase 6: MCP backend 기록
-`backend=memento | mem0`일 때는 파일로 쓰지 않고 아래 규칙을 따른다.
+`backend=memento`일 때는 파일로 쓰지 않고 아래 규칙을 따른다.
 
 ### memento
 - fact / decision / error / procedure만 Memento MCP에 기록
 - preference / relation은 skip
-
-### mem0
-- preference / relation만 Mem0 MCP에 기록
-- fact / decision / error / procedure는 skip
 
 현재 턴에 필요한 MCP 도구를 사용할 수 없으면 file로 몰래 대체하지 말고 `skip + 이유`를 보고한다.
 

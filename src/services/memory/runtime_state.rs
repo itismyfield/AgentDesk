@@ -1,15 +1,11 @@
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, SystemTime};
 
-use serde_json::{Map, Value, json};
-
 use crate::runtime_layout;
 use crate::services::discord::settings::MemoryBackendKind;
 
-const MEM0_SEARCH_PATH: &str = "/v2/memories/search";
 const MEMENTO_HEALTH_PATH: &str = "/health";
 const MEMENTO_MCP_PATH: &str = "/mcp";
-const MEM0_HEALTH_USER_ID: &str = "agentdesk-healthcheck";
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_THRESHOLD: u8 = 3;
 const BACKOFF_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -65,13 +61,11 @@ impl ExternalMemoryBackendState {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MemoryBackendRuntimeSnapshot {
-    pub mem0: ExternalMemoryBackendState,
     pub memento: ExternalMemoryBackendState,
 }
 
 #[derive(Clone, Debug, Default)]
 struct MemoryBackendRuntimeState {
-    mem0: ExternalMemoryBackendState,
     memento: ExternalMemoryBackendState,
 }
 
@@ -79,14 +73,6 @@ static MEMORY_BACKEND_STATE: LazyLock<RwLock<MemoryBackendRuntimeState>> =
     LazyLock::new(|| RwLock::new(MemoryBackendRuntimeState::default()));
 #[cfg(test)]
 static LAST_REFRESH_REASON: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
-
-#[derive(Clone, Debug)]
-struct Mem0RuntimeConfig {
-    api_key: String,
-    base_url: String,
-    org_id: Option<String>,
-    project_id: Option<String>,
-}
 
 #[derive(Clone, Debug)]
 struct MementoRuntimeConfig {
@@ -118,17 +104,6 @@ fn env_var_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn mem0_runtime_config() -> Option<Mem0RuntimeConfig> {
-    Some(Mem0RuntimeConfig {
-        api_key: env_var_value("MEM0_API_KEY")?,
-        base_url: env_var_value("MEM0_BASE_URL")?
-            .trim_end_matches('/')
-            .to_string(),
-        org_id: env_var_value("MEM0_ORG_ID"),
-        project_id: env_var_value("MEM0_PROJECT_ID"),
-    })
-}
-
 fn memento_runtime_config() -> Option<MementoRuntimeConfig> {
     let config = runtime_memory_backend_config()?;
     let endpoint = normalize_memento_endpoint(&config.mcp.endpoint);
@@ -153,7 +128,6 @@ fn normalize_memento_endpoint(endpoint: &str) -> String {
 }
 
 fn sync_configured_backends(state: &mut MemoryBackendRuntimeState) {
-    sync_backend_slot(&mut state.mem0, mem0_runtime_config().is_some());
     sync_backend_slot(&mut state.memento, memento_runtime_config().is_some());
 }
 
@@ -208,58 +182,6 @@ fn apply_probe_outcome(
     }
 }
 
-fn mem0_probe_body(config: &Mem0RuntimeConfig) -> Value {
-    let mut body = Map::new();
-    body.insert("query".to_string(), json!("agentdesk health check"));
-    body.insert("user_id".to_string(), json!(MEM0_HEALTH_USER_ID));
-    body.insert("limit".to_string(), json!(1));
-    body.insert("version".to_string(), json!("v2"));
-    body.insert("top_k".to_string(), json!(1));
-    body.insert("threshold".to_string(), json!(0.0));
-    body.insert("fields".to_string(), json!(["memory"]));
-    if let Some(org_id) = &config.org_id {
-        body.insert("org_id".to_string(), json!(org_id));
-    }
-    if let Some(project_id) = &config.project_id {
-        body.insert("project_id".to_string(), json!(project_id));
-    }
-    Value::Object(body)
-}
-
-async fn probe_mem0() -> ProbeOutcome {
-    let Some(config) = mem0_runtime_config() else {
-        return ProbeOutcome::Unconfigured;
-    };
-
-    let client = match reqwest::Client::builder()
-        .timeout(HEALTH_PROBE_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            return ProbeOutcome::Failure(format!("mem0 health client build failed: {err}"));
-        }
-    };
-
-    let url = format!("{}{}", config.base_url, MEM0_SEARCH_PATH);
-    let response = client
-        .post(url)
-        .header("Authorization", format!("Token {}", config.api_key))
-        .header("Accept", "application/json")
-        .json(&mem0_probe_body(&config))
-        .send()
-        .await;
-
-    match response {
-        Ok(response) if response.status() == reqwest::StatusCode::OK => ProbeOutcome::Success,
-        Ok(response) => ProbeOutcome::Failure(format!(
-            "mem0 health probe failed with {}",
-            response.status()
-        )),
-        Err(err) => ProbeOutcome::Failure(format!("mem0 health probe request failed: {err}")),
-    }
-}
-
 async fn probe_memento() -> ProbeOutcome {
     let Some(config) = memento_runtime_config() else {
         return ProbeOutcome::Unconfigured;
@@ -310,7 +232,6 @@ pub(crate) fn snapshot() -> MemoryBackendRuntimeSnapshot {
     let mut state = lock_write();
     sync_configured_backends(&mut state);
     MemoryBackendRuntimeSnapshot {
-        mem0: state.mem0.clone(),
         memento: state.memento.clone(),
     }
 }
@@ -318,7 +239,6 @@ pub(crate) fn snapshot() -> MemoryBackendRuntimeSnapshot {
 pub(crate) fn backend_state(kind: MemoryBackendKind) -> Option<ExternalMemoryBackendState> {
     match kind {
         MemoryBackendKind::File => None,
-        MemoryBackendKind::Mem0 => Some(snapshot().mem0),
         MemoryBackendKind::Memento => Some(snapshot().memento),
     }
 }
@@ -326,7 +246,6 @@ pub(crate) fn backend_state(kind: MemoryBackendKind) -> Option<ExternalMemoryBac
 pub(crate) fn backend_is_active(kind: MemoryBackendKind) -> bool {
     match kind {
         MemoryBackendKind::File => true,
-        MemoryBackendKind::Mem0 => snapshot().mem0.active,
         MemoryBackendKind::Memento => snapshot().memento.active,
     }
 }
@@ -337,23 +256,20 @@ pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntime
         sync_configured_backends(&mut state);
     }
 
-    let (mem0_outcome, memento_outcome) = tokio::join!(probe_mem0(), probe_memento());
+    let memento_outcome = probe_memento().await;
     let now = SystemTime::now();
 
     let snapshot = {
         let mut state = lock_write();
-        apply_probe_outcome(&mut state.mem0, mem0_outcome, now);
         apply_probe_outcome(&mut state.memento, memento_outcome, now);
         MemoryBackendRuntimeSnapshot {
-            mem0: state.mem0.clone(),
             memento: state.memento.clone(),
         }
     };
 
     tracing::info!(
-        "[memory] {} health refresh: {}, {}",
+        "[memory] {} health refresh: {}",
         reason,
-        snapshot.mem0.summary("mem0"),
         snapshot.memento.summary("memento")
     );
     #[cfg(test)]
@@ -436,60 +352,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mem0_health_backoff_deactivates_after_three_failures_and_recovers() {
-        let _lock = env_lock();
-        reset_for_tests();
-
-        let temp = tempfile::tempdir().unwrap();
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let previous_api_key = std::env::var_os("MEM0_API_KEY");
-        let previous_base_url = std::env::var_os("MEM0_BASE_URL");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-        write_memory_backend_config(
-            temp.path(),
-            serde_json::json!({
-                "version": 2,
-                "backend": "auto"
-            }),
-        );
-        unsafe { std::env::set_var("MEM0_API_KEY", "mem0-key") };
-
-        for attempt in 1..=3 {
-            let (base_url, handle) =
-                spawn_fixed_response_server("500 Internal Server Error", "{\"error\":\"boom\"}")
-                    .await;
-            unsafe { std::env::set_var("MEM0_BASE_URL", &base_url) };
-
-            let snapshot = refresh_backend_health("test-failure").await;
-            handle.abort();
-
-            assert!(snapshot.mem0.configured);
-            assert_eq!(snapshot.mem0.consecutive_failures, attempt);
-            if attempt < 3 {
-                assert!(snapshot.mem0.active);
-                assert!(snapshot.mem0.backoff_until.is_none());
-            } else {
-                assert!(!snapshot.mem0.active);
-                assert!(snapshot.mem0.backoff_until.is_some());
-            }
-        }
-
-        let (base_url, handle) = spawn_fixed_response_server("200 OK", "{\"results\":[]}").await;
-        unsafe { std::env::set_var("MEM0_BASE_URL", &base_url) };
-        let snapshot = refresh_backend_health("test-recovery").await;
-        handle.abort();
-
-        assert!(snapshot.mem0.active);
-        assert_eq!(snapshot.mem0.consecutive_failures, 0);
-        assert!(snapshot.mem0.backoff_until.is_none());
-
-        restore_env("AGENTDESK_ROOT_DIR", previous_root);
-        restore_env("MEM0_API_KEY", previous_api_key);
-        restore_env("MEM0_BASE_URL", previous_base_url);
-        reset_for_tests();
-    }
-
-    #[tokio::test]
     async fn memento_health_backoff_deactivates_after_three_failures_and_recovers() {
         let _lock = env_lock();
         reset_for_tests();
@@ -545,7 +407,7 @@ mod tests {
             }
         }
 
-        let (base_url, handle) = spawn_fixed_response_server("200 OK", "{\"status\":\"ok\"}").await;
+        let (base_url, handle) = spawn_fixed_response_server("200 OK", "{\"ok\":true}").await;
         write_memory_backend_config(
             temp.path(),
             serde_json::json!({
