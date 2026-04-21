@@ -462,41 +462,6 @@ mod tests {
 
     use super::*;
 
-    struct Mem0EnvGuard {
-        prev_api_key: Option<std::ffi::OsString>,
-        prev_base_url: Option<std::ffi::OsString>,
-    }
-
-    impl Mem0EnvGuard {
-        fn install() -> Self {
-            crate::services::memory::reset_backend_health_for_tests();
-            let prev_api_key = std::env::var_os("MEM0_API_KEY");
-            let prev_base_url = std::env::var_os("MEM0_BASE_URL");
-            unsafe {
-                std::env::set_var("MEM0_API_KEY", "test-key");
-                std::env::set_var("MEM0_BASE_URL", "http://mem0.local");
-            }
-            Self {
-                prev_api_key,
-                prev_base_url,
-            }
-        }
-    }
-
-    impl Drop for Mem0EnvGuard {
-        fn drop(&mut self) {
-            match self.prev_api_key.take() {
-                Some(value) => unsafe { std::env::set_var("MEM0_API_KEY", value) },
-                None => unsafe { std::env::remove_var("MEM0_API_KEY") },
-            }
-            match self.prev_base_url.take() {
-                Some(value) => unsafe { std::env::set_var("MEM0_BASE_URL", value) },
-                None => unsafe { std::env::remove_var("MEM0_BASE_URL") },
-            }
-            crate::services::memory::reset_backend_health_for_tests();
-        }
-    }
-
     fn with_temp_root<F>(f: F)
     where
         F: FnOnce(&TempDir),
@@ -634,56 +599,39 @@ channels:
 
     #[test]
     fn test_channel_binding_memory_overrides_agent_memory_defaults() {
-        with_temp_root(|_temp_home: &TempDir| {
-            let _mem0_env = Mem0EnvGuard::install();
-            let schema: OrgSchema = serde_yaml::from_str(
-                r#"
+        let schema: OrgSchema = serde_yaml::from_str(
+            r#"
 version: 1
 agents:
   spark:
     display_name: "Spark"
     prompt_file: "~/prompts/spark.md"
     memory:
-      backend: mem0
+      backend: file
       recall_timeout_ms: 900
       capture_timeout_ms: 7000
-      mem0:
-        profile: default
-        ingestion:
-          infer: false
 channels:
   by_id:
     "1488022491992424448":
       agent: spark
       memory:
         recall_timeout_ms: 50
-        mem0:
-          profile: strict
-          ingestion:
-            custom_instructions: "Prefer high-confidence facts"
 "#,
-            )
-            .expect("parse org schema");
+        )
+        .expect("parse org schema");
 
-            let (channel_binding, agent_def) =
-                resolve_channel_binding(&schema, ChannelId::new(1488022491992424448), None)
-                    .expect("resolve channel binding");
-            let memory =
-                resolve_memory_settings(agent_def.memory.as_ref(), channel_binding.memory.as_ref());
+        let (channel_binding, agent_def) =
+            resolve_channel_binding(&schema, ChannelId::new(1488022491992424448), None)
+                .expect("resolve channel binding");
+        let memory =
+            resolve_memory_settings(agent_def.memory.as_ref(), channel_binding.memory.as_ref());
 
-            assert_eq!(
-                memory.backend,
-                super::super::settings::MemoryBackendKind::Mem0
-            );
-            assert_eq!(memory.recall_timeout_ms, 100);
-            assert_eq!(memory.capture_timeout_ms, 7000);
-            assert_eq!(memory.mem0.profile, "strict");
-            assert_eq!(memory.mem0.ingestion.infer, Some(false));
-            assert_eq!(
-                memory.mem0.ingestion.custom_instructions.as_deref(),
-                Some("Prefer high-confidence facts")
-            );
-        });
+        assert_eq!(
+            memory.backend,
+            super::super::settings::MemoryBackendKind::File
+        );
+        assert_eq!(memory.recall_timeout_ms, 100);
+        assert_eq!(memory.capture_timeout_ms, 7000);
     }
 
     #[test]

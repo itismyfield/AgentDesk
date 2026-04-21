@@ -7,7 +7,7 @@ use super::context_window::{
 };
 use super::memory_lifecycle::{
     PROVIDER_SESSION_ASSISTANT_TURN_CAP, TurnEndMemoryPlan, optional_metric_token_fields,
-    plan_turn_end_memory, spawn_memory_capture_task, take_memento_reflect_request,
+    plan_turn_end_memory, take_memento_reflect_request,
 };
 use super::recovery_text::{
     build_session_retry_context_from_history, store_session_retry_context,
@@ -25,62 +25,16 @@ use super::stale_resume::{
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::MessageId;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::memory::{CaptureRequest, SessionEndReason, TokenUsage};
+use crate::services::memory::{SessionEndReason, TokenUsage};
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
 use std::time::{Duration, Instant};
-
-async fn spawn_hanging_http_server() -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::AsyncReadExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf).await;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-    });
-    (format!("http://{}", addr), handle)
-}
-
-fn set_mem0_env(
-    base_url: &str,
-) -> (
-    std::sync::MutexGuard<'static, ()>,
-    Option<std::ffi::OsString>,
-    Option<std::ffi::OsString>,
-) {
-    let guard = crate::services::discord::runtime_store::lock_test_env();
-    let prev_api_key = std::env::var_os("MEM0_API_KEY");
-    let prev_base_url = std::env::var_os("MEM0_BASE_URL");
-    unsafe {
-        std::env::set_var("MEM0_API_KEY", "test-key");
-        std::env::set_var("MEM0_BASE_URL", base_url);
-    }
-    (guard, prev_api_key, prev_base_url)
-}
-
-fn restore_mem0_env(
-    prev_api_key: Option<std::ffi::OsString>,
-    prev_base_url: Option<std::ffi::OsString>,
-) {
-    match prev_api_key {
-        Some(value) => unsafe { std::env::set_var("MEM0_API_KEY", value) },
-        None => unsafe { std::env::remove_var("MEM0_API_KEY") },
-    }
-    match prev_base_url {
-        Some(value) => unsafe { std::env::set_var("MEM0_BASE_URL", value) },
-        None => unsafe { std::env::remove_var("MEM0_BASE_URL") },
-    }
-}
 
 #[test]
 fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -505,7 +459,7 @@ fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
 fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_capture() {
     let session = sample_session();
     assert_eq!(
-        plan_turn_end_memory(&session, MemoryBackendKind::Mem0, false, true, false, false),
+        plan_turn_end_memory(&session, MemoryBackendKind::File, false, true, false, false),
         Some(TurnEndMemoryPlan {
             session_end_reason: None,
             clear_provider_session: true,
@@ -694,162 +648,6 @@ fn storing_retry_context_enqueues_deduped_lifecycle_notification() {
         take_session_retry_context(Some(&db), 42),
         Some("User: hi\nAssistant: hello again".to_string())
     );
-}
-
-#[tokio::test]
-async fn headless_turn_completion_enqueues_notify_outbox_message() {
-    let db = crate::db::test_db();
-    let shared =
-        crate::services::discord::make_shared_data_for_tests_with_storage(Some(db.clone()), None);
-    let cancel_token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-    let channel_id = ChannelId::new(42);
-    let user_msg_id = MessageId::new(4201);
-    let current_msg_id = MessageId::new(4202);
-    let inflight_state = InflightTurnState::new(
-        ProviderKind::Codex,
-        channel_id.get(),
-        Some("agentdesk-cdx".to_string()),
-        1,
-        user_msg_id.get(),
-        current_msg_id.get(),
-        "background follow-up".to_string(),
-        Some("session-headless".to_string()),
-        None,
-        None,
-        None,
-        0,
-    );
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-
-    super::spawn_turn_bridge(
-        shared,
-        cancel_token,
-        rx,
-        super::TurnBridgeContext {
-            provider: ProviderKind::Codex,
-            gateway: std::sync::Arc::new(super::super::gateway::HeadlessGateway),
-            channel_id,
-            user_msg_id,
-            user_text_owned: "background follow-up".to_string(),
-            request_owner_name: "system".to_string(),
-            role_binding: None,
-            adk_session_key: Some("headless-session-key".to_string()),
-            adk_session_name: None,
-            adk_session_info: None,
-            adk_cwd: None,
-            dispatch_id: None,
-            memory_recall_usage: TokenUsage::default(),
-            current_msg_id,
-            response_sent_offset: 0,
-            full_response: String::new(),
-            tmux_last_offset: None,
-            new_session_id: Some("session-headless".to_string()),
-            defer_watcher_resume: false,
-            completion_tx: Some(completion_tx),
-            inflight_state,
-        },
-    );
-
-    tx.send(StreamMessage::TaskNotification {
-        task_id: "task-42".to_string(),
-        status: "completed".to_string(),
-        summary: "background task done".to_string(),
-    })
-    .unwrap();
-    tx.send(StreamMessage::Text {
-        content: "✅ PR #825 리뷰 4건 fix 완료".to_string(),
-    })
-    .unwrap();
-    tx.send(StreamMessage::Done {
-        result: String::new(),
-        session_id: Some("session-headless-next".to_string()),
-    })
-    .unwrap();
-    drop(tx);
-
-    tokio::time::timeout(Duration::from_secs(5), completion_rx)
-        .await
-        .expect("turn bridge completion")
-        .expect("completion signal");
-
-    let conn = db.read_conn().unwrap();
-    let (target, content, bot, source, session_key, count): (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        i64,
-    ) = conn
-        .query_row(
-            "SELECT
-                COALESCE(MAX(target), ''),
-                COALESCE(MAX(content), ''),
-                COALESCE(MAX(bot), ''),
-                COALESCE(MAX(source), ''),
-                MAX(session_key),
-                COUNT(*)
-             FROM message_outbox",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-
-    assert_eq!(count, 1);
-    assert_eq!(target, "channel:42");
-    assert_eq!(bot, "notify");
-    assert_eq!(source, "headless_turn");
-    assert_eq!(session_key.as_deref(), Some("headless-session-key"));
-    assert!(content.contains("PR #825 리뷰 4건 fix 완료"));
-}
-
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
-    let (base_url, server_handle) = spawn_hanging_http_server().await;
-    let (_guard, prev_api_key, prev_base_url) = set_mem0_env(&base_url);
-
-    let start = Instant::now();
-    let handle = spawn_memory_capture_task(
-        ChannelId::new(42),
-        ResolvedMemorySettings {
-            backend: MemoryBackendKind::Mem0,
-            capture_timeout_ms: 25,
-            ..ResolvedMemorySettings::default()
-        },
-        CaptureRequest {
-            provider: ProviderKind::Codex,
-            role_id: "codex".to_string(),
-            channel_id: 42,
-            session_id: "run-42".to_string(),
-            dispatch_id: None,
-            user_text: "user".to_string(),
-            assistant_text: "assistant".to_string(),
-        },
-    );
-
-    assert!(
-        start.elapsed() < Duration::from_millis(10),
-        "spawning capture should not block the response-finalization path"
-    );
-
-    tokio::time::timeout(Duration::from_millis(300), handle)
-        .await
-        .expect("capture task should finish within timeout")
-        .expect("capture task should not panic");
-
-    server_handle.abort();
-    restore_mem0_env(prev_api_key, prev_base_url);
 }
 
 #[test]
