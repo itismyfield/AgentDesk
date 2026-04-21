@@ -291,10 +291,17 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
     let target = format!("channel:{}", channel_id.get());
     let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
 
-    // Prefer the Postgres-backed outbox when available — mirrors the
-    // headless-delivery ordering in `turn_bridge::enqueue_headless_delivery`.
+    // #897 round-3 High: when `pg_pool` is configured, the outbox worker
+    // drains PG EXCLUSIVELY. Writing a row to SQLite as a "fallback" would
+    // silently black-hole the message because no worker polls it in that
+    // mode. On PG insert failure we return `false` so the caller falls
+    // back to a DIRECT Discord send (the only path that guarantees
+    // delivery in PG mode) rather than papering over the failure with an
+    // undeliverable SQLite row. Mirrors
+    // `turn_bridge::enqueue_headless_delivery` which also refuses to fall
+    // back to SQLite when PG is configured.
     if let Some(pool) = pg_pool {
-        match sqlx::query(
+        return match sqlx::query(
             "INSERT INTO message_outbox
              (target, content, bot, source, reason_code, session_key)
              VALUES ($1, $2, 'notify', 'system', 'bg_trigger.auto_turn', $3)",
@@ -305,18 +312,19 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
         .execute(pool)
         .await
         {
-            Ok(_) => return true,
+            Ok(_) => true,
             Err(error) => {
                 tracing::warn!(
-                    "background-trigger postgres outbox insert failed for channel {}: {} — falling back to sqlite",
+                    "background-trigger postgres outbox insert failed for channel {}: {}",
                     channel_id,
                     error
                 );
-                // Fall through to the SQLite fallback below.
+                false
             }
-        }
+        };
     }
 
+    // PG is not configured — use the SQLite outbox (legacy / test setups).
     let Some(db) = db else {
         return false;
     };
@@ -393,7 +401,12 @@ async fn reconcile_failed_bg_trigger_enqueues_for_channel(
 ) -> Option<u64> {
     let target = format!("channel:{}", channel_id.get());
 
-    // Prefer the Postgres-backed outbox.
+    // #897 round-3 High: when `pg_pool` is configured it is the ONLY
+    // authoritative store. Consulting SQLite as a "fallback" on PG
+    // failure or on an empty PG result would surface rows from a legacy
+    // test/dev database that the outbox worker never produced, and worse
+    // could delete rows written by a prior run. On PG error we surface
+    // `None` so the next poll retries; there is no data-safe fallback.
     if let Some(pool) = pg_pool {
         let rows_res = sqlx::query_as::<_, (i64, Option<String>)>(
             "SELECT id, session_key FROM message_outbox
@@ -407,7 +420,7 @@ async fn reconcile_failed_bg_trigger_enqueues_for_channel(
         .fetch_all(pool)
         .await;
 
-        match rows_res {
+        return match rows_res {
             Ok(rows) if !rows.is_empty() => {
                 let mut min_offset: Option<u64> = None;
                 for (_, session_key) in &rows {
@@ -438,20 +451,21 @@ async fn reconcile_failed_bg_trigger_enqueues_for_channel(
                     channel_id,
                     min_offset,
                 );
-                return min_offset;
+                min_offset
             }
-            Ok(_) => return None,
+            Ok(_) => None,
             Err(error) => {
                 tracing::warn!(
-                    "postgres bg_trigger reconcile query failed for channel {}: {} — falling back to sqlite",
+                    "postgres bg_trigger reconcile query failed for channel {}: {}",
                     channel_id,
                     error
                 );
-                // Fall through to SQLite fallback below.
+                None
             }
-        }
+        };
     }
 
+    // PG is not configured — use the SQLite outbox (legacy/test setups).
     let db = db?;
     let conn = db.separate_conn().ok()?;
 
@@ -1616,7 +1630,12 @@ pub(super) async fn tmux_output_watcher(
                     let _ = channel_id.say(&http, &notice).await;
                 }
             }
-            if let Some(state) = inflight_state.as_ref() {
+            // #897 round-3 Medium: skip reaction work for `rebind_origin`
+            // inflights — their `user_msg_id=0` identifies no real Discord
+            // message so issuing reactions against it just produces API
+            // errors. The synthetic state was created by
+            // `/api/inflight/rebind` to adopt a live tmux session.
+            if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '⚠').await;
@@ -1728,7 +1747,10 @@ pub(super) async fn tmux_output_watcher(
                 }
             }
 
-            if let Some(state) = inflight_state.as_ref() {
+            // #897 round-3 Medium: skip reaction + retry scheduling for
+            // `rebind_origin` inflights — they have no real user message
+            // to react against and no real user text to re-prompt.
+            if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
                 if matches!(&decision, ProviderOverloadDecision::Exhausted) {
@@ -1744,7 +1766,7 @@ pub(super) async fn tmux_output_watcher(
                     fingerprint,
                 } => {
                     if let Some(retry_text) = retry_text {
-                        if let Some(state) = inflight_state.as_ref() {
+                        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
                             schedule_provider_overload_retry(
                                 shared.clone(),
                                 http.clone(),
@@ -2200,8 +2222,15 @@ pub(super) async fn tmux_output_watcher(
             );
         }
 
-        // Mark user message as completed: ⏳ → ✅ when inflight metadata is available.
-        if let Some(state) = inflight_state.as_ref() {
+        // Mark user message as completed: ⏳ → ✅ when inflight metadata is
+        // available. #897 round-3 Medium: skip the reaction + transcript +
+        // analytics block entirely for `rebind_origin` inflights. Their
+        // `user_msg_id=0` points at no real message, and persisting a
+        // transcript with `turn_id=discord:<channel>:0` poisons
+        // session_transcripts / turn_analytics. The notify-bot outbox
+        // enqueue above already delivered the recovered response to the
+        // user; nothing else on the success path is legitimate here.
+        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin) {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
