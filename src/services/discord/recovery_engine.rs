@@ -304,6 +304,27 @@ pub(super) async fn restore_inflight_turns(
     let settings_snapshot = shared.settings.read().await.clone();
 
     for state in states {
+        // #897 round-4 High: rebind_origin inflights are synthetic
+        // placeholders owned by `/api/inflight/rebind` and do NOT carry
+        // a real user message, dispatch context, or placeholder Discord
+        // message. Restart recovery has nothing meaningful to do with
+        // them — running `replace_long_message_raw(msg_id=0)`, writing
+        // `discord:<channel>:0` analytics rows, or emitting reactions
+        // against `MessageId::new(0)` would all produce bogus state
+        // (flagged by #897 round-4 review). The operator is expected to
+        // re-invoke `/api/inflight/rebind` after dcserver comes back up
+        // if the orphan tmux is still alive. Clear the stale state and
+        // skip further processing for this entry.
+        if state.rebind_origin {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏭ recovery: skipping rebind-origin inflight for channel {} — operator must re-invoke /api/inflight/rebind post-restart",
+                state.channel_id
+            );
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
+
         let channel_id = ChannelId::new(state.channel_id);
         let is_dm = matches!(
             channel_id.to_channel(http).await,

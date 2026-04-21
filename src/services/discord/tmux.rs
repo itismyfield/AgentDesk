@@ -1938,29 +1938,44 @@ pub(super) async fn tmux_output_watcher(
             // Auto-retry: persist Discord history for LLM injection, then queue the
             // original user message as an internal follow-up instead of self-routing
             // through /api/send announce.
-            if let Some(state) =
-                super::inflight::load_inflight_state(&watcher_provider, channel_id.get())
-            {
-                super::turn_bridge::auto_retry_with_history(
-                    &http,
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    serenity::MessageId::new(state.user_msg_id),
-                    &state.user_text,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ↻ Watcher auto-retry queued for channel {}",
-                    channel_id
-                );
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ Watcher auto-retry skipped: inflight state missing for channel {}",
-                    channel_id
-                );
+            //
+            // #897 round-4 Medium: a `rebind_origin` inflight has no real
+            // user message or text to retry with (`user_msg_id=0`,
+            // user_text="/api/inflight/rebind"), so auto-retry would
+            // enqueue a garbage internal follow-up. Skip the retry; the
+            // operator is expected to re-invoke `/api/inflight/rebind`
+            // once the tmux session is healthy again.
+            match super::inflight::load_inflight_state(&watcher_provider, channel_id.get()) {
+                Some(state) if state.rebind_origin => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ Watcher auto-retry skipped for channel {} — rebind_origin inflight has no user message to retry",
+                        channel_id
+                    );
+                }
+                Some(state) => {
+                    super::turn_bridge::auto_retry_with_history(
+                        &http,
+                        &shared,
+                        &watcher_provider,
+                        channel_id,
+                        serenity::MessageId::new(state.user_msg_id),
+                        &state.user_text,
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ↻ Watcher auto-retry queued for channel {}",
+                        channel_id
+                    );
+                }
+                None => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ Watcher auto-retry skipped: inflight state missing for channel {}",
+                        channel_id
+                    );
+                }
             }
             // Skip normal response relay
             full_response = String::new();
