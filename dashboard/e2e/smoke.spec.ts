@@ -1299,6 +1299,31 @@ test.describe("Dashboard smoke tests", () => {
     expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
   });
 
+  test("responsive: mobile topbar keeps breadcrumb on a dedicated row", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/kanban");
+
+    const breadcrumb = page.getByTestId("topbar-breadcrumb");
+    const search = page.getByTestId("topbar-search");
+
+    await expect(breadcrumb).toBeVisible();
+    await expect(search).toBeVisible();
+
+    const [breadcrumbBox, searchBox] = await Promise.all([
+      breadcrumb.boundingBox(),
+      search.boundingBox(),
+    ]);
+    expect(searchBox?.y ?? 0).toBeGreaterThan((breadcrumbBox?.y ?? 0) + 8);
+
+    const breadcrumbMetrics = await breadcrumb.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+    }));
+    expect(breadcrumbMetrics.clientHeight).toBeLessThan(28);
+    expect(breadcrumbMetrics.scrollWidth).toBeGreaterThanOrEqual(breadcrumbMetrics.clientWidth);
+  });
+
   test("responsive: mobile tab bar stays below modal overlays", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
