@@ -359,10 +359,16 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "github.sync_interval_minutes <= 0");
                     return Ok(None);
                 }
-                let sync_db = self.db.clone();
+                let sync_db = if self.pg_pool.is_some() {
+                    None
+                } else {
+                    Some(self.db.clone())
+                };
                 let sync_engine = self.engine.clone();
+                let sync_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::github_sync_loop(sync_db, sync_engine, sync_interval).await;
+                    super::github_sync_loop(sync_db, sync_pg_pool, sync_engine, sync_interval)
+                        .await;
                 });
                 Ok(None)
             }
@@ -390,7 +396,11 @@ impl SupervisedWorkerRegistry {
                 Ok(None)
             }
             ServerWorkerId::RateLimitSync => {
-                let rate_limit_db = self.db.clone();
+                let rate_limit_db = if self.pg_pool.is_some() {
+                    None
+                } else {
+                    Some(self.db.clone())
+                };
                 let rate_limit_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
                     super::rate_limit_sync_loop(rate_limit_db, rate_limit_pg_pool).await;
@@ -398,7 +408,11 @@ impl SupervisedWorkerRegistry {
                 Ok(None)
             }
             ServerWorkerId::MessageOutbox => {
-                let outbox_db = self.db.clone();
+                let outbox_db = if self.pg_pool.is_some() {
+                    None
+                } else {
+                    Some(self.db.clone())
+                };
                 let outbox_health_registry = self.health_registry.clone();
                 let outbox_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
@@ -420,7 +434,11 @@ impl SupervisedWorkerRegistry {
                 Ok(None)
             }
             ServerWorkerId::DmReplyRetry => {
-                let dm_retry_db = self.db.clone();
+                let dm_retry_db = if self.pg_pool.is_some() {
+                    None
+                } else {
+                    Some(self.db.clone())
+                };
                 let dm_retry_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
                     super::dm_reply_retry_loop(dm_retry_db, dm_retry_pg_pool).await;

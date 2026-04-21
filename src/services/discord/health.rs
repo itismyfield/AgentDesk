@@ -5,6 +5,7 @@ use std::time::Instant;
 use poise::serenity_prelude as serenity;
 use serde::Serialize;
 use serenity::{ChannelId, CreateMessage};
+use sqlx::PgPool;
 
 use super::formatting::{build_long_message_attachment, split_message};
 use super::{
@@ -1472,44 +1473,104 @@ fn parse_channel_target_value(target: &str) -> Option<u64> {
         .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed))
 }
 
-fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTargetResolutionError> {
-    if let Some(agent_id_raw) = target.strip_prefix("agent:") {
-        let agent_id = agent_id_raw.trim();
-        if agent_id.is_empty() {
-            return Err(SendTargetResolutionError::BadRequest(
-                "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
-            ));
-        }
-
-        let conn = db.lock().map_err(|e| {
-            SendTargetResolutionError::Internal(format!("db lock failed during agent lookup: {e}"))
-        })?;
-        let bindings = crate::db::agents::load_agent_channel_bindings(&conn, agent_id)
-            .map_err(|e| {
-                SendTargetResolutionError::Internal(format!(
-                    "agent lookup failed for {agent_id}: {e}"
-                ))
-            })?
-            .ok_or_else(|| {
-                SendTargetResolutionError::NotFound(format!("unknown agent target: {agent_id}"))
-            })?;
-        let channel_target = bindings.primary_channel().ok_or_else(|| {
-            SendTargetResolutionError::NotFound(format!(
-                "agent target has no primary channel: {agent_id}"
-            ))
-        })?;
-
-        return parse_channel_target_value(&channel_target).ok_or_else(|| {
-            SendTargetResolutionError::Internal(format!(
-                "agent target resolved to invalid channel: {channel_target}"
-            ))
-        });
+fn parse_agent_target(target: &str) -> Result<Option<&str>, SendTargetResolutionError> {
+    let Some(agent_id_raw) = target.strip_prefix("agent:") else {
+        return Ok(None);
+    };
+    let agent_id = agent_id_raw.trim();
+    if agent_id.is_empty() {
+        return Err(SendTargetResolutionError::BadRequest(
+            "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
+        ));
     }
+    Ok(Some(agent_id))
+}
 
+fn resolve_agent_target_channel_id_sqlite(
+    db: &Db,
+    agent_id: &str,
+) -> Result<u64, SendTargetResolutionError> {
+    let conn = db.lock().map_err(|e| {
+        SendTargetResolutionError::Internal(format!("db lock failed during agent lookup: {e}"))
+    })?;
+    let bindings = crate::db::agents::load_agent_channel_bindings(&conn, agent_id)
+        .map_err(|e| {
+            SendTargetResolutionError::Internal(format!("agent lookup failed for {agent_id}: {e}"))
+        })?
+        .ok_or_else(|| {
+            SendTargetResolutionError::NotFound(format!("unknown agent target: {agent_id}"))
+        })?;
+    let channel_target = bindings.primary_channel().ok_or_else(|| {
+        SendTargetResolutionError::NotFound(format!(
+            "agent target has no primary channel: {agent_id}"
+        ))
+    })?;
+
+    parse_channel_target_value(&channel_target).ok_or_else(|| {
+        SendTargetResolutionError::Internal(format!(
+            "agent target resolved to invalid channel: {channel_target}"
+        ))
+    })
+}
+
+async fn resolve_agent_target_channel_id_pg(
+    pg_pool: &PgPool,
+    agent_id: &str,
+) -> Result<u64, SendTargetResolutionError> {
+    let bindings = crate::db::agents::load_agent_channel_bindings_pg(pg_pool, agent_id)
+        .await
+        .map_err(|e| {
+            SendTargetResolutionError::Internal(format!("agent lookup failed for {agent_id}: {e}"))
+        })?
+        .ok_or_else(|| {
+            SendTargetResolutionError::NotFound(format!("unknown agent target: {agent_id}"))
+        })?;
+    let channel_target = bindings.primary_channel().ok_or_else(|| {
+        SendTargetResolutionError::NotFound(format!(
+            "agent target has no primary channel: {agent_id}"
+        ))
+    })?;
+
+    parse_channel_target_value(&channel_target).ok_or_else(|| {
+        SendTargetResolutionError::Internal(format!(
+            "agent target resolved to invalid channel: {channel_target}"
+        ))
+    })
+}
+
+fn resolve_channel_target(target: &str) -> Result<u64, SendTargetResolutionError> {
     let channel_target = target.strip_prefix("channel:").unwrap_or(target);
     parse_channel_target_value(channel_target).ok_or(SendTargetResolutionError::BadRequest(
         "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
     ))
+}
+
+fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTargetResolutionError> {
+    match parse_agent_target(target)? {
+        Some(agent_id) => resolve_agent_target_channel_id_sqlite(db, agent_id),
+        None => resolve_channel_target(target),
+    }
+}
+
+async fn resolve_send_target_channel_id_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+) -> Result<u64, SendTargetResolutionError> {
+    match parse_agent_target(target)? {
+        Some(agent_id) => {
+            if let Some(pg_pool) = pg_pool {
+                return resolve_agent_target_channel_id_pg(pg_pool, agent_id).await;
+            }
+            let db = db.ok_or_else(|| {
+                SendTargetResolutionError::Internal(
+                    "sqlite db unavailable during agent lookup".to_string(),
+                )
+            })?;
+            resolve_agent_target_channel_id_sqlite(db, agent_id)
+        }
+        None => resolve_channel_target(target),
+    }
 }
 
 /// Handle POST /api/send — agent-to-agent native routing.
@@ -1521,9 +1582,10 @@ fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTarg
 /// at a glance, or falls back to a short generic notice pointing at the
 /// attachment. Keeping attachment-based delivery (instead of chunk splitting)
 /// avoids firing one recipient turn per chunk.
-pub async fn send_message(
+pub(crate) async fn send_message_with_backends(
     registry: &HealthRegistry,
-    db: &Db,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
     source: &str,
@@ -1537,27 +1599,28 @@ pub async fn send_message(
         );
     }
 
-    let channel_id_raw = match resolve_send_target_channel_id(db, target) {
-        Ok(id) => id,
-        Err(SendTargetResolutionError::BadRequest(message)) => {
-            return (
-                "400 Bad Request",
-                serde_json::json!({"ok": false, "error": message}).to_string(),
-            );
-        }
-        Err(SendTargetResolutionError::NotFound(message)) => {
-            return (
-                "404 Not Found",
-                serde_json::json!({"ok": false, "error": message}).to_string(),
-            );
-        }
-        Err(SendTargetResolutionError::Internal(message)) => {
-            return (
-                "500 Internal Server Error",
-                serde_json::json!({"ok": false, "error": message}).to_string(),
-            );
-        }
-    };
+    let channel_id_raw =
+        match resolve_send_target_channel_id_with_backends(db, pg_pool, target).await {
+            Ok(id) => id,
+            Err(SendTargetResolutionError::BadRequest(message)) => {
+                return (
+                    "400 Bad Request",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+            Err(SendTargetResolutionError::NotFound(message)) => {
+                return (
+                    "404 Not Found",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+            Err(SendTargetResolutionError::Internal(message)) => {
+                return (
+                    "500 Internal Server Error",
+                    serde_json::json!({"ok": false, "error": message}).to_string(),
+                );
+            }
+        };
 
     let channel_id = ChannelId::new(channel_id_raw);
 
@@ -1703,6 +1766,28 @@ pub async fn send_message(
             )
         }
     }
+}
+
+pub async fn send_message(
+    registry: &HealthRegistry,
+    db: &Db,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+) -> (&'static str, String) {
+    send_message_with_backends(
+        registry,
+        Some(db),
+        None,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+    )
+    .await
 }
 
 pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {

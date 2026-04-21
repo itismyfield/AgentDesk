@@ -75,7 +75,8 @@ pub(super) async fn try_handle_pending_dm_reply(
 
             // Notify the source agent's Discord channel (inline, not fire-and-forget)
             if let Err(e) = notify_source_agent(
-                &info.db,
+                Some(&info.db),
+                pg_pool,
                 &info.source_agent,
                 info.id,
                 info.channel_id.as_deref(),
@@ -109,7 +110,8 @@ pub(super) async fn try_handle_pending_dm_reply(
 /// Prefers the stored `channel_id` from the pending row (alt/thread channels);
 /// falls back to `agents.discord_channel_id` only if none was stored.
 async fn notify_source_agent(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     source_agent: &str,
     reply_id: i64,
     stored_channel_id: Option<&str>,
@@ -124,17 +126,25 @@ async fn notify_source_agent(
     let channel_id: u64 = if let Some(ch) = stored_channel_id {
         resolve_channel_to_u64(ch)?
     } else {
-        // Fall back to the agent's primary discord_channel_id
-        let db = db.clone();
-        let agent_name = source_agent.to_string();
-        let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
-            let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
-            crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_name)
-                .map_err(|e| format!("{e}"))
-        })
-        .await
-        .map_err(|e| format!("join: {e}"))??;
-        let raw = ch_opt.ok_or("agent has no discord_channel_id")?;
+        let raw = if let Some(pg_pool) = pg_pool {
+            crate::db::agents::resolve_agent_primary_channel_pg(pg_pool, source_agent)
+                .await
+                .map_err(|e| format!("agent lookup failed for {source_agent}: {e}"))?
+                .ok_or("agent has no primary channel")?
+        } else {
+            let db = db
+                .cloned()
+                .ok_or("sqlite db unavailable during agent lookup")?;
+            let agent_name = source_agent.to_string();
+            let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
+                let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
+                crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_name)
+                    .map_err(|e| format!("{e}"))
+            })
+            .await
+            .map_err(|e| format!("join: {e}"))??;
+            ch_opt.ok_or("agent has no primary channel")?
+        };
         resolve_channel_to_u64(&raw)?
     };
 
@@ -181,7 +191,10 @@ fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
 
 /// Retry DM reply notifications that previously failed (`_notify_failed` in context).
 /// Called from the 5-min tick loop.
-pub async fn retry_failed_dm_notifications(db: &crate::db::Db, pg_pool: Option<&sqlx::PgPool>) {
+pub async fn retry_failed_dm_notifications(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+) {
     let entries =
         match crate::services::discord::dm_reply_store::load_failed_consumed_dm_replies_db(
             db, pg_pool,
@@ -209,6 +222,7 @@ pub async fn retry_failed_dm_notifications(db: &crate::db::Db, pg_pool: Option<&
 
         match notify_source_agent(
             db,
+            pg_pool,
             &entry.source_agent,
             entry.id,
             entry.channel_id.as_deref(),

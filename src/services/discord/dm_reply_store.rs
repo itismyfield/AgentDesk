@@ -284,7 +284,7 @@ pub(crate) async fn mark_pending_dm_reply_consumed_db(
 }
 
 pub(crate) async fn load_failed_consumed_dm_replies_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
 ) -> Result<Vec<PendingDmReplyRecord>, String> {
     if let Some(pool) = pg_pool {
@@ -311,6 +311,7 @@ pub(crate) async fn load_failed_consumed_dm_replies_db(
     }
 
     let conn = db
+        .ok_or("sqlite db unavailable for pending_dm_replies lookup")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     let mut stmt = conn
@@ -374,7 +375,7 @@ pub(crate) async fn mark_pending_dm_reply_notify_failed_db(
 }
 
 pub(crate) async fn clear_pending_dm_reply_notify_failure_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     reply_id: i64,
 ) -> Result<(), String> {
@@ -392,6 +393,7 @@ pub(crate) async fn clear_pending_dm_reply_notify_failure_db(
     }
 
     let conn = db
+        .ok_or("sqlite db unavailable for pending_dm_replies update")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     conn.execute(

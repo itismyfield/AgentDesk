@@ -530,6 +530,6 @@ pub(super) async fn dm_reply_retry_loop(db: Db, pg_pool: Option<sqlx::PgPool>) {
     interval.tick().await;
     loop {
         interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(&db, pg_pool.as_ref()).await;
+        crate::services::discord::retry_failed_dm_notifications(Some(&db), pg_pool.as_ref()).await;
     }
 }
