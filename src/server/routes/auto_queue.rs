@@ -2495,7 +2495,10 @@ impl AutoQueueActivateDeps {
     }
 
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
+        crate::services::auto_queue::AutoQueueService::new(
+            Some(self.db.clone()),
+            self.engine.clone(),
+        )
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -2510,6 +2513,22 @@ impl AutoQueueActivateDeps {
             .await
             .unwrap_or(serde_json::Value::Null)
     }
+}
+
+pub(crate) async fn activate_with_bridge_pg(
+    db: Option<crate::db::Db>,
+    engine: crate::engine::PolicyEngine,
+    body: ActivateBody,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(db) = db.or_else(|| engine.legacy_db().cloned()) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "sqlite backend is unavailable"})),
+        );
+    };
+    let mut deps = AutoQueueActivateDeps::for_bridge(db, engine.clone());
+    deps.pg_pool = engine.pg_pool().cloned();
+    activate_with_deps_pg(&deps, body).await
 }
 
 enum ActivatePreflightOutcome {
@@ -7140,7 +7159,7 @@ pub(crate) fn activate_with_deps(
                     &card_id,
                     step,
                     "auto-queue-walk",
-                    false,
+                    crate::engine::transition::ForceIntent::None,
                 ) {
                     crate::auto_queue_log!(
                         warn,
