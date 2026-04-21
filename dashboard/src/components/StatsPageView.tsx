@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  getCachedTokenAnalytics,
   getSkillCatalog,
   getSkillRanking,
   getTokenAnalytics,
@@ -869,7 +870,11 @@ export default function StatsPageView({
     const controller = new AbortController();
 
     const load = async () => {
-      setLoading(true);
+      const cachedAnalytics = getCachedTokenAnalytics(period);
+      if (cachedAnalytics) {
+        setAnalytics(cachedAnalytics.data);
+      }
+      setLoading(!cachedAnalytics);
       setSkillLoading(true);
       setAnalyticsError(null);
       setSkillError(null);

@@ -26,6 +26,11 @@ const INITIAL_BACKOFF_MS = 500;
 
 // ── GET deduplication ──
 const inflightGets = new Map<string, Promise<unknown>>();
+interface CachedGetEntry<T = unknown> {
+  data: T;
+  fetchedAt: number;
+}
+const cachedGets = new Map<string, CachedGetEntry>();
 
 // ── Global error listener for toast integration ──
 type ApiErrorListener = (url: string, error: Error) => void;
@@ -76,6 +81,16 @@ function isRetryable(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function isAbortError(error: Error): boolean {
+  return error.name === "AbortError" || /aborted/i.test(error.message);
+}
+
+function readCachedGet<T>(url: string): CachedGetEntry<T> | null {
+  const cached = cachedGets.get(url);
+  if (!cached) return null;
+  return cached as CachedGetEntry<T>;
+}
+
 async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
@@ -120,7 +135,14 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
           }
           throw error;
         }
-        return await res.json();
+        const payload = await res.json();
+        if (isGet) {
+          cachedGets.set(url, {
+            data: payload,
+            fetchedAt: Date.now(),
+          });
+        }
+        return payload;
       } catch (error) {
         clearTimeout(timer);
         cleanup();
@@ -153,7 +175,9 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
   return promise.catch((error) => {
     const resolvedError =
       error instanceof Error ? error : new Error(String(error));
-    apiErrorListener?.(url, resolvedError);
+    if (!isAbortError(resolvedError)) {
+      apiErrorListener?.(url, resolvedError);
+    }
     throw resolvedError;
   });
 }
@@ -450,6 +474,10 @@ export async function getHealth(): Promise<HealthResponse> {
   return request("/api/health");
 }
 
+export function getCachedHealth(): CachedGetEntry<HealthResponse> | null {
+  return readCachedGet<HealthResponse>("/api/health");
+}
+
 // ── Dispatches ──
 
 export async function createDispatch(body: {
@@ -479,6 +507,14 @@ export async function getTokenAnalytics(
     signal: opts?.signal,
     timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
   });
+}
+
+export function getCachedTokenAnalytics(
+  period: "7d" | "30d" | "90d" = "30d",
+): CachedGetEntry<TokenAnalyticsResponse> | null {
+  return readCachedGet<TokenAnalyticsResponse>(
+    `/api/token-analytics?period=${period}`,
+  );
 }
 
 // ── Kanban & Dispatches ──

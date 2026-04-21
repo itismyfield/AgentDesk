@@ -1754,7 +1754,9 @@ function HomeOverviewPage({
   const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
-  const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(null);
+  const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
+    () => api.getCachedTokenAnalytics("7d")?.data ?? null,
+  );
   const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
   const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
   const defaultWidgets = useMemo(
@@ -1869,6 +1871,10 @@ function HomeOverviewPage({
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
+    const cachedAnalytics = api.getCachedTokenAnalytics("7d");
+    if (cachedAnalytics) {
+      setAnalytics(cachedAnalytics.data);
+    }
     api
       .getTokenAnalytics("7d", { signal: controller.signal })
       .then((next) => {
