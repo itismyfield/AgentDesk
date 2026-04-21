@@ -220,7 +220,6 @@ package "Support Services" as SupportPkg #Ivory {
     package "Memory  (services/memory/)" as MemPkg {
         [mod.rs\n(backend dispatch)] as MemMod
         [local.rs] as MemLocal
-        [mem0.rs] as MemMem0
         [memento.rs] as MemMemento
         [runtime_state.rs] as MemRTState
     }
@@ -342,7 +341,6 @@ GhSync --> DbMod
 PromptBuilder --> SharedMem
 MemLife --> MemMod
 MemMod --> MemLocal
-MemMod --> MemMem0
 MemMod --> MemMemento
 
 ' --- Recovery ---

@@ -470,12 +470,6 @@ fn proactive_memory_guidance(
             "`memory-write` skill",
             String::new(),
         ),
-        MemoryBackendKind::Mem0 => (
-            "mem0",
-            "`search_memory` MCP tool",
-            "`add_memories` MCP tool",
-            String::new(),
-        ),
         MemoryBackendKind::Memento if !memento_mcp_available => return None,
         MemoryBackendKind::Memento => {
             let role_id = role_binding
@@ -1057,32 +1051,6 @@ mod tests {
     }
 
     #[test]
-    fn test_full_prompt_injects_mem0_memory_guidance() {
-        let prompt = build_system_prompt(
-            "ctx",
-            "/tmp",
-            ChannelId::new(1),
-            "tok",
-            None,
-            false,
-            DispatchProfile::Full,
-            None,
-            None,
-            None,
-            None,
-            Some(&ResolvedMemorySettings {
-                backend: MemoryBackendKind::Mem0,
-                ..ResolvedMemorySettings::default()
-            }),
-            false,
-        );
-
-        assert!(prompt.contains("[Proactive Memory Guidance]"));
-        assert!(prompt.contains("`search_memory` MCP tool"));
-        assert!(prompt.contains("`add_memories` MCP tool"));
-    }
-
-    #[test]
     fn test_full_prompt_injects_memento_memory_guidance() {
         use super::super::settings::RoleBinding;
 
@@ -1170,15 +1138,15 @@ mod tests {
             None,
             None,
             Some(&ResolvedMemorySettings {
-                backend: MemoryBackendKind::Mem0,
+                backend: MemoryBackendKind::File,
                 ..ResolvedMemorySettings::default()
             }),
             false,
         );
 
         assert!(!prompt.contains("[Proactive Memory Guidance]"));
-        assert!(!prompt.contains("`search_memory`"));
-        assert!(!prompt.contains("`add_memories`"));
+        assert!(!prompt.contains("`memory-read`"));
+        assert!(!prompt.contains("`memory-write`"));
     }
 
     #[test]

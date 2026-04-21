@@ -39,7 +39,6 @@ src/
 ├── db/
 │   ├── agents.rs
 │   ├── auto_queue.rs
-│   ├── builtin_pipeline.rs
 │   ├── kanban.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
@@ -61,7 +60,6 @@ src/
 │   │   ├── cards_ops.rs
 │   │   ├── config_ops.rs
 │   │   ├── db_ops.rs
-│   │   ├── deploy_ops.rs
 │   │   ├── dispatch_ops.rs
 │   │   ├── dm_reply_ops.rs
 │   │   ├── exec_ops.rs
@@ -158,7 +156,8 @@ src/
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
 │   │   ├── stats.rs
-│   │   └── termination_events.rs
+│   │   ├── termination_events.rs
+│   │   └── v1.rs
 │   ├── background.rs
 │   ├── boot.rs
 │   ├── cron_catalog.rs
@@ -234,6 +233,7 @@ src/
 │   │   ├── queue_io.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── restart_ctrl.rs
+│   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
 │   │   ├── role_map.rs
 │   │   ├── runtime_bootstrap.rs
@@ -250,7 +250,6 @@ src/
 │   │   └── tmux_restart_handoff.rs
 │   ├── memory/
 │   │   ├── local.rs
-│   │   ├── mem0.rs
 │   │   ├── memento.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs

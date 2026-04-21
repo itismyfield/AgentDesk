@@ -28,7 +28,3 @@
 **memento**
 - fact / decision / error / procedure만 Memento MCP에 기록한다
 - preference / relation은 이번 이슈 범위에서 skip한다
-
-**mem0**
-- preference / relation만 Mem0 MCP에 기록한다
-- fact / decision / error / procedure는 이번 이슈 범위에서 skip한다

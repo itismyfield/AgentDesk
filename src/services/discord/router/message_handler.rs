@@ -511,11 +511,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch=full memory_backend={} memory_profile={} reused_session={} duration_ms={}",
+        "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch=full memory_backend={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
         memory_backend_label,
-        memory_settings.mem0.profile,
         session_id.is_some(),
         prompt_prep_duration_ms
     );
@@ -1764,7 +1763,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
 
     // Derive dispatch prompt profile before memory recall so ReviewLite can
-    // skip heavy memory work consistently across local/mem0 backends.
+    // skip heavy memory work consistently across supported backends.
     let dispatch_profile = DispatchProfile::from_dispatch_type(
         active_dispatch_id_for_prompt
             .as_ref()
@@ -1806,7 +1805,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let prompt_prep_started = std::time::Instant::now();
 
     // Resolve channel/tmux session name from current session state. We need the
-    // persisted provider session_id before recall so Mem0 can scope search by run_id.
+    // persisted provider session_id before recall so external memory can scope by run_id.
     let (channel_name, tmux_session_name) = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -2093,12 +2092,11 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
+        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
         dispatch_profile_label,
         memory_backend_label,
-        memory_settings.mem0.profile,
         session_id.is_some(),
         prompt_prep_duration_ms
     );

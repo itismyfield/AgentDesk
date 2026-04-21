@@ -644,41 +644,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    struct Mem0EnvGuard {
-        prev_api_key: Option<std::ffi::OsString>,
-        prev_base_url: Option<std::ffi::OsString>,
-    }
-
-    impl Mem0EnvGuard {
-        fn install() -> Self {
-            crate::services::memory::reset_backend_health_for_tests();
-            let prev_api_key = std::env::var_os("MEM0_API_KEY");
-            let prev_base_url = std::env::var_os("MEM0_BASE_URL");
-            unsafe {
-                std::env::set_var("MEM0_API_KEY", "test-key");
-                std::env::set_var("MEM0_BASE_URL", "http://mem0.local");
-            }
-            Self {
-                prev_api_key,
-                prev_base_url,
-            }
-        }
-    }
-
-    impl Drop for Mem0EnvGuard {
-        fn drop(&mut self) {
-            match self.prev_api_key.take() {
-                Some(value) => unsafe { std::env::set_var("MEM0_API_KEY", value) },
-                None => unsafe { std::env::remove_var("MEM0_API_KEY") },
-            }
-            match self.prev_base_url.take() {
-                Some(value) => unsafe { std::env::set_var("MEM0_BASE_URL", value) },
-                None => unsafe { std::env::remove_var("MEM0_BASE_URL") },
-            }
-            crate::services::memory::reset_backend_health_for_tests();
-        }
-    }
-
     fn with_temp_root<F>(f: F)
     where
         F: FnOnce(&TempDir),
@@ -705,7 +670,6 @@ mod tests {
     #[test]
     fn test_resolve_role_binding_reads_memory_block_from_role_map() {
         with_temp_root(|temp_home: &TempDir| {
-            let _mem0_env = Mem0EnvGuard::install();
             write_role_map(
                 temp_home.path(),
                 r#"{
@@ -715,16 +679,9 @@ mod tests {
       "promptFile": "~/prompts/codex.md",
       "provider": "codex",
       "memory": {
-        "backend": "mem0",
+        "backend": "file",
         "recall_timeout_ms": 50,
-        "capture_timeout_ms": 8000,
-        "mem0": {
-          "profile": "strict",
-          "ingestion": {
-            "infer": true,
-            "custom_instructions": "Remember deployment facts"
-          }
-        }
+        "capture_timeout_ms": 8000
       }
     }
   }
@@ -734,16 +691,10 @@ mod tests {
             let binding = resolve_role_binding(ChannelId::new(123), None).unwrap();
             assert_eq!(
                 binding.memory.backend,
-                super::super::settings::MemoryBackendKind::Mem0
+                super::super::settings::MemoryBackendKind::File
             );
             assert_eq!(binding.memory.recall_timeout_ms, 100);
             assert_eq!(binding.memory.capture_timeout_ms, 8000);
-            assert_eq!(binding.memory.mem0.profile, "strict");
-            assert_eq!(binding.memory.mem0.ingestion.infer, Some(true));
-            assert_eq!(
-                binding.memory.mem0.ingestion.custom_instructions.as_deref(),
-                Some("Remember deployment facts")
-            );
         });
     }
 
