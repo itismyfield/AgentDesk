@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getHealth, type HealthResponse } from "../../api";
+import { getCachedHealth, getHealth, type HealthResponse } from "../../api";
 import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 import { cx, dashboardBadge, dashboardCard } from "./ui";
@@ -346,10 +346,14 @@ function formatUpdatedAt(timestamp: number | null, localeTag: string): string {
 }
 
 export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
-  const [data, setData] = useState<HealthResponse | null>(null);
-  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null);
+  const [data, setData] = useState<HealthResponse | null>(
+    () => getCachedHealth()?.data ?? null,
+  );
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(
+    () => getCachedHealth()?.fetchedAt ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(() => !getCachedHealth());
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
