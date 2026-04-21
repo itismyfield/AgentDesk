@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import * as api from "../../api";
 import { localeName } from "../../i18n";
@@ -25,6 +25,7 @@ import {
   stageDraftFromApi,
   type StageDraft,
 } from "./pipeline-visual-editor-model";
+import { SurfaceCard } from "../common/SurfacePrimitives";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -76,13 +77,115 @@ const TEXTAREA_CLASS =
   "w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none resize-y";
 
 const INPUT_STYLE = {
-  borderColor: "rgba(148,163,184,0.24)",
+  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
   color: "var(--th-text-primary)",
+  backgroundColor: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+} as const;
+
+const FSM_INPUT_STYLE = {
+  borderColor: "color-mix(in srgb, var(--th-border) 80%, transparent)",
+  color: "var(--th-text-primary)",
+  backgroundColor: "#11141b",
 } as const;
 
 const MUTED_TEXT_STYLE = {
   color: "var(--th-text-muted)",
 } as const;
+
+const SECTION_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+  background:
+    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+};
+
+const PANEL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+  background:
+    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+};
+
+const PANEL_SOFT_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+  background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+};
+
+const EMPTY_PANEL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+  background: "color-mix(in srgb, var(--th-overlay-subtle) 92%, transparent)",
+  color: "var(--th-text-muted)",
+};
+
+const CANVAS_SHELL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+  background:
+    "radial-gradient(circle at top left, color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent) 0%, transparent 42%), radial-gradient(circle at bottom right, color-mix(in srgb, var(--th-badge-sky-bg) 64%, transparent) 0%, transparent 34%), color-mix(in srgb, var(--th-card-bg) 95%, transparent)",
+};
+
+const STATUS_INFO_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+  background: "color-mix(in srgb, var(--th-overlay-subtle) 88%, transparent)",
+  color: "var(--th-text-secondary)",
+};
+
+const STATUS_SUCCESS_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-accent-primary) 28%, var(--th-border) 72%)",
+  background: "color-mix(in srgb, var(--th-badge-emerald-bg) 84%, var(--th-card-bg) 16%)",
+  color: "var(--th-text-primary)",
+};
+
+const STATUS_ERROR_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-accent-danger) 32%, var(--th-border) 68%)",
+  background: "color-mix(in srgb, rgba(255, 107, 107, 0.16) 84%, var(--th-card-bg) 16%)",
+  color: "var(--th-text-primary)",
+};
+
+const BUTTON_NEUTRAL_STYLE: CSSProperties = {
+  ...PANEL_SOFT_STYLE,
+  color: "var(--th-text-primary)",
+};
+
+const BUTTON_ACCENT_STYLE: CSSProperties = {
+  ...BUTTON_NEUTRAL_STYLE,
+  borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
+  background: "var(--th-accent-primary-soft)",
+};
+
+const BUTTON_INFO_STYLE: CSSProperties = {
+  ...BUTTON_NEUTRAL_STYLE,
+  borderColor: "color-mix(in srgb, var(--th-accent-info) 30%, var(--th-border) 70%)",
+};
+
+const BUTTON_WARN_STYLE: CSSProperties = {
+  ...BUTTON_NEUTRAL_STYLE,
+  borderColor: "color-mix(in srgb, var(--th-accent-warn) 30%, var(--th-border) 70%)",
+};
+
+const BUTTON_DANGER_STYLE: CSSProperties = {
+  ...BUTTON_NEUTRAL_STYLE,
+  borderColor: "color-mix(in srgb, var(--th-accent-danger) 32%, var(--th-border) 68%)",
+};
+
+const FSM_PANEL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 78%, transparent)",
+  background:
+    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, #090b0f 3%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, #05070a 2%) 100%)",
+};
+
+const FSM_CANVAS_SHELL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
+  background: "#0e1014",
+};
+
+const FSM_INSPECTOR_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)",
+  background:
+    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, #0b0d10 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, #080a0d 2%) 100%)",
+};
+
+const FSM_DETAIL_PANEL_STYLE: CSSProperties = {
+  borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
+  background: "#11141b",
+};
 
 const EMPTY_FSM_DRAFT_STORE: PersistedFsmDraftStore = {
   version: 2,
@@ -325,23 +428,40 @@ function formatSelectionTitle(
 function transitionAccent(type: PipelineConfigFull["transitions"][number]["type"]) {
   if (type === "free") {
     return {
-      stroke: "#22c55e",
-      background: "rgba(34,197,94,0.14)",
-      text: "#4ade80",
+      stroke: "var(--th-accent-info)",
+      background: "color-mix(in srgb, var(--th-badge-sky-bg) 82%, var(--th-card-bg) 18%)",
+      text: "var(--th-accent-info)",
     };
   }
   if (type === "gated") {
     return {
-      stroke: "#f59e0b",
-      background: "rgba(245,158,11,0.16)",
-      text: "#fbbf24",
+      stroke: "var(--th-accent-warn)",
+      background: "color-mix(in srgb, var(--th-badge-amber-bg) 84%, var(--th-card-bg) 16%)",
+      text: "var(--th-accent-warn)",
     };
   }
   return {
-    stroke: "#ef4444",
-    background: "rgba(239,68,68,0.14)",
-    text: "#f87171",
+    stroke: "var(--th-accent-danger)",
+    background: "color-mix(in srgb, rgba(255, 107, 107, 0.18) 84%, var(--th-card-bg) 16%)",
+    text: "var(--th-accent-danger)",
   };
+}
+
+function fsmStateTone(stateId: string) {
+  switch (stateId) {
+    case "ready":
+      return { stroke: "oklch(0.72 0.14 220)", glow: "rgba(56, 189, 248, 0.16)" };
+    case "in_progress":
+      return { stroke: "#fb923c", glow: "rgba(251, 146, 60, 0.16)" };
+    case "review":
+      return { stroke: "#facc15", glow: "rgba(250, 204, 21, 0.14)" };
+    case "done":
+      return { stroke: "#86efac", glow: "rgba(134, 239, 172, 0.15)" };
+    case "failed":
+      return { stroke: "#f87171", glow: "rgba(248, 113, 113, 0.14)" };
+    default:
+      return { stroke: "rgba(148, 163, 184, 0.72)", glow: "rgba(148, 163, 184, 0.08)" };
+  }
 }
 
 function selectedAgentLabel(
@@ -1322,11 +1442,8 @@ export default function PipelineVisualEditor({
 
   return (
     <section
-      className="min-w-0 overflow-hidden rounded-2xl border p-3 sm:p-4 space-y-4"
-      style={{
-        borderColor: "rgba(99,102,241,0.35)",
-        backgroundColor: "var(--th-bg-surface)",
-      }}
+      className="min-w-0 overflow-hidden rounded-[28px] border p-4 sm:p-5 space-y-5"
+      style={SECTION_STYLE}
     >
       <button
         type="button"
@@ -1340,10 +1457,11 @@ export default function PipelineVisualEditor({
             </h3>
             {pipelineDraft && (
               <span
-                className="rounded-full px-2 py-0.5 text-xs"
+                className="rounded-full border px-2.5 py-1 text-[11px] font-medium"
                 style={{
-                  backgroundColor: "rgba(99,102,241,0.18)",
-                  color: "#818cf8",
+                  borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
+                  background: "var(--th-accent-primary-soft)",
+                  color: "var(--th-text-primary)",
                 }}
               >
                 {pipelineDraft.states.length} {tr("상태", "states")} /{" "}
@@ -1358,10 +1476,11 @@ export default function PipelineVisualEditor({
             )}
             {activeLayers.length > 1 && (
               <span
-                className="rounded-full px-2 py-0.5 text-xs"
+                className="rounded-full border px-2.5 py-1 text-[11px] font-medium"
                 style={{
-                  backgroundColor: "rgba(251,191,36,0.15)",
-                  color: "#fbbf24",
+                  borderColor: "color-mix(in srgb, var(--th-accent-warn) 30%, var(--th-border) 70%)",
+                  background: "color-mix(in srgb, var(--th-badge-amber-bg) 84%, var(--th-card-bg) 16%)",
+                  color: "var(--th-text-primary)",
                 }}
               >
                 {activeLayers.join(" → ")}
@@ -1379,137 +1498,292 @@ export default function PipelineVisualEditor({
 
       {!collapsed && (
       <>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-2">
-          <p className="text-xs" style={MUTED_TEXT_STYLE}>
-            {editorHelpText}
-          </p>
-          {selectedAgentName && (
-            <p className="text-xs" style={MUTED_TEXT_STYLE}>
-              {tr("현재 선택된 에이전트", "Selected agent")}: {selectedAgentName}
-            </p>
-          )}
-        </div>
+      <SurfaceCard
+        className="rounded-[24px] p-4 sm:p-5"
+        style={isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
+      >
+        {isFsmVariant ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 space-y-2">
+                <div
+                  className="text-[11px] font-bold uppercase tracking-[0.22em]"
+                  style={{
+                    color: "var(--th-accent-primary)",
+                    fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                  }}
+                >
+                  Pipeline FSM
+                </div>
+                <div className="text-[15px] font-semibold" style={{ color: "var(--th-text-heading)" }}>
+                  {tr("칸반 상태 머신 · 비주얼 에디터", "Kanban state machine · visual editor")}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] leading-5" style={MUTED_TEXT_STYLE}>
+                  <span>
+                    {tr(
+                      "엣지를 클릭해 훅/정책을 편집합니다.",
+                      "Select an edge to edit hook and policy.",
+                    )}
+                  </span>
+                  <code
+                    className="rounded-md border px-2 py-0.5"
+                    style={{
+                      borderColor: "color-mix(in srgb, var(--th-border) 78%, transparent)",
+                      background: "color-mix(in srgb, var(--th-overlay-subtle) 90%, transparent)",
+                      color: "var(--th-text-secondary)",
+                      fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                    }}
+                  >
+                    kv_meta.kanban_fsm
+                  </code>
+                </div>
+                {selectedAgentName && (
+                  <p className="text-xs leading-5" style={MUTED_TEXT_STYLE}>
+                    {tr("현재 선택된 에이전트", "Selected agent")}:{" "}
+                    <span style={{ color: "var(--th-text-primary)" }}>{selectedAgentName}</span>
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  {activeLayers.length > 1 && (
+                    <span
+                      className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-accent-warn) 36%, var(--th-border) 64%)",
+                        background: "color-mix(in srgb, var(--th-badge-amber-bg) 72%, var(--th-card-bg) 28%)",
+                        color: "var(--th-text-primary)",
+                        fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                      }}
+                    >
+                      {activeLayers.join(" → ")}
+                    </span>
+                  )}
+                  {pipelineDraft && (
+                    <span
+                      className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
+                        background: "color-mix(in srgb, var(--th-overlay-subtle) 88%, transparent)",
+                        color: "var(--th-text-secondary)",
+                        fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                      }}
+                    >
+                      {pipelineDraft.states.length} {tr("states", "states")} · {pipelineDraft.transitions.length}{" "}
+                      {tr("edges", "edges")}
+                    </span>
+                  )}
+                </div>
+              </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <div
-            className="inline-flex rounded-full p-1"
-            style={{ backgroundColor: "var(--th-overlay-medium)" }}
-          >
-            <button
-              onClick={() => setLevel("repo")}
-              className="rounded-full px-3 py-1.5 text-xs font-medium"
-              style={{
-                backgroundColor:
-                  level === "repo" ? "rgba(99,102,241,0.24)" : "transparent",
-                color: level === "repo" ? "#c7d2fe" : "var(--th-text-muted)",
-              }}
-            >
-              {tr("레포 레벨", "Repo level")}
-            </button>
-            <button
-              onClick={() => setLevel("agent")}
-              disabled={!selectedAgentId}
-              className="rounded-full px-3 py-1.5 text-xs font-medium"
-              style={{
-                backgroundColor:
-                  level === "agent" ? "rgba(99,102,241,0.24)" : "transparent",
-                color: level === "agent" ? "#c7d2fe" : "var(--th-text-muted)",
-                opacity: selectedAgentId ? 1 : 0.45,
-              }}
-            >
-              {tr("에이전트 레벨", "Agent level")}
-            </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  onClick={addState}
+                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  style={BUTTON_INFO_STYLE}
+                >
+                  + {tr("상태 추가", "State")}
+                </button>
+                <button
+                  onClick={addTransition}
+                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  style={BUTTON_ACCENT_STYLE}
+                >
+                  + {tr("전환 추가", "Edge")}
+                </button>
+                <button
+                  onClick={handleExportJson}
+                  disabled={!pipelineDraft}
+                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  style={{
+                    ...BUTTON_NEUTRAL_STYLE,
+                    opacity: pipelineDraft ? 1 : 0.45,
+                  }}
+                >
+                  {tr("JSON 내보내기", "Export JSON")}
+                </button>
+                <button
+                  onClick={() => void handleClearOverride()}
+                  disabled={saving || !overrideExists}
+                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  style={{
+                    ...BUTTON_NEUTRAL_STYLE,
+                    opacity: saving || !overrideExists ? 0.45 : 1,
+                  }}
+                >
+                  {tr("기본값", "Reset")}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div
+                className="inline-flex rounded-full border p-1"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                  background: "color-mix(in srgb, var(--th-overlay-subtle) 86%, transparent)",
+                }}
+              >
+                <button
+                  onClick={() => setLevel("repo")}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+                  style={{
+                    background: level === "repo" ? "var(--th-accent-primary-soft)" : "transparent",
+                    color: level === "repo" ? "var(--th-text-primary)" : "var(--th-text-muted)",
+                  }}
+                >
+                  {tr("레포 레벨", "Repo level")}
+                </button>
+                <button
+                  onClick={() => setLevel("agent")}
+                  disabled={!selectedAgentId}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+                  style={{
+                    background: level === "agent" ? "var(--th-accent-primary-soft)" : "transparent",
+                    color: level === "agent" ? "var(--th-text-primary)" : "var(--th-text-muted)",
+                    opacity: selectedAgentId ? 1 : 0.45,
+                  }}
+                >
+                  {tr("에이전트 레벨", "Agent level")}
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  onClick={() => setReloadKey((current) => current + 1)}
+                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  style={BUTTON_NEUTRAL_STYLE}
+                >
+                  {tr("새로고침", "Refresh")}
+                </button>
+                <button
+                  onClick={() => void handleSave()}
+                  disabled={saving || !hasVisibleChanges}
+                  className="rounded-lg border px-3 py-1.5 text-[11px] font-semibold disabled:opacity-50"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
+                    background: "var(--th-accent-primary-soft)",
+                    color: "var(--th-text-primary)",
+                  }}
+                >
+                  {saving
+                    ? tr("저장 중…", "Saving…")
+                    : hasVisibleChanges
+                      ? tr("저장", "Save")
+                      : tr("변경 없음", "No changes")}
+                </button>
+              </div>
+            </div>
           </div>
+        ) : (
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-2">
+              <p className="text-xs leading-6 sm:text-sm sm:leading-6" style={MUTED_TEXT_STYLE}>
+                {editorHelpText}
+              </p>
+              {selectedAgentName && (
+                <p className="text-xs leading-6 sm:text-sm sm:leading-6" style={MUTED_TEXT_STYLE}>
+                  {tr("현재 선택된 에이전트", "Selected agent")}:{" "}
+                  <span style={{ color: "var(--th-text-primary)" }}>{selectedAgentName}</span>
+                </p>
+              )}
+            </div>
 
-          <button
-            onClick={() => setReloadKey((current) => current + 1)}
-            className="rounded-xl border px-3 py-1.5 text-xs"
-            style={{
-              borderColor: "rgba(148,163,184,0.2)",
-              color: "var(--th-text-secondary)",
-            }}
-          >
-            {tr("새로고침", "Refresh")}
-          </button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div
+                className="inline-flex rounded-full border p-1"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                  background: "color-mix(in srgb, var(--th-overlay-subtle) 86%, transparent)",
+                }}
+              >
+                <button
+                  onClick={() => setLevel("repo")}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+                  style={{
+                    background: level === "repo" ? "var(--th-accent-primary-soft)" : "transparent",
+                    color: level === "repo" ? "var(--th-text-primary)" : "var(--th-text-muted)",
+                  }}
+                >
+                  {tr("레포 레벨", "Repo level")}
+                </button>
+                <button
+                  onClick={() => setLevel("agent")}
+                  disabled={!selectedAgentId}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+                  style={{
+                    background: level === "agent" ? "var(--th-accent-primary-soft)" : "transparent",
+                    color: level === "agent" ? "var(--th-text-primary)" : "var(--th-text-muted)",
+                    opacity: selectedAgentId ? 1 : 0.45,
+                  }}
+                >
+                  {tr("에이전트 레벨", "Agent level")}
+                </button>
+              </div>
 
-          <button
-            onClick={() => void handleClearOverride()}
-            disabled={saving || !overrideExists}
-            className="rounded-xl border px-3 py-1.5 text-xs"
-            style={{
-              borderColor: "rgba(245,158,11,0.3)",
-              color: "#fbbf24",
-              opacity: saving || !overrideExists ? 0.45 : 1,
-            }}
-          >
-            {isFsmVariant ? tr("기본값 복원", "Reset default") : tr("오버라이드 상속", "Clear override")}
-          </button>
+              <button
+                onClick={() => setReloadKey((current) => current + 1)}
+                className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                style={PANEL_SOFT_STYLE}
+              >
+                {tr("새로고침", "Refresh")}
+              </button>
 
-          {isFsmVariant && (
-            <button
-              onClick={handleExportJson}
-              disabled={!pipelineDraft}
-              className="rounded-xl border px-3 py-1.5 text-xs"
-              style={{
-                borderColor: "rgba(56,189,248,0.3)",
-                color: "#38bdf8",
-                opacity: pipelineDraft ? 1 : 0.45,
-              }}
-            >
-              {tr("JSON 내보내기", "Export JSON")}
-            </button>
-          )}
+              <button
+                onClick={() => void handleClearOverride()}
+                disabled={saving || !overrideExists}
+                className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                style={{
+                  ...PANEL_SOFT_STYLE,
+                  borderColor: "color-mix(in srgb, var(--th-accent-warn) 30%, var(--th-border) 70%)",
+                  color: "var(--th-text-primary)",
+                  opacity: saving || !overrideExists ? 0.45 : 1,
+                }}
+              >
+                {tr("오버라이드 상속", "Clear override")}
+              </button>
 
-          <button
-            onClick={() => void handleSave()}
-            disabled={saving || !hasVisibleChanges}
-            className="rounded-xl px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-            style={{ backgroundColor: "#4f46e5" }}
-          >
-            {saving
-              ? tr("저장 중…", "Saving…")
-              : hasVisibleChanges
-                ? tr("변경 저장", "Save changes")
-                : tr("변경 없음", "No changes")}
-          </button>
-        </div>
-      </div>
+              <button
+                onClick={() => void handleSave()}
+                disabled={saving || !hasVisibleChanges}
+                className="rounded-xl border px-3.5 py-1.5 text-xs font-semibold disabled:opacity-50"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
+                  background: "var(--th-accent-primary-soft)",
+                  color: "var(--th-text-primary)",
+                }}
+              >
+                {saving
+                  ? tr("저장 중…", "Saving…")
+                  : hasVisibleChanges
+                    ? tr("변경 저장", "Save changes")
+                    : tr("변경 없음", "No changes")}
+              </button>
+            </div>
+          </div>
+        )}
+      </SurfaceCard>
 
       {(error || success || preservedKeys.length > 0) && (
         <div className="space-y-2">
           {error && (
             <div
-              className="rounded-xl border px-3 py-2 text-xs"
-              style={{
-                borderColor: "rgba(248,113,113,0.35)",
-                backgroundColor: "rgba(127,29,29,0.2)",
-                color: "#fecaca",
-              }}
+              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              style={STATUS_ERROR_STYLE}
             >
               {error}
             </div>
           )}
           {success && (
             <div
-              className="rounded-xl border px-3 py-2 text-xs"
-              style={{
-                borderColor: "rgba(74,222,128,0.35)",
-                backgroundColor: "rgba(34,197,94,0.12)",
-                color: "#86efac",
-              }}
+              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              style={STATUS_SUCCESS_STYLE}
             >
               {success}
             </div>
           )}
           {preservedKeys.length > 0 && (
             <div
-              className="rounded-xl border px-3 py-2 text-xs"
-              style={{
-                borderColor: "rgba(148,163,184,0.22)",
-                backgroundColor: "var(--th-overlay-subtle)",
-                color: "var(--th-text-secondary)",
-              }}
+              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              style={STATUS_INFO_STYLE}
             >
               {tr("시각 편집기 밖의 override 키는 저장 시 유지됩니다.", "Non-visual override keys are preserved on save.")}{" "}
               <span style={{ color: "var(--th-text-primary)" }}>
@@ -1521,45 +1795,36 @@ export default function PipelineVisualEditor({
       )}
 
       {loading || !pipelineDraft || !graph ? (
-        <div className="rounded-2xl border px-4 py-8 text-sm text-center" style={INPUT_STYLE}>
+        <div className="rounded-[24px] border px-4 py-8 text-sm text-center" style={EMPTY_PANEL_STYLE}>
           {tr("비주얼 파이프라인을 불러오는 중…", "Loading visual pipeline…")}
         </div>
       ) : (
         <>
           <div className={graphGridClass}>
-            <div className="min-w-0 rounded-2xl border p-3 sm:p-4 space-y-3" style={INPUT_STYLE}>
+            <div
+              className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4"
+              style={isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
+            >
               {!isFsmVariant && (
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={addState}
                     className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                    style={{
-                      borderColor: "rgba(56,189,248,0.35)",
-                      color: "#38bdf8",
-                      backgroundColor: "rgba(56,189,248,0.08)",
-                    }}
+                    style={BUTTON_INFO_STYLE}
                   >
                     + {tr("상태", "State")}
                   </button>
                   <button
                     onClick={addTransition}
                     className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                    style={{
-                      borderColor: "rgba(129,140,248,0.35)",
-                      color: "#a5b4fc",
-                      backgroundColor: "rgba(129,140,248,0.08)",
-                    }}
+                    style={BUTTON_ACCENT_STYLE}
                   >
                     + {tr("전환", "Transition")}
                   </button>
                   <button
                     onClick={() => setSelection({ kind: "phase_gate" })}
                     className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                    style={{
-                      borderColor: "rgba(245,158,11,0.35)",
-                      color: "#fbbf24",
-                      backgroundColor: "rgba(245,158,11,0.08)",
-                    }}
+                    style={BUTTON_WARN_STYLE}
                   >
                     {tr("Phase Gate", "Phase Gate")}
                   </button>
@@ -1567,12 +1832,8 @@ export default function PipelineVisualEditor({
               )}
 
               <div
-                className="overflow-hidden rounded-2xl border p-2 sm:p-3"
-                style={{
-                  borderColor: "rgba(148,163,184,0.18)",
-                  background:
-                    "radial-gradient(circle at top left, rgba(79,70,229,0.16), transparent 38%), radial-gradient(circle at bottom right, rgba(14,165,233,0.14), transparent 34%), var(--th-overlay-subtle)",
-                }}
+                className="overflow-hidden rounded-[24px] border p-3 sm:p-4"
+                style={isFsmVariant ? FSM_CANVAS_SHELL_STYLE : CANVAS_SHELL_STYLE}
               >
                 <svg
                   ref={svgRef}
@@ -1615,6 +1876,40 @@ export default function PipelineVisualEditor({
                   }}
                 >
                   <defs>
+                    {isFsmVariant && (
+                      <>
+                        <pattern
+                          id="pipeline-grid-fsm"
+                          width="24"
+                          height="24"
+                          patternUnits="userSpaceOnUse"
+                        >
+                          <circle cx="1" cy="1" r="1" fill="rgba(148, 163, 184, 0.22)" />
+                        </pattern>
+                        <marker
+                          id="pipeline-arrow-fsm"
+                          viewBox="0 0 12 12"
+                          refX="9"
+                          refY="6"
+                          markerWidth="8"
+                          markerHeight="8"
+                          orient="auto"
+                        >
+                          <path d="M 0 0 L 12 6 L 0 12 z" fill="rgba(148, 163, 184, 0.58)" />
+                        </marker>
+                        <marker
+                          id="pipeline-arrow-fsm-active"
+                          viewBox="0 0 12 12"
+                          refX="9"
+                          refY="6"
+                          markerWidth="8"
+                          markerHeight="8"
+                          orient="auto"
+                        >
+                          <path d="M 0 0 L 12 6 L 0 12 z" fill="var(--th-accent-primary)" />
+                        </marker>
+                      </>
+                    )}
                     <marker
                       id="pipeline-arrow"
                       viewBox="0 0 12 12"
@@ -1628,6 +1923,17 @@ export default function PipelineVisualEditor({
                     </marker>
                   </defs>
 
+                  {isFsmVariant && (
+                    <>
+                      <rect width={FSM_VIEWBOX.width} height={FSM_VIEWBOX.height} fill="#0d1016" />
+                      <rect
+                        width={FSM_VIEWBOX.width}
+                        height={FSM_VIEWBOX.height}
+                        fill="url(#pipeline-grid-fsm)"
+                      />
+                    </>
+                  )}
+
                   <g
                     transform={
                       graphTransform
@@ -1639,16 +1945,33 @@ export default function PipelineVisualEditor({
                     const accent = transitionAccent(edge.type);
                     const isSelected =
                       selection?.kind === "transition" && selection.index === edge.index;
+                    const bindingKey = buildFsmEdgeBindingKey(edge.from, edge.to);
+                    const fsmEventLabel =
+                      fsmEdgeBindings[bindingKey]?.event
+                      ?? inferFsmEventName(edge.from, edge.to);
+                    const edgeStroke = isFsmVariant
+                      ? isSelected
+                        ? "var(--th-accent-primary)"
+                        : "rgba(148, 163, 184, 0.58)"
+                      : accent.stroke;
                     return (
                       <g key={edge.key}>
                         <path
                           d={edge.path}
                           fill="none"
-                          stroke={accent.stroke}
-                          strokeOpacity={isSelected ? 0.95 : 0.65}
-                          strokeWidth={isSelected ? 3.5 : 2.25}
-                          markerEnd="url(#pipeline-arrow)"
-                          style={{ color: accent.stroke }}
+                          stroke={edgeStroke}
+                          strokeOpacity={isSelected ? 0.95 : isFsmVariant ? 0.8 : 0.65}
+                          strokeWidth={isSelected ? (isFsmVariant ? 2.4 : 3.5) : isFsmVariant ? 1.6 : 2.25}
+                          markerEnd={
+                            isFsmVariant
+                              ? isSelected
+                                ? "url(#pipeline-arrow-fsm-active)"
+                                : "url(#pipeline-arrow-fsm)"
+                              : "url(#pipeline-arrow)"
+                          }
+                          strokeLinecap={isFsmVariant ? "round" : undefined}
+                          strokeLinejoin={isFsmVariant ? "round" : undefined}
+                          style={{ color: edgeStroke }}
                         />
                         <path
                           d={edge.path}
@@ -1664,12 +1987,12 @@ export default function PipelineVisualEditor({
                             : edge.type === "gated"
                               ? edge.gates.length > 0 ? tr(`조건${edge.gates.length}`, `cond${edge.gates.length}`) : tr("조건부", "cond")
                               : String(edge.type);
-                          const label = typeLabel;
-                          if (edge.labelRotated) {
+                          const label = isFsmVariant ? fsmEventLabel : typeLabel;
+                          if (edge.labelRotated && !isFsmVariant) {
                             const labelLen = Math.max(44, label.length * 7 + 14);
-                            return (
-                              <g
-                                transform={`translate(${edge.labelX}, ${edge.labelY}) rotate(-90)`}
+                          return (
+                            <g
+                              transform={`translate(${edge.labelX}, ${edge.labelY}) rotate(-90)`}
                                 onClick={() => setSelection({ kind: "transition", index: edge.index })}
                                 className="cursor-pointer"
                               >
@@ -1679,7 +2002,11 @@ export default function PipelineVisualEditor({
                                   width={labelLen}
                                   height={22}
                                   rx={11}
-                                  fill={isSelected ? "rgba(15,23,42,0.96)" : "rgba(15,23,42,0.92)"}
+                                  fill={
+                                    isSelected
+                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
+                                      : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
+                                  }
                                   stroke={accent.stroke}
                                   strokeOpacity={isSelected ? 1 : 0.5}
                                   strokeWidth={1.5}
@@ -1690,14 +2017,14 @@ export default function PipelineVisualEditor({
                                   textAnchor="middle"
                                   fontSize="10"
                                   fontWeight="700"
-                                  fill={accent.text}
+                                  fill="var(--th-text-primary)"
                                 >
                                   {label}
                                 </text>
                               </g>
                             );
                           }
-                          const labelWidth = Math.max(48, label.length * 7 + 16);
+                          const labelWidth = Math.max(isFsmVariant ? 64 : 48, label.length * (isFsmVariant ? 6.8 : 7) + (isFsmVariant ? 18 : 16));
                           return (
                             <g
                               transform={`translate(${edge.labelX}, ${edge.labelY})`}
@@ -1710,17 +2037,31 @@ export default function PipelineVisualEditor({
                                 width={labelWidth}
                                 height={22}
                                 rx={11}
-                                fill={isSelected ? "rgba(15,23,42,0.95)" : "rgba(15,23,42,0.88)"}
-                                stroke={accent.stroke}
-                                strokeOpacity={isSelected ? 1 : 0.55}
+                                fill={
+                                  isFsmVariant
+                                    ? isSelected
+                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 44%, #151922 56%)"
+                                      : "#141821"
+                                    : isSelected
+                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
+                                      : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
+                                }
+                                stroke={isFsmVariant ? edgeStroke : accent.stroke}
+                                strokeOpacity={isSelected ? 1 : isFsmVariant ? 0.76 : 0.55}
+                                strokeWidth={isFsmVariant ? 1 : undefined}
                               />
                               <text
                                 x="0"
                                 y="4"
                                 textAnchor="middle"
                                 fontSize="10"
-                                fontWeight="600"
-                                fill={accent.text}
+                                fontWeight={isFsmVariant ? "700" : "600"}
+                                fill={isFsmVariant ? edgeStroke : "var(--th-text-primary)"}
+                                fontFamily={
+                                  isFsmVariant
+                                    ? "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
+                                    : undefined
+                                }
                               >
                                 {label}
                               </text>
@@ -1736,6 +2077,7 @@ export default function PipelineVisualEditor({
                       selection?.kind === "state" && selection.stateId === node.id;
                     const isDropTarget = dragConnect?.hoverId === node.id;
                     const isDragSource = dragConnect?.fromId === node.id;
+                    const tone = fsmStateTone(node.id);
                     return (
                       <g
                         key={node.id}
@@ -1767,17 +2109,50 @@ export default function PipelineVisualEditor({
                           width={node.width}
                           height={node.height}
                           rx={18}
-                          fill={isDropTarget ? "rgba(165,180,252,0.18)" : isDragSource ? "rgba(129,140,248,0.12)" : node.terminal ? "rgba(22,163,74,0.14)" : "rgba(15,23,42,0.82)"}
-                          stroke={isDropTarget ? "#a5b4fc" : isDragSource ? "#818cf8" : isSelected ? "#c4b5fd" : node.terminal ? "#4ade80" : "#64748b"}
-                          strokeOpacity={isDropTarget ? 0.95 : isDragSource ? 0.8 : isSelected ? 0.95 : 0.55}
-                          strokeWidth={isDropTarget ? 3 : isSelected ? 2.5 : 1.5}
+                          fill={
+                            isFsmVariant
+                              ? "#141821"
+                              : isDropTarget
+                                ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
+                                : isDragSource
+                                  ? "color-mix(in srgb, var(--th-accent-primary-soft) 56%, var(--th-card-bg) 44%)"
+                                  : node.terminal
+                                    ? "color-mix(in srgb, var(--th-badge-emerald-bg) 82%, var(--th-card-bg) 18%)"
+                                    : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
+                          }
+                          stroke={
+                            isFsmVariant
+                              ? tone.stroke
+                              : isDropTarget
+                                ? "var(--th-accent-primary)"
+                                : isDragSource
+                                  ? "color-mix(in srgb, var(--th-accent-primary) 74%, var(--th-accent-info) 26%)"
+                                  : isSelected
+                                    ? "var(--th-accent-primary)"
+                                    : node.terminal
+                                      ? "color-mix(in srgb, var(--th-accent-primary) 52%, #16a34a 48%)"
+                                      : "color-mix(in srgb, var(--th-border) 88%, transparent)"
+                          }
+                          strokeOpacity={
+                            isFsmVariant
+                              ? isSelected ? 1 : 0.92
+                              : isDropTarget ? 0.95 : isDragSource ? 0.8 : isSelected ? 0.95 : 0.55
+                          }
+                          strokeWidth={isFsmVariant ? (isSelected ? 2.2 : 1.6) : isDropTarget ? 3 : isSelected ? 2.5 : 1.5}
                         />
+                        {isFsmVariant && (
+                          <rect width={node.width} height={3} rx={1.5} fill={tone.stroke} />
+                        )}
                         <text
                           x="12"
                           y={compactGraph ? 20 : 24}
                           fontSize={compactGraph ? 10 : 11}
                           fontFamily="ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
-                          fill={isSelected ? "#e9d5ff" : "#cbd5f5"}
+                          fill={
+                            isFsmVariant
+                              ? "rgba(148, 163, 184, 0.78)"
+                              : isSelected ? "var(--th-accent-primary)" : "var(--th-text-muted)"
+                          }
                         >
                           {node.id}
                         </text>
@@ -1786,18 +2161,31 @@ export default function PipelineVisualEditor({
                           y={compactGraph ? 38 : 45}
                           fontSize={compactGraph ? 13 : 14}
                           fontWeight="700"
-                          fill={node.terminal ? "#86efac" : "#f8fafc"}
+                          fill={
+                            isFsmVariant
+                              ? "var(--th-text-primary)"
+                              : node.terminal
+                                ? "color-mix(in srgb, var(--th-accent-primary) 58%, #166534 42%)"
+                                : "var(--th-text-primary)"
+                          }
                         >
                           {node.label}
                         </text>
-                        <text x="12" y={compactGraph ? 54 : 66} fontSize={compactGraph ? 9 : 11} fill="#94a3b8">
-                          {[
-                            node.hookCount > 0 ? `${node.hookCount}h` : null,
-                            node.hasClock ? "clock" : null,
-                            node.hasTimeout ? "timeout" : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ") || tr("속성 없음", "No extras")}
+                        <text
+                          x="12"
+                          y={compactGraph ? 54 : 66}
+                          fontSize={compactGraph ? 9 : 11}
+                          fill={isFsmVariant ? "rgba(148, 163, 184, 0.74)" : "var(--th-text-muted)"}
+                        >
+                          {isFsmVariant
+                            ? `n=${node.index + 1}`
+                            : [
+                                node.hookCount > 0 ? `${node.hookCount}h` : null,
+                                node.hasClock ? "clock" : null,
+                                node.hasTimeout ? "timeout" : null,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ") || tr("속성 없음", "No extras")}
                         </text>
                       </g>
                     );
@@ -1809,24 +2197,75 @@ export default function PipelineVisualEditor({
                       y1={dragConnect.fromCy}
                       x2={dragConnect.cursorX}
                       y2={dragConnect.cursorY}
-                      stroke={dragConnect.hoverId ? "#a5b4fc" : "#818cf8"}
+                      stroke={dragConnect.hoverId ? "var(--th-accent-info)" : "var(--th-accent-primary)"}
                       strokeWidth={2.5}
                       strokeDasharray={dragConnect.hoverId ? "none" : "6 4"}
                       strokeOpacity={0.8}
                       markerEnd="url(#pipeline-arrow)"
-                      style={{ color: dragConnect.hoverId ? "#a5b4fc" : "#818cf8", pointerEvents: "none" }}
+                      style={{
+                        color: dragConnect.hoverId ? "var(--th-accent-info)" : "var(--th-accent-primary)",
+                        pointerEvents: "none",
+                      }}
                     />
                   )}
                   </g>
                 </svg>
               </div>
 
-              <div className="flex flex-wrap gap-2 text-xs" style={MUTED_TEXT_STYLE}>
-                <span>{graphPanelNote}</span>
+              <div className="flex flex-wrap items-center gap-3 text-xs" style={MUTED_TEXT_STYLE}>
+                {isFsmVariant ? (
+                  <>
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="inline-block h-px w-5"
+                        style={{ background: "rgba(148, 163, 184, 0.7)" }}
+                      />
+                      <span
+                        style={{
+                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        {tr("전환", "edge")}
+                      </span>
+                    </span>
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="inline-block h-px w-5"
+                        style={{ background: "var(--th-accent-primary)" }}
+                      />
+                      <span
+                        style={{
+                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        {tr("선택됨", "selected")}
+                      </span>
+                    </span>
+                    <span
+                      className="ml-auto"
+                      style={{
+                        fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.12em",
+                      }}
+                    >
+                      {`states:${pipelineDraft.states.length} · transitions:${pipelineDraft.transitions.length}`}
+                    </span>
+                  </>
+                ) : (
+                  <span>{graphPanelNote}</span>
+                )}
               </div>
             </div>
 
-            <div className="min-w-0 rounded-2xl border p-3 sm:p-4 space-y-3" style={INPUT_STYLE}>
+            <div
+              className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4"
+              style={isFsmVariant ? FSM_INSPECTOR_STYLE : PANEL_STYLE}
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h4 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
                   {formatSelectionTitle(tr, selection, pipelineDraft)}
@@ -1847,11 +2286,7 @@ export default function PipelineVisualEditor({
                       </label>
                       <div
                         className="rounded-xl border px-3 py-2 text-sm font-mono"
-                        style={{
-                          borderColor: "rgba(148,163,184,0.18)",
-                          color: "var(--th-text-primary)",
-                          backgroundColor: "var(--th-overlay-subtle)",
-                        }}
+                        style={{ ...PANEL_SOFT_STYLE, color: "var(--th-text-primary)" }}
                       >
                         {selectedState.id}
                       </div>
@@ -1919,30 +2354,21 @@ export default function PipelineVisualEditor({
                     <button
                       onClick={() => clearStateHooks(selectedState.id)}
                       className="rounded-xl border px-3 py-1.5 text-xs"
-                      style={{
-                        borderColor: "rgba(148,163,184,0.18)",
-                        color: "var(--th-text-secondary)",
-                      }}
+                      style={BUTTON_NEUTRAL_STYLE}
                     >
                       {tr("훅 비우기", "Clear hooks")}
                     </button>
                     <button
                       onClick={() => clearStateClock(selectedState.id)}
                       className="rounded-xl border px-3 py-1.5 text-xs"
-                      style={{
-                        borderColor: "rgba(148,163,184,0.18)",
-                        color: "var(--th-text-secondary)",
-                      }}
+                      style={BUTTON_NEUTRAL_STYLE}
                     >
                       {tr("클록 비우기", "Clear clock")}
                     </button>
                     <button
                       onClick={() => clearStateTimeout(selectedState.id)}
                       className="rounded-xl border px-3 py-1.5 text-xs"
-                      style={{
-                        borderColor: "rgba(148,163,184,0.18)",
-                        color: "var(--th-text-secondary)",
-                      }}
+                      style={BUTTON_NEUTRAL_STYLE}
                     >
                       {tr("타임아웃 비우기", "Clear timeout")}
                     </button>
@@ -1981,7 +2407,7 @@ export default function PipelineVisualEditor({
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
+                  <div className="rounded-[20px] border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
                     <div className="flex items-center justify-between gap-2">
                       <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
                         {tr("타임아웃", "Timeout")}
@@ -2088,11 +2514,7 @@ export default function PipelineVisualEditor({
                   <button
                     onClick={() => removeState(selectedState.id)}
                     className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                    style={{
-                      borderColor: "rgba(248,113,113,0.28)",
-                      color: "#f87171",
-                      backgroundColor: "rgba(248,113,113,0.08)",
-                    }}
+                    style={BUTTON_DANGER_STYLE}
                   >
                     {tr("이 상태 삭제", "Delete state")}
                   </button>
@@ -2103,28 +2525,33 @@ export default function PipelineVisualEditor({
                 <div className="space-y-3">
                   {isFsmVariant ? (
                     <>
-                      <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
+                      <div className="rounded-[20px] border p-4 space-y-4" style={FSM_DETAIL_PANEL_STYLE}>
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
+                            <h5
+                              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+                              style={{
+                                ...MUTED_TEXT_STYLE,
+                                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                              }}
+                            >
                               {tr("선택된 전환", "Selected transition")}
                             </h5>
                             <p className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
                               {selectedTransition.from} → {selectedTransition.to}
                             </p>
                           </div>
-                          <label className="inline-flex items-center gap-2 text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                            <span>{tr("사용", "Enabled")}</span>
-                            <input
-                              type="checkbox"
-                              checked
-                              onChange={(event) => {
-                                if (!event.target.checked) {
-                                  removeTransition(selectedTransitionIndex);
-                                }
-                              }}
-                            />
-                          </label>
+                          <span
+                            className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                            style={{
+                              borderColor: "color-mix(in srgb, var(--th-border) 80%, transparent)",
+                              background: "color-mix(in srgb, var(--th-overlay-subtle) 82%, transparent)",
+                              color: "var(--th-text-secondary)",
+                              fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                            }}
+                          >
+                            edge
+                          </span>
                         </div>
 
                         <div className="grid gap-3">
@@ -2138,7 +2565,7 @@ export default function PipelineVisualEditor({
                                 updateFsmTransitionEvent(selectedTransitionIndex, event.target.value)
                               }
                               className={INPUT_CLASS}
-                              style={INPUT_STYLE}
+                              style={FSM_INPUT_STYLE}
                             >
                               {fsmEventOptions.map((eventName) => (
                                 <option key={eventName} value={eventName}>
@@ -2158,7 +2585,7 @@ export default function PipelineVisualEditor({
                                 updateFsmEventHook(selectedFsmEvent, event.target.value)
                               }
                               className={INPUT_CLASS}
-                              style={INPUT_STYLE}
+                              style={FSM_INPUT_STYLE}
                             >
                               <option value="">{tr("없음", "None")}</option>
                               {fsmHookOptions.map((hookName) => (
@@ -2187,7 +2614,7 @@ export default function PipelineVisualEditor({
                                 })
                               }
                               className={INPUT_CLASS}
-                              style={INPUT_STYLE}
+                              style={FSM_INPUT_STYLE}
                             >
                               <option value="free">free</option>
                               <option value="gated">gated</option>
@@ -2217,11 +2644,14 @@ export default function PipelineVisualEditor({
                                         updateTransitionGates(selectedTransitionIndex, next.join(", "));
                                       }}
                                       className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
-                                      style={{
-                                        borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
-                                        backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
-                                        color: active ? "#fbbf24" : "var(--th-text-muted)",
-                                      }}
+                                      style={
+                                        active
+                                          ? BUTTON_WARN_STYLE
+                                          : {
+                                              ...FSM_DETAIL_PANEL_STYLE,
+                                              color: "var(--th-text-muted)",
+                                            }
+                                      }
                                     >
                                       {name}
                                     </button>
@@ -2230,6 +2660,16 @@ export default function PipelineVisualEditor({
                               </div>
                             </div>
                           )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          <button
+                            onClick={() => removeTransition(selectedTransitionIndex)}
+                            className="rounded-lg border px-3 py-1.5 text-[11px] font-medium"
+                            style={BUTTON_DANGER_STYLE}
+                          >
+                            {tr("전환 삭제", "Delete edge")}
+                          </button>
                         </div>
                       </div>
                     </>
@@ -2321,11 +2761,15 @@ export default function PipelineVisualEditor({
                                     updateTransitionGates(selectedTransitionIndex, next.join(", "));
                                   }}
                                   className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
-                                  style={{
-                                    borderColor: active ? "rgba(245,158,11,0.5)" : "rgba(148,163,184,0.2)",
-                                    backgroundColor: active ? "rgba(245,158,11,0.14)" : "transparent",
-                                    color: active ? "#fbbf24" : "var(--th-text-muted)",
-                                  }}
+                                  style={
+                                    active
+                                      ? BUTTON_WARN_STYLE
+                                      : {
+                                          ...BUTTON_NEUTRAL_STYLE,
+                                          background: "transparent",
+                                          color: "var(--th-text-muted)",
+                                        }
+                                  }
                                 >
                                   {name}
                                 </button>
@@ -2335,7 +2779,7 @@ export default function PipelineVisualEditor({
                         </div>
                       </div>
 
-                      <div className="rounded-2xl border p-3 space-y-3" style={INPUT_STYLE}>
+                      <div className="rounded-[20px] border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div>
                             <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
@@ -2351,10 +2795,7 @@ export default function PipelineVisualEditor({
                           <button
                             onClick={() => addGate(selectedTransitionIndex)}
                             className="rounded-xl border px-3 py-1.5 text-xs"
-                            style={{
-                              borderColor: "rgba(245,158,11,0.35)",
-                              color: "#fbbf24",
-                            }}
+                            style={BUTTON_WARN_STYLE}
                           >
                             + {tr("게이트", "Gate")}
                           </button>
@@ -2372,10 +2813,7 @@ export default function PipelineVisualEditor({
                             <div
                               key={gateName}
                               className="rounded-xl border p-3 space-y-2"
-                              style={{
-                                borderColor: "rgba(148,163,184,0.18)",
-                                backgroundColor: "var(--th-overlay-subtle)",
-                              }}
+                              style={PANEL_SOFT_STYLE}
                             >
                               <div
                                 className="text-xs font-mono"
@@ -2455,11 +2893,7 @@ export default function PipelineVisualEditor({
                       <button
                         onClick={() => removeTransition(selectedTransitionIndex)}
                         className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                        style={{
-                          borderColor: "rgba(248,113,113,0.28)",
-                          color: "#f87171",
-                          backgroundColor: "rgba(248,113,113,0.08)",
-                        }}
+                        style={BUTTON_DANGER_STYLE}
                       >
                         {tr("이 전환 삭제", "Delete transition")}
                       </button>
@@ -2470,11 +2904,11 @@ export default function PipelineVisualEditor({
 
               {isFsmVariant && !selectedTransition && (
                 <div
-                  className="rounded-2xl border px-4 py-6 text-sm"
+                  className="rounded-[20px] border px-4 py-6 text-sm"
                   style={{
-                    borderColor: "rgba(148,163,184,0.18)",
-                    backgroundColor: "var(--th-overlay-subtle)",
-                    color: "var(--th-text-muted)",
+                    ...EMPTY_PANEL_STYLE,
+                    borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
+                    background: "#11141b",
                   }}
                 >
                   {tr(
@@ -2557,11 +2991,15 @@ export default function PipelineVisualEditor({
                               updatePhaseGate({ checks: next });
                             }}
                             className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
-                            style={{
-                              borderColor: active ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.2)",
-                              backgroundColor: active ? "rgba(96,165,250,0.14)" : "transparent",
-                              color: active ? "#60a5fa" : "var(--th-text-muted)",
-                            }}
+                            style={
+                              active
+                                ? BUTTON_INFO_STYLE
+                                : {
+                                    ...BUTTON_NEUTRAL_STYLE,
+                                    background: "transparent",
+                                    color: "var(--th-text-muted)",
+                                  }
+                            }
                           >
                             {checkName}
                           </button>
@@ -2575,7 +3013,7 @@ export default function PipelineVisualEditor({
           </div>
 
           {!isFsmVariant && (
-          <div className="min-w-0 rounded-2xl border p-3 sm:p-4 space-y-3" style={INPUT_STYLE}>
+          <div className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4" style={PANEL_STYLE}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h4 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
@@ -2597,10 +3035,7 @@ export default function PipelineVisualEditor({
                 <button
                   onClick={addStage}
                   className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-                  style={{
-                    borderColor: "rgba(56,189,248,0.35)",
-                    color: "#38bdf8",
-                  }}
+                  style={BUTTON_INFO_STYLE}
                 >
                   + {tr("스테이지", "Stage")}
                 </button>
@@ -2609,8 +3044,7 @@ export default function PipelineVisualEditor({
                   disabled={saving || (stageDrafts.length === 0 && allRepoStages.length === 0)}
                   className="rounded-xl border px-3 py-1.5 text-xs"
                   style={{
-                    borderColor: "rgba(248,113,113,0.28)",
-                    color: "#f87171",
+                    ...BUTTON_DANGER_STYLE,
                     opacity:
                       saving || (stageDrafts.length === 0 && allRepoStages.length === 0) ? 0.45 : 1,
                   }}
@@ -2622,12 +3056,8 @@ export default function PipelineVisualEditor({
 
             {stageDrafts.length === 0 ? (
               <div
-                className="rounded-2xl border px-4 py-6 text-center text-sm"
-                style={{
-                  borderColor: "rgba(148,163,184,0.18)",
-                  backgroundColor: "var(--th-overlay-subtle)",
-                  color: "var(--th-text-muted)",
-                }}
+                className="rounded-[20px] border px-4 py-6 text-center text-sm"
+                style={EMPTY_PANEL_STYLE}
               >
                 {tr(
                   "스테이지가 없습니다. 아래의 + 버튼으로 자동 실행 단계를 추가하세요.",
@@ -2639,18 +3069,15 @@ export default function PipelineVisualEditor({
                 {stageDrafts.map((stage, index) => (
                   <div
                     key={`${stage.stage_name}-${index}`}
-                    className="min-w-0 rounded-2xl border p-3 space-y-3"
-                    style={{
-                      borderColor: "rgba(148,163,184,0.18)",
-                      backgroundColor: "var(--th-overlay-subtle)",
-                    }}
+                    className="min-w-0 rounded-[20px] border p-4 space-y-3"
+                    style={PANEL_SOFT_STYLE}
                   >
                     <div className="flex items-center gap-2">
                       <span
                         className="inline-flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold"
                         style={{
-                          backgroundColor: "rgba(99,102,241,0.18)",
-                          color: "#c7d2fe",
+                          background: "var(--th-accent-primary-soft)",
+                          color: "var(--th-text-primary)",
                         }}
                       >
                         {index + 1}
@@ -2877,10 +3304,7 @@ export default function PipelineVisualEditor({
                         <button
                           onClick={() => moveStage(index, -1)}
                           className="rounded-xl border px-3 py-1.5 text-xs"
-                          style={{
-                            borderColor: "rgba(148,163,184,0.18)",
-                            color: "var(--th-text-secondary)",
-                          }}
+                          style={BUTTON_NEUTRAL_STYLE}
                         >
                           ↑ {tr("앞으로", "Earlier")}
                         </button>
@@ -2889,10 +3313,7 @@ export default function PipelineVisualEditor({
                         <button
                           onClick={() => moveStage(index, 1)}
                           className="rounded-xl border px-3 py-1.5 text-xs"
-                          style={{
-                            borderColor: "rgba(148,163,184,0.18)",
-                            color: "var(--th-text-secondary)",
-                          }}
+                          style={BUTTON_NEUTRAL_STYLE}
                         >
                           ↓ {tr("뒤로", "Later")}
                         </button>
@@ -2900,10 +3321,7 @@ export default function PipelineVisualEditor({
                       <button
                         onClick={() => removeStage(index)}
                         className="rounded-xl border px-3 py-1.5 text-xs"
-                        style={{
-                          borderColor: "rgba(248,113,113,0.28)",
-                          color: "#f87171",
-                        }}
+                        style={BUTTON_DANGER_STYLE}
                       >
                         {tr("삭제", "Delete")}
                       </button>
