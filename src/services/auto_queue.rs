@@ -434,6 +434,101 @@ impl AutoQueueService {
         Ok(cards.into_iter().map(GenerateCandidate::from).collect())
     }
 
+    pub async fn prepare_generate_cards_with_pg(
+        &self,
+        pool: &PgPool,
+        input: &PrepareGenerateInput,
+    ) -> ServiceResult<Vec<GenerateCandidate>> {
+        if let Some(issue_numbers) = input.issue_numbers.as_ref().filter(|nums| !nums.is_empty()) {
+            crate::pipeline::ensure_loaded();
+            let backlog_cards = auto_queue::list_backlog_cards_pg(
+                pool,
+                &GenerateCardFilter {
+                    repo: input.repo.clone(),
+                    agent_id: input.agent_id.clone(),
+                    issue_numbers: Some(issue_numbers.clone()),
+                },
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("load backlog cards: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("prepare_generate_cards_with_pg.list_backlog_cards_pg")
+            })?;
+
+            let mut transition_plan = Vec::with_capacity(backlog_cards.len());
+            for card in backlog_cards {
+                let effective = crate::pipeline::resolve_for_card_pg(
+                    pool,
+                    card.repo_id.as_deref(),
+                    card.assigned_agent_id.as_deref(),
+                )
+                .await;
+                let prep_path = if effective.is_valid_state("ready") {
+                    effective
+                        .free_path_to_state("backlog", "ready")
+                        .or_else(|| effective.free_path_to_dispatchable("backlog"))
+                } else {
+                    effective.free_path_to_dispatchable("backlog")
+                };
+                let Some(path) = prep_path else {
+                    return Err(ServiceError::bad_request(format!(
+                        "card {} has no free path from backlog to ready/dispatchable state",
+                        card.card_id
+                    ))
+                    .with_code(ErrorCode::AutoQueue)
+                    .with_context("card_id", &card.card_id));
+                };
+                transition_plan.push((card.card_id, path));
+            }
+
+            for (card_id, path) in transition_plan {
+                for step in &path {
+                    crate::kanban::transition_status_with_opts_pg(
+                        &self.db,
+                        pool,
+                        &self.engine,
+                        &card_id,
+                        step,
+                        "auto-queue-generate",
+                        false,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ServiceError::bad_request(format!(
+                            "failed to auto-transition card {card_id} to {step}: {error}"
+                        ))
+                        .with_code(ErrorCode::AutoQueue)
+                        .with_context("card_id", card_id.as_str())
+                        .with_context("target_state", step)
+                    })?;
+                }
+            }
+        }
+
+        crate::pipeline::ensure_loaded();
+        let enqueueable_states = crate::pipeline::try_get()
+            .map(enqueueable_states_for)
+            .unwrap_or_else(|| vec!["ready".to_string(), "requested".to_string()]);
+        let cards = auto_queue::list_generate_candidates_pg(
+            pool,
+            &GenerateCardFilter {
+                repo: input.repo.clone(),
+                agent_id: input.agent_id.clone(),
+                issue_numbers: input.issue_numbers.clone(),
+            },
+            &enqueueable_states,
+        )
+        .await
+        .map_err(|error| {
+            ServiceError::internal(format!("load generate cards: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("prepare_generate_cards_with_pg.list_generate_candidates_pg")
+        })?;
+
+        Ok(cards.into_iter().map(GenerateCandidate::from).collect())
+    }
+
     pub fn count_cards_by_status(
         &self,
         repo: Option<&str>,
@@ -464,6 +559,23 @@ impl AutoQueueService {
         })
     }
 
+    pub async fn count_cards_by_status_with_pg(
+        &self,
+        pool: &PgPool,
+        repo: Option<&str>,
+        agent_id: Option<&str>,
+        status: &str,
+    ) -> ServiceResult<i64> {
+        auto_queue::count_cards_by_status_pg(pool, repo, agent_id, status)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("count cards: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("count_cards_by_status_with_pg")
+                    .with_context("status", status)
+            })
+    }
+
     pub fn run_view(&self, run_id: &str) -> ServiceResult<Option<AutoQueueRunView>> {
         let conn = self
             .db
@@ -491,9 +603,33 @@ impl AutoQueueService {
             })
     }
 
+    pub async fn run_view_with_pg(
+        &self,
+        pool: &PgPool,
+        run_id: &str,
+    ) -> ServiceResult<Option<AutoQueueRunView>> {
+        auto_queue::get_run_pg(pool, run_id)
+            .await
+            .map(|record| record.map(AutoQueueRunView::from))
+            .map_err(|error| {
+                ServiceError::internal(format!("load run: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("run_view_with_pg.get_run_pg")
+                    .with_context("run_id", run_id)
+            })
+    }
+
     pub fn run_json(&self, run_id: &str) -> ServiceResult<Value> {
         Ok(self
             .run_view(run_id)?
+            .map(|run| json!(run))
+            .unwrap_or(Value::Null))
+    }
+
+    pub async fn run_json_with_pg(&self, pool: &PgPool, run_id: &str) -> ServiceResult<Value> {
+        Ok(self
+            .run_view_with_pg(pool, run_id)
+            .await?
             .map(|run| json!(run))
             .unwrap_or(Value::Null))
     }
@@ -616,6 +752,15 @@ impl AutoQueueService {
 
     pub fn status_json_for_run(&self, run_id: &str, input: StatusInput) -> ServiceResult<Value> {
         Ok(json!(self.status_for_run(run_id, input)?))
+    }
+
+    pub async fn status_json_for_run_with_pg(
+        &self,
+        pool: &PgPool,
+        run_id: &str,
+        input: StatusInput,
+    ) -> ServiceResult<Value> {
+        Ok(json!(self.status_for_run_pg(pool, run_id, input).await?))
     }
 
     pub fn status(&self, input: StatusInput) -> ServiceResult<AutoQueueStatusResponse> {
