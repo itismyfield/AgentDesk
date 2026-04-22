@@ -63,6 +63,49 @@ fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::
     dispatch_context.and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
 }
 
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn parse_pg_dispatch_context(
+    dispatch_id: &str,
+    raw_context: Option<&str>,
+    warn_reason: &'static str,
+) -> Option<serde_json::Value> {
+    let raw_context = raw_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let value = match serde_json::from_str::<serde_json::Value>(raw_context) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                dispatch_id,
+                %error,
+                warn_reason,
+                "[dispatch] invalid postgres dispatch context JSON"
+            );
+            return None;
+        }
+    };
+    if !value.is_object() {
+        tracing::warn!(
+            dispatch_id,
+            json_type = json_value_kind(&value),
+            warn_reason,
+            "[dispatch] postgres dispatch context is not an object"
+        );
+        return None;
+    }
+    Some(value)
+}
+
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {
     dispatch_context
         .and_then(|ctx| ctx.get("slot_index"))
@@ -931,7 +974,7 @@ async fn recent_slot_thread_history_pg(
     slot_index: i64,
 ) -> Result<Vec<String>, String> {
     let rows = sqlx::query(
-        "SELECT thread_id, context
+        "SELECT id, thread_id, context
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND thread_id IS NOT NULL
@@ -945,12 +988,41 @@ async fn recent_slot_thread_history_pg(
 
     let mut candidates = Vec::new();
     for row in rows {
-        let thread_id: Option<String> = row.try_get("thread_id").ok().flatten();
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        let matches_slot = context
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|value| value.get("slot_index").and_then(|value| value.as_i64()))
+        let dispatch_id: String = row.try_get("id").map_err(|error| {
+            format!("read postgres dispatch id for {agent_id}:{slot_index}: {error}")
+        })?;
+        let thread_id: Option<String> = match row.try_get("thread_id") {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    agent_id,
+                    slot_index,
+                    %error,
+                    "[dispatch] failed to decode postgres thread_id while checking recent slot history"
+                );
+                continue;
+            }
+        };
+        let context: Option<String> = match row.try_get("context") {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    agent_id,
+                    slot_index,
+                    %error,
+                    "[dispatch] failed to decode postgres dispatch context while checking recent slot history"
+                );
+                continue;
+            }
+        };
+        let matches_slot = parse_pg_dispatch_context(
+            &dispatch_id,
+            context.as_deref(),
+            "recent_slot_thread_history_pg",
+        )
+        .and_then(|value| value.get("slot_index").and_then(|value| value.as_i64()))
             == Some(slot_index);
         if matches_slot {
             push_unique_thread_candidate(&mut candidates, thread_id.as_deref());
@@ -1741,7 +1813,7 @@ async fn latest_completed_review_provider_pg(
     card_id: &str,
 ) -> Result<Option<String>, String> {
     let rows = sqlx::query(
-        "SELECT context
+        "SELECT id, context
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type = 'review'
@@ -1754,10 +1826,37 @@ async fn latest_completed_review_provider_pg(
     .await
     .map_err(|error| format!("load postgres review provider for {card_id}: {error}"))?;
 
-    Ok(rows.into_iter().find_map(|row| {
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        review_source_provider_from_context(context.as_deref())
-    }))
+    for row in rows {
+        let dispatch_id: String = row
+            .try_get("id")
+            .map_err(|error| format!("read postgres review dispatch id for {card_id}: {error}"))?;
+        let context: Option<String> = match row.try_get("context") {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    card_id,
+                    %error,
+                    "[dispatch] failed to decode postgres review context while loading provider"
+                );
+                continue;
+            }
+        };
+        if let Some(provider) = parse_pg_dispatch_context(
+            &dispatch_id,
+            context.as_deref(),
+            "latest_completed_review_provider_pg",
+        )
+        .and_then(|ctx| {
+            ctx.get("from_provider")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        }) {
+            return Ok(Some(provider));
+        }
+    }
+
+    Ok(None)
 }
 
 fn latest_work_dispatch_thread_on_conn(
@@ -1794,7 +1893,7 @@ async fn latest_work_dispatch_thread_pg(
     card_id: &str,
 ) -> Result<Option<String>, String> {
     let rows = sqlx::query(
-        "SELECT thread_id, context
+        "SELECT id, thread_id, context
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type IN ('implementation', 'rework')
@@ -1813,25 +1912,52 @@ async fn latest_work_dispatch_thread_pg(
     .map_err(|error| format!("load postgres work dispatch thread for {card_id}: {error}"))?;
 
     for row in rows {
-        let thread_id: Option<String> = row.try_get("thread_id").ok().flatten();
+        let dispatch_id: String = row
+            .try_get("id")
+            .map_err(|error| format!("read postgres work dispatch id for {card_id}: {error}"))?;
+        let thread_id: Option<String> = match row.try_get("thread_id") {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    card_id,
+                    %error,
+                    "[dispatch] failed to decode postgres work thread_id while loading reusable thread"
+                );
+                continue;
+            }
+        };
         if let Some(thread_id) = thread_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         {
             return Ok(Some(thread_id));
         }
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        if let Some(thread_id) = context
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|value| {
-                value
-                    .get("thread_id")
-                    .and_then(|value| value.as_str())
-                    .map(std::string::ToString::to_string)
-            })
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        let context: Option<String> = match row.try_get("context") {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    card_id,
+                    %error,
+                    "[dispatch] failed to decode postgres work context while loading reusable thread"
+                );
+                continue;
+            }
+        };
+        if let Some(thread_id) = parse_pg_dispatch_context(
+            &dispatch_id,
+            context.as_deref(),
+            "latest_work_dispatch_thread_pg",
+        )
+        .and_then(|value| {
+            value
+                .get("thread_id")
+                .and_then(|value| value.as_str())
+                .map(std::string::ToString::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         {
             return Ok(Some(thread_id));
         }

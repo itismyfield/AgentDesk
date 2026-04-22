@@ -97,7 +97,7 @@ async fn load_existing_thread_for_channel_pg(
     card_id: &str,
     channel_id: u64,
 ) -> Result<Option<String>> {
-    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+    let row = match sqlx::query_as::<_, (Option<String>, Option<String>)>(
         "SELECT channel_thread_map::text, active_thread_id
          FROM kanban_cards
          WHERE id = $1",
@@ -105,8 +105,18 @@ async fn load_existing_thread_for_channel_pg(
     .bind(card_id)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(
+                card_id,
+                channel_id,
+                %error,
+                "[dispatch] failed to load postgres channel_thread_map; creating a new thread"
+            );
+            return Ok(None);
+        }
+    };
 
     let Some((map_json, active_thread_id)) = row else {
         return Ok(None);
@@ -138,7 +148,7 @@ async fn load_existing_thread_for_channel_pg(
         return Ok(None);
     }
 
-    Ok(active_thread_id)
+    Ok(active_thread_id.filter(|value| !value.trim().is_empty()))
 }
 
 #[cfg(test)]

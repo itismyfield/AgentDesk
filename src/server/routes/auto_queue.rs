@@ -259,6 +259,17 @@ fn slot_requires_thread_reset_before_reuse(
             || slot_has_dispatch_thread_history(conn, agent_id, slot_index))
 }
 
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 async fn slot_thread_map_has_bindings_pg(
     pool: &sqlx::PgPool,
     agent_id: &str,
@@ -277,19 +288,37 @@ async fn slot_thread_map_has_bindings_pg(
     .flatten()
     .unwrap_or_else(|| "{}".to_string());
 
-    Ok(serde_json::from_str::<serde_json::Value>(&raw_map)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| {
-            map.values().any(|value| {
-                value
-                    .as_str()
-                    .map(|raw| !raw.trim().is_empty())
-                    .or_else(|| value.as_u64().map(|_| true))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false))
+    let thread_map = match serde_json::from_str::<serde_json::Value>(&raw_map) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                agent_id,
+                slot_index,
+                %error,
+                "[auto-queue] invalid postgres slot thread_id_map JSON while checking thread reuse"
+            );
+            return Ok(false);
+        }
+    };
+    let Some(thread_map) = thread_map.as_object() else {
+        if raw_map.trim() != "{}" && raw_map.trim() != "null" {
+            tracing::warn!(
+                agent_id,
+                slot_index,
+                json_type = json_value_kind(&thread_map),
+                "[auto-queue] postgres slot thread_id_map is not an object while checking thread reuse"
+            );
+        }
+        return Ok(false);
+    };
+
+    Ok(thread_map.values().any(|value| {
+        value
+            .as_str()
+            .map(|raw| !raw.trim().is_empty())
+            .or_else(|| value.as_u64().map(|_| true))
+            .unwrap_or(false)
+    }))
 }
 
 async fn slot_has_dispatch_thread_history_pg(
@@ -298,7 +327,7 @@ async fn slot_has_dispatch_thread_history_pg(
     slot_index: i64,
 ) -> Result<bool, String> {
     let rows = sqlx::query(
-        "SELECT thread_id, context
+        "SELECT id, thread_id, context
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND thread_id IS NOT NULL
@@ -312,11 +341,50 @@ async fn slot_has_dispatch_thread_history_pg(
     })?;
 
     for row in rows {
-        let context: Option<String> = row.try_get("context").ok().flatten();
-        let Some(context) = context else {
+        let dispatch_id: String = row.try_get("id").map_err(|error| {
+            format!("read postgres dispatch id for {agent_id}:{slot_index}: {error}")
+        })?;
+        let context: Option<String> = match row.try_get("context") {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    agent_id,
+                    slot_index,
+                    %error,
+                    "[auto-queue] failed to decode postgres dispatch context while checking slot thread history"
+                );
+                continue;
+            }
+        };
+        let Some(context) = context
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             continue;
         };
-        let Some(context_json) = serde_json::from_str::<serde_json::Value>(&context).ok() else {
+        let context_json = match serde_json::from_str::<serde_json::Value>(context) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    agent_id,
+                    slot_index,
+                    %error,
+                    "[auto-queue] invalid postgres dispatch context JSON while checking slot thread history"
+                );
+                continue;
+            }
+        };
+        let Some(context_json) = context_json.as_object() else {
+            tracing::warn!(
+                dispatch_id,
+                agent_id,
+                slot_index,
+                json_type = json_value_kind(&context_json),
+                "[auto-queue] postgres dispatch context is not an object while checking slot thread history"
+            );
             continue;
         };
         if context_json

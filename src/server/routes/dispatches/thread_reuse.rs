@@ -41,6 +41,67 @@ fn lookup_thread_for_channel_from_map(map_json: Option<&str>, channel_id: u64) -
     })
 }
 
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn lookup_thread_for_channel_from_map_pg(
+    map_json: Option<&str>,
+    card_id: &str,
+    channel_id: u64,
+) -> Option<String> {
+    let Some(raw) = map_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "null")
+    else {
+        return None;
+    };
+
+    let value = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                card_id,
+                channel_id,
+                %error,
+                "[dispatch] invalid postgres channel_thread_map JSON; skipping thread reuse"
+            );
+            return None;
+        }
+    };
+
+    let Some(map) = value.as_object() else {
+        tracing::warn!(
+            card_id,
+            channel_id,
+            json_type = json_value_kind(&value),
+            "[dispatch] postgres channel_thread_map is not an object; skipping thread reuse"
+        );
+        return None;
+    };
+
+    match map.get(&channel_id.to_string()) {
+        Some(serde_json::Value::String(thread_id)) => Some(thread_id.to_string()),
+        Some(other) => {
+            tracing::warn!(
+                card_id,
+                channel_id,
+                json_type = json_value_kind(other),
+                "[dispatch] postgres channel_thread_map entry is not a string; skipping thread reuse"
+            );
+            None
+        }
+        None => None,
+    }
+}
+
 /// Look up the thread_id for a specific channel from channel_thread_map.
 /// Falls back to active_thread_id for backward compatibility.
 pub(super) fn get_thread_for_channel(
@@ -106,7 +167,9 @@ pub(super) async fn get_thread_for_channel_pg(
         .try_get("active_thread_id")
         .map_err(|error| format!("read postgres active_thread_id for {card_id}: {error}"))?;
 
-    if let Some(thread_id) = lookup_thread_for_channel_from_map(map_json.as_deref(), channel_id) {
+    if let Some(thread_id) =
+        lookup_thread_for_channel_from_map_pg(map_json.as_deref(), card_id, channel_id)
+    {
         return Ok(Some(thread_id));
     }
 
@@ -892,12 +955,170 @@ mod tests {
         Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get,
     };
     use serde_json::json;
+    use std::{
+        future::Future,
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
 
     fn test_db() -> crate::db::Db {
         let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn capture_logs_async<T, F>(run: impl FnOnce() -> F) -> (T, String)
+    where
+        F: Future<Output = T>,
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let result = run().await;
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
+
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Option<Self> {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_thread_reuse_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres thread_reuse test: admin connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!("skipping postgres thread_reuse test: create database failed: {error}");
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+            Some(Self {
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn migrate(&self) -> Option<sqlx::PgPool> {
+            let pool = match sqlx::PgPool::connect(&self.database_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping postgres thread_reuse test: db connect failed: {error}");
+                    return None;
+                }
+            };
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("skipping postgres thread_reuse test: migrate failed: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(pool)
+        }
+
+        async fn drop(self) {
+            let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await else {
+                return;
+            };
+            let _ = sqlx::query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE datname = $1
+                   AND pid <> pg_backend_pid()",
+            )
+            .bind(&self.database_name)
+            .execute(&admin_pool)
+            .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.database_name
+            ))
+            .execute(&admin_pool)
+            .await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+            None => format!("postgres://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        format!("{}/postgres", postgres_base_database_url())
     }
 
     async fn spawn_thread_info_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -977,6 +1198,41 @@ mod tests {
         assert!(map.get("222").is_none());
         assert!(map.get("333").is_none());
         assert_eq!(active_thread_id.as_deref(), Some("thread-valid"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_thread_for_channel_pg_warns_on_non_object_thread_map() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, channel_thread_map)
+             VALUES ($1, 'Test Card', 'review', $2::jsonb)",
+        )
+        .bind("card-bad-thread-map")
+        .bind("\"bad-thread-map\"")
+        .execute(&pool)
+        .await
+        .expect("seed malformed thread map");
+
+        let (result, logs) = capture_logs_async(|| async {
+            get_thread_for_channel_pg(&pool, "card-bad-thread-map", 111).await
+        })
+        .await;
+
+        assert_eq!(result.expect("thread lookup should not fail"), None);
+        assert!(
+            logs.contains("postgres channel_thread_map is not an object"),
+            "expected warn log for malformed channel_thread_map, got: {logs}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
 

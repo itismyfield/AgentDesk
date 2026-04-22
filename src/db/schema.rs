@@ -155,6 +155,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN sort_order INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN active_thread_id TEXT;");
+    // Postgres keeps several sibling columns as JSONB while SQLite stores raw JSON text.
+    // Any PG SELECT that decodes these as `String` / `Option<String>` must cast with `::text`
+    // first, or sqlx will raise a JSONB-vs-string decode error.
+    // High-risk regression points:
+    // - kanban_cards.metadata
+    // - kanban_cards.channel_thread_map
+    // - auto_queue_slots.thread_id_map
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN channel_thread_map TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN suggestion_pending_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN review_entered_at TEXT;");
@@ -904,6 +911,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
+    // SQLite stores thread maps as TEXT, but the Postgres schema uses JSONB for
+    // `auto_queue_slots.thread_id_map`. Keep PG raw-string readers on `::text`.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS auto_queue_runs (
             id          TEXT PRIMARY KEY,
