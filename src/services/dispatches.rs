@@ -45,6 +45,14 @@ impl DispatchService {
         status: Option<&str>,
         kanban_card_id: Option<&str>,
     ) -> ServiceResult<Vec<Value>> {
+        if let Some(pool) = self.engine.pg_pool() {
+            return list_dispatches_pg(pool, status, kanban_card_id).map_err(|error| {
+                ServiceError::internal(error)
+                    .with_code(ErrorCode::Database)
+                    .with_operation("list_dispatches.pg")
+            });
+        }
+
         let conn = self.db.lock().map_err(|e| {
             ServiceError::internal(format!("{e}"))
                 .with_code(ErrorCode::Database)
@@ -90,27 +98,18 @@ impl DispatchService {
     }
 
     pub fn get_dispatch(&self, id: &str) -> ServiceResult<Value> {
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("get_dispatch.lock")
-                .with_context("dispatch_id", id)
-        })?;
-
-        conn.query_row(
-            "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at FROM task_dispatches WHERE id = ?1",
-            [id],
-            dispatch_row_to_json,
-        )
-        .map_err(|e| match e {
-            libsql_rusqlite::Error::QueryReturnedNoRows => ServiceError::not_found("dispatch not found")
-                .with_code(ErrorCode::Dispatch)
-                .with_context("dispatch_id", id),
-            other => ServiceError::internal(format!("{other}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("get_dispatch.query")
-                .with_context("dispatch_id", id),
-        })
+        dispatch::load_dispatch_row_pg_first(&self.db, self.engine.pg_pool(), id)
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("get_dispatch.query")
+                    .with_context("dispatch_id", id)
+            })?
+            .ok_or_else(|| {
+                ServiceError::not_found("dispatch not found")
+                    .with_code(ErrorCode::Dispatch)
+                    .with_context("dispatch_id", id)
+            })
     }
 
     pub async fn create_dispatch(
@@ -229,16 +228,10 @@ impl DispatchService {
             .with_context("status", status));
         }
 
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("update_dispatch.lock")
-                .with_context("dispatch_id", id)
-        })?;
-
         if let Some(status) = input.status {
-            let changed = dispatch::set_dispatch_status_on_conn(
-                &conn,
+            let changed = dispatch::set_dispatch_status_pg_first(
+                &self.db,
+                self.engine.pg_pool(),
                 id,
                 &status,
                 input.result.as_ref(),
@@ -258,33 +251,49 @@ impl DispatchService {
                     .with_context("dispatch_id", id));
             }
         } else if let Some(result) = input.result {
-            let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
-            let result_str = serde_json::to_string(&result).unwrap_or_default();
-            let mut sets = vec!["result = ?1".to_string()];
-            values.push(Box::new(result_str));
-            sets.push("updated_at = datetime('now')".to_string());
-            values.push(Box::new(id.to_string()));
-            let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
-                values.iter().map(|value| value.as_ref()).collect();
-            match conn.execute(
-                &format!(
-                    "UPDATE task_dispatches SET {} WHERE id = ?2",
-                    sets.join(", ")
-                ),
-                params_ref.as_slice(),
-            ) {
-                Ok(0) => {
-                    return Err(ServiceError::not_found("dispatch not found")
-                        .with_code(ErrorCode::Dispatch)
-                        .with_context("dispatch_id", id));
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    return Err(ServiceError::internal(format!("{error}"))
+            let changed = if let Some(pool) = self.engine.pg_pool() {
+                update_dispatch_result_pg(pool, id, &result).map_err(|error| {
+                    ServiceError::internal(error)
                         .with_code(ErrorCode::Database)
-                        .with_operation("update_dispatch.update_result")
-                        .with_context("dispatch_id", id));
+                        .with_operation("update_dispatch.update_result_pg")
+                        .with_context("dispatch_id", id)
+                })?
+            } else {
+                let conn = self.db.lock().map_err(|e| {
+                    ServiceError::internal(format!("{e}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("update_dispatch.lock")
+                        .with_context("dispatch_id", id)
+                })?;
+                let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
+                let result_str = serde_json::to_string(&result).unwrap_or_default();
+                let mut sets = vec!["result = ?1".to_string()];
+                values.push(Box::new(result_str));
+                sets.push("updated_at = datetime('now')".to_string());
+                values.push(Box::new(id.to_string()));
+                let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
+                    values.iter().map(|value| value.as_ref()).collect();
+                match conn.execute(
+                    &format!(
+                        "UPDATE task_dispatches SET {} WHERE id = ?2",
+                        sets.join(", ")
+                    ),
+                    params_ref.as_slice(),
+                ) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        return Err(ServiceError::internal(format!("{error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("update_dispatch.update_result")
+                            .with_context("dispatch_id", id));
+                    }
                 }
+            };
+
+            if changed == 0 {
+                return Err(ServiceError::not_found("dispatch not found")
+                    .with_code(ErrorCode::Dispatch)
+                    .with_context("dispatch_id", id));
             }
         } else {
             return Err(ServiceError::bad_request("no fields to update")
@@ -292,17 +301,18 @@ impl DispatchService {
                 .with_context("dispatch_id", id));
         }
 
-        conn.query_row(
-            "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at FROM task_dispatches WHERE id = ?1",
-            [id],
-            dispatch_row_to_json,
-        )
-        .map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("update_dispatch.readback")
-                .with_context("dispatch_id", id)
-        })
+        dispatch::load_dispatch_row_pg_first(&self.db, self.engine.pg_pool(), id)
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("update_dispatch.readback")
+                    .with_context("dispatch_id", id)
+            })?
+            .ok_or_else(|| {
+                ServiceError::not_found("dispatch not found")
+                    .with_code(ErrorCode::Dispatch)
+                    .with_context("dispatch_id", id)
+            })
     }
 }
 
@@ -329,6 +339,78 @@ fn resolve_dispatch_target_agent_id_on_conn(
         )
         .ok()
     })
+}
+
+fn list_dispatches_pg(
+    pool: &sqlx::PgPool,
+    status: Option<&str>,
+    kanban_card_id: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let status = status.map(|value| value.to_string());
+    let kanban_card_id = kanban_card_id.map(|value| value.to_string());
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |pool| async move {
+            let rows = sqlx::query(
+                "SELECT
+                    id,
+                    kanban_card_id,
+                    from_agent_id,
+                    to_agent_id,
+                    dispatch_type,
+                    status,
+                    title,
+                    context,
+                    result,
+                    parent_dispatch_id,
+                    COALESCE(chain_depth, 0)::BIGINT AS chain_depth,
+                    created_at::text AS created_at,
+                    updated_at::text AS updated_at,
+                    completed_at::text AS completed_at
+                 FROM task_dispatches
+                 WHERE ($1::text IS NULL OR status = $1)
+                   AND ($2::text IS NULL OR kanban_card_id = $2)
+                 ORDER BY created_at DESC",
+            )
+            .bind(status.as_deref())
+            .bind(kanban_card_id.as_deref())
+            .fetch_all(&pool)
+            .await
+            .map_err(|error| format!("list postgres dispatches: {error}"))?;
+
+            rows.into_iter()
+                .map(|row| dispatch_row_to_json_pg(&row))
+                .collect()
+        },
+        |error| error,
+    )
+}
+
+fn update_dispatch_result_pg(
+    pool: &sqlx::PgPool,
+    dispatch_id: &str,
+    result: &Value,
+) -> Result<usize, String> {
+    let dispatch_id = dispatch_id.to_string();
+    let result_json = serde_json::to_string(result)
+        .map_err(|error| format!("serialize dispatch result {dispatch_id}: {error}"))?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |pool| async move {
+            let updated = sqlx::query(
+                "UPDATE task_dispatches
+                 SET result = $2, updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(&dispatch_id)
+            .bind(&result_json)
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("update postgres dispatch result {dispatch_id}: {error}"))?;
+            Ok(updated.rows_affected() as usize)
+        },
+        |error| error,
+    )
 }
 
 async fn resolve_dispatch_target_agent_id_with_pg(
@@ -422,6 +504,64 @@ fn dispatch_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<V
                     .flatten()
                     .map(|value| value.to_string())
             }),
+        "updated_at": updated_at,
+        "completed_at": completed_at,
+    }))
+}
+
+fn dispatch_row_to_json_pg(row: &sqlx::postgres::PgRow) -> Result<Value, String> {
+    let status = row
+        .try_get::<String, _>("status")
+        .map_err(|error| format!("decode postgres dispatch status: {error}"))?;
+    let dispatch_type = row
+        .try_get::<Option<String>, _>("dispatch_type")
+        .map_err(|error| format!("decode postgres dispatch type: {error}"))?;
+    let context_raw = row
+        .try_get::<Option<String>, _>("context")
+        .map_err(|error| format!("decode postgres dispatch context: {error}"))?;
+    let result_raw = row
+        .try_get::<Option<String>, _>("result")
+        .map_err(|error| format!("decode postgres dispatch result: {error}"))?;
+    let context = context_raw
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let result = result_raw
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let result_summary = dispatch::summarize_dispatch_result(
+        dispatch_type.as_deref(),
+        Some(status.as_str()),
+        result.as_ref(),
+        context.as_ref(),
+    );
+    let created_at = row
+        .try_get::<String, _>("created_at")
+        .map_err(|error| format!("decode postgres dispatch created_at: {error}"))?;
+    let updated_at = row
+        .try_get::<String, _>("updated_at")
+        .map_err(|error| format!("decode postgres dispatch updated_at: {error}"))?;
+    let completed_at = row
+        .try_get::<Option<String>, _>("completed_at")
+        .map_err(|error| format!("decode postgres dispatch completed_at: {error}"))?
+        .or_else(|| (status == "completed").then(|| updated_at.clone()));
+
+    Ok(json!({
+        "id": row.try_get::<String, _>("id").map_err(|error| format!("decode postgres dispatch id: {error}"))?,
+        "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id").map_err(|error| format!("decode postgres dispatch kanban_card_id: {error}"))?,
+        "from_agent_id": row.try_get::<Option<String>, _>("from_agent_id").map_err(|error| format!("decode postgres dispatch from_agent_id: {error}"))?,
+        "to_agent_id": row.try_get::<Option<String>, _>("to_agent_id").map_err(|error| format!("decode postgres dispatch to_agent_id: {error}"))?,
+        "dispatch_type": dispatch_type,
+        "status": status,
+        "title": row.try_get::<Option<String>, _>("title").map_err(|error| format!("decode postgres dispatch title: {error}"))?,
+        "context": context,
+        "result": result,
+        "context_file": Value::Null,
+        "result_file": Value::Null,
+        "result_summary": result_summary,
+        "parent_dispatch_id": row.try_get::<Option<String>, _>("parent_dispatch_id").map_err(|error| format!("decode postgres dispatch parent_dispatch_id: {error}"))?,
+        "chain_depth": row.try_get::<i64, _>("chain_depth").map_err(|error| format!("decode postgres dispatch chain_depth: {error}"))?,
+        "created_at": created_at.clone(),
+        "dispatched_at": Some(created_at),
         "updated_at": updated_at,
         "completed_at": completed_at,
     }))

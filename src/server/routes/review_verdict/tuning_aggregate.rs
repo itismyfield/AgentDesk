@@ -268,8 +268,11 @@ async fn record_tuning_outcome_pg(
 /// This avoids the old mtime-based debounce that could miss outcomes inserted
 /// shortly after the previous aggregate (e.g. a 5th sample crossing the threshold
 /// 10s after a 4-sample aggregate).
-pub fn spawn_aggregate_if_needed_with_pg(db: &crate::db::Db, pg_pool: Option<sqlx::PgPool>) {
-    let db = db.clone();
+pub fn spawn_aggregate_if_needed_with_pg(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<sqlx::PgPool>,
+) {
+    let db = db.cloned();
     tokio::spawn(async move {
         if let Some(pool) = pg_pool {
             let max_outcome_id = sqlx::query(
@@ -305,6 +308,10 @@ pub fn spawn_aggregate_if_needed_with_pg(db: &crate::db::Db, pg_pool: Option<sql
             let _ = aggregate_review_tuning_core_pg(&pool).await;
             return;
         }
+
+        let Some(db) = db else {
+            return;
+        };
 
         // Debounce: compare latest outcome rowid against last aggregated rowid
         if let Ok(conn) = db.lock() {

@@ -1422,6 +1422,56 @@ pub fn rebind_slot_for_group_agent(
     bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
 }
 
+pub async fn rebind_slot_for_group_agent_pg(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<u64, String> {
+    let slot_pool_size = run_slot_pool_size_pg(pool, run_id)
+        .await
+        .map_err(|error| format!("load postgres slot pool size for {run_id}: {error}"))?;
+    ensure_agent_slot_pool_rows_pg(pool, agent_id, slot_pool_size)
+        .await
+        .map_err(|error| {
+            format!("prepare postgres slot rows for run {run_id} agent {agent_id}: {error}")
+        })?;
+
+    let slot_updated = sqlx::query(
+        "UPDATE auto_queue_slots
+         SET assigned_run_id = $1,
+             assigned_thread_group = $2,
+             updated_at = NOW()
+         WHERE agent_id = $3
+           AND slot_index = $4
+           AND (assigned_run_id IS NULL OR assigned_run_id = $1)",
+    )
+    .bind(run_id)
+    .bind(thread_group)
+    .bind(agent_id)
+    .bind(slot_index)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "rebind postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+        )
+    })?
+    .rows_affected();
+    if slot_updated == 0 {
+        return Ok(0);
+    }
+
+    bind_slot_index_for_group_entries_pg(pool, run_id, agent_id, thread_group, slot_index)
+        .await
+        .map_err(|error| {
+            format!(
+                "bind rebound postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
+            )
+        })
+}
+
 fn bind_slot_index_for_group_entries(
     conn: &Connection,
     run_id: &str,
@@ -3596,6 +3646,14 @@ pub fn slot_has_active_dispatch(conn: &Connection, agent_id: &str, slot_index: i
     slot_has_active_dispatch_excluding(conn, agent_id, slot_index, None)
 }
 
+pub async fn slot_has_active_dispatch_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<bool, sqlx::Error> {
+    slot_has_active_dispatch_excluding_pg(pool, agent_id, slot_index, None).await
+}
+
 pub fn slot_has_active_dispatch_excluding(
     conn: &Connection,
     agent_id: &str,
@@ -3631,6 +3689,47 @@ pub fn slot_has_active_dispatch_excluding(
         |row| row.get(0),
     )
     .unwrap_or(false)
+}
+
+async fn slot_has_active_dispatch_excluding_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    exclude_dispatch_id: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let exclude_id = exclude_dispatch_id.unwrap_or("");
+    let auto_queue_active = sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM auto_queue_entries
+         WHERE agent_id = $1
+           AND slot_index = $2
+           AND status = 'dispatched'
+           AND COALESCE(dispatch_id, '') != $3",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .bind(exclude_id)
+    .fetch_one(pool)
+    .await?;
+    if auto_queue_active {
+        return Ok(true);
+    }
+
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM task_dispatches
+         WHERE to_agent_id = $1
+           AND status IN ('pending', 'dispatched')
+           AND COALESCE(NULLIF(COALESCE(context, '{}'::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
+           AND COALESCE((COALESCE(context, '{}'::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND COALESCE(context, '{}'::jsonb)->'phase_gate' IS NULL
+           AND id != $3",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .bind(exclude_id)
+    .fetch_one(pool)
+    .await
 }
 
 pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {

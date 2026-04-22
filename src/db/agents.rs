@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use libsql_rusqlite::{Connection, OptionalExtension}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use sqlx::{PgPool, Row as SqlxRow};
@@ -201,6 +203,34 @@ pub async fn load_agent_channel_bindings_pg(
         })
     })
     .transpose()
+}
+
+pub async fn load_all_agent_channel_bindings_pg(
+    pool: &PgPool,
+) -> Result<BTreeMap<String, AgentChannelBindings>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         FROM agents",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut bindings = BTreeMap::new();
+    for row in rows {
+        let agent_id: String = row.try_get("id")?;
+        bindings.insert(
+            agent_id,
+            AgentChannelBindings {
+                provider: row.try_get("provider")?,
+                discord_channel_id: row.try_get("discord_channel_id")?,
+                discord_channel_alt: row.try_get("discord_channel_alt")?,
+                discord_channel_cc: row.try_get("discord_channel_cc")?,
+                discord_channel_cdx: row.try_get("discord_channel_cdx")?,
+            },
+        );
+    }
+
+    Ok(bindings)
 }
 
 pub async fn resolve_agent_primary_channel_pg(

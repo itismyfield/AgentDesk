@@ -2285,8 +2285,13 @@ pub async fn pm_decision(
             })
             .unwrap_or_default();
         for dispatch_id in pending_dispatch_ids {
-            crate::dispatch::mark_dispatch_completed(&state.db, &dispatch_id, &completion_result)
-                .ok();
+            crate::dispatch::mark_dispatch_completed_pg_first(
+                &state.db,
+                state.pg_pool.as_ref(),
+                &dispatch_id,
+                &completion_result,
+            )
+            .ok();
         }
     }
     // Clear manual-intervention markers before applying the selected decision.
@@ -2411,8 +2416,9 @@ pub async fn pm_decision(
                         })
                         .unwrap_or_default();
                     for dispatch_id in pending_dispatch_ids {
-                        crate::dispatch::mark_dispatch_completed(
+                        crate::dispatch::mark_dispatch_completed_pg_first(
                             &state.db,
+                            state.pg_pool.as_ref(),
                             &dispatch_id,
                             &completion_result,
                         )

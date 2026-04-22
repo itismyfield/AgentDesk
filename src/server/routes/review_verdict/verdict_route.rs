@@ -50,8 +50,8 @@ fn normalize_review_notes(text: &str) -> String {
         .to_lowercase()
 }
 
-fn enforce_session_reset_dilemma_fallback(
-    db: &crate::db::Db,
+async fn enforce_session_reset_dilemma_fallback(
+    state: &AppState,
     card_id: &str,
     verdict: &str,
     new_notes: Option<&str>,
@@ -67,28 +67,48 @@ fn enforce_session_reset_dilemma_fallback(
         return;
     };
 
-    let Ok(conn) = db.lock() else {
-        return;
-    };
-
-    let snapshot: Option<(String, Option<String>, Option<String>, i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT c.status, c.review_status, c.review_notes, COALESCE(c.review_round, 0), rs.session_reset_round
-             FROM kanban_cards c
-             LEFT JOIN card_review_state rs ON rs.card_id = c.id
-             WHERE c.id = ?1",
-            [card_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+    let snapshot: Option<(String, Option<String>, Option<String>, i64, Option<i64>)> = if let Some(
+        pool,
+    ) =
+        state.pg_pool.as_ref()
+    {
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, i64, Option<i64>)>(
+            "SELECT c.status,
+                        c.review_status,
+                        c.review_notes,
+                        COALESCE(c.review_round, 0)::BIGINT,
+                        rs.session_reset_round::BIGINT
+                 FROM kanban_cards c
+                 LEFT JOIN card_review_state rs ON rs.card_id = c.id
+                 WHERE c.id = $1",
         )
-        .ok();
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        let Ok(conn) = state.db.lock() else {
+            return;
+        };
+        conn.query_row(
+                "SELECT c.status, c.review_status, c.review_notes, COALESCE(c.review_round, 0), rs.session_reset_round
+                 FROM kanban_cards c
+                 LEFT JOIN card_review_state rs ON rs.card_id = c.id
+                 WHERE c.id = ?1",
+                [card_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .ok()
+    };
 
     let Some((card_status, review_status, previous_notes, current_round, session_reset_round)) =
         snapshot
@@ -122,16 +142,34 @@ fn enforce_session_reset_dilemma_fallback(
         reset_round, current_round
     );
 
-    let _ = conn.execute(
-        "UPDATE kanban_cards
-         SET review_status = 'dilemma_pending',
-             blocked_reason = ?1,
-             suggestion_pending_at = NULL,
-             awaiting_dod_at = NULL,
-             updated_at = datetime('now')
-         WHERE id = ?2",
-        libsql_rusqlite::params![blocked_reason, card_id],
-    );
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let _ = sqlx::query(
+            "UPDATE kanban_cards
+             SET review_status = 'dilemma_pending',
+                 blocked_reason = $1,
+                 suggestion_pending_at = NULL,
+                 awaiting_dod_at = NULL,
+                 updated_at = NOW()
+             WHERE id = $2",
+        )
+        .bind(&blocked_reason)
+        .bind(card_id)
+        .execute(pool)
+        .await;
+    } else if let Ok(conn) = state.db.lock() {
+        let _ = conn.execute(
+            "UPDATE kanban_cards
+             SET review_status = 'dilemma_pending',
+                 blocked_reason = ?1,
+                 suggestion_pending_at = NULL,
+                 awaiting_dod_at = NULL,
+                 updated_at = datetime('now')
+             WHERE id = ?2",
+            libsql_rusqlite::params![blocked_reason, card_id],
+        );
+    } else {
+        return;
+    }
 
     let payload = serde_json::json!({
         "card_id": card_id,
@@ -139,7 +177,40 @@ fn enforce_session_reset_dilemma_fallback(
         "last_verdict": verdict,
         "session_reset_round": reset_round,
     });
-    let _ = crate::engine::ops::review_state_sync_on_conn(&conn, &payload.to_string());
+    let _ = crate::engine::ops::review_state_sync_with_backends(
+        Some(&state.db),
+        state.pg_pool.as_ref(),
+        &payload.to_string(),
+    );
+}
+
+async fn emit_card_updated(state: &AppState, card_id: &str) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        match super::super::kanban::load_card_json_pg(pool, card_id).await {
+            Ok(Some(card)) => {
+                crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                return;
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    %error,
+                    "[review-verdict] falling back to sqlite kanban_card_updated emit"
+                );
+            }
+        }
+    }
+
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(card) = conn.query_row(
+            &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
+            [card_id],
+            |row| super::super::kanban::card_row_to_json(row),
+        ) {
+            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,30 +253,34 @@ pub async fn submit_verdict(
         );
     }
 
-    let effective_commit: Option<String> = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
+    let dispatch = match crate::dispatch::load_dispatch_row_pg_first(
+        &state.db,
+        state.pg_pool.as_ref(),
+        &body.dispatch_id,
+    ) {
+        Ok(Some(dispatch)) => dispatch,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "dispatch not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load dispatch: {error}")})),
+            );
+        }
+    };
 
+    let effective_commit: Option<String> = {
         // A: Validate dispatch_type — only 'review' dispatches should go through the verdict API.
         //    implementation/rework dispatches have their own completion path (turn_bridge explicit completion),
         //    review-decision dispatches should use /api/review-decision (accept/dispute/dismiss).
-        let dispatch_type: Option<String> = conn
-            .query_row(
-                "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
-                [&body.dispatch_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        match dispatch_type.as_deref() {
+        match dispatch
+            .get("dispatch_type")
+            .and_then(|value| value.as_str())
+        {
             Some("review") => {} // allowed
             Some(dtype) => {
                 return (
@@ -226,19 +301,10 @@ pub async fn submit_verdict(
         // B: Cross-provider validation for counter-model reviews.
         //    When a review dispatch has from_provider/target_provider in context,
         //    reject same-provider verdict submissions (self-review).
-        let dispatch_context_str: Option<String> = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [&body.dispatch_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        let dispatch_context: serde_json::Value = dispatch_context_str
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(json!({}));
+        let dispatch_context: serde_json::Value = dispatch
+            .get("context")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         let from_provider = dispatch_context
             .get("from_provider")
@@ -353,8 +419,9 @@ pub async fn submit_verdict(
     // #143: Mark dispatch completed via shared helper (DB-only, no OnDispatchCompleted).
     // Review verdict fires OnReviewVerdict — specialized hook, not the generic completion hook.
     // Cancelled dispatches must NOT be promoted to completed (review loop guard #80).
-    let updated = match crate::dispatch::mark_dispatch_completed(
+    let updated = match crate::dispatch::mark_dispatch_completed_pg_first(
         &state.db,
+        state.pg_pool.as_ref(),
         &body.dispatch_id,
         &result_json,
     ) {
@@ -368,22 +435,19 @@ pub async fn submit_verdict(
     };
 
     if updated == 0 {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("database lock poisoned: {e}")})),
-                );
-            }
-        };
-        let current_status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                [&body.dispatch_id],
-                |row| row.get(0),
-            )
-            .ok();
+        let current_status = crate::dispatch::load_dispatch_row_pg_first(
+            &state.db,
+            state.pg_pool.as_ref(),
+            &body.dispatch_id,
+        )
+        .ok()
+        .flatten()
+        .and_then(|dispatch| {
+            dispatch
+                .get("status")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
         let msg = match current_status.as_deref() {
             Some("cancelled") => "dispatch was cancelled (card may have been dismissed)",
             Some("completed") => "dispatch already completed",
@@ -393,14 +457,18 @@ pub async fn submit_verdict(
     }
 
     // Find associated card
-    let card_id: Option<String> = state.db.separate_conn().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [&body.dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
+    let card_id = crate::dispatch::load_dispatch_row_pg_first(
+        &state.db,
+        state.pg_pool.as_ref(),
+        &body.dispatch_id,
+    )
+    .ok()
+    .flatten()
+    .and_then(|dispatch| {
+        dispatch
+            .get("kanban_card_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
     });
 
     // #100: stamp release marker AFTER dispatch update confirmed, BEFORE hooks.
@@ -409,17 +477,16 @@ pub async fn submit_verdict(
     if body.overall == "pass" || body.overall == "approved" {
         if let Err(e) = stamp_review_passed_marker(effective_commit.as_deref()) {
             // Roll back the dispatch status since we can't complete the pass flow
-            if let Ok(conn) = state.db.lock() {
-                let _ = crate::dispatch::set_dispatch_status_on_conn(
-                    &conn,
-                    &body.dispatch_id,
-                    "dispatched",
-                    None,
-                    "review_verdict_marker_rollback",
-                    Some(&["completed"]),
-                    false,
-                );
-            }
+            let _ = crate::dispatch::set_dispatch_status_pg_first(
+                &state.db,
+                state.pg_pool.as_ref(),
+                &body.dispatch_id,
+                "dispatched",
+                None,
+                "review_verdict_marker_rollback",
+                Some(&["completed"]),
+                false,
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -466,11 +533,12 @@ pub async fn submit_verdict(
         }
 
         enforce_session_reset_dilemma_fallback(
-            &state.db,
+            &state,
             cid,
             &body.overall,
             body.notes.as_deref().or(body.feedback.as_deref()),
-        );
+        )
+        .await;
 
         if let Some(pool) = state.pg_pool.as_ref() {
             if let Err(error) =
@@ -493,14 +561,8 @@ pub async fn submit_verdict(
     // #100: release marker was already stamped before dispatch completion (above).
 
     // Emit kanban_card_updated for real-time dashboard
-    if let Ok(conn) = state.db.lock() {
-        if let Ok(card) = conn.query_row(
-            &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
-            [&card_id],
-            |row| super::super::kanban::card_row_to_json(row),
-        ) {
-            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
-        }
+    if let Some(ref cid) = card_id {
+        emit_card_updated(&state, cid).await;
     }
 
     (

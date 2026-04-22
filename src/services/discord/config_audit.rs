@@ -216,7 +216,7 @@ pub(crate) fn audit_and_reconcile(
     }
 
     if !dry_run {
-        persist_report(db, &report);
+        persist_report(&config, db, &report);
     }
 
     Ok(AuditRunOutcome { config, report })
@@ -253,6 +253,32 @@ fn load_persisted_report_pg(pg_pool: Option<&sqlx::PgPool>) -> Option<String> {
     .flatten()
 }
 
+fn persist_report_pg(config: &Config, rendered: &str) -> bool {
+    let config = config.clone();
+    let rendered = rendered.to_string();
+    crate::utils::async_bridge::block_on_result(
+        async move {
+            let Some(pool) = crate::db::postgres::connect(&config).await? else {
+                return Ok(false);
+            };
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value",
+            )
+            .bind(CONFIG_AUDIT_KV_KEY)
+            .bind(&rendered)
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("persist config audit report to pg: {error}"))?;
+            Ok(true)
+        },
+        |message| message,
+    )
+    .unwrap_or(false)
+}
+
 pub(crate) fn load_persisted_report(
     db: &Db,
     pg_pool: Option<&sqlx::PgPool>,
@@ -282,7 +308,7 @@ fn persist_report_sqlite(db: &Db, rendered: &str) {
     );
 }
 
-fn persist_report(db: &Db, report: &ConfigAuditReport) {
+fn persist_report(config: &Config, db: &Db, report: &ConfigAuditReport) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
@@ -291,6 +317,10 @@ fn persist_report(db: &Db, report: &ConfigAuditReport) {
         Ok(()) => return,
         Err(error) if !direct_api_context_unavailable(&error) => return,
         Err(_) => {}
+    }
+
+    if persist_report_pg(config, &rendered) {
+        return;
     }
 
     persist_report_sqlite(db, &rendered);
@@ -568,7 +598,16 @@ fn audit_db_agents(
     dry_run: bool,
     report: &mut ConfigAuditReport,
 ) -> Result<(), String> {
-    let db_agents = load_db_agents(db)?;
+    let db_agents = match load_db_agents_pg(config) {
+        Ok(Some(agents)) => agents,
+        Ok(None) => load_db_agents_sqlite(db)?,
+        Err(error) => {
+            report.warnings.push(format!(
+                "Failed to load agents from PostgreSQL during config audit: {error}; falling back to sqlite"
+            ));
+            load_db_agents_sqlite(db)?
+        }
+    };
     let yaml_agents = config
         .agents
         .iter()
@@ -621,11 +660,26 @@ fn audit_db_agents(
         return Ok(());
     }
 
+    match sync_db_agents_pg(config, &config.agents) {
+        Ok(Some(count)) => {
+            report.db.synced_agents = Some(count);
+            report.actions.push(format!(
+                "synced {} agent definitions from agentdesk.yaml into the PostgreSQL agents table",
+                count
+            ));
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) => report.warnings.push(format!(
+            "Failed to sync agents from agentdesk.yaml into PostgreSQL: {error}; falling back to sqlite"
+        )),
+    }
+
     match crate::db::agents::sync_agents_from_config(db, &config.agents) {
         Ok(count) => {
             report.db.synced_agents = Some(count);
             report.actions.push(format!(
-                "synced {} agent definitions from agentdesk.yaml into the agents table",
+                "synced {} agent definitions from agentdesk.yaml into the sqlite agents table",
                 count
             ));
         }
@@ -637,7 +691,66 @@ fn audit_db_agents(
     Ok(())
 }
 
-fn load_db_agents(db: &Db) -> Result<BTreeMap<String, ComparableAgent>, String> {
+fn sync_db_agents_pg(config: &Config, agents: &[AgentDef]) -> Result<Option<usize>, String> {
+    if !crate::db::postgres::database_enabled(config) {
+        return Ok(None);
+    }
+
+    let config = config.clone();
+    let agents = agents.to_vec();
+    crate::utils::async_bridge::block_on_result(
+        async move {
+            let Some(pool) = crate::db::postgres::connect(&config).await? else {
+                return Ok(None);
+            };
+            let count = crate::db::postgres::sync_agents_from_config_pg(&pool, &agents).await?;
+            Ok(Some(count))
+        },
+        |message| message,
+    )
+}
+
+fn load_db_agents_pg(config: &Config) -> Result<Option<BTreeMap<String, ComparableAgent>>, String> {
+    if !crate::db::postgres::database_enabled(config) {
+        return Ok(None);
+    }
+
+    let config = config.clone();
+    crate::utils::async_bridge::block_on_result(
+        async move {
+            let Some(pool) = crate::db::postgres::connect(&config).await? else {
+                return Ok(None);
+            };
+            let rows = crate::db::agents::load_all_agent_channel_bindings_pg(&pool)
+                .await
+                .map_err(|error| format!("Failed to query postgres agent audit rows: {error}"))?;
+
+            let mut agents = BTreeMap::new();
+            for (id, bindings) in rows {
+                agents.insert(
+                    id.clone(),
+                    ComparableAgent {
+                        id,
+                        provider: normalize_provider(bindings.provider.as_deref())
+                            .unwrap_or_else(|| "claude".to_string()),
+                        discord_channel_id: normalize_optional_string(bindings.discord_channel_id),
+                        discord_channel_alt: normalize_optional_string(
+                            bindings.discord_channel_alt,
+                        ),
+                        discord_channel_cc: normalize_optional_string(bindings.discord_channel_cc),
+                        discord_channel_cdx: normalize_optional_string(
+                            bindings.discord_channel_cdx,
+                        ),
+                    },
+                );
+            }
+            Ok(Some(agents))
+        },
+        |message| message,
+    )
+}
+
+fn load_db_agents_sqlite(db: &Db) -> Result<BTreeMap<String, ComparableAgent>, String> {
     let conn = db
         .lock()
         .map_err(|err| format!("DB lock error while auditing config: {err}"))?;

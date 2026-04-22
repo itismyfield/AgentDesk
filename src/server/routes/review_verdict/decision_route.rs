@@ -107,6 +107,35 @@ fn active_accept_followups(db: &crate::db::Db, card_id: &str) -> ActiveAcceptFol
         .unwrap_or_default()
 }
 
+async fn active_accept_followups_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> ActiveAcceptFollowups {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok((review, rework, review_decision)) =
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0)::BIGINT, \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'rework' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0)::BIGINT, \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0)::BIGINT \
+                 FROM task_dispatches \
+                 WHERE kanban_card_id = $1",
+            )
+            .bind(card_id)
+            .fetch_one(pool)
+            .await
+        {
+            return ActiveAcceptFollowups {
+                review,
+                rework,
+                review_decision,
+            };
+        }
+    }
+
+    active_accept_followups(&state.db, card_id)
+}
+
 fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
     db.lock().ok().and_then(|conn| {
         conn.query_row(
@@ -115,6 +144,110 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
             |row| row.get(0),
         )
         .ok()
+    })
+}
+
+async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option<String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(status) =
+            sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_optional(pool)
+                .await
+        {
+            return status;
+        }
+    }
+
+    current_card_status(&state.db, card_id)
+}
+
+async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(exists) =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM kanban_cards WHERE id = $1)")
+                .bind(card_id)
+                .fetch_one(pool)
+                .await
+        {
+            return exists;
+        }
+    }
+
+    state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |_row| Ok(()),
+            )
+            .ok()
+        })
+        .is_some()
+}
+
+async fn pending_review_decision_dispatch_id_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Option<String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(dispatch_id) = sqlx::query_scalar::<_, String>(
+            "SELECT td.id
+             FROM task_dispatches td
+             JOIN card_review_state crs ON crs.pending_dispatch_id = td.id
+             WHERE crs.card_id = $1
+               AND td.dispatch_type = 'review-decision'
+               AND td.status IN ('pending', 'dispatched')",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            if dispatch_id.is_some() {
+                return dispatch_id;
+            }
+        }
+
+        if let Ok(dispatch_id) = sqlx::query_scalar::<_, String>(
+            "SELECT td.id
+             FROM task_dispatches td
+             JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id
+             WHERE kc.id = $1
+               AND td.dispatch_type = 'review-decision'
+               AND td.status IN ('pending', 'dispatched')",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return dispatch_id;
+        }
+    }
+
+    state.db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT td.id FROM task_dispatches td \
+             JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
+             WHERE crs.card_id = ?1 AND td.dispatch_type = 'review-decision' \
+             AND td.status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .or_else(|| {
+            conn.query_row(
+                "SELECT td.id FROM task_dispatches td \
+                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
+                 WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
+                 AND td.status IN ('pending', 'dispatched')",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok()
+        })
     })
 }
 
@@ -188,6 +321,58 @@ fn mark_next_review_round_advance_on_conn(
     Ok(true)
 }
 
+async fn mark_next_review_round_advance_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Result<bool, String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let metadata_raw = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT metadata FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres metadata for {card_id}: {error}"))?
+        .flatten();
+
+        let mut metadata = metadata_raw
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| json!({}));
+        let object = metadata
+            .as_object_mut()
+            .expect("review round advance metadata must be an object");
+        if object
+            .get(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            return Ok(false);
+        }
+
+        object.insert(
+            crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        sqlx::query("UPDATE kanban_cards SET metadata = $1, updated_at = NOW() WHERE id = $2")
+            .bind(metadata.to_string())
+            .bind(card_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("update postgres metadata for {card_id}: {error}"))?;
+        return Ok(true);
+    }
+
+    let conn = state
+        .db
+        .lock()
+        .map_err(|error| format!("database lock poisoned: {error}"))?;
+    mark_next_review_round_advance_on_conn(&conn, card_id).map_err(|error| error.to_string())
+}
+
 fn dispatch_status_and_result(
     db: &crate::db::Db,
     dispatch_id: &str,
@@ -200,6 +385,25 @@ fn dispatch_status_and_result(
         )
         .ok()
     })
+}
+
+async fn dispatch_status_and_result_pg_first(
+    state: &AppState,
+    dispatch_id: &str,
+) -> Option<(String, Option<String>)> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(row) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, result FROM task_dispatches WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return row;
+        }
+    }
+
+    dispatch_status_and_result(&state.db, dispatch_id)
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +464,303 @@ fn latest_active_review_dispatch(
             }
         })
     })
+}
+
+fn build_active_review_dispatch(id: String, context_raw: Option<String>) -> ActiveReviewDispatch {
+    let context = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let target_repo = context
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("target_repo")
+                .and_then(|entry| entry.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            context
+                .as_ref()
+                .and_then(|value| value.get("worktree_path"))
+                .and_then(|entry| entry.as_str())
+                .and_then(|path| {
+                    crate::services::platform::shell::resolve_repo_dir_for_target(Some(path))
+                        .ok()
+                        .flatten()
+                })
+        });
+    ActiveReviewDispatch {
+        id,
+        reviewed_commit: context.as_ref().and_then(|value| {
+            value
+                .get("reviewed_commit")
+                .and_then(|entry| entry.as_str())
+                .map(str::to_string)
+        }),
+        target_repo,
+    }
+}
+
+async fn latest_active_review_dispatch_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Option<ActiveReviewDispatch> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(row) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT id, context
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched')
+             ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return row.map(|(id, context_raw)| build_active_review_dispatch(id, context_raw));
+        }
+    }
+
+    latest_active_review_dispatch(&state.db, card_id)
+}
+
+async fn latest_completed_review_context_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Option<serde_json::Value> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(context_raw) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT context
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status = 'completed'
+             ORDER BY completed_at DESC NULLS LAST, updated_at DESC NULLS LAST
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return context_raw
+                .flatten()
+                .and_then(|ctx| serde_json::from_str::<serde_json::Value>(&ctx).ok());
+        }
+    }
+
+    state
+        .db
+        .lock()
+        .ok()
+        .and_then(|c| {
+            c.query_row(
+                "SELECT context FROM task_dispatches \
+                 WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                 AND status = 'completed' \
+                 ORDER BY completed_at DESC LIMIT 1",
+                [card_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(&ctx_str).ok())
+}
+
+async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i64> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(issue_number) = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT github_issue_number::BIGINT FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return issue_number.flatten();
+        }
+    }
+
+    state.db.lock().ok().and_then(|c| {
+        c.query_row(
+            "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    })
+}
+
+async fn stale_review_dispatch_ids_pg_first(state: &AppState, card_id: &str) -> Vec<String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(ids) = sqlx::query_scalar::<_, String>(
+            "SELECT id
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(card_id)
+        .fetch_all(pool)
+        .await
+        {
+            return ids;
+        }
+    }
+
+    state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.prepare(
+                "SELECT id FROM task_dispatches \
+                 WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched')",
+            )
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map([card_id], |row| row.get::<_, String>(0))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row.ok())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+async fn prepare_dispute_review_entry_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Result<(), String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin dispute review-entry tx for {card_id}: {error}"))?;
+        let dispute_intents = [
+            crate::engine::transition::TransitionIntent::SetReviewStatus {
+                card_id: card_id.to_string(),
+                review_status: Some("reviewing".to_string()),
+            },
+            crate::engine::transition::TransitionIntent::SyncReviewState {
+                card_id: card_id.to_string(),
+                state: "reviewing".to_string(),
+            },
+        ];
+        for intent in &dispute_intents {
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
+                .await?;
+        }
+        sqlx::query("UPDATE kanban_cards SET review_entered_at = NOW() WHERE id = $1")
+            .bind(card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("set review_entered_at for {card_id}: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit dispute review-entry tx for {card_id}: {error}"))?;
+        return Ok(());
+    }
+
+    let conn = state
+        .db
+        .lock()
+        .map_err(|error| format!("database lock poisoned: {error}"))?;
+    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+    let dispute_intents = [
+        TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: Some("reviewing".to_string()),
+        },
+        TransitionIntent::SyncReviewState {
+            card_id: card_id.to_string(),
+            state: "reviewing".to_string(),
+        },
+    ];
+    for intent in &dispute_intents {
+        execute_intent_on_conn(&conn, intent).map_err(|error| error.to_string())?;
+    }
+    conn.execute(
+        "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
+        [card_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn finalize_accept_cleanup_pg_first(
+    state: &AppState,
+    card_id: &str,
+    clear_review_status: bool,
+) -> Result<(), String> {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin accept cleanup tx for {card_id}: {error}"))?;
+        if clear_review_status {
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                &mut tx,
+                &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                    card_id: card_id.to_string(),
+                    review_status: None,
+                },
+            )
+            .await?;
+        }
+        sqlx::query("UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = $1")
+            .bind(card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("clear suggestion_pending_at for {card_id}: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit accept cleanup tx for {card_id}: {error}"))?;
+        return Ok(());
+    }
+
+    if let Ok(c) = state.db.lock() {
+        if clear_review_status {
+            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+            execute_intent_on_conn(
+                &c,
+                &TransitionIntent::SetReviewStatus {
+                    card_id: card_id.to_string(),
+                    review_status: None,
+                },
+            )
+            .ok();
+        }
+        c.execute(
+            "UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = ?1",
+            [card_id],
+        )
+        .ok();
+    }
+    Ok(())
+}
+
+async fn commit_belongs_to_card_issue_pg_first(
+    state: &AppState,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> bool {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return crate::dispatch::commit_belongs_to_card_issue_pg(
+            pool,
+            card_id,
+            commit_sha,
+            target_repo,
+        )
+        .await;
+    }
+
+    crate::dispatch::commit_belongs_to_card_issue(&state.db, card_id, commit_sha, target_repo)
 }
 
 async fn cancel_dispatch_pg_first(
@@ -413,53 +914,14 @@ pub async fn submit_review_decision(
         );
     }
 
-    let pending_rd_id: Option<String> = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
+    if !card_exists_pg_first(&state, &body.card_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "card not found"})),
+        );
+    }
 
-        let card_exists = conn
-            .query_row(
-                "SELECT 1 FROM kanban_cards WHERE id = ?1",
-                [&body.card_id],
-                |_row| Ok(()),
-            )
-            .is_ok();
-
-        if !card_exists {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
-        }
-
-        conn.query_row(
-            "SELECT td.id FROM task_dispatches td \
-             JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
-             WHERE crs.card_id = ?1 AND td.dispatch_type = 'review-decision' \
-             AND td.status IN ('pending', 'dispatched')",
-            [&body.card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .or_else(|| {
-            conn.query_row(
-                "SELECT td.id FROM task_dispatches td \
-                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
-                 WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
-                 AND td.status IN ('pending', 'dispatched')",
-                [&body.card_id],
-                |row| row.get(0),
-            )
-            .ok()
-        })
-    };
+    let pending_rd_id = pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
 
     if pending_rd_id.is_none() {
         // No pending review-decision dispatch → stale or duplicate call
@@ -565,23 +1027,8 @@ pub async fn submit_review_decision(
             // reviewed_commit of the last review, skip rework and go straight
             // to review (the agent already addressed the feedback).
             let skip_rework = {
-                let last_review_context: Option<serde_json::Value> = state
-                    .db
-                    .lock()
-                    .ok()
-                    .and_then(|c| {
-                        c.query_row(
-                            "SELECT context FROM task_dispatches \
-                             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
-                             AND status = 'completed' \
-                             ORDER BY completed_at DESC LIMIT 1",
-                            [&body.card_id],
-                            |row| row.get::<_, Option<String>>(0),
-                        )
-                        .ok()
-                        .flatten()
-                    })
-                    .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(&ctx_str).ok());
+                let last_review_context =
+                    latest_completed_review_context_pg_first(&state, &body.card_id).await;
 
                 let last_reviewed_commit: Option<String> =
                     last_review_context.as_ref().and_then(|v| {
@@ -590,14 +1037,7 @@ pub async fn submit_review_decision(
                             .map(|s| s.to_string())
                     });
 
-                let issue_number: Option<i64> = state.db.lock().ok().and_then(|c| {
-                    c.query_row(
-                        "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
-                        [&body.card_id],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                });
+                let issue_number = card_issue_number_pg_first(&state, &body.card_id).await;
 
                 if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
                 {
@@ -647,9 +1087,8 @@ pub async fn submit_review_decision(
                     .map(|t| t.to.clone());
 
                 if let Some(ref review_st) = review_state {
-                    if let Ok(conn) = state.db.lock()
-                        && let Err(error) =
-                            mark_next_review_round_advance_on_conn(&conn, &body.card_id)
+                    if let Err(error) =
+                        mark_next_review_round_advance_pg_first(&state, &body.card_id).await
                     {
                         accept_failures.push(format!(
                             "failed to mark review round advance before direct review: {error}"
@@ -689,7 +1128,8 @@ pub async fn submit_review_decision(
                                         &state.engine,
                                     );
                                     let followups =
-                                        active_accept_followups(&state.db, &body.card_id);
+                                        active_accept_followups_pg_first(&state, &body.card_id)
+                                            .await;
                                     if followups.review > 0 {
                                         tracing::info!(
                                             "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
@@ -699,7 +1139,8 @@ pub async fn submit_review_decision(
                                             review_st
                                         );
                                         true
-                                    } else if current_card_status(&state.db, &body.card_id)
+                                    } else if current_card_status_pg_first(&state, &body.card_id)
+                                        .await
                                         .as_deref()
                                         .map(|status| effective_pipeline.is_terminal(status))
                                         .unwrap_or(false)
@@ -764,7 +1205,8 @@ pub async fn submit_review_decision(
             // Create rework dispatch on the normal accept path, or as a fallback when
             // direct review re-entry fails / produces no active review dispatch.
             if !direct_review_created && !direct_review_auto_approved {
-                let card_status_before_rework = current_card_status(&state.db, &body.card_id);
+                let card_status_before_rework =
+                    current_card_status_pg_first(&state, &body.card_id).await;
                 let rework_transition_ready = card_status_before_rework.as_deref()
                     == Some(rework_target.as_str())
                     || match crate::kanban::transition_status_with_opts(
@@ -839,20 +1281,21 @@ pub async fn submit_review_decision(
                 }
             }
 
-            let followups = active_accept_followups(&state.db, &body.card_id);
+            let followups = active_accept_followups_pg_first(&state, &body.card_id).await;
             direct_review_created = followups.review > 0;
             let rework_dispatch_created = followups.rework > 0;
             let terminal_auto_approved = direct_review_attempted
                 && (direct_review_auto_approved
                     || (!direct_review_created
                         && !rework_dispatch_created
-                        && current_card_status(&state.db, &body.card_id)
+                        && current_card_status_pg_first(&state, &body.card_id)
+                            .await
                             .as_deref()
                             .map(|status| effective_pipeline.is_terminal(status))
                             .unwrap_or(false)));
 
             if !followups.has_followup() && !terminal_auto_approved {
-                let card_status_after = current_card_status(&state.db, &body.card_id);
+                let card_status_after = current_card_status_pg_first(&state, &body.card_id).await;
                 tracing::error!(
                     card_id = %body.card_id,
                     pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
@@ -890,15 +1333,17 @@ pub async fn submit_review_decision(
             }
 
             if let Some(ref rd_id) = pending_rd_id {
-                match crate::dispatch::mark_dispatch_completed(
+                match crate::dispatch::mark_dispatch_completed_pg_first(
                     &state.db,
+                    state.pg_pool.as_ref(),
                     rd_id,
                     &json!({"decision": "accept", "completion_source": "review_decision_api"}),
                 ) {
                     Ok(1) => {}
                     Ok(_) => {
                         let dispatch_consumed_by_terminal_cleanup = terminal_auto_approved
-                            && dispatch_status_and_result(&state.db, rd_id)
+                            && dispatch_status_and_result_pg_first(&state, rd_id)
+                                .await
                                 .map(|(status, result)| {
                                     if status == "completed" {
                                         return true;
@@ -925,7 +1370,9 @@ pub async fn submit_review_decision(
                                 })
                                 .unwrap_or(false);
                         let dispatch_no_longer_active = terminal_auto_approved
-                            && active_accept_followups(&state.db, &body.card_id).review_decision
+                            && active_accept_followups_pg_first(&state, &body.card_id)
+                                .await
+                                .review_decision
                                 == 0;
                         if dispatch_consumed_by_terminal_cleanup || dispatch_no_longer_active {
                             tracing::info!(
@@ -934,7 +1381,8 @@ pub async fn submit_review_decision(
                                 body.card_id
                             );
                         } else {
-                            let live_dispatches = active_accept_followups(&state.db, &body.card_id);
+                            let live_dispatches =
+                                active_accept_followups_pg_first(&state, &body.card_id).await;
                             tracing::error!(
                                 card_id = %body.card_id,
                                 pending_rd_id = %rd_id,
@@ -980,24 +1428,13 @@ pub async fn submit_review_decision(
             // ClearTerminalFields never fires.
             // Guard: when direct_review_created, OnReviewEnter already set
             // review_status='reviewing' — clearing it would break the live review.
-            if let Ok(c) = state.db.lock() {
-                if !direct_review_created && !terminal_auto_approved {
-                    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                    execute_intent_on_conn(
-                        &c,
-                        &TransitionIntent::SetReviewStatus {
-                            card_id: body.card_id.clone(),
-                            review_status: None,
-                        },
-                    )
-                    .ok();
-                }
-                c.execute(
-                    "UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = ?1",
-                    [&body.card_id],
-                )
-                .ok();
-            }
+            finalize_accept_cleanup_pg_first(
+                &state,
+                &body.card_id,
+                !direct_review_created && !terminal_auto_approved,
+            )
+            .await
+            .ok();
 
             // #119: Record tuning outcome
             record_decision_tuning(
@@ -1008,7 +1445,7 @@ pub async fn submit_review_decision(
                 pending_rd_id.as_deref(),
             )
             .await;
-            spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
+            spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
 
             // #117: Update canonical review state.
             // For direct review: OnReviewEnter already set the state, so skip the
@@ -1045,36 +1482,11 @@ pub async fn submit_review_decision(
             );
         }
         "dispute" => {
-            {
-                let conn = match state.db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("database lock poisoned: {e}")})),
-                        );
-                    }
-                };
-                // #155: Use intents for review_status mutation (executor boundary)
-                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                let dispute_intents = vec![
-                    TransitionIntent::SetReviewStatus {
-                        card_id: body.card_id.clone(),
-                        review_status: Some("reviewing".to_string()),
-                    },
-                    TransitionIntent::SyncReviewState {
-                        card_id: body.card_id.clone(),
-                        state: "reviewing".to_string(),
-                    },
-                ];
-                for intent in &dispute_intents {
-                    execute_intent_on_conn(&conn, intent).ok();
-                }
-                conn.execute(
-                    "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
-                    [&body.card_id],
-                )
-                .ok();
+            if let Err(error) = prepare_dispute_review_entry_pg_first(&state, &body.card_id).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
             }
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
@@ -1086,32 +1498,12 @@ pub async fn submit_review_decision(
                 pending_rd_id.as_deref(),
             )
             .await;
-            spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
+            spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
 
             // #229: Cancel stale pending/dispatched review dispatches for this card.
             // Without this, the dispatch-core dedup guard blocks
             // OnReviewEnter from creating a fresh review dispatch after dispute.
-            let stale_ids: Vec<String> = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|conn| {
-                    conn.prepare(
-                        "SELECT id FROM task_dispatches \
-                         WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
-                         AND status IN ('pending', 'dispatched')",
-                    )
-                    .ok()
-                    .map(|mut stmt| {
-                        stmt.query_map([&body.card_id], |row| row.get::<_, String>(0))
-                            .ok()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|row| row.ok())
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
+            let stale_ids = stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
             let mut cancelled = 0usize;
             for stale_id in &stale_ids {
                 if cancel_dispatch_pg_first(
@@ -1135,18 +1527,8 @@ pub async fn submit_review_decision(
             }
 
             // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
-            let dispute_status: String = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|c| {
-                    c.query_row(
-                        "SELECT status FROM kanban_cards WHERE id = ?1",
-                        [&body.card_id],
-                        |r| r.get(0),
-                    )
-                    .ok()
-                })
+            let dispute_status = current_card_status_pg_first(&state, &body.card_id)
+                .await
                 .unwrap_or_else(|| "review".to_string());
             crate::kanban::fire_enter_hooks(
                 &state.db,
@@ -1205,7 +1587,9 @@ pub async fn submit_review_decision(
                 }
             }
 
-            let live_review = match latest_active_review_dispatch(&state.db, &body.card_id) {
+            let live_review = match latest_active_review_dispatch_pg_first(&state, &body.card_id)
+                .await
+            {
                 Some(dispatch) => dispatch,
                 None => {
                     tracing::error!(
@@ -1225,12 +1609,14 @@ pub async fn submit_review_decision(
             };
 
             if let Some(ref reviewed_commit) = live_review.reviewed_commit {
-                if !crate::dispatch::commit_belongs_to_card_issue(
-                    &state.db,
+                if !commit_belongs_to_card_issue_pg_first(
+                    &state,
                     &body.card_id,
                     reviewed_commit,
                     live_review.target_repo.as_deref(),
-                ) {
+                )
+                .await
+                {
                     let _ = cancel_dispatch_pg_first(
                         &state,
                         &live_review.id,
@@ -1258,8 +1644,9 @@ pub async fn submit_review_decision(
             }
 
             if let Some(ref rd_id) = pending_rd_id {
-                match crate::dispatch::mark_dispatch_completed(
+                match crate::dispatch::mark_dispatch_completed_pg_first(
                     &state.db,
+                    state.pg_pool.as_ref(),
                     rd_id,
                     &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
                 ) {
@@ -1395,7 +1782,7 @@ pub async fn submit_review_decision(
         pending_rd_id.as_deref(),
     )
     .await;
-    spawn_aggregate_if_needed_with_pg(&state.db, state.pg_pool.clone());
+    spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
 
     emit_card_updated(&state, &body.card_id).await;
 

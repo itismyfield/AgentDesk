@@ -5,8 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::PgPool;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
@@ -15,6 +14,7 @@ use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
     parse_thread_channel_name, resolve_agent_id_for_session as resolve_session_agent_id,
+    resolve_agent_id_for_session_pg,
 };
 use crate::services::message_outbox::{
     enqueue_lifecycle_notification, enqueue_lifecycle_notification_pg,
@@ -38,6 +38,19 @@ fn load_dispatch_thread_id(
         )
         .ok()
         .flatten();
+    normalize_thread_channel_id(thread_id.as_deref())
+}
+
+async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
+    let thread_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT thread_id FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
     normalize_thread_channel_id(thread_id.as_deref())
 }
 
@@ -312,6 +325,540 @@ async fn create_retry_dispatch_pg(
     Ok(dispatch_id)
 }
 
+async fn list_dispatched_sessions_pg(
+    pool: &PgPool,
+    include_all: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    let sql = if include_all {
+        "SELECT
+            s.id,
+            s.session_key,
+            s.agent_id,
+            s.provider,
+            s.status,
+            s.active_dispatch_id,
+            s.model,
+            s.tokens,
+            s.cwd,
+            s.last_heartbeat,
+            s.session_info,
+            a.department,
+            a.sprite_number,
+            a.avatar_emoji,
+            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
+            d.name AS department_name,
+            d.name_ko AS department_name_ko,
+            d.color AS department_color,
+            s.thread_channel_id
+         FROM sessions s
+         LEFT JOIN agents a ON s.agent_id = a.id
+         LEFT JOIN departments d ON a.department = d.id
+         ORDER BY s.id"
+    } else {
+        "SELECT
+            s.id,
+            s.session_key,
+            s.agent_id,
+            s.provider,
+            s.status,
+            s.active_dispatch_id,
+            s.model,
+            s.tokens,
+            s.cwd,
+            s.last_heartbeat,
+            s.session_info,
+            a.department,
+            a.sprite_number,
+            a.avatar_emoji,
+            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
+            d.name AS department_name,
+            d.name_ko AS department_name_ko,
+            d.color AS department_color,
+            s.thread_channel_id
+         FROM sessions s
+         LEFT JOIN agents a ON s.agent_id = a.id
+         LEFT JOIN departments d ON a.department = d.id
+         WHERE s.active_dispatch_id IS NOT NULL
+         ORDER BY s.id"
+    };
+
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("list postgres sessions: {error}"))?;
+
+    let mut resolver = SessionActivityResolver::new();
+    let mut sessions = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|error| format!("decode postgres session id: {error}"))?;
+        let session_key: Option<String> = row
+            .try_get("session_key")
+            .map_err(|error| format!("decode postgres session_key for session {id}: {error}"))?;
+        let agent_id: Option<String> = row
+            .try_get("agent_id")
+            .map_err(|error| format!("decode postgres agent_id for session {id}: {error}"))?;
+        let provider: Option<String> = row
+            .try_get("provider")
+            .map_err(|error| format!("decode postgres provider for session {id}: {error}"))?;
+        let status: Option<String> = row
+            .try_get("status")
+            .map_err(|error| format!("decode postgres status for session {id}: {error}"))?;
+        let active_dispatch_id: Option<String> =
+            row.try_get("active_dispatch_id").map_err(|error| {
+                format!("decode postgres active_dispatch_id for session {id}: {error}")
+            })?;
+        let model: Option<String> = row
+            .try_get("model")
+            .map_err(|error| format!("decode postgres model for session {id}: {error}"))?;
+        let tokens: i64 = row
+            .try_get("tokens")
+            .map_err(|error| format!("decode postgres tokens for session {id}: {error}"))?;
+        let cwd: Option<String> = row
+            .try_get("cwd")
+            .map_err(|error| format!("decode postgres cwd for session {id}: {error}"))?;
+        let last_heartbeat: Option<chrono::DateTime<chrono::Utc>> =
+            row.try_get("last_heartbeat").map_err(|error| {
+                format!("decode postgres last_heartbeat for session {id}: {error}")
+            })?;
+        let last_heartbeat = last_heartbeat.map(|value| value.to_rfc3339());
+        let session_info: Option<String> = row
+            .try_get("session_info")
+            .map_err(|error| format!("decode postgres session_info for session {id}: {error}"))?;
+        let department_id: Option<String> = row
+            .try_get("department")
+            .map_err(|error| format!("decode postgres department for session {id}: {error}"))?;
+        let sprite_number: Option<i64> = row
+            .try_get("sprite_number")
+            .map_err(|error| format!("decode postgres sprite_number for session {id}: {error}"))?;
+        let avatar_emoji: Option<String> = row
+            .try_get("avatar_emoji")
+            .map_err(|error| format!("decode postgres avatar_emoji for session {id}: {error}"))?;
+        let stats_xp: i64 = row
+            .try_get("stats_xp")
+            .map_err(|error| format!("decode postgres stats_xp for session {id}: {error}"))?;
+        let department_name: Option<String> = row.try_get("department_name").map_err(|error| {
+            format!("decode postgres department_name for session {id}: {error}")
+        })?;
+        let department_name_ko: Option<String> =
+            row.try_get("department_name_ko").map_err(|error| {
+                format!("decode postgres department_name_ko for session {id}: {error}")
+            })?;
+        let department_color: Option<String> =
+            row.try_get("department_color").map_err(|error| {
+                format!("decode postgres department_color for session {id}: {error}")
+            })?;
+        let thread_channel_id: Option<String> =
+            row.try_get("thread_channel_id").map_err(|error| {
+                format!("decode postgres thread_channel_id for session {id}: {error}")
+            })?;
+
+        let effective = resolver.resolve(
+            session_key.as_deref(),
+            status.as_deref(),
+            active_dispatch_id.as_deref(),
+            last_heartbeat.as_deref(),
+        );
+        if !include_all && !effective.is_working && effective.active_dispatch_id.is_none() {
+            continue;
+        }
+        if !include_all && thread_channel_id.is_some() && !effective.is_working {
+            continue;
+        }
+
+        sessions.push(json!({
+            "id": id.to_string(),
+            "session_key": session_key,
+            "agent_id": agent_id,
+            "provider": provider,
+            "status": effective.status,
+            "active_dispatch_id": effective.active_dispatch_id,
+            "model": model,
+            "tokens": tokens,
+            "cwd": cwd,
+            "last_heartbeat": last_heartbeat,
+            "session_info": session_info,
+            "linked_agent_id": agent_id,
+            "last_seen_at": last_heartbeat,
+            "name": session_key,
+            "department_id": department_id,
+            "sprite_number": sprite_number,
+            "avatar_emoji": avatar_emoji.unwrap_or_else(|| "\u{1F916}".to_string()),
+            "stats_xp": stats_xp,
+            "connected_at": null,
+            "department_name": department_name,
+            "department_name_ko": department_name_ko,
+            "department_color": department_color,
+            "thread_channel_id": thread_channel_id,
+        }));
+    }
+
+    Ok(sessions)
+}
+
+async fn load_session_event_payload_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let row = sqlx::query(
+        "SELECT
+            s.id,
+            s.session_key,
+            s.agent_id,
+            s.provider,
+            s.status,
+            s.active_dispatch_id,
+            s.model,
+            s.tokens,
+            s.cwd,
+            s.last_heartbeat,
+            s.session_info,
+            a.department,
+            a.sprite_number,
+            a.avatar_emoji,
+            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
+            s.thread_channel_id,
+            d.name AS department_name,
+            d.name_ko AS department_name_ko,
+            d.color AS department_color
+         FROM sessions s
+         LEFT JOIN agents a ON s.agent_id = a.id
+         LEFT JOIN departments d ON a.department = d.id
+         WHERE s.session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres session event payload for {session_key}: {error}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let id: i64 = row
+        .try_get("id")
+        .map_err(|error| format!("decode postgres session event id for {session_key}: {error}"))?;
+    let session_key_value: Option<String> = row.try_get("session_key").map_err(|error| {
+        format!("decode postgres session_key for session event {session_key}: {error}")
+    })?;
+    let last_seen_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("last_heartbeat").map_err(|error| {
+            format!("decode postgres last_heartbeat for session event {session_key}: {error}")
+        })?;
+
+    Ok(Some(json!({
+        "id": id.to_string(),
+        "session_key": session_key_value,
+        "name": session_key_value,
+        "linked_agent_id": row.try_get::<Option<String>, _>("agent_id").map_err(|error| format!("decode postgres agent_id for session event {session_key}: {error}"))?,
+        "provider": row.try_get::<Option<String>, _>("provider").map_err(|error| format!("decode postgres provider for session event {session_key}: {error}"))?,
+        "status": row.try_get::<Option<String>, _>("status").map_err(|error| format!("decode postgres status for session event {session_key}: {error}"))?,
+        "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").map_err(|error| format!("decode postgres active_dispatch_id for session event {session_key}: {error}"))?,
+        "model": row.try_get::<Option<String>, _>("model").map_err(|error| format!("decode postgres model for session event {session_key}: {error}"))?,
+        "tokens": row.try_get::<i64, _>("tokens").map_err(|error| format!("decode postgres tokens for session event {session_key}: {error}"))?,
+        "cwd": row.try_get::<Option<String>, _>("cwd").map_err(|error| format!("decode postgres cwd for session event {session_key}: {error}"))?,
+        "last_seen_at": last_seen_at.map(|value| value.to_rfc3339()),
+        "session_info": row.try_get::<Option<String>, _>("session_info").map_err(|error| format!("decode postgres session_info for session event {session_key}: {error}"))?,
+        "department_id": row.try_get::<Option<String>, _>("department").map_err(|error| format!("decode postgres department for session event {session_key}: {error}"))?,
+        "sprite_number": row.try_get::<Option<i64>, _>("sprite_number").map_err(|error| format!("decode postgres sprite_number for session event {session_key}: {error}"))?,
+        "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").map_err(|error| format!("decode postgres avatar_emoji for session event {session_key}: {error}"))?.unwrap_or_else(|| "\u{1F916}".to_string()),
+        "stats_xp": row.try_get::<i64, _>("stats_xp").map_err(|error| format!("decode postgres stats_xp for session event {session_key}: {error}"))?,
+        "thread_channel_id": row.try_get::<Option<String>, _>("thread_channel_id").map_err(|error| format!("decode postgres thread_channel_id for session event {session_key}: {error}"))?,
+        "department_name": row.try_get::<Option<String>, _>("department_name").map_err(|error| format!("decode postgres department_name for session event {session_key}: {error}"))?,
+        "department_name_ko": row.try_get::<Option<String>, _>("department_name_ko").map_err(|error| format!("decode postgres department_name_ko for session event {session_key}: {error}"))?,
+        "department_color": row.try_get::<Option<String>, _>("department_color").map_err(|error| format!("decode postgres department_color for session event {session_key}: {error}"))?,
+        "connected_at": null,
+    })))
+}
+
+async fn load_agent_status_payload_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    session_key: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let row = sqlx::query(
+        "SELECT
+            a.id,
+            a.name,
+            a.name_ko,
+            s.status,
+            s.session_info,
+            a.cli_provider,
+            a.avatar_emoji,
+            a.department,
+            a.discord_channel_id,
+            a.discord_channel_alt,
+            a.discord_channel_cc,
+            a.discord_channel_cdx
+         FROM agents a
+         LEFT JOIN sessions s
+           ON s.agent_id = a.id
+          AND s.session_key = $2
+         WHERE a.id = $1",
+    )
+    .bind(agent_id)
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        format!("load postgres agent status payload for {agent_id}/{session_key}: {error}")
+    })?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    Ok(Some(json!({
+        "id": row.try_get::<String, _>("id").map_err(|error| format!("decode postgres agent id for {agent_id}: {error}"))?,
+        "name": row.try_get::<String, _>("name").map_err(|error| format!("decode postgres agent name for {agent_id}: {error}"))?,
+        "name_ko": row.try_get::<Option<String>, _>("name_ko").map_err(|error| format!("decode postgres agent name_ko for {agent_id}: {error}"))?,
+        "status": row.try_get::<Option<String>, _>("status").map_err(|error| format!("decode postgres agent status for {agent_id}: {error}"))?,
+        "session_info": row.try_get::<Option<String>, _>("session_info").map_err(|error| format!("decode postgres agent session_info for {agent_id}: {error}"))?,
+        "cli_provider": row.try_get::<Option<String>, _>("cli_provider").map_err(|error| format!("decode postgres cli_provider for {agent_id}: {error}"))?,
+        "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").map_err(|error| format!("decode postgres avatar_emoji for {agent_id}: {error}"))?,
+        "department": row.try_get::<Option<String>, _>("department").map_err(|error| format!("decode postgres department for {agent_id}: {error}"))?,
+        "discord_channel_id": row.try_get::<Option<String>, _>("discord_channel_id").map_err(|error| format!("decode postgres discord_channel_id for {agent_id}: {error}"))?,
+        "discord_channel_alt": row.try_get::<Option<String>, _>("discord_channel_alt").map_err(|error| format!("decode postgres discord_channel_alt for {agent_id}: {error}"))?,
+        "discord_channel_cc": row.try_get::<Option<String>, _>("discord_channel_cc").map_err(|error| format!("decode postgres discord_channel_cc for {agent_id}: {error}"))?,
+        "discord_channel_cdx": row.try_get::<Option<String>, _>("discord_channel_cdx").map_err(|error| format!("decode postgres discord_channel_cdx for {agent_id}: {error}"))?,
+        "discord_channel_id_codex": row.try_get::<Option<String>, _>("discord_channel_cdx").map_err(|error| format!("decode postgres discord_channel_id_codex for {agent_id}: {error}"))?,
+    })))
+}
+
+async fn load_session_update_payload_pg(
+    pool: &PgPool,
+    id: i64,
+) -> Result<Option<serde_json::Value>, String> {
+    let row = sqlx::query(
+        "SELECT
+            id,
+            session_key,
+            agent_id,
+            status,
+            provider,
+            session_info,
+            model,
+            tokens,
+            cwd,
+            active_dispatch_id,
+            last_heartbeat
+         FROM sessions
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres session update payload for {id}: {error}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let last_heartbeat: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("last_heartbeat").map_err(|error| {
+            format!("decode postgres last_heartbeat for session update {id}: {error}")
+        })?;
+
+    Ok(Some(json!({
+        "id": row.try_get::<i64, _>("id").map_err(|error| format!("decode postgres session id for update {id}: {error}"))?.to_string(),
+        "session_key": row.try_get::<String, _>("session_key").map_err(|error| format!("decode postgres session_key for update {id}: {error}"))?,
+        "agent_id": row.try_get::<Option<String>, _>("agent_id").map_err(|error| format!("decode postgres agent_id for update {id}: {error}"))?,
+        "status": row.try_get::<Option<String>, _>("status").map_err(|error| format!("decode postgres status for update {id}: {error}"))?,
+        "provider": row.try_get::<Option<String>, _>("provider").map_err(|error| format!("decode postgres provider for update {id}: {error}"))?,
+        "session_info": row.try_get::<Option<String>, _>("session_info").map_err(|error| format!("decode postgres session_info for update {id}: {error}"))?,
+        "model": row.try_get::<Option<String>, _>("model").map_err(|error| format!("decode postgres model for update {id}: {error}"))?,
+        "tokens": row.try_get::<i64, _>("tokens").map_err(|error| format!("decode postgres tokens for update {id}: {error}"))?,
+        "cwd": row.try_get::<Option<String>, _>("cwd").map_err(|error| format!("decode postgres cwd for update {id}: {error}"))?,
+        "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").map_err(|error| format!("decode postgres active_dispatch_id for update {id}: {error}"))?,
+        "last_heartbeat": last_heartbeat.map(|value| value.to_rfc3339()),
+    })))
+}
+
+async fn hook_session_pg(
+    state: &AppState,
+    pool: &PgPool,
+    body: HookSessionBody,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let mut thread_channel_id = normalize_thread_channel_id(body.thread_channel_id.as_deref())
+        .or_else(|| {
+            body.name
+                .as_deref()
+                .and_then(parse_thread_channel_name)
+                .map(|(_, tid)| tid.to_string())
+        })
+        .or_else(|| parse_thread_channel_id_from_session_key(&body.session_key));
+    if thread_channel_id.is_none()
+        && let Some(dispatch_id) = body.dispatch_id.as_deref()
+    {
+        thread_channel_id = load_dispatch_thread_id_pg(pool, dispatch_id).await;
+    }
+
+    let agent_id = resolve_agent_id_for_session_pg(
+        pool,
+        None,
+        Some(&body.session_key),
+        body.name.as_deref(),
+        thread_channel_id.as_deref(),
+        body.dispatch_id.as_deref(),
+    )
+    .await;
+
+    let status = body.status.as_deref().unwrap_or("working");
+    let provider = body.provider.as_deref().unwrap_or("claude");
+    let tokens = body.tokens.unwrap_or(0) as i64;
+    let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
+    let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
+    let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
+
+    let is_new_session = match sqlx::query("SELECT 1 FROM sessions WHERE session_key = $1 LIMIT 1")
+        .bind(&body.session_key)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => row.is_none(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres session existence for {}: {error}", body.session_key)}),
+                ),
+            );
+        }
+    };
+
+    let result = sqlx::query(
+        "INSERT INTO sessions (
+            session_key,
+            agent_id,
+            provider,
+            status,
+            session_info,
+            model,
+            tokens,
+            cwd,
+            active_dispatch_id,
+            thread_channel_id,
+            claude_session_id,
+            raw_provider_session_id,
+            last_heartbeat
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+         )
+         ON CONFLICT(session_key) DO UPDATE SET
+            status = EXCLUDED.status,
+            provider = EXCLUDED.provider,
+            session_info = COALESCE(EXCLUDED.session_info, sessions.session_info),
+            model = COALESCE(EXCLUDED.model, sessions.model),
+            tokens = EXCLUDED.tokens,
+            cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
+            active_dispatch_id = CASE
+              WHEN lower(EXCLUDED.status) = 'disconnected' THEN NULL
+              WHEN EXCLUDED.active_dispatch_id IS NOT NULL THEN EXCLUDED.active_dispatch_id
+              ELSE sessions.active_dispatch_id
+            END,
+            agent_id = COALESCE(NULLIF(BTRIM(EXCLUDED.agent_id), ''), NULLIF(BTRIM(sessions.agent_id), '')),
+            thread_channel_id = COALESCE(EXCLUDED.thread_channel_id, sessions.thread_channel_id),
+            claude_session_id = COALESCE(EXCLUDED.claude_session_id, sessions.claude_session_id),
+            raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
+            last_heartbeat = NOW()",
+    )
+    .bind(&body.session_key)
+    .bind(agent_id.as_deref())
+    .bind(provider)
+    .bind(status)
+    .bind(body.session_info.as_deref())
+    .bind(body.model.as_deref())
+    .bind(tokens)
+    .bind(body.cwd.as_deref())
+    .bind(active_dispatch_id.as_deref())
+    .bind(thread_channel_id.as_deref())
+    .bind(claude_session_id)
+    .bind(raw_provider_session_id)
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            let dispatch_id = body.dispatch_id.clone();
+
+            crate::kanban::fire_event_hooks(
+                &state.db,
+                &state.engine,
+                "on_session_status_change",
+                "OnSessionStatusChange",
+                json!({
+                    "session_key": body.session_key,
+                    "status": status,
+                    "agent_id": agent_id,
+                    "dispatch_id": dispatch_id,
+                    "provider": provider,
+                }),
+            );
+
+            if status == "idle"
+                && let Some(aid) = agent_id.as_ref()
+            {
+                spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
+            }
+
+            match load_session_event_payload_pg(pool, &body.session_key).await {
+                Ok(Some(payload)) => {
+                    if is_new_session {
+                        crate::server::ws::emit_event(
+                            &state.broadcast_tx,
+                            "dispatched_session_new",
+                            payload,
+                        );
+                    } else {
+                        crate::server::ws::emit_batched_event(
+                            &state.batch_buffer,
+                            "dispatched_session_update",
+                            &body.session_key,
+                            payload,
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    "[dispatched-sessions] hook_session_pg: failed to load session payload for {}: {}",
+                    body.session_key,
+                    error
+                ),
+            }
+
+            if let Some(aid) = agent_id.as_deref() {
+                match load_agent_status_payload_pg(pool, aid, &body.session_key).await {
+                    Ok(Some(agent)) => {
+                        crate::server::ws::emit_batched_event(
+                            &state.batch_buffer,
+                            "agent_status",
+                            aid,
+                            agent,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        "[dispatched-sessions] hook_session_pg: failed to load agent payload for {} / {}: {}",
+                        aid,
+                        body.session_key,
+                        error
+                    ),
+                }
+            }
+
+            (StatusCode::OK, Json(json!({"ok": true})))
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("upsert postgres session {}: {error}", body.session_key)}),
+            ),
+        ),
+    }
+}
+
 fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     tokio::spawn(async move {
         // Let the session/dispatch cleanup commit before queue activation probes.
@@ -391,6 +938,17 @@ pub async fn list_dispatched_sessions(
     State(state): State<AppState>,
     Query(params): Query<ListDispatchedSessionsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let include_all = params.include_merged.as_deref() == Some("1");
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match list_dispatched_sessions_pg(pool, include_all).await {
+            Ok(sessions) => (StatusCode::OK, Json(json!({"sessions": sessions}))),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -400,8 +958,6 @@ pub async fn list_dispatched_sessions(
             );
         }
     };
-
-    let include_all = params.include_merged.as_deref() == Some("1");
 
     let sql = if include_all {
         "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, s.active_dispatch_id,
@@ -543,6 +1099,10 @@ pub async fn hook_session(
     State(state): State<AppState>,
     Json(body): Json<HookSessionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return hook_session_pg(&state, pool, body).await;
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -785,6 +1345,22 @@ pub async fn hook_session(
 pub async fn cleanup_sessions(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match sqlx::query("DELETE FROM sessions WHERE status = 'disconnected'")
+            .execute(pool)
+            .await
+        {
+            Ok(result) => (
+                StatusCode::OK,
+                Json(json!({"ok": true, "deleted": result.rows_affected()})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -808,6 +1384,14 @@ pub async fn cleanup_sessions(
 pub async fn gc_thread_sessions(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let deleted = gc_stale_thread_sessions_pg(pool).await;
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": true, "gc_threads": deleted})),
+        );
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -830,6 +1414,47 @@ pub async fn delete_session(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let session_id =
+            match sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
+                .bind(&params.session_key)
+                .fetch_optional(pool)
+                .await
+            {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            };
+
+        return match sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+            .bind(&params.session_key)
+            .execute(pool)
+            .await
+        {
+            Ok(result) => {
+                if let Some(session_id) = session_id {
+                    crate::server::ws::emit_event(
+                        &state.broadcast_tx,
+                        "dispatched_session_disconnect",
+                        json!({"id": session_id.to_string()}),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({"ok": true, "deleted": result.rows_affected()})),
+                )
+            }
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -877,6 +1502,76 @@ pub async fn get_claude_session_id(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let _ = disconnect_stale_fixed_session_by_key_pg(pool, &params.session_key).await;
+
+        let provider = params.provider.as_deref().filter(|s| !s.is_empty());
+        let result = if let Some(provider) = provider {
+            sqlx::query(
+                "SELECT claude_session_id, raw_provider_session_id
+                 FROM sessions
+                 WHERE session_key = $1 AND provider = $2",
+            )
+            .bind(&params.session_key)
+            .bind(provider)
+            .fetch_optional(pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT claude_session_id, raw_provider_session_id
+                 FROM sessions
+                 WHERE session_key = $1",
+            )
+            .bind(&params.session_key)
+            .fetch_optional(pool)
+            .await
+        };
+
+        return match result {
+            Ok(Some(row)) => {
+                let claude_session_id: Option<String> = match row.try_get("claude_session_id") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{error}")})),
+                        );
+                    }
+                };
+                let raw_provider_session_id: Option<String> =
+                    match row.try_get("raw_provider_session_id") {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": format!("{error}")})),
+                            );
+                        }
+                    };
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "claude_session_id": claude_session_id,
+                        "session_id": claude_session_id,
+                        "raw_provider_session_id": raw_provider_session_id,
+                    })),
+                )
+            }
+            Ok(None) => (
+                StatusCode::OK,
+                Json(json!({
+                    "claude_session_id": null,
+                    "session_id": null,
+                    "raw_provider_session_id": null,
+                })),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -961,6 +1656,29 @@ pub async fn clear_stale_session_id(
             Json(json!({"error": "session_id required"})),
         );
     };
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match sqlx::query(
+            "UPDATE sessions
+             SET claude_session_id = NULL,
+                 raw_provider_session_id = NULL
+             WHERE claude_session_id = $1
+                OR raw_provider_session_id = $1",
+        )
+        .bind(sid)
+        .execute(pool)
+        .await
+        {
+            Ok(result) => (
+                StatusCode::OK,
+                Json(json!({"cleared": result.rows_affected()})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -996,6 +1714,28 @@ pub async fn clear_session_id_by_key(
             Json(json!({"error": "session_key required"})),
         );
     };
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match sqlx::query(
+            "UPDATE sessions
+             SET claude_session_id = NULL,
+                 raw_provider_session_id = NULL
+             WHERE session_key = $1",
+        )
+        .bind(key)
+        .execute(pool)
+        .await
+        {
+            Ok(result) => (
+                StatusCode::OK,
+                Json(json!({"cleared": result.rows_affected()})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -1326,6 +2066,79 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
     }
 }
 
+async fn disconnect_stale_fixed_session_by_key_pg(pool: &PgPool, session_key: &str) -> usize {
+    let stale_dispatches = match sqlx::query_scalar::<_, String>(
+        "SELECT active_dispatch_id
+         FROM sessions
+         WHERE session_key = $1
+           AND thread_channel_id IS NULL
+           AND status = 'working'
+           AND active_dispatch_id IS NOT NULL
+           AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
+    )
+    .bind(session_key)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                "[dispatched-sessions] disconnect_stale_fixed_session_by_key_pg: failed to load stale dispatches for {}: {}",
+                session_key,
+                error
+            );
+            return 0;
+        }
+    };
+
+    for dispatch_id in stale_dispatches {
+        if let Err(error) = sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'failed',
+                 updated_at = NOW(),
+                 completed_at = COALESCE(completed_at, NOW())
+             WHERE id = $1
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(&dispatch_id)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                "[dispatched-sessions] disconnect_stale_fixed_session_by_key_pg: failed to mark stale dispatch {} as failed: {}",
+                dispatch_id,
+                error
+            );
+        }
+    }
+
+    match sqlx::query(
+        "UPDATE sessions
+         SET status = 'disconnected',
+             active_dispatch_id = NULL,
+             claude_session_id = NULL,
+             raw_provider_session_id = NULL
+         WHERE session_key = $1
+           AND thread_channel_id IS NULL
+           AND status = 'working'
+           AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
+    )
+    .bind(session_key)
+    .execute(pool)
+    .await
+    {
+        Ok(result) => result.rows_affected() as usize,
+        Err(error) => {
+            tracing::warn!(
+                "[dispatched-sessions] disconnect_stale_fixed_session_by_key_pg: failed to disconnect stale session {}: {}",
+                session_key,
+                error
+            );
+            0
+        }
+    }
+}
+
 fn disconnect_stale_fixed_session_by_key_db(
     conn: &libsql_rusqlite::Connection,
     session_key: &str,
@@ -1369,6 +2182,70 @@ pub async fn update_dispatched_session(
     Path(id): Path<i64>,
     Json(body): Json<UpdateDispatchedSessionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if body.status.is_none()
+            && body.active_dispatch_id.is_none()
+            && body.model.is_none()
+            && body.tokens.is_none()
+            && body.cwd.is_none()
+            && body.session_info.is_none()
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "no fields to update"})),
+            );
+        }
+
+        return match sqlx::query(
+            "UPDATE sessions
+             SET status = COALESCE($1, status),
+                 active_dispatch_id = COALESCE($2, active_dispatch_id),
+                 model = COALESCE($3, model),
+                 tokens = COALESCE($4, tokens),
+                 cwd = COALESCE($5, cwd),
+                 session_info = COALESCE($6, session_info)
+             WHERE id = $7",
+        )
+        .bind(body.status.as_deref())
+        .bind(body.active_dispatch_id.as_deref())
+        .bind(body.model.as_deref())
+        .bind(body.tokens)
+        .bind(body.cwd.as_deref())
+        .bind(body.session_info.as_deref())
+        .bind(id)
+        .execute(pool)
+        .await
+        {
+            Ok(result) if result.rows_affected() == 0 => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "session not found"})),
+            ),
+            Ok(_) => {
+                match load_session_update_payload_pg(pool, id).await {
+                    Ok(Some(session)) => {
+                        crate::server::ws::emit_batched_event(
+                            &state.batch_buffer,
+                            "dispatched_session_update",
+                            &id.to_string(),
+                            session,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        "[dispatched-sessions] update_dispatched_session: failed to load postgres session payload {}: {}",
+                        id,
+                        error
+                    ),
+                }
+                (StatusCode::OK, Json(json!({"ok": true})))
+            }
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ),
+        };
+    }
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {

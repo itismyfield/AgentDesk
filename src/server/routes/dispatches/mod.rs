@@ -11,7 +11,7 @@ pub use crud::{
 };
 
 // ── Re-exports: Discord delivery ─────────────────────────────
-pub(crate) use discord_delivery::{send_dispatch_to_discord, send_dispatch_to_discord_with_pg};
+pub(crate) use discord_delivery::send_dispatch_to_discord;
 
 // ── Re-exports: Outbox ───────────────────────────────────────
 pub use outbox::resolve_channel_alias_pub;
@@ -25,7 +25,7 @@ pub(crate) use outbox::{
 
 // ── Re-exports: Thread reuse ─────────────────────────────────
 pub(super) use thread_reuse::clear_all_threads;
-pub(crate) use thread_reuse::validate_channel_thread_maps_on_startup;
+pub(crate) use thread_reuse::validate_channel_thread_maps_on_startup_with_backends;
 pub use thread_reuse::{
     LinkDispatchThreadBody, get_card_thread, get_pending_dispatch_for_thread, link_dispatch_thread,
 };

@@ -470,7 +470,7 @@ where
         && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-            db,
+            Some(db),
             engine.pg_pool().cloned(),
         );
     }
@@ -770,7 +770,6 @@ pub async fn transition_status_with_opts_pg(
 
     if effective.is_terminal(new_status)
         && record_true_negative_if_pass_with_backends(db, engine.pg_pool(), card_id)
-        && let Some(db) = db
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
             db,
@@ -1029,6 +1028,10 @@ fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementa
 /// Hooks cannot re-enter the engine, so transition requests and dispatch
 /// creations are accumulated for post-hook replay.
 pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
+    drain_hook_side_effects_with_backends(Some(db), engine);
+}
+
+pub fn drain_hook_side_effects_with_backends(db: Option<&Db>, engine: &PolicyEngine) {
     loop {
         let intent_result = engine.drain_pending_intents();
         let mut transitions = intent_result.transitions;
@@ -1039,7 +1042,14 @@ pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
         }
 
         for (card_id, old_status, new_status) in &transitions {
-            fire_transition_hooks(db, engine, card_id, old_status, new_status);
+            fire_transition_hooks_with_backends(
+                db,
+                engine.pg_pool(),
+                engine,
+                card_id,
+                old_status,
+                new_status,
+            );
         }
     }
 }
@@ -1051,6 +1061,16 @@ pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
 /// hook name if no pipeline config or no event binding is found.
 pub fn fire_event_hooks(
     db: &Db,
+    engine: &PolicyEngine,
+    event: &str,
+    default_hook: &str,
+    payload: serde_json::Value,
+) {
+    fire_event_hooks_with_backends(Some(db), engine, event, default_hook, payload);
+}
+
+pub fn fire_event_hooks_with_backends(
+    db: Option<&Db>,
     engine: &PolicyEngine,
     event: &str,
     default_hook: &str,
@@ -1211,7 +1231,7 @@ pub fn fire_transition_hooks_with_backends(
         // #119: Record true_negative for cards that passed review and reached terminal state
         if pipeline.is_terminal(to) && record_true_negative_if_pass(db, engine.pg_pool(), card_id) {
             crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-                db,
+                Some(db),
                 engine.pg_pool().cloned(),
             );
         }
@@ -1376,7 +1396,6 @@ fn fire_transition_hooks_pg(
 
         if pipeline.is_terminal(to)
             && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
-            && let Some(db) = db
         {
             crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
                 db,

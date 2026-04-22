@@ -73,6 +73,51 @@ fn take_session_retry_context_sqlite(db: &crate::db::Db, key: &str) -> Option<St
     }
 }
 
+fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
+    let key = key.to_string();
+    crate::utils::async_bridge::block_on_result(
+        async move {
+            let config =
+                crate::config::load().map_err(|error| format!("load runtime config: {error}"))?;
+            let Some(pool) = crate::db::postgres::connect(&config).await? else {
+                return Ok(None);
+            };
+
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin retry-context tx for {key}: {error}"))?;
+            let history =
+                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                    .bind(&key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|error| format!("load retry context {key}: {error}"))?;
+            if history.is_some() {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(&key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("delete retry context {key}: {error}"))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit retry-context tx for {key}: {error}"))?;
+            Ok(history.and_then(|history| {
+                let history = history.trim().to_string();
+                if history.is_empty() {
+                    None
+                } else {
+                    Some(history)
+                }
+            }))
+        },
+        |message| message,
+    )
+    .ok()
+    .flatten()
+}
+
 pub(in crate::services::discord) fn build_session_retry_context_from_history(
     history: &[HistoryItem],
 ) -> Option<String> {
@@ -174,7 +219,8 @@ pub(in crate::services::discord) fn take_session_retry_context(
         }
         Ok(None) => None,
         Err(err) if direct_api_context_unavailable(&err) => {
-            db.and_then(|db| take_session_retry_context_sqlite(db, &key))
+            take_session_retry_context_runtime_pg(&key)
+                .or_else(|| db.and_then(|db| take_session_retry_context_sqlite(db, &key)))
         }
         Err(_) => None,
     }

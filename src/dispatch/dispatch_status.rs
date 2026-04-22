@@ -1,12 +1,13 @@
 use anyhow::Result;
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
+use sqlx::{PgPool, Row};
 
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_context::validate_dispatch_completion_evidence_on_conn;
-use super::query_dispatch_row;
+use super::{query_dispatch_row, query_dispatch_row_pg};
 
 /// #750: Sources whose completion path already writes ✅ to the Discord
 /// message via the command bot (turn_bridge / tmux watcher). For those, the
@@ -18,6 +19,371 @@ use super::query_dispatch_row;
 fn transition_source_is_live_command_bot(transition_source: &str) -> bool {
     let src = transition_source.trim();
     src.starts_with("turn_bridge") || src.starts_with("watcher")
+}
+
+fn should_enqueue_status_reaction(to_status: &str, transition_source: &str) -> bool {
+    match to_status {
+        "failed" | "cancelled" => true,
+        "completed" => !transition_source_is_live_command_bot(transition_source),
+        _ => false,
+    }
+}
+
+fn block_on_dispatch_pg<F, T>(
+    pool: &PgPool,
+    future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| {
+        anyhow::anyhow!("{error}")
+    })
+}
+
+async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = $1")
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("postgres dispatch existence lookup {dispatch_id}: {error}")
+        })
+}
+
+async fn validate_dispatch_completion_evidence_on_pg(
+    pool: &PgPool,
+    db: Option<&Db>,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Result<()> {
+    let row = sqlx::query("SELECT dispatch_type, status FROM task_dispatches WHERE id = $1")
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| anyhow::anyhow!("Dispatch lookup error: {error}"))?;
+
+    let dispatch_type: Option<String> = row
+        .try_get("dispatch_type")
+        .map_err(|error| anyhow::anyhow!("Dispatch lookup decode error: {error}"))?;
+    let status: String = row
+        .try_get("status")
+        .map_err(|error| anyhow::anyhow!("Dispatch lookup decode error: {error}"))?;
+
+    if !matches!(status.as_str(), "pending" | "dispatched")
+        || !matches!(
+            dispatch_type.as_deref(),
+            Some("implementation") | Some("rework")
+        )
+    {
+        return Ok(());
+    }
+
+    let result_has_work_completion_evidence = result
+        .get("completed_commit")
+        .and_then(|v| v.as_str())
+        .is_some()
+        || result
+            .get("assistant_message")
+            .and_then(|v| v.as_str())
+            .is_some()
+        || result
+            .get("agent_response_present")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        || result
+            .get("work_outcome")
+            .and_then(|v| v.as_str())
+            .is_some();
+
+    if result_has_work_completion_evidence
+        || crate::db::session_transcripts::dispatch_has_assistant_response_db(
+            db,
+            Some(pool),
+            dispatch_id,
+        )?
+    {
+        return Ok(());
+    }
+
+    let dispatch_label = dispatch_type.as_deref().unwrap_or("work");
+    let completion_source = result
+        .get("completion_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    tracing::warn!(
+        "[dispatch] rejecting {} completion for {}: no agent execution evidence",
+        dispatch_label,
+        dispatch_id
+    );
+    Err(anyhow::anyhow!(
+        "Cannot complete {dispatch_label} dispatch {dispatch_id} via {completion_source}: no agent execution evidence (expected assistant response, completed_commit, or explicit work_outcome)"
+    ))
+}
+
+async fn set_dispatch_status_on_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin postgres dispatch status tx: {error}"))?;
+
+    let current = sqlx::query(
+        "SELECT status, kanban_card_id, dispatch_type
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres dispatch {dispatch_id}: {error}"))?;
+    let Some(current) = current else {
+        tx.rollback()
+            .await
+            .map_err(|error| anyhow::anyhow!("rollback postgres dispatch status tx: {error}"))?;
+        return Ok(0);
+    };
+
+    let current_status = current
+        .try_get::<Option<String>, _>("status")
+        .map_err(|error| {
+            anyhow::anyhow!("decode postgres dispatch status for {dispatch_id}: {error}")
+        })?
+        .unwrap_or_default();
+
+    if let Some(allowed_from) = allowed_from {
+        if !allowed_from
+            .iter()
+            .any(|status| *status == current_status.as_str())
+        {
+            tx.rollback().await.map_err(|error| {
+                anyhow::anyhow!("rollback postgres dispatch status tx: {error}")
+            })?;
+            return Ok(0);
+        }
+    }
+
+    let result_json = result.map(|value| value.to_string());
+    let changed = match (result_json.as_deref(), touch_completed_at) {
+        (Some(result_json), true) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 result = CAST($2 AS jsonb),
+                 updated_at = NOW(),
+                 completed_at = CASE
+                     WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                     ELSE completed_at
+                 END
+             WHERE id = $3
+               AND status = $4",
+        )
+        .bind(to_status)
+        .bind(result_json)
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        (Some(result_json), false) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 result = CAST($2 AS jsonb),
+                 updated_at = NOW()
+             WHERE id = $3
+               AND status = $4",
+        )
+        .bind(to_status)
+        .bind(result_json)
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        (None, true) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 updated_at = NOW(),
+                 completed_at = CASE
+                     WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                     ELSE completed_at
+                 END
+             WHERE id = $2
+               AND status = $3",
+        )
+        .bind(to_status)
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        (None, false) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 updated_at = NOW()
+             WHERE id = $2
+               AND status = $3",
+        )
+        .bind(to_status)
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+    };
+
+    if changed > 0 && current_status != to_status {
+        let kanban_card_id = current
+            .try_get::<Option<String>, _>("kanban_card_id")
+            .map_err(|error| {
+                anyhow::anyhow!("decode postgres kanban_card_id for {dispatch_id}: {error}")
+            })?;
+        let dispatch_type = current
+            .try_get::<Option<String>, _>("dispatch_type")
+            .map_err(|error| {
+                anyhow::anyhow!("decode postgres dispatch_type for {dispatch_id}: {error}")
+            })?;
+
+        sqlx::query(
+            "INSERT INTO dispatch_events (
+                dispatch_id,
+                kanban_card_id,
+                dispatch_type,
+                from_status,
+                to_status,
+                transition_source,
+                payload_json
+            ) VALUES ($1, $2, $3, $4, $5, $6, CAST($7 AS jsonb))",
+        )
+        .bind(dispatch_id)
+        .bind(kanban_card_id)
+        .bind(dispatch_type)
+        .bind(&current_status)
+        .bind(to_status)
+        .bind(transition_source)
+        .bind(result_json.as_deref())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("insert postgres dispatch event for {dispatch_id}: {error}")
+        })?;
+
+        if should_enqueue_status_reaction(to_status, transition_source) {
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (dispatch_id, action)
+                 SELECT $1, 'status_reaction'
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM dispatch_outbox
+                     WHERE dispatch_id = $1
+                       AND action = 'status_reaction'
+                       AND status IN ('pending', 'processing')
+                 )",
+            )
+            .bind(dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("enqueue postgres status_reaction for {dispatch_id}: {error}")
+            })?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit postgres dispatch status tx: {error}"))?;
+    Ok(changed)
+}
+
+async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT status, repo_id, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load postgres card {card_id} for review redispatch: {error}")
+    })?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    let card_status: Option<String> = row
+        .try_get("status")
+        .map_err(|error| anyhow::anyhow!("decode status for {card_id}: {error}"))?;
+    let repo_id: Option<String> = row
+        .try_get("repo_id")
+        .map_err(|error| anyhow::anyhow!("decode repo_id for {card_id}: {error}"))?;
+    let agent_id: Option<String> = row
+        .try_get("assigned_agent_id")
+        .map_err(|error| anyhow::anyhow!("decode assigned_agent_id for {card_id}: {error}"))?;
+
+    let has_review_dispatch = sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('review', 'review-decision')
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load review dispatch gate for {card_id}: {error}"))?;
+    let has_active_work = sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('implementation', 'rework')
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load active work gate for {card_id}: {error}"))?;
+
+    let Some(card_status) = card_status else {
+        return Ok(false);
+    };
+    let effective =
+        crate::pipeline::resolve_for_card_pg(pool, repo_id.as_deref(), agent_id.as_deref()).await;
+    let is_review_state = effective
+        .hooks_for_state(&card_status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
+
+    Ok(is_review_state && !has_review_dispatch && !has_active_work)
+}
+
+async fn maybe_inject_phase_gate_verdict_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let context_raw = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()?;
+    let ctx = serde_json::from_str::<serde_json::Value>(&context_raw).ok()?;
+    let phase_gate_ctx = ctx.get("phase_gate").and_then(|v| v.as_object())?;
+    infer_phase_gate_verdict(dispatch_id, phase_gate_ctx, result)
 }
 
 /// Ensure a durable notify outbox row exists for a dispatch.
@@ -295,6 +661,16 @@ pub fn finalize_dispatch(
     completion_source: &str,
     context: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
+    finalize_dispatch_with_backends(Some(db), engine, dispatch_id, completion_source, context)
+}
+
+pub fn finalize_dispatch_with_backends(
+    db: Option<&Db>,
+    engine: &PolicyEngine,
+    dispatch_id: &str,
+    completion_source: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
     let result = match context {
         Some(ctx) => {
             let mut merged = ctx.clone();
@@ -308,7 +684,7 @@ pub fn finalize_dispatch(
         }
         None => json!({ "completion_source": completion_source }),
     };
-    complete_dispatch_inner(db, engine, dispatch_id, &result)
+    complete_dispatch_inner_with_backends(db, engine, dispatch_id, &result)
 }
 
 /// #143: DB-only dispatch completion — marks status='completed' without firing hooks.
@@ -336,6 +712,134 @@ pub fn mark_dispatch_completed(
     Ok(changed)
 }
 
+pub fn mark_dispatch_completed_pg_first(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Result<usize> {
+    set_dispatch_status_pg_first(
+        db,
+        pg_pool,
+        dispatch_id,
+        "completed",
+        Some(result),
+        "mark_dispatch_completed",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+}
+
+pub fn set_dispatch_status_pg_first(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_with_backends(
+        Some(db),
+        pg_pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+    )
+}
+
+pub fn set_dispatch_status_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    if let Some(pool) = pg_pool {
+        let dispatch_id = dispatch_id.to_string();
+        let to_status = to_status.to_string();
+        let transition_source = transition_source.to_string();
+        let result_owned = result.cloned();
+        let allowed_from_owned = allowed_from.map(|statuses| {
+            statuses
+                .iter()
+                .map(|status| (*status).to_string())
+                .collect::<Vec<_>>()
+        });
+        return block_on_dispatch_pg(pool, move |pool| async move {
+            let allowed_from_refs = allowed_from_owned
+                .as_ref()
+                .map(|statuses| statuses.iter().map(String::as_str).collect::<Vec<_>>());
+            set_dispatch_status_on_pg(
+                &pool,
+                &dispatch_id,
+                &to_status,
+                result_owned.as_ref(),
+                &transition_source,
+                allowed_from_refs.as_deref(),
+                touch_completed_at,
+            )
+            .await
+        });
+    }
+
+    let Some(db) = db else {
+        return Err(anyhow::anyhow!(
+            "dispatch status backend unavailable for {dispatch_id}"
+        ));
+    };
+    let conn = db
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+    set_dispatch_status_on_conn(
+        &conn,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+    )
+}
+
+pub fn load_dispatch_row_pg_first(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    if let Some(pool) = pg_pool {
+        let dispatch_id = dispatch_id.to_string();
+        return block_on_dispatch_pg(pool, move |pool| async move {
+            if !dispatch_exists_pg(&pool, &dispatch_id).await? {
+                return Ok(None);
+            }
+            query_dispatch_row_pg(&pool, &dispatch_id).await.map(Some)
+        });
+    }
+
+    let conn = db
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Ok(None);
+    }
+    query_dispatch_row(&conn, dispatch_id).map(Some)
+}
+
 /// Legacy wrapper — delegates to [`finalize_dispatch`] for callers that already
 /// have a fully-formed result JSON (e.g. API PATCH handler).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -345,11 +849,11 @@ pub fn complete_dispatch(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    complete_dispatch_inner(db, engine, dispatch_id, result)
+    complete_dispatch_inner_with_backends(Some(db), engine, dispatch_id, result)
 }
 
-fn complete_dispatch_inner(
-    db: &Db,
+fn complete_dispatch_inner_with_backends(
+    db: Option<&Db>,
     engine: &PolicyEngine,
     dispatch_id: &str,
     result: &serde_json::Value,
@@ -357,80 +861,191 @@ fn complete_dispatch_inner(
     let dispatch_span =
         crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
-    let conn = db
-        .separate_conn()
-        .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+    let (dispatch, kanban_card_id, needs_review_dispatch, effective_result, skip_hooks) =
+        if let Some(pool) = engine.pg_pool() {
+            let db_owned = db.cloned();
+            let dispatch_id = dispatch_id.to_string();
+            let input_result = result.clone();
+            block_on_dispatch_pg(pool, move |pool| async move {
+                validate_dispatch_completion_evidence_on_pg(
+                    &pool,
+                    db_owned.as_ref(),
+                    &dispatch_id,
+                    &input_result,
+                )
+                .await?;
 
-    validate_dispatch_completion_evidence_on_conn(
-        &conn,
-        db,
-        engine.pg_pool(),
-        dispatch_id,
-        result,
-    )?;
+                let result_owned =
+                    maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id, &input_result).await;
+                let effective_result = result_owned.unwrap_or(input_result);
 
-    // #699: phase-gate callers occasionally omit `verdict` even when every
-    // declared `checks.*` entry passed. Auto-queue then reads the missing
-    // verdict as failure and pauses the run. Inject `verdict = pass_verdict`
-    // defensively so the run can progress.
-    let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
-    let result_ref = result_owned.as_ref().unwrap_or(result);
+                let changed = set_dispatch_status_on_pg(
+                    &pool,
+                    &dispatch_id,
+                    "completed",
+                    Some(&effective_result),
+                    effective_result
+                        .get("completion_source")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("complete_dispatch"),
+                    Some(&["pending", "dispatched"]),
+                    true,
+                )
+                .await?;
 
-    let changed = set_dispatch_status_on_conn(
-        &conn,
-        dispatch_id,
-        "completed",
-        Some(result_ref),
-        result_ref
-            .get("completion_source")
-            .and_then(|value| value.as_str())
-            .unwrap_or("complete_dispatch"),
-        Some(&["pending", "dispatched"]),
-        true,
-    )?;
+                if changed == 0 {
+                    if dispatch_exists_pg(&pool, &dispatch_id).await? {
+                        tracing::info!(
+                            "skipping completion hooks because dispatch is already finalized"
+                        );
+                        let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
+                        return Ok((dispatch, None, false, effective_result, true));
+                    }
+                    return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+                }
 
-    if changed == 0 {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if exists {
-            tracing::info!("skipping completion hooks because dispatch is already finalized");
+                let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
+                let kanban_card_id = dispatch
+                    .get("kanban_card_id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let needs_review_dispatch = if let Some(card_id) = kanban_card_id.as_deref() {
+                    card_needs_review_dispatch_pg(&pool, card_id).await?
+                } else {
+                    false
+                };
+
+                Ok((
+                    dispatch,
+                    kanban_card_id,
+                    needs_review_dispatch,
+                    effective_result,
+                    false,
+                ))
+            })?
+        } else {
+            let Some(db) = db else {
+                return Err(anyhow::anyhow!(
+                    "dispatch completion backend unavailable for {dispatch_id}"
+                ));
+            };
+            let conn = db
+                .separate_conn()
+                .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+
+            validate_dispatch_completion_evidence_on_conn(
+                &conn,
+                db,
+                engine.pg_pool(),
+                dispatch_id,
+                result,
+            )?;
+
+            let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
+            let effective_result = result_owned.unwrap_or_else(|| result.clone());
+
+            let changed = set_dispatch_status_on_conn(
+                &conn,
+                dispatch_id,
+                "completed",
+                Some(&effective_result),
+                effective_result
+                    .get("completion_source")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("complete_dispatch"),
+                Some(&["pending", "dispatched"]),
+                true,
+            )?;
+
+            if changed == 0 {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    tracing::info!(
+                        "skipping completion hooks because dispatch is already finalized"
+                    );
+                    let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+                    drop(conn);
+                    return Ok(dispatch);
+                }
+                return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+            }
+
             let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+            let kanban_card_id: Option<String> = conn
+                .query_row(
+                    "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let needs_review_dispatch = db
+                .lock()
+                .ok()
+                .map(|conn| {
+                    let (card_status, repo_id, agent_id): (
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                    ) = conn
+                        .query_row(
+                            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                            [&kanban_card_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .unwrap_or((None, None, None));
+                    let has_review_dispatch: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
+                             AND status IN ('pending', 'dispatched')",
+                            [&kanban_card_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+                    let has_active_work: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
+                             AND status IN ('pending', 'dispatched')",
+                            [&kanban_card_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+                    let is_review_state = card_status.as_deref().is_some_and(|status| {
+                        let eff = crate::pipeline::resolve_for_card(
+                            &conn,
+                            repo_id.as_deref(),
+                            agent_id.as_deref(),
+                        );
+                        eff.hooks_for_state(status)
+                            .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
+                    });
+                    is_review_state && !has_review_dispatch && !has_active_work
+                })
+                .unwrap_or(false);
+
             drop(conn);
-            return Ok(dispatch);
-        }
-        return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+            (
+                dispatch,
+                kanban_card_id,
+                needs_review_dispatch,
+                effective_result,
+                false,
+            )
+        };
+
+    if skip_hooks {
+        return Ok(dispatch);
     }
 
-    let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-
-    let kanban_card_id: Option<String> = conn
-        .query_row(
-            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let _old_status: String = kanban_card_id
-        .as_ref()
-        .and_then(|cid| {
-            conn.query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [cid],
-                |row| row.get(0),
-            )
-            .ok()
-        })
-        .unwrap_or_default();
-
-    drop(conn);
-
-    crate::kanban::fire_event_hooks(
+    crate::kanban::fire_event_hooks_with_backends(
         db,
         engine,
         "on_dispatch_completed",
@@ -438,60 +1053,20 @@ fn complete_dispatch_inner(
         json!({
             "dispatch_id": dispatch_id,
             "kanban_card_id": kanban_card_id,
-            "result": result,
+            "result": effective_result,
         }),
     );
 
-    crate::kanban::drain_hook_side_effects(db, engine);
+    crate::kanban::drain_hook_side_effects_with_backends(db, engine);
 
-    {
-        let needs_review_dispatch = db
-            .lock()
-            .ok()
-            .map(|conn| {
-                let (card_status, repo_id, agent_id): (Option<String>, Option<String>, Option<String>) = conn
-                    .query_row(
-                        "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                        [&kanban_card_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .unwrap_or((None, None, None));
-                let has_review_dispatch: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM task_dispatches \
-                         WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
-                         AND status IN ('pending', 'dispatched')",
-                        [&kanban_card_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                let has_active_work: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM task_dispatches \
-                         WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
-                         AND status IN ('pending', 'dispatched')",
-                        [&kanban_card_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                let is_review_state = card_status.as_deref().map_or(false, |s| {
-                    let eff = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
-                    eff.hooks_for_state(s)
-                        .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"))
-                });
-                is_review_state && !has_review_dispatch && !has_active_work
-            })
-            .unwrap_or(false);
-
-        if needs_review_dispatch {
-            let cid = kanban_card_id.as_deref().unwrap_or("unknown");
-            tracing::warn!(
-                "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
-                cid
-            );
-            let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
-            crate::kanban::drain_hook_side_effects(db, engine);
-        }
+    if needs_review_dispatch {
+        let cid = kanban_card_id.as_deref().unwrap_or("unknown");
+        tracing::warn!(
+            "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
+            cid
+        );
+        let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
+        crate::kanban::drain_hook_side_effects_with_backends(db, engine);
     }
 
     Ok(dispatch)
@@ -525,7 +1100,14 @@ pub(super) fn maybe_inject_phase_gate_verdict(
         .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())?;
     let phase_gate_ctx = ctx.get("phase_gate").and_then(|v| v.as_object())?;
+    infer_phase_gate_verdict(dispatch_id, phase_gate_ctx, result)
+}
 
+fn infer_phase_gate_verdict(
+    dispatch_id: &str,
+    phase_gate_ctx: &serde_json::Map<String, serde_json::Value>,
+    result: &serde_json::Value,
+) -> Option<serde_json::Value> {
     // Explicit verdict/decision already present — never override, even for
     // explicit "fail" cases.
     let has_verdict = result

@@ -24,10 +24,12 @@ use crate::services::provider::cancel_requested;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use completion_guard::{
     build_work_dispatch_completion_result, fail_dispatch_with_retry,
-    guard_review_dispatch_completion, runtime_db_fallback_complete_with_result,
+    guard_review_dispatch_completion, queue_dispatch_followup_with_handles,
+    runtime_db_fallback_complete_with_result,
 };
 pub(super) use recovery_text::{
     auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
+    take_session_retry_context,
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;

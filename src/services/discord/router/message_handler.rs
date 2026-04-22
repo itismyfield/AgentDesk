@@ -124,11 +124,8 @@ fn merge_reply_contexts(primary: Option<String>, secondary: Option<String>) -> O
     }
 }
 
-fn take_session_retry_context(channel_id: ChannelId) -> Option<String> {
-    let key = super::super::session_retry_context_key(channel_id);
-    super::super::internal_api::take_kv_value(&key)
-        .ok()
-        .flatten()
+fn take_session_retry_context(shared: &Arc<SharedData>, channel_id: ChannelId) -> Option<String> {
+    super::super::turn_bridge::take_session_retry_context(shared.db.as_ref(), channel_id.get())
         .and_then(|raw| format_session_retry_context(&raw))
 }
 
@@ -211,8 +208,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
             if let Some(retry_context) =
                 session.recent_history_context(super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
             {
-                let _ = super::super::internal_api::set_kv_value(
-                    &super::super::session_retry_context_key(channel_id),
+                let _ = super::super::turn_bridge::store_session_retry_context(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
+                    channel_id.get(),
                     &retry_context,
                 );
             }
@@ -301,7 +300,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
         (settings.provider.clone(), settings.allowed_tools.clone())
     };
 
-    let reply_context = take_session_retry_context(channel_id);
+    let reply_context = take_session_retry_context(shared, channel_id);
     let role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -1208,8 +1207,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             if let Some(retry_context) =
                 session.recent_history_context(super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
             {
-                let _ = super::super::internal_api::set_kv_value(
-                    &super::super::session_retry_context_key(channel_id),
+                let _ = super::super::turn_bridge::store_session_retry_context(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
+                    channel_id.get(),
                     &retry_context,
                 );
             }
@@ -1876,7 +1877,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id = restored;
         }
     }
-    let reply_context = merge_reply_contexts(reply_context, take_session_retry_context(channel_id));
+    let reply_context = merge_reply_contexts(
+        reply_context,
+        take_session_retry_context(shared, channel_id),
+    );
 
     // Send placeholder message (after restore notification so restore appears first)
     rate_limit_wait(shared, channel_id).await;

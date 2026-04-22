@@ -421,11 +421,14 @@ pub async fn list_transcripts_for_card_db(
 }
 
 pub fn dispatch_has_assistant_response_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<bool> {
     let Some(pool) = pg_pool else {
+        let Some(db) = db else {
+            return Ok(false);
+        };
         let conn = db
             .read_conn()
             .map_err(|e| anyhow!("db read lock failed while checking transcript evidence: {e}"))?;

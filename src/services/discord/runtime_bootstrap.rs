@@ -119,11 +119,19 @@ fn enqueue_restored_intervention(
     true
 }
 
-fn spawn_startup_thread_map_validation(db: crate::db::Db, token: String) {
+fn spawn_startup_thread_map_validation(
+    db: Option<crate::db::Db>,
+    pg_pool: Option<sqlx::PgPool>,
+    token: String,
+) {
     tokio::spawn(async move {
         let (checked, cleared) =
-            crate::server::routes::dispatches::validate_channel_thread_maps_on_startup(&db, &token)
-                .await;
+            crate::server::routes::dispatches::validate_channel_thread_maps_on_startup_with_backends(
+                db.as_ref(),
+                pg_pool.as_ref(),
+                &token,
+            )
+            .await;
         if checked > 0 || cleared > 0 {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -1045,10 +1053,14 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     // Thread-map validation is best-effort hygiene and can spend
                     // multiple REST round-trips on startup. Do not block intake
                     // reopening or queued-turn kickoff on it.
-                    if let Some(db) = shared_for_tmux2.db.clone() {
+                    if shared_for_tmux2.db.is_some() || shared_for_tmux2.pg_pool.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
-                        spawn_startup_thread_map_validation(db, token_for_kickoff.clone());
+                        spawn_startup_thread_map_validation(
+                            shared_for_tmux2.db.clone(),
+                            shared_for_tmux2.pg_pool.clone(),
+                            token_for_kickoff.clone(),
+                        );
                     }
 
                     // NOW flush restart reports (recovery is done, safe to delete them)

@@ -637,6 +637,91 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
     runtime_pg_complete_dispatch_with_result(dispatch_id, result)
 }
 
+pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    dispatch_id: &str,
+    source: &str,
+) -> bool {
+    if let Some(pool) = pg_pool {
+        if let Err(error) =
+            crate::server::routes::dispatches::queue_dispatch_followup_pg(pool, dispatch_id).await
+        {
+            tracing::warn!(
+                "[{source}] failed to enqueue postgres dispatch followup for {dispatch_id}: {error}"
+            );
+            return false;
+        }
+        return true;
+    }
+
+    if let Some(db) = db {
+        crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+        return true;
+    }
+
+    tracing::warn!(
+        "[{source}] no database handle available to enqueue dispatch followup for {dispatch_id}"
+    );
+    false
+}
+
+pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    dispatch_id: &str,
+    source: &str,
+) -> bool {
+    let reconcile_key = runtime_postgres_reconcile_key(dispatch_id);
+    if super::super::internal_api::set_kv_value(&reconcile_key, dispatch_id).is_ok() {
+        return true;
+    }
+
+    if let Some(pool) = pg_pool {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE
+                 SET value = EXCLUDED.value",
+        )
+        .bind(&reconcile_key)
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                "[{source}] failed to persist postgres reconcile marker for {dispatch_id}: {error}"
+            );
+            return false;
+        }
+        return true;
+    }
+
+    if let Some(db) = db {
+        match db.separate_conn() {
+            Ok(conn) => {
+                if let Err(error) = conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    [reconcile_key.as_str(), dispatch_id],
+                ) {
+                    tracing::warn!(
+                        "[{source}] failed to persist sqlite reconcile marker for {dispatch_id}: {error}"
+                    );
+                    return false;
+                }
+                return true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[{source}] no sqlite connection available to persist reconcile marker for {dispatch_id}: {error}"
+                );
+            }
+        }
+    }
+
+    false
+}
+
 #[allow(dead_code)]
 pub(in crate::services::discord) fn runtime_db_fallback_complete(
     dispatch_id: &str,
@@ -716,10 +801,80 @@ struct DispatchCompletionHints {
     output_commit_repo_dir: Option<String>,
 }
 
+fn resolve_completion_target_repo(
+    context_raw: Option<&str>,
+    fallback_repo: Option<String>,
+) -> Option<String> {
+    context_raw
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .as_ref()
+        .and_then(|value| value.get("target_repo"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or(fallback_repo)
+}
+
 fn lookup_dispatch_completion_hints(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> DispatchCompletionHints {
+    if let Some(pool) = pg_pool {
+        let dispatch_id = dispatch_id.to_string();
+        if let Ok(Some((issue_number, dispatch_created_at, target_repo))) =
+            crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    let row = sqlx::query(
+                        "SELECT kc.github_issue_number,
+                                td.created_at,
+                                td.context,
+                                kc.repo_id
+                         FROM task_dispatches td
+                         LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+                         WHERE td.id = $1",
+                    )
+                    .bind(&dispatch_id)
+                    .fetch_optional(&bridge_pool)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "load postgres completion hints for dispatch {dispatch_id}: {error}"
+                        )
+                    })?;
+                    Ok(row.map(|row| {
+                        let issue_number = row
+                            .try_get::<Option<i64>, _>("github_issue_number")
+                            .ok()
+                            .flatten();
+                        let dispatch_created_at = row
+                            .try_get::<Option<String>, _>("created_at")
+                            .ok()
+                            .flatten();
+                        let context_raw =
+                            row.try_get::<Option<String>, _>("context").ok().flatten();
+                        let fallback_repo =
+                            row.try_get::<Option<String>, _>("repo_id").ok().flatten();
+                        (
+                            issue_number,
+                            dispatch_created_at,
+                            resolve_completion_target_repo(context_raw.as_deref(), fallback_repo),
+                        )
+                    }))
+                },
+                |error| error,
+            )
+        {
+            return DispatchCompletionHints {
+                issue_number,
+                dispatch_created_at,
+                target_repo,
+                output_commit: None,
+                output_commit_repo_dir: None,
+            };
+        }
+    }
+
     let conn = db.and_then(|db| db.separate_conn().ok());
     let (issue_number, dispatch_created_at, target_repo) = conn
         .as_ref()
@@ -732,14 +887,10 @@ fn lookup_dispatch_completion_hints(
                 [dispatch_id],
                 |row| {
                     let context_raw: Option<String> = row.get(2)?;
-                    let target_repo = context_raw
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .as_ref()
-                        .and_then(|value| value.get("target_repo"))
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
-                        .or_else(|| row.get::<_, Option<String>>(3).ok().flatten());
+                    let target_repo = resolve_completion_target_repo(
+                        context_raw.as_deref(),
+                        row.get::<_, Option<String>>(3).ok().flatten(),
+                    );
                     Ok((
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -872,13 +1023,14 @@ fn completion_result_with_context(
 
 pub(in crate::services::discord) fn build_work_dispatch_completion_result(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
     source: &str,
     needs_reconcile: bool,
     adk_cwd: Option<&str>,
     turn_output: Option<&str>,
 ) -> serde_json::Value {
-    let mut hints = lookup_dispatch_completion_hints(db, dispatch_id);
+    let mut hints = lookup_dispatch_completion_hints(db, pg_pool, dispatch_id);
     let repo_dirs = completion_repo_dirs(adk_cwd, &hints);
     if let Some((repo_dir, output_commit)) =
         turn_output.and_then(|output| extract_output_commit_from_repo_dirs(output, &repo_dirs))
@@ -1040,7 +1192,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     let tracked_changes = tracked_change_summary(adk_cwd);
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
-    if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+    if let Some(engine) = &shared.engine {
         if explicit_work_outcome == Some("noop") {
             if let Some(ref changes) = tracked_changes {
                 let reason = format!(
@@ -1057,7 +1209,11 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         }
 
         // Extract commit SHA directly from agent output (most reliable method)
-        let mut hints = lookup_dispatch_completion_hints(Some(db), dispatch_id);
+        let mut hints = lookup_dispatch_completion_hints(
+            shared.db.as_ref(),
+            shared.pg_pool.as_ref(),
+            dispatch_id,
+        );
         let repo_dirs = completion_repo_dirs(adk_cwd, &hints);
         if explicit_work_outcome != Some("noop") {
             if let Some((repo_dir, output_commit)) = turn_output
@@ -1107,8 +1263,8 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             "turn_bridge_explicit"
         };
         for attempt in 1..=3u8 {
-            match crate::dispatch::finalize_dispatch(
-                db,
+            match crate::dispatch::finalize_dispatch_with_backends(
+                shared.db.as_ref(),
                 engine,
                 dispatch_id,
                 completion_source,
@@ -1116,22 +1272,13 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             ) {
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch");
-                    if let Some(pool) = shared.pg_pool.as_ref() {
-                        if let Err(error) =
-                            crate::server::routes::dispatches::queue_dispatch_followup_pg(
-                                pool,
-                                dispatch_id,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                dispatch_id = %dispatch_id,
-                                "failed to enqueue turn-bridge followup: {error}"
-                            );
-                        }
-                    } else {
-                        crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
-                    }
+                    let _ = queue_dispatch_followup_with_handles(
+                        shared.db.as_ref(),
+                        shared.pg_pool.as_ref(),
+                        dispatch_id,
+                        "turn_bridge_explicit",
+                    )
+                    .await;
                     return;
                 }
                 Err(e) => {
@@ -1143,7 +1290,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             }
         }
         // All retries exhausted — DB fallback via pool, then runtime-root file
-        let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
+        let fallback_ok = {
             let fallback_result = if explicit_work_outcome == Some("noop") {
                 let mut result = noop_completion_context(adk_cwd, turn_output);
                 if let Some(obj) = result.as_object_mut() {
@@ -1157,8 +1304,9 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             } else {
                 completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
             };
-            let changed = crate::dispatch::set_dispatch_status_on_conn(
-                &conn,
+            let changed = crate::dispatch::set_dispatch_status_with_backends(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
                 dispatch_id,
                 "completed",
                 Some(&fallback_result),
@@ -1168,18 +1316,25 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             )
             .unwrap_or(0);
             if changed > 0 {
-                let reconcile_key = runtime_postgres_reconcile_key(dispatch_id);
-                if super::super::internal_api::set_kv_value(&reconcile_key, dispatch_id).is_err() {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        [reconcile_key.as_str(), dispatch_id],
-                    )
-                    .ok();
-                }
+                let _ = store_reconcile_marker_with_handles(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
+                    dispatch_id,
+                    "turn_bridge_db_fallback",
+                )
+                .await;
             }
             changed > 0
-        });
-        if !fallback_ok {
+        };
+        if fallback_ok {
+            let _ = queue_dispatch_followup_with_handles(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                dispatch_id,
+                "turn_bridge_db_fallback",
+            )
+            .await;
+        } else {
             let fallback_result = if explicit_work_outcome == Some("noop") {
                 let mut result = noop_completion_context(adk_cwd, turn_output);
                 if let Some(obj) = result.as_object_mut() {
@@ -1197,7 +1352,15 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 })
             };
             let ok = runtime_db_fallback_complete_with_result(dispatch_id, &fallback_result);
-            if !ok {
+            if ok {
+                let _ = queue_dispatch_followup_with_handles(
+                    shared.db.as_ref(),
+                    shared.pg_pool.as_ref(),
+                    dispatch_id,
+                    "turn_bridge_runtime_db_fallback",
+                )
+                .await;
+            } else {
                 tracing::error!("all completion paths exhausted; dispatch stranded");
             }
         }
@@ -1239,6 +1402,13 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             {
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch via API");
+                    let _ = queue_dispatch_followup_with_handles(
+                        shared.db.as_ref(),
+                        shared.pg_pool.as_ref(),
+                        dispatch_id,
+                        "turn_bridge_explicit_api",
+                    )
+                    .await;
                     return;
                 }
                 Err(err) => {
@@ -1266,7 +1436,15 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 "needs_reconcile": true,
             })
         };
-        if !runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
+        if runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
+            let _ = queue_dispatch_followup_with_handles(
+                shared.db.as_ref(),
+                shared.pg_pool.as_ref(),
+                dispatch_id,
+                "turn_bridge_runtime_db_fallback",
+            )
+            .await;
+        } else {
             tracing::error!("all completion paths exhausted; dispatch stranded");
         }
     }
@@ -1427,6 +1605,7 @@ mod tests {
         let short_head = run_git(repo_dir, &["rev-parse", "--short", "HEAD"]);
 
         let result = build_work_dispatch_completion_result(
+            None,
             None,
             "dispatch-1",
             "watcher_completed",

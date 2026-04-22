@@ -474,11 +474,11 @@ pub(super) async fn restore_inflight_turns(
                         tracing::warn!(
                             "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                         );
-                    } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                    } else if let Some(engine) = &shared.engine {
                         // #143: Use finalize_dispatch directly with retry.
                         for attempt in 1..=3u8 {
-                            match crate::dispatch::finalize_dispatch(
-                                db,
+                            match crate::dispatch::finalize_dispatch_with_backends(
+                                shared.db.as_ref(),
                                 engine,
                                 did,
                                 "recovery_completed_during_downtime",
@@ -489,22 +489,14 @@ pub(super) async fn restore_inflight_turns(
                                     tracing::info!(
                                         "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
                                     );
-                                    if let Some(pool) = shared.pg_pool.as_ref() {
-                                        if let Err(error) = crate::server::routes::dispatches::queue_dispatch_followup_pg(
-                                            pool,
-                                            &did,
+                                    let _ =
+                                        super::turn_bridge::queue_dispatch_followup_with_handles(
+                                            shared.db.as_ref(),
+                                            shared.pg_pool.as_ref(),
+                                            did,
+                                            "recovery_completed_during_downtime",
                                         )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                "  [{ts}] ⚠ recovery: failed to enqueue followup for {did}: {error}"
-                                            );
-                                        }
-                                    } else {
-                                        crate::server::routes::dispatches::queue_dispatch_followup(
-                                            db, &did,
-                                        );
-                                    }
+                                        .await;
                                     dispatch_completed = true;
                                     break;
                                 }
@@ -527,6 +519,15 @@ pub(super) async fn restore_inflight_turns(
                                     did,
                                     &fallback_result,
                                 );
+                            if dispatch_completed {
+                                let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
+                                    shared.db.as_ref(),
+                                    shared.pg_pool.as_ref(),
+                                    did,
+                                    "recovery_completed_during_downtime_fallback",
+                                )
+                                .await;
+                            }
                         }
                     } else {
                         // Db/Engine not available — fall back to direct dispatch update with retry
@@ -1022,10 +1023,10 @@ pub(super) async fn restore_inflight_turns(
                             tracing::warn!(
                                 "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                             );
-                        } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                        } else if let Some(engine) = &shared.engine {
                             for attempt in 1..=3u8 {
-                                match crate::dispatch::finalize_dispatch(
-                                    db,
+                                match crate::dispatch::finalize_dispatch_with_backends(
+                                    shared.db.as_ref(),
                                     engine,
                                     did,
                                     "recovery_output_completed",
@@ -1036,22 +1037,14 @@ pub(super) async fn restore_inflight_turns(
                                         tracing::info!(
                                             "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
                                         );
-                                        if let Some(pool) = shared.pg_pool.as_ref() {
-                                            if let Err(error) = crate::server::routes::dispatches::queue_dispatch_followup_pg(
-                                                pool,
+                                        let _ =
+                                            super::turn_bridge::queue_dispatch_followup_with_handles(
+                                                shared.db.as_ref(),
+                                                shared.pg_pool.as_ref(),
                                                 did,
+                                                "recovery_output_completed",
                                             )
-                                            .await
-                                            {
-                                                tracing::warn!(
-                                                    "  [{ts}] ⚠ recovery: failed to enqueue followup for {did}: {error}"
-                                                );
-                                            }
-                                        } else {
-                                            crate::server::routes::dispatches::queue_dispatch_followup(
-                                                db, did,
-                                            );
-                                        }
+                                            .await;
                                         dispatch_completed = true;
                                         break;
                                     }
@@ -1073,6 +1066,16 @@ pub(super) async fn restore_inflight_turns(
                                         did,
                                         &fallback_result,
                                     );
+                                if dispatch_completed {
+                                    let _ =
+                                        super::turn_bridge::queue_dispatch_followup_with_handles(
+                                            shared.db.as_ref(),
+                                            shared.pg_pool.as_ref(),
+                                            did,
+                                            "recovery_output_completed_fallback",
+                                        )
+                                        .await;
+                                }
                             }
                         } else {
                             dispatch_completed =
@@ -1080,6 +1083,15 @@ pub(super) async fn restore_inflight_turns(
                                     did,
                                     &fallback_result,
                                 );
+                            if dispatch_completed {
+                                let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
+                                    shared.db.as_ref(),
+                                    shared.pg_pool.as_ref(),
+                                    did,
+                                    "recovery_output_completed_runtime_fallback",
+                                )
+                                .await;
+                            }
                         }
                         if !dispatch_completed {
                             let ts = chrono::Local::now().format("%H:%M:%S");

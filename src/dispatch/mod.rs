@@ -19,7 +19,7 @@ pub(crate) use dispatch_context::resolve_card_worktree_sqlite_test;
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
     DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
-    REVIEW_VERDICT_IMPROVE_GUIDANCE, commit_belongs_to_card_issue,
+    REVIEW_VERDICT_IMPROVE_GUIDANCE, commit_belongs_to_card_issue, commit_belongs_to_card_issue_pg,
     dispatch_session_strategy_from_context, dispatch_type_force_new_session_default,
     dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
     inject_review_dispatch_identifiers, resolve_card_worktree,
@@ -44,7 +44,11 @@ pub(crate) use dispatch_create::{
     create_dispatch_record_sqlite_test, create_dispatch_record_with_id_sqlite_test,
 };
 #[allow(unused_imports)]
-pub use dispatch_status::{complete_dispatch, finalize_dispatch, mark_dispatch_completed};
+pub use dispatch_status::{
+    complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
+    load_dispatch_row_pg_first, mark_dispatch_completed, mark_dispatch_completed_pg_first,
+    set_dispatch_status_pg_first, set_dispatch_status_with_backends,
+};
 #[allow(unused_imports)]
 pub(crate) use dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, ensure_dispatch_status_reaction_outbox_on_conn,

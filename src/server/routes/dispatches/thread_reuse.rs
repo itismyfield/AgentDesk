@@ -281,8 +281,32 @@ pub(in crate::server::routes) fn clear_all_threads(
     .ok();
 }
 
+#[derive(Debug)]
+struct ThreadMapValidationRow {
+    card_id: String,
+    map_json: String,
+    active_thread_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct ThreadMapValidationOutcome {
+    checked: usize,
+    cleared: usize,
+    persist: bool,
+    new_map: Option<String>,
+    new_active_thread_id: Option<String>,
+}
+
 pub(crate) async fn validate_channel_thread_maps_on_startup(
     db: &crate::db::Db,
+    token: &str,
+) -> (usize, usize) {
+    validate_channel_thread_maps_on_startup_with_backends(Some(db), None, token).await
+}
+
+pub(crate) async fn validate_channel_thread_maps_on_startup_with_backends(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&PgPool>,
     token: &str,
 ) -> (usize, usize) {
     let client = match reqwest::Client::builder()
@@ -294,6 +318,20 @@ pub(crate) async fn validate_channel_thread_maps_on_startup(
             tracing::warn!("[dispatch] failed to build startup thread-map validator client: {e}");
             return (0, 0);
         }
+    };
+
+    if let Some(pool) = pg_pool {
+        return validate_channel_thread_maps_on_startup_with_base_url_pg(
+            pool,
+            &client,
+            token,
+            "https://discord.com/api/v10",
+        )
+        .await;
+    }
+
+    let Some(db) = db else {
+        return (0, 0);
     };
 
     validate_channel_thread_maps_on_startup_with_base_url(
@@ -311,7 +349,7 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
     token: &str,
     base_url: &str,
 ) -> (usize, usize) {
-    let rows: Vec<(String, String, Option<String>)> = match db.lock() {
+    let rows: Vec<ThreadMapValidationRow> = match db.lock() {
         Ok(conn) => conn
             .prepare(
                 "SELECT id, channel_thread_map, active_thread_id
@@ -321,8 +359,14 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
                    AND TRIM(channel_thread_map) != '{}'",
             )
             .and_then(|mut stmt| {
-                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                stmt.query_map([], |row| {
+                    Ok(ThreadMapValidationRow {
+                        card_id: row.get(0)?,
+                        map_json: row.get(1)?,
+                        active_thread_id: row.get(2)?,
+                    })
+                })
+                .map(|rows| rows.filter_map(|row| row.ok()).collect())
             })
             .unwrap_or_default(),
         Err(e) => {
@@ -334,151 +378,14 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
     let mut checked = 0usize;
     let mut cleared = 0usize;
 
-    for (card_id, map_json, active_thread_id) in rows {
-        let Ok(mut map) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&map_json)
-        else {
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE kanban_cards SET channel_thread_map = NULL WHERE id = ?1",
-                    [&card_id],
-                )
-                .ok();
-            }
-            cleared += 1;
-            continue;
-        };
+    for row in rows {
+        let outcome = validate_thread_map_validation_row(client, token, base_url, &row).await;
+        checked += outcome.checked;
+        cleared += outcome.cleared;
 
-        let mut changed = false;
-        let mut removed_active = false;
-        let snapshot: Vec<(String, Option<String>)> = map
-            .iter()
-            .map(|(channel_id, thread_id)| {
-                (
-                    channel_id.clone(),
-                    thread_id.as_str().map(std::string::ToString::to_string),
-                )
-            })
-            .collect();
-
-        for (channel_id_raw, thread_id) in snapshot {
-            checked += 1;
-            let Some(thread_id) = thread_id else {
-                map.remove(&channel_id_raw);
-                changed = true;
-                cleared += 1;
-                continue;
-            };
-            let Ok(expected_parent) = channel_id_raw.parse::<u64>() else {
-                map.remove(&channel_id_raw);
-                changed = true;
-                cleared += 1;
-                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
-                    removed_active = true;
-                }
-                continue;
-            };
-
-            let thread_info_url =
-                format!("{}/channels/{}", base_url.trim_end_matches('/'), thread_id);
-            let response = match client
-                .get(&thread_info_url)
-                .header("Authorization", format!("Bot {}", token))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(e) => {
-                    tracing::info!(
-                        "[dispatch] startup thread-map validation clearing {} -> {} after request error: {}",
-                        card_id,
-                        thread_id,
-                        e
-                    );
-                    map.remove(&channel_id_raw);
-                    changed = true;
-                    cleared += 1;
-                    if active_thread_id.as_deref() == Some(thread_id.as_str()) {
-                        removed_active = true;
-                    }
-                    continue;
-                }
-            };
-
-            if !response.status().is_success() {
-                tracing::info!(
-                    "[dispatch] startup thread-map validation clearing {} -> {} after {}",
-                    card_id,
-                    thread_id,
-                    response.status()
-                );
-                map.remove(&channel_id_raw);
-                changed = true;
-                cleared += 1;
-                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
-                    removed_active = true;
-                }
-                continue;
-            }
-
-            let body: serde_json::Value = match response.json().await {
-                Ok(body) => body,
-                Err(e) => {
-                    tracing::info!(
-                        "[dispatch] startup thread-map validation clearing {} -> {} after json error: {}",
-                        card_id,
-                        thread_id,
-                        e
-                    );
-                    map.remove(&channel_id_raw);
-                    changed = true;
-                    cleared += 1;
-                    if active_thread_id.as_deref() == Some(thread_id.as_str()) {
-                        removed_active = true;
-                    }
-                    continue;
-                }
-            };
-
-            let parent_id = body
-                .get("parent_id")
-                .and_then(|value| value.as_str())
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default();
-
-            if parent_id != expected_parent {
-                tracing::info!(
-                    "[dispatch] startup thread-map validation clearing {} -> {} (parent {} != {})",
-                    card_id,
-                    thread_id,
-                    parent_id,
-                    expected_parent
-                );
-                map.remove(&channel_id_raw);
-                changed = true;
-                cleared += 1;
-                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
-                    removed_active = true;
-                }
-            }
-        }
-
-        if !changed {
+        if !outcome.persist {
             continue;
         }
-
-        let new_map = if map.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
-        };
-        let new_active_thread_id = if removed_active {
-            map.values()
-                .find_map(|value| value.as_str())
-                .map(std::string::ToString::to_string)
-        } else {
-            active_thread_id.clone()
-        };
 
         if let Ok(conn) = db.lock() {
             conn.execute(
@@ -486,13 +393,252 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
                  SET channel_thread_map = ?1,
                      active_thread_id = ?2
                  WHERE id = ?3",
-                libsql_rusqlite::params![new_map, new_active_thread_id, card_id],
+                libsql_rusqlite::params![
+                    outcome.new_map,
+                    outcome.new_active_thread_id,
+                    row.card_id
+                ],
             )
             .ok();
         }
     }
 
     (checked, cleared)
+}
+
+async fn validate_channel_thread_maps_on_startup_with_base_url_pg(
+    pool: &PgPool,
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+) -> (usize, usize) {
+    let rows: Vec<ThreadMapValidationRow> = match sqlx::query(
+        "SELECT id, channel_thread_map::text AS channel_thread_map, active_thread_id
+         FROM kanban_cards
+         WHERE channel_thread_map IS NOT NULL
+           AND BTRIM(channel_thread_map::text) != ''
+           AND BTRIM(channel_thread_map::text) != '{}'",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(ThreadMapValidationRow {
+                    card_id: row.try_get::<String, _>("id").ok()?,
+                    map_json: row.try_get::<String, _>("channel_thread_map").ok()?,
+                    active_thread_id: row.try_get::<Option<String>, _>("active_thread_id").ok()?,
+                })
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                "[dispatch] startup thread-map validation skipped (postgres query): {error}"
+            );
+            return (0, 0);
+        }
+    };
+
+    let mut checked = 0usize;
+    let mut cleared = 0usize;
+
+    for row in rows {
+        let outcome = validate_thread_map_validation_row(client, token, base_url, &row).await;
+        checked += outcome.checked;
+        cleared += outcome.cleared;
+
+        if !outcome.persist {
+            continue;
+        }
+
+        if let Err(error) = sqlx::query(
+            "UPDATE kanban_cards
+             SET channel_thread_map = $1::jsonb,
+                 active_thread_id = $2,
+                 updated_at = NOW()
+             WHERE id = $3",
+        )
+        .bind(outcome.new_map)
+        .bind(outcome.new_active_thread_id)
+        .bind(&row.card_id)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                "[dispatch] failed to persist postgres startup thread-map cleanup for {}: {}",
+                row.card_id,
+                error
+            );
+        }
+    }
+
+    (checked, cleared)
+}
+
+async fn validate_thread_map_validation_row(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    row: &ThreadMapValidationRow,
+) -> ThreadMapValidationOutcome {
+    let Ok(mut map) =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&row.map_json)
+    else {
+        return ThreadMapValidationOutcome {
+            checked: 0,
+            cleared: 1,
+            persist: true,
+            new_map: None,
+            new_active_thread_id: row.active_thread_id.clone(),
+        };
+    };
+
+    let mut checked = 0usize;
+    let mut cleared = 0usize;
+    let mut changed = false;
+    let mut removed_active = false;
+    let snapshot: Vec<(String, Option<String>)> = map
+        .iter()
+        .map(|(channel_id, thread_id)| {
+            (
+                channel_id.clone(),
+                thread_id.as_str().map(std::string::ToString::to_string),
+            )
+        })
+        .collect();
+
+    for (channel_id_raw, thread_id) in snapshot {
+        checked += 1;
+        let Some(thread_id) = thread_id else {
+            map.remove(&channel_id_raw);
+            changed = true;
+            cleared += 1;
+            continue;
+        };
+        let Ok(expected_parent) = channel_id_raw.parse::<u64>() else {
+            map.remove(&channel_id_raw);
+            changed = true;
+            cleared += 1;
+            if row.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                removed_active = true;
+            }
+            continue;
+        };
+
+        let thread_info_url = format!("{}/channels/{}", base_url.trim_end_matches('/'), thread_id);
+        let response = match client
+            .get(&thread_info_url)
+            .header("Authorization", format!("Bot {}", token))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::info!(
+                    "[dispatch] startup thread-map validation clearing {} -> {} after request error: {}",
+                    row.card_id,
+                    thread_id,
+                    error
+                );
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                if row.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    removed_active = true;
+                }
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::info!(
+                "[dispatch] startup thread-map validation clearing {} -> {} after {}",
+                row.card_id,
+                thread_id,
+                response.status()
+            );
+            map.remove(&channel_id_raw);
+            changed = true;
+            cleared += 1;
+            if row.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                removed_active = true;
+            }
+            continue;
+        }
+
+        let body: serde_json::Value = match response.json().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::info!(
+                    "[dispatch] startup thread-map validation clearing {} -> {} after json error: {}",
+                    row.card_id,
+                    thread_id,
+                    error
+                );
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                if row.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    removed_active = true;
+                }
+                continue;
+            }
+        };
+
+        let parent_id = body
+            .get("parent_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+
+        if parent_id != expected_parent {
+            tracing::info!(
+                "[dispatch] startup thread-map validation clearing {} -> {} (parent {} != {})",
+                row.card_id,
+                thread_id,
+                parent_id,
+                expected_parent
+            );
+            map.remove(&channel_id_raw);
+            changed = true;
+            cleared += 1;
+            if row.active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                removed_active = true;
+            }
+        }
+    }
+
+    if !changed {
+        return ThreadMapValidationOutcome {
+            checked,
+            cleared,
+            persist: false,
+            new_map: None,
+            new_active_thread_id: row.active_thread_id.clone(),
+        };
+    }
+
+    let new_map = if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
+    };
+    let new_active_thread_id = if removed_active {
+        map.values()
+            .find_map(|value| value.as_str())
+            .map(std::string::ToString::to_string)
+    } else {
+        row.active_thread_id.clone()
+    };
+
+    ThreadMapValidationOutcome {
+        checked,
+        cleared,
+        persist: true,
+        new_map,
+        new_active_thread_id,
+    }
 }
 
 /// Try to reuse an existing Discord thread for a dispatch.

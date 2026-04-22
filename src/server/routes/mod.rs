@@ -81,7 +81,11 @@ impl AppState {
     }
 
     pub fn settings_service(&self) -> crate::services::settings::SettingsService {
-        crate::services::settings::SettingsService::new(self.db.clone(), self.config.clone())
+        crate::services::settings::SettingsService::new(
+            self.db.clone(),
+            self.pg_pool.clone(),
+            self.config.clone(),
+        )
     }
 }
 

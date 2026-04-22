@@ -857,7 +857,7 @@ pub(super) fn validate_dispatch_completion_evidence_on_conn(
 
     if result_has_work_completion_evidence(result)
         || crate::db::session_transcripts::dispatch_has_assistant_response_db(
-            db,
+            Some(db),
             pg_pool,
             dispatch_id,
         )?

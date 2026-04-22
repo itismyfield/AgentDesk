@@ -234,7 +234,7 @@ pub(super) async fn upsert_meeting(
     into_result(status, body)
 }
 
-pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     let ctx = load_context()?;
     if let Some(pool) = ctx.pg_pool.as_ref() {
         let key = key.to_string();
@@ -271,7 +271,7 @@ pub(super) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn get_kv_value(key: &str) -> Result<Option<String>, String> {
+pub(crate) fn get_kv_value(key: &str) -> Result<Option<String>, String> {
     let ctx = load_context()?;
     if let Some(pool) = ctx.pg_pool.as_ref() {
         let key = key.to_string();
@@ -354,7 +354,7 @@ pub(super) fn take_kv_value(key: &str) -> Result<Option<String>, String> {
     Ok(value)
 }
 
-pub(super) fn delete_kv_value(key: &str) -> Result<(), String> {
+pub(crate) fn delete_kv_value(key: &str) -> Result<(), String> {
     let ctx = load_context()?;
     if let Some(pool) = ctx.pg_pool.as_ref() {
         let key = key.to_string();
