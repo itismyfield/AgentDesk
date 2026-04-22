@@ -9,9 +9,10 @@ use crate::config::{AgentChannel, AgentDef, BotConfig, Config};
 use crate::db::Db;
 use crate::runtime_layout;
 
-use super::formatting::normalize_allowed_tools;
-use super::runtime_store::atomic_write;
-use super::settings::discord_token_hash;
+use crate::services::discord::formatting::normalize_allowed_tools;
+use crate::services::discord::internal_api;
+use crate::services::discord::runtime_store::atomic_write;
+use crate::services::discord::settings::discord_token_hash;
 
 const CONFIG_AUDIT_KV_KEY: &str = "config_audit_report";
 
@@ -225,6 +226,7 @@ pub(crate) fn audit_and_reconcile(
 
 fn direct_api_context_unavailable(error: &str) -> bool {
     error.contains("direct runtime API context is unavailable")
+        || error.contains("direct runtime pg context is unavailable")
 }
 
 fn load_persisted_report_sqlite(sqlite: &Db) -> Option<String> {
@@ -284,7 +286,7 @@ pub(crate) fn load_persisted_report(
     sqlite: &Db,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> Option<ConfigAuditReport> {
-    match super::internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
+    match internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
         Ok(Some(raw)) => return serde_json::from_str(&raw).ok(),
         Ok(None) => return None,
         Err(error) if !direct_api_context_unavailable(&error) => return None,
@@ -314,7 +316,7 @@ fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
         return;
     };
 
-    match super::internal_api::set_kv_value(CONFIG_AUDIT_KV_KEY, &rendered) {
+    match internal_api::set_kv_value(CONFIG_AUDIT_KV_KEY, &rendered) {
         Ok(()) => return,
         Err(error) if !direct_api_context_unavailable(&error) => return,
         Err(_) => {}

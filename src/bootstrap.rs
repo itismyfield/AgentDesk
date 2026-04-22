@@ -10,7 +10,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     let runtime_root = crate::config::runtime_root();
     let legacy_scan = runtime_root
         .as_ref()
-        .map(|root| crate::services::discord::config_audit::scan_legacy_sources(root))
+        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
         .unwrap_or_default();
 
     if let Some(root) = runtime_root.as_ref() {
@@ -19,11 +19,11 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     }
 
     let loaded = if let Some(root) = runtime_root.as_ref() {
-        crate::services::discord::config_audit::load_runtime_config(root)
+        crate::services::discord_config_audit::load_runtime_config(root)
             .map_err(|error| anyhow::anyhow!("Failed to load config after layout prep: {error}"))?
     } else {
         let config = crate::config::load().context("Failed to load config")?;
-        crate::services::discord::config_audit::LoadedRuntimeConfig {
+        crate::services::discord_config_audit::LoadedRuntimeConfig {
             config,
             path: std::path::PathBuf::from("config/agentdesk.yaml"),
             existed: true,
@@ -34,7 +34,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     // bootstrap no longer exports it as part of the runtime state.
     let audit_db = crate::db::init(&loaded.config).context("Failed to init DB")?;
     let config = if let Some(root) = runtime_root.as_ref() {
-        crate::services::discord::config_audit::audit_and_reconcile(
+        crate::services::discord_config_audit::audit_and_reconcile(
             root,
             loaded.config,
             loaded.path,

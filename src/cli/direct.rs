@@ -145,7 +145,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     let runtime_root = crate::config::runtime_root();
     let legacy_scan = runtime_root
         .as_ref()
-        .map(|root| crate::services::discord::config_audit::scan_legacy_sources(root))
+        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
         .unwrap_or_default();
 
     if let Some(root) = runtime_root.as_ref() {
@@ -154,11 +154,11 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     }
 
     let loaded = if let Some(root) = runtime_root.as_ref() {
-        crate::services::discord::config_audit::load_runtime_config(root)
+        crate::services::discord_config_audit::load_runtime_config(root)
             .map_err(|e| format!("load runtime config: {e}"))?
     } else {
         let config = crate::config::load().map_err(|e| format!("load config: {e}"))?;
-        crate::services::discord::config_audit::LoadedRuntimeConfig {
+        crate::services::discord_config_audit::LoadedRuntimeConfig {
             config,
             path: std::path::PathBuf::from("config/agentdesk.yaml"),
             existed: true,
@@ -168,7 +168,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     let db = crate::db::init(&loaded.config).map_err(|e| format!("init db: {e}"))?;
 
     let config = if let Some(root) = runtime_root.as_ref() {
-        crate::services::discord::config_audit::audit_and_reconcile(
+        crate::services::discord_config_audit::audit_and_reconcile(
             root,
             loaded.config,
             loaded.path,

@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::services::discord::dm_reply_store::{
+use crate::services::discord_dm_reply_store::{
     PendingDmReplyRecord, load_most_recent_consumed_dm_reply_db, load_oldest_pending_dm_reply_db,
     mark_pending_dm_reply_consumed_db, register_pending_dm_reply, register_pending_dm_reply_db,
 };

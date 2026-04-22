@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::services::discord::dm_reply_store::register_pending_dm_reply_db;
+use crate::services::discord_dm_reply_store::register_pending_dm_reply_db;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {

@@ -92,7 +92,7 @@ pub(super) fn canonical_tool_name(name: &str) -> Option<&'static str> {
 }
 
 /// Canonicalize, dedupe, and discard unknown tool names while preserving input order.
-pub(super) fn normalize_allowed_tools<I, S>(tools: I) -> Vec<String>
+pub(crate) fn normalize_allowed_tools<I, S>(tools: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,

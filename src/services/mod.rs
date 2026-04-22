@@ -6,6 +6,8 @@ pub mod codex;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod discord;
+pub mod discord_config_audit;
+pub mod discord_dm_reply_store;
 pub mod dispatches;
 pub mod gemini;
 pub mod kanban;

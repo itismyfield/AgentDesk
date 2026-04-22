@@ -1572,7 +1572,7 @@ fn print_report(report: &PostgresCutoverReport) -> Result<(), String> {
 
 fn load_effective_config() -> Result<Config, String> {
     if let Some(root) = crate::config::runtime_root() {
-        return crate::services::discord::config_audit::load_runtime_config(&root)
+        return crate::services::discord_config_audit::load_runtime_config(&root)
             .map(|loaded| loaded.config)
             .map_err(|e| format!("load runtime config: {e}"));
     }

@@ -50,6 +50,10 @@ fn api_url(ctx: &DirectApiContext, path: &str) -> String {
     crate::config::local_api_url(ctx.api_port, path)
 }
 
+fn api_origin(ctx: &DirectApiContext) -> String {
+    format!("http://{}:{}", crate::config::loopback(), ctx.api_port)
+}
+
 fn into_result(status: reqwest::StatusCode, body: Value) -> Result<Value, String> {
     if status.is_success() {
         Ok(body)
@@ -74,6 +78,8 @@ async fn request_json(method: Method, path: &str) -> Result<Value, String> {
     let ctx = load_context()?;
     let response = client()
         .request(method, api_url(&ctx, path))
+        .header(reqwest::header::ORIGIN, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx))
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
@@ -88,6 +94,8 @@ where
     let response = client()
         .request(method, api_url(&ctx, path))
         .query(query)
+        .header(reqwest::header::ORIGIN, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx))
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
@@ -102,6 +110,8 @@ where
     let response = client()
         .request(method, api_url(&ctx, path))
         .json(body)
+        .header(reqwest::header::ORIGIN, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx))
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;

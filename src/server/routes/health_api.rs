@@ -73,7 +73,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
-    let config_audit_report = crate::services::discord::config_audit::load_persisted_report(
+    let config_audit_report = crate::services::discord_config_audit::load_persisted_report(
         &state.db,
         state.pg_pool.as_ref(),
     )

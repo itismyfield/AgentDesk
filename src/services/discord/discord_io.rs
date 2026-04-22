@@ -91,7 +91,7 @@ pub(super) async fn try_handle_pending_dm_reply(
                 let sqlite3 = info.sqlite.clone();
                 let reply_id = info.id;
                 let err_msg = format!("{e}");
-                let _ = crate::services::discord::dm_reply_store::mark_pending_dm_reply_notify_failed_db(
+                let _ = crate::services::discord_dm_reply_store::mark_pending_dm_reply_notify_failed_db(
                     sqlite3.as_ref(),
                     pg_pool,
                     reply_id,
@@ -195,18 +195,17 @@ pub async fn retry_failed_dm_notifications(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
-    let entries =
-        match crate::services::discord::dm_reply_store::load_failed_consumed_dm_replies_db(
-            db, pg_pool,
-        )
-        .await
-        {
-            Ok(entries) => entries,
-            Err(error) => {
-                tracing::warn!("  [dm-reply] list failed notifications: {error}");
-                return;
-            }
-        };
+    let entries = match crate::services::discord_dm_reply_store::load_failed_consumed_dm_replies_db(
+        db, pg_pool,
+    )
+    .await
+    {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!("  [dm-reply] list failed notifications: {error}");
+            return;
+        }
+    };
 
     if entries.is_empty() {
         return;
@@ -234,7 +233,7 @@ pub async fn retry_failed_dm_notifications(
         {
             Ok(()) => {
                 // Clear _notify_failed on success
-                let _ = crate::services::discord::dm_reply_store::clear_pending_dm_reply_notify_failure_db(
+                let _ = crate::services::discord_dm_reply_store::clear_pending_dm_reply_notify_failure_db(
                     db,
                     pg_pool,
                     entry.id,
@@ -269,7 +268,7 @@ async fn consume_pending_dm_reply(
     user_id: &str,
     answer: &str,
 ) -> Option<ConsumedDmReply> {
-    let row = crate::services::discord::dm_reply_store::load_oldest_pending_dm_reply_db(
+    let row = crate::services::discord_dm_reply_store::load_oldest_pending_dm_reply_db(
         db, pg_pool, user_id,
     )
     .await
@@ -283,7 +282,7 @@ async fn consume_pending_dm_reply(
     let updated_context = serde_json::to_string(&context).unwrap_or_default();
 
     // CAS: only mark consumed if still pending (guards against race)
-    let updated = crate::services::discord::dm_reply_store::mark_pending_dm_reply_consumed_db(
+    let updated = crate::services::discord_dm_reply_store::mark_pending_dm_reply_consumed_db(
         db,
         pg_pool,
         row.id,
@@ -498,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn consume_pending_dm_reply_stores_answer_but_returns_original_context() {
         let db = crate::db::test_db();
-        let reply_id = crate::services::discord::dm_reply_store::register_pending_dm_reply(
+        let reply_id = crate::services::discord_dm_reply_store::register_pending_dm_reply(
             &db,
             "family-counsel",
             "12345",

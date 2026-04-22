@@ -707,15 +707,15 @@ pub fn cmd_config_set(json_str: &str) -> Result<(), String> {
 pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| "Failed to resolve AGENTDESK_ROOT_DIR".to_string())?;
-    let legacy_scan = crate::services::discord::config_audit::scan_legacy_sources(&root);
+    let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(&root);
 
     if !dry_run {
         crate::runtime_layout::ensure_runtime_layout(&root)?;
     }
 
-    let loaded = crate::services::discord::config_audit::load_runtime_config(&root)?;
+    let loaded = crate::services::discord_config_audit::load_runtime_config(&root)?;
     let db = crate::db::init(&loaded.config).map_err(|err| err.to_string())?;
-    let outcome = crate::services::discord::config_audit::audit_and_reconcile(
+    let outcome = crate::services::discord_config_audit::audit_and_reconcile(
         &root,
         loaded.config,
         loaded.path,

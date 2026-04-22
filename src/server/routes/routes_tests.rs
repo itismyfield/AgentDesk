@@ -776,7 +776,7 @@ async fn health_api_includes_latest_config_audit_report() {
 
     {
         let conn = db.lock().unwrap();
-        let report = crate::services::discord::config_audit::ConfigAuditReport {
+        let report = crate::services::discord_config_audit::ConfigAuditReport {
             generated_at: "2026-04-11T01:23:45Z".to_string(),
             status: "warn".to_string(),
             dry_run: false,
@@ -785,7 +785,7 @@ async fn health_api_includes_latest_config_audit_report() {
             actions: vec![
                 "synced 1 agent definitions from agentdesk.yaml into the agents table".to_string(),
             ],
-            sources: crate::services::discord::config_audit::ConfigAuditSources {
+            sources: crate::services::discord_config_audit::ConfigAuditSources {
                 yaml_path: "/tmp/agentdesk.yaml".to_string(),
                 yaml_present: true,
                 role_map_path: Some("/tmp/role_map.json".to_string()),
@@ -793,7 +793,7 @@ async fn health_api_includes_latest_config_audit_report() {
                 bot_settings_path: Some("/tmp/bot_settings.json".to_string()),
                 bot_settings_present: false,
             },
-            storage: crate::services::discord::config_audit::ConfigAuditDbSummary {
+            storage: crate::services::discord_config_audit::ConfigAuditDbSummary {
                 missing_agents: Vec::new(),
                 extra_agents: Vec::new(),
                 mismatched_agents: vec!["alpha".to_string()],

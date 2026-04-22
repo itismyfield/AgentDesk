@@ -1024,7 +1024,7 @@ pub fn handle_dcserver(token: Option<String>) {
     let runtime_root = agentdesk_runtime_root();
     let legacy_scan = runtime_root
         .as_ref()
-        .map(|root| crate::services::discord::config_audit::scan_legacy_sources(root))
+        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
         .unwrap_or_default();
 
     if let Some(root) = runtime_root.as_ref() {
@@ -1095,7 +1095,7 @@ pub fn handle_dcserver(token: Option<String>) {
         // ── AgentDesk HTTP server ──────────────────────────────────
         // Load agentdesk.yaml (graceful: use defaults if missing)
         let loaded = if let Some(root) = runtime_root.as_ref() {
-            match crate::services::discord::config_audit::load_runtime_config(root) {
+            match crate::services::discord_config_audit::load_runtime_config(root) {
                 Ok(loaded) => loaded,
                 Err(error) => {
                     eprintln!("  ✖ Failed to load config after layout prep: {error}");
@@ -1106,7 +1106,7 @@ pub fn handle_dcserver(token: Option<String>) {
             let fallback_path = settings_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"));
-            crate::services::discord::config_audit::LoadedRuntimeConfig {
+            crate::services::discord_config_audit::LoadedRuntimeConfig {
                 config: config::load_graceful(),
                 existed: fallback_path.is_file(),
                 path: fallback_path,
@@ -1225,7 +1225,7 @@ pub fn handle_dcserver(token: Option<String>) {
         match db::init(&ad_config) {
             Ok(ad_db) => {
                 if let Some(root) = runtime_root.as_ref() {
-                    match crate::services::discord::config_audit::audit_and_reconcile(
+                    match crate::services::discord_config_audit::audit_and_reconcile(
                         root,
                         ad_config,
                         loaded.path,
