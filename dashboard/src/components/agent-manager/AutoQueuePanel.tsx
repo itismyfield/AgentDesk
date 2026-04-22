@@ -866,9 +866,12 @@ export default function AutoQueuePanel({
     threadGroupCount > 1 || Object.keys(threadGroups).length > 1;
   const maxConcurrent = run?.max_concurrent_threads ?? 1;
   const hasBatchPhases = entries.some((entry) => (entry.batch_phase ?? 0) > 0);
+  // Earliest phase that still has work to do (pending or in-flight).
+  // Previously this excluded phase 0 ("if (phase <= 0)"), so a queue with
+  // P0 entries still pending and P1 entries also pending was reported as
+  // "currently P1". Phase 0 is a real phase — include it.
   const currentBatchPhase = entries.reduce<number | null>((minPhase, entry) => {
     const phase = entry.batch_phase ?? 0;
-    if (phase <= 0) return minPhase;
     if (entry.status !== "pending" && entry.status !== "dispatched") return minPhase;
     return minPhase == null ? phase : Math.min(minPhase, phase);
   }, null);
