@@ -148,6 +148,32 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 
 Policies are not checked into the repository — they are created at runtime and loaded from the configured `policies.dir` path.
 
+### Policy Tests
+Local policy development now has a dedicated Node runner for the repository copies under `policies/`.
+
+Run the full suite:
+
+```bash
+npm run test:policies
+```
+
+What the harness does:
+- Loads each policy file in a Node VM without booting the Rust server
+- Injects a mocked `agentdesk` bridge so hooks can execute side-effect paths
+- Lets tests assert dispatch creation, status transitions, review state sync, and SQL-driven branches
+
+Where to add tests:
+- `policies/__tests__/kanban-rules.test.js`
+- `policies/__tests__/auto-queue.test.js`
+- `policies/__tests__/review-automation.test.js`
+- Shared helpers live in `policies/__tests__/support/harness.js`
+
+Test-writing rules:
+- Prefer hook-level coverage first (`onCardTransition`, `onDispatchCompleted`, `onReviewEnter`)
+- Mock only the SQL and bridge calls the scenario actually needs
+- Keep assertions on observable side effects: `agentdesk.dispatch.create`, `agentdesk.kanban.setStatus`, `agentdesk.kanban.setReviewStatus`, `agentdesk.reviewState.sync`
+- Export only Node-safe test surfaces from policy files via guarded `module.exports` blocks so QuickJS runtime behavior stays unchanged
+
 ### Tiered Tick System
 Policies hook into a 3-tier periodic tick system running on a dedicated OS thread:
 

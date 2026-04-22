@@ -1442,7 +1442,9 @@ function processVerdict(cardId, verdict, result, options) {
   }
 }
 
-agentdesk.registerPolicy(reviewAutomation);
+if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPolicy === "function") {
+  agentdesk.registerPolicy(reviewAutomation);
+}
 
 // #701: Expose the create-pr dispatch helper so pipeline stage policies can
 // hand cards back into the PR/CI flow after non-skip pipeline stages
@@ -1463,3 +1465,14 @@ agentdesk.reviewAutomation.attemptCreatePr = function(cardId) {
 agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason) {
   markPrCreateFailed(cardId, reason);
 };
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    policy: reviewAutomation,
+    __test: {
+      buildNoopReviewContext: buildNoopReviewContext,
+      processVerdict: processVerdict,
+      setNormalSuggestionPending: setNormalSuggestionPending
+    }
+  };
+}

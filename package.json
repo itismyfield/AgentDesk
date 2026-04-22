@@ -1,0 +1,8 @@
+{
+  "name": "agentdesk-policy-tests",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test:policies": "node --test policies/__tests__/*.test.js"
+  }
+}

@@ -1292,4 +1292,17 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
   }
 }
 
-agentdesk.registerPolicy(autoQueue);
+if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPolicy === "function") {
+  agentdesk.registerPolicy(autoQueue);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    policy: autoQueue,
+    __test: {
+      inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
+      dispatchableTargets: _dispatchableTargets,
+      freePathToDispatchable: _freePathToDispatchable
+    }
+  };
+}

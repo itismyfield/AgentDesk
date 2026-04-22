@@ -759,4 +759,15 @@ var rules = {
   }
 };
 
-agentdesk.registerPolicy(rules);
+if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPolicy === "function") {
+  agentdesk.registerPolicy(rules);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    policy: rules,
+    __test: {
+      runPreflight: _runPreflight
+    }
+  };
+}
