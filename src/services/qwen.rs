@@ -2298,7 +2298,10 @@ mod tests {
                 message: expected_message,
             }
         );
-        assert!(!state.meaningful_progress_seen, "system event must not mark progress");
+        assert!(
+            !state.meaningful_progress_seen,
+            "system event must not mark progress"
+        );
     }
 
     #[test]
