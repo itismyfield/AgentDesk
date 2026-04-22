@@ -700,7 +700,6 @@ async fn mailbox_try_start_turn(
         .await
 }
 
-#[allow(dead_code)]
 async fn mailbox_restore_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,

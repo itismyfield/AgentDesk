@@ -790,6 +790,20 @@ pub(super) async fn restore_inflight_turns(
                     }
                 }
 
+                // Mark the channel mailbox as having an active turn so new
+                // incoming messages are queued instead of racing the restored
+                // tmux turn. Without this, the hourglass reaction appears
+                // immediately on the next user message but no response is
+                // produced because the tmux session is still busy.
+                mailbox_restore_active_turn(
+                    shared,
+                    channel_id,
+                    Arc::new(CancelToken::new()),
+                    UserId::new(state.request_owner_user_id),
+                    MessageId::new(state.user_msg_id),
+                )
+                .await;
+
                 // Keep the inflight state until the watcher either relays the
                 // final response or triggers watcher-death handoff. Clearing it
                 // here breaks the handoff path if the recovered tmux session
@@ -1378,6 +1392,20 @@ pub(super) async fn restore_inflight_turns(
                     }
                 }
             }
+
+            // Mark the channel mailbox as having an active turn so new
+            // incoming messages are queued instead of racing the restored
+            // tmux turn. Without this, the hourglass reaction appears
+            // immediately on the next user message but no response is
+            // produced because the tmux session is still busy.
+            mailbox_restore_active_turn(
+                shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(state.request_owner_user_id),
+                MessageId::new(state.user_msg_id),
+            )
+            .await;
 
             // Keep the inflight state until the watcher either relays the
             // final response or triggers watcher-death handoff. Clearing it
