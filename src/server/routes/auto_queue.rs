@@ -1886,7 +1886,7 @@ async fn load_activate_card_state_pg(
     entry_id: &str,
 ) -> Result<ActivateCardState, String> {
     let row = sqlx::query(
-        "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id
+        "SELECT status, title, metadata::TEXT AS metadata, latest_dispatch_id, repo_id, assigned_agent_id
          FROM kanban_cards
          WHERE id = $1",
     )
