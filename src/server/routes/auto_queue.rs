@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder, Row as SqlxRow};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +12,8 @@ use std::sync::{Arc, OnceLock};
 
 use super::AppState;
 use crate::services::{auto_queue::AutoQueueLogContext, provider::ProviderKind};
+
+const RESET_GLOBAL_CONFIRMATION_TOKEN: &str = "confirm-global-reset";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -127,6 +129,11 @@ pub struct AddRunEntryBody {
 #[derive(Debug, Default, Deserialize)]
 pub struct ResetBody {
     pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ResetGlobalBody {
+    pub confirmation_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1379,112 +1386,106 @@ async fn cancel_selected_runs_with_pg(
     .await
 }
 
-async fn reset_with_pg(body: &ResetBody, pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
-    let agent_id = body
-        .agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let (deleted_entries, completed_runs, protected_active_runs, warning) = if let Some(agent_id) =
-        agent_id
-    {
-        let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
-            .bind(agent_id)
-            .execute(pool)
-            .await
-            .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
-            .rows_affected() as usize;
-        let completed_runs = sqlx::query(
-            "UPDATE auto_queue_runs
-                 SET status = 'completed',
-                     completed_at = NOW()
-                 WHERE status IN ('generated', 'pending', 'active', 'paused')
-                   AND agent_id = $1",
-        )
+async fn reset_scoped_with_pg(
+    agent_id: &str,
+    pool: &sqlx::PgPool,
+) -> Result<serde_json::Value, String> {
+    let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
         .bind(agent_id)
         .execute(pool)
         .await
-        .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
+        .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
         .rows_affected() as usize;
-        (deleted_entries, completed_runs, 0usize, None)
-    } else {
-        let protected_active_runs = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM auto_queue_runs WHERE status = 'active'",
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|error| format!("count active auto_queue_runs: {error}"))?;
-        if protected_active_runs > 0 {
-            crate::auto_queue_log!(
-                warn,
-                "reset_global_preserved_active_runs",
-                AutoQueueLogContext::new(),
-                "[auto-queue] Global PG reset requested without agent_id; preserving {protected_active_runs} active run(s)"
-            );
-        } else {
-            crate::auto_queue_log!(
-                warn,
-                "reset_global_unscoped",
-                AutoQueueLogContext::new(),
-                "[auto-queue] Global PG reset requested without agent_id; applying unscoped reset"
-            );
-        }
+    let completed_runs = sqlx::query(
+        "UPDATE auto_queue_runs
+             SET status = 'completed',
+                 completed_at = NOW()
+             WHERE status IN ('generated', 'pending', 'active', 'paused')
+               AND agent_id = $1",
+    )
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
+    .rows_affected() as usize;
+    Ok(json!({
+        "ok": true,
+        "deleted_entries": deleted_entries,
+        "completed_runs": completed_runs,
+        "protected_active_runs": 0usize,
+    }))
+}
 
-        let deleted_entries = if protected_active_runs > 0 {
-            sqlx::query(
-                "DELETE FROM auto_queue_entries
-                     WHERE run_id IS NULL
-                        OR run_id NOT IN (
-                            SELECT id FROM auto_queue_runs WHERE status = 'active'
-                        )",
-            )
-            .execute(pool)
-            .await
-            .map_err(|error| format!("delete inactive auto_queue_entries: {error}"))?
-            .rows_affected() as usize
-        } else {
-            sqlx::query("DELETE FROM auto_queue_entries")
-                .execute(pool)
-                .await
-                .map_err(|error| format!("delete all auto_queue_entries: {error}"))?
-                .rows_affected() as usize
-        };
-        let completed_runs = if protected_active_runs > 0 {
-            sqlx::query(
-                "UPDATE auto_queue_runs
-                     SET status = 'completed',
-                         completed_at = NOW()
-                     WHERE status IN ('generated', 'pending', 'paused')",
-            )
-            .execute(pool)
-            .await
-            .map_err(|error| format!("complete inactive auto_queue_runs: {error}"))?
-            .rows_affected() as usize
-        } else {
-            sqlx::query(
-                "UPDATE auto_queue_runs
-                     SET status = 'completed',
-                         completed_at = NOW()
-                     WHERE status IN ('generated', 'pending', 'active', 'paused')",
-            )
-            .execute(pool)
-            .await
-            .map_err(|error| format!("complete all auto_queue_runs: {error}"))?
-            .rows_affected() as usize
-        };
-        let warning = (protected_active_runs > 0).then(|| {
-                format!(
-                    "global reset preserved {protected_active_runs} active run(s); use agent_id to reset a specific queue"
-                )
-            });
-        (
-            deleted_entries,
-            completed_runs,
-            protected_active_runs as usize,
-            warning,
+async fn reset_global_with_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
+    let protected_active_runs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM auto_queue_runs WHERE status = 'active'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count active auto_queue_runs: {error}"))?;
+    if protected_active_runs > 0 {
+        crate::auto_queue_log!(
+            warn,
+            "reset_global_preserved_active_runs",
+            AutoQueueLogContext::new(),
+            "[auto-queue] Global PG reset requested without agent_id; preserving {protected_active_runs} active run(s)"
+        );
+    } else {
+        crate::auto_queue_log!(
+            warn,
+            "reset_global_unscoped",
+            AutoQueueLogContext::new(),
+            "[auto-queue] Global PG reset requested without agent_id; applying unscoped reset"
+        );
+    }
+
+    let deleted_entries = if protected_active_runs > 0 {
+        sqlx::query(
+            "DELETE FROM auto_queue_entries
+                 WHERE run_id IS NULL
+                    OR run_id NOT IN (
+                        SELECT id FROM auto_queue_runs WHERE status = 'active'
+                    )",
         )
+        .execute(pool)
+        .await
+        .map_err(|error| format!("delete inactive auto_queue_entries: {error}"))?
+        .rows_affected() as usize
+    } else {
+        sqlx::query("DELETE FROM auto_queue_entries")
+            .execute(pool)
+            .await
+            .map_err(|error| format!("delete all auto_queue_entries: {error}"))?
+            .rows_affected() as usize
     };
+    let completed_runs = if protected_active_runs > 0 {
+        sqlx::query(
+            "UPDATE auto_queue_runs
+                 SET status = 'completed',
+                     completed_at = NOW()
+                 WHERE status IN ('generated', 'pending', 'paused')",
+        )
+        .execute(pool)
+        .await
+        .map_err(|error| format!("complete inactive auto_queue_runs: {error}"))?
+        .rows_affected() as usize
+    } else {
+        sqlx::query(
+            "UPDATE auto_queue_runs
+                 SET status = 'completed',
+                     completed_at = NOW()
+                 WHERE status IN ('generated', 'pending', 'active', 'paused')",
+        )
+        .execute(pool)
+        .await
+        .map_err(|error| format!("complete all auto_queue_runs: {error}"))?
+        .rows_affected() as usize
+    };
+    let warning = (protected_active_runs > 0).then(|| {
+        format!(
+            "global reset preserved {protected_active_runs} active run(s); use agent_id to reset a specific queue"
+        )
+    });
 
     let mut response = json!({
         "ok": true,
@@ -1496,6 +1497,83 @@ async fn reset_with_pg(body: &ResetBody, pool: &sqlx::PgPool) -> Result<serde_js
         response["warning"] = json!(warning);
     }
     Ok(response)
+}
+
+fn reset_global_with_conn(conn: &libsql_rusqlite::Connection) -> Result<serde_json::Value, String> {
+    let protected_active_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("count active auto_queue_runs: {error}"))?;
+    if protected_active_runs > 0 {
+        crate::auto_queue_log!(
+            warn,
+            "reset_global_preserved_active_runs",
+            AutoQueueLogContext::new(),
+            "[auto-queue] Global reset requested without agent_id; preserving {protected_active_runs} active run(s)"
+        );
+    } else {
+        crate::auto_queue_log!(
+            warn,
+            "reset_global_unscoped",
+            AutoQueueLogContext::new(),
+            "[auto-queue] Global reset requested without agent_id; applying unscoped reset"
+        );
+    }
+
+    let deleted_entries = if protected_active_runs > 0 {
+        conn.execute(
+            "DELETE FROM auto_queue_entries \
+                 WHERE run_id IS NULL \
+                    OR run_id NOT IN (SELECT id FROM auto_queue_runs WHERE status = 'active')",
+            [],
+        )
+        .map_err(|error| format!("delete inactive auto_queue_entries: {error}"))?
+    } else {
+        conn.execute("DELETE FROM auto_queue_entries", [])
+            .map_err(|error| format!("delete all auto_queue_entries: {error}"))?
+    };
+    let completed_runs = if protected_active_runs > 0 {
+        conn.execute(
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+                 WHERE status IN ('generated', 'pending', 'paused')",
+            [],
+        )
+        .map_err(|error| format!("complete inactive auto_queue_runs: {error}"))?
+    } else {
+        conn.execute(
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+                 WHERE status IN ('generated', 'pending', 'active', 'paused')",
+            [],
+        )
+        .map_err(|error| format!("complete all auto_queue_runs: {error}"))?
+    };
+    let warning = (protected_active_runs > 0).then(|| {
+        format!(
+            "global reset preserved {protected_active_runs} active run(s); use agent_id to reset a specific queue"
+        )
+    });
+
+    let mut response = json!({
+        "ok": true,
+        "deleted_entries": deleted_entries,
+        "completed_runs": completed_runs,
+        "protected_active_runs": protected_active_runs,
+    });
+    if let Some(warning) = warning {
+        response["warning"] = json!(warning);
+    }
+    Ok(response)
+}
+
+fn parse_json_body<T: DeserializeOwned>(body: Bytes, label: &str) -> Result<T, String> {
+    if body.is_empty() {
+        serde_json::from_slice(b"{}").map_err(|error| format!("invalid {label} body: {error}"))
+    } else {
+        serde_json::from_slice(&body).map_err(|error| format!("invalid {label} body: {error}"))
+    }
 }
 
 async fn update_run_with_pg(
@@ -10275,27 +10353,35 @@ pub async fn reset_slot_thread(
 }
 
 /// POST /api/auto-queue/reset
-/// Clear all entries and complete all non-terminal runs.
+/// Reset a single agent queue. Requires `agent_id`.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let body: ResetBody = if body.is_empty() {
-        ResetBody::default()
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid reset body: {error}")})),
-                );
-            }
+    let body: ResetBody = match parse_json_body(body, "reset") {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+
+    let agent_id = match body
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(agent_id) => agent_id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "agent_id is required for reset"})),
+            );
         }
     };
 
     if let Some(pool) = state.pg_pool.as_ref() {
-        return match reset_with_pg(&body, pool).await {
+        return match reset_scoped_with_pg(agent_id, pool).await {
             Ok(response) => (StatusCode::OK, Json(response)),
             Err(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10314,103 +10400,82 @@ pub async fn reset(
         }
     };
 
-    let agent_id = body
-        .agent_id
+    let deleted_entries = conn
+        .execute(
+            "DELETE FROM auto_queue_entries WHERE agent_id = ?1",
+            libsql_rusqlite::params![agent_id],
+        )
+        .unwrap_or(0);
+    let completed_runs = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+             WHERE status IN ('generated', 'pending', 'active', 'paused') AND agent_id = ?1",
+            libsql_rusqlite::params![agent_id],
+        )
+        .unwrap_or(0);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "deleted_entries": deleted_entries,
+            "completed_runs": completed_runs,
+            "protected_active_runs": 0usize,
+        })),
+    )
+}
+
+/// POST /api/auto-queue/reset-global
+/// Global reset requires an explicit confirmation token.
+pub async fn reset_global(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let body: ResetGlobalBody = match parse_json_body(body, "reset-global") {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+
+    let confirmation_token = body
+        .confirmation_token
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if confirmation_token != Some(RESET_GLOBAL_CONFIRMATION_TOKEN) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "confirmation_token is required for reset-global"})),
+        );
+    }
 
-    let (deleted_entries, completed_runs, protected_active_runs, warning) = if let Some(agent_id) =
-        agent_id
-    {
-        let deleted_entries = conn
-            .execute(
-                "DELETE FROM auto_queue_entries WHERE agent_id = ?1",
-                libsql_rusqlite::params![agent_id],
-            )
-            .unwrap_or(0);
-        let completed_runs = conn
-                .execute(
-                    "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
-                     WHERE status IN ('generated', 'pending', 'active', 'paused') AND agent_id = ?1",
-                    libsql_rusqlite::params![agent_id],
-                )
-                .unwrap_or(0);
-        (deleted_entries, completed_runs, 0usize, None)
-    } else {
-        let protected_active_runs: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if protected_active_runs > 0 {
-            crate::auto_queue_log!(
-                warn,
-                "reset_global_preserved_active_runs",
-                AutoQueueLogContext::new(),
-                "[auto-queue] Global reset requested without agent_id; preserving {protected_active_runs} active run(s)"
-            );
-        } else {
-            crate::auto_queue_log!(
-                warn,
-                "reset_global_unscoped",
-                AutoQueueLogContext::new(),
-                "[auto-queue] Global reset requested without agent_id; applying unscoped reset"
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return match reset_global_with_pg(pool).await {
+            Ok(response) => (StatusCode::OK, Json(response)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
             );
         }
-
-        let deleted_entries = if protected_active_runs > 0 {
-            conn.execute(
-                "DELETE FROM auto_queue_entries \
-                     WHERE run_id IS NULL \
-                        OR run_id NOT IN (SELECT id FROM auto_queue_runs WHERE status = 'active')",
-                [],
-            )
-            .unwrap_or(0)
-        } else {
-            conn.execute("DELETE FROM auto_queue_entries", [])
-                .unwrap_or(0)
-        };
-        let completed_runs = if protected_active_runs > 0 {
-            conn.execute(
-                "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
-                     WHERE status IN ('generated', 'pending', 'paused')",
-                [],
-            )
-            .unwrap_or(0)
-        } else {
-            conn.execute(
-                "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
-                     WHERE status IN ('generated', 'pending', 'active', 'paused')",
-                [],
-            )
-            .unwrap_or(0)
-        };
-        let warning = (protected_active_runs > 0).then(|| {
-                format!(
-                    "global reset preserved {protected_active_runs} active run(s); use agent_id to reset a specific queue"
-                )
-            });
-        (
-            deleted_entries,
-            completed_runs,
-            protected_active_runs as usize,
-            warning,
-        )
     };
 
-    let mut response = json!({
-        "ok": true,
-        "deleted_entries": deleted_entries,
-        "completed_runs": completed_runs,
-        "protected_active_runs": protected_active_runs,
-    });
-    if let Some(warning) = warning {
-        response["warning"] = json!(warning);
+    match reset_global_with_conn(&conn) {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ),
     }
-    (StatusCode::OK, Json(response))
 }
 
 /// POST /api/auto-queue/pause — pause all active runs

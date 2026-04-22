@@ -1985,14 +1985,29 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/auto-queue/reset",
             "auto-queue",
-            "Complete non-terminal runs and clear queue entries",
+            "Reset one agent queue and clear its queue entries",
         )
-        .with_params([(
-            "agent_id",
-            body_param("string", false, "Reset only one agent queue instead of global scope"),
-        )])
+        .with_params([("agent_id", body_param("string", true, "Agent ID for the queue reset"))])
         .with_example(
             json!({"body": {"agent_id": "agent-1"}}),
+            json!({"ok": true, "deleted_entries": 4, "completed_runs": 1, "protected_active_runs": 0}),
+        ),
+        ep(
+            "POST",
+            "/api/auto-queue/reset-global",
+            "auto-queue",
+            "Reset all queues with an explicit confirmation token",
+        )
+        .with_params([(
+            "confirmation_token",
+            body_param(
+                "string",
+                true,
+                "Confirmation token required for global reset",
+            ),
+        )])
+        .with_example(
+            json!({"body": {"confirmation_token": "confirm-global-reset"}}),
             json!({"ok": true, "deleted_entries": 4, "completed_runs": 1, "protected_active_runs": 0}),
         ),
         ep(

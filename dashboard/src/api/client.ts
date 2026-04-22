@@ -1768,18 +1768,29 @@ export async function reorderAutoQueueEntries(
 export interface AutoQueueResetScope {
   runId?: string | null;
   repo?: string | null;
-  agentId?: string | null;
+  agentId: string;
 }
 
 export async function resetAutoQueue(
-  scope: AutoQueueResetScope = {},
+  scope: AutoQueueResetScope,
 ): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
   return request("/api/auto-queue/reset", {
     method: "POST",
     body: JSON.stringify({
       run_id: scope.runId ?? undefined,
       repo: scope.repo ?? undefined,
-      agent_id: scope.agentId ?? undefined,
+      agent_id: scope.agentId,
+    }),
+  });
+}
+
+export async function resetGlobalAutoQueue(
+  confirmationToken = "confirm-global-reset",
+): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
+  return request("/api/auto-queue/reset-global", {
+    method: "POST",
+    body: JSON.stringify({
+      confirmation_token: confirmationToken,
     }),
   });
 }

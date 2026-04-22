@@ -688,10 +688,13 @@ export default function AutoQueuePanel({
     setError(null);
     try {
       suppressedRunIdRef.current = null;
+      if (!resetAgentId) {
+        throw new Error("agent_id is required for reset");
+      }
       await api.resetAutoQueue({
         runId: status?.run?.id ?? null,
         repo: selectedRepo || null,
-        agentId: selectedAgentId || null,
+        agentId: resetAgentId,
       });
       const result = await api.generateAutoQueue(
         selectedRepo || null,
@@ -729,10 +732,13 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
+      if (!resetAgentId) {
+        throw new Error("agent_id is required for reset");
+      }
       await api.resetAutoQueue({
         runId: status?.run?.id ?? null,
         repo: selectedRepo || null,
-        agentId: selectedAgentId || null,
+        agentId: resetAgentId,
       });
       resetPanelState();
     } catch (e) {
@@ -827,6 +833,7 @@ export default function AutoQueuePanel({
   const entries = status?.entries ?? [];
   const phaseGates = status?.phase_gates ?? [];
   const deployPhases = new Set(run?.deploy_phases ?? []);
+  const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
   const gatesByPhase = new Map<number, PhaseGateInfo[]>();
   for (const gate of phaseGates) {
     const list = gatesByPhase.get(gate.phase) ?? [];
