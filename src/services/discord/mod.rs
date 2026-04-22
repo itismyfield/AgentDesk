@@ -394,6 +394,47 @@ pub(super) struct TmuxWatcherHandle {
     /// Watcher checks this before relay to avoid duplicate messages.
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Per-channel coordination for watcher-to-Discord relay emission.
+///
+/// This state is **shared across watcher-handle replacements** (unlike
+/// `TmuxWatcherHandle`, which is recreated on `claim_or_replace_watcher`).
+/// Surviving replacement is the root-cause fix for duplicate terminal-response
+/// emission observed when an outgoing watcher and an incoming watcher both
+/// pass their per-instance dedupe guards and both send the same tmux range to
+/// Discord.
+///
+/// Scope: intra-process only. Persisted dedupe across dcserver restarts is
+/// still handled by `InflightTurnState::last_watcher_relayed_offset` in the
+/// inflight JSON.
+pub(super) struct TmuxRelayCoord {
+    /// Non-zero while some watcher instance is actively emitting a relay for
+    /// this channel. Holds the `data_start_offset` of the in-progress emission.
+    /// Acquired via `compare_exchange(0, offset)` — only one watcher can
+    /// hold the slot, so concurrent attempts from outgoing+incoming watchers
+    /// serialize rather than double-fire.
+    pub(super) relay_slot: Arc<std::sync::atomic::AtomicU64>,
+    /// End offset (exclusive) of the last relay this process has confirmed
+    /// delivery for. 0 = no confirmed delivery yet this process lifetime.
+    ///
+    /// Dedupe invariant: a new relay candidate with
+    /// `data_start_offset < confirmed_end_offset` overlaps an already-delivered
+    /// range and must be skipped. Using the END offset (not the start) lets a
+    /// legitimate new turn that starts exactly at the previous turn's end
+    /// still be emitted, which is the intentional strict-`<` semantic the
+    /// watcher already relies on for Claude Code's `task_notification`
+    /// auto-trigger boundary.
+    pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl TmuxRelayCoord {
+    pub(super) fn new() -> Self {
+        Self {
+            relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+}
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,
@@ -424,6 +465,11 @@ pub(super) struct SharedData {
     pub(super) skills_cache: tokio::sync::RwLock<Vec<(String, String)>>,
     /// Per-channel tmux output watchers for terminal→Discord relay
     pub(super) tmux_watchers: dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    /// Per-channel relay coordination state. Unlike `tmux_watchers`, this
+    /// entry is preserved across watcher-handle replacements so an outgoing
+    /// watcher and an incoming watcher share the same emission-slot atomic
+    /// and confirmed-offset watermark. See `TmuxRelayCoord`.
+    pub(super) tmux_relay_coords: dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -532,6 +578,17 @@ impl SharedData {
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
         self.health_registry.upgrade()
     }
+
+    /// Fetch the per-channel relay coordination state, creating a fresh one
+    /// on first access. Returned Arc is shared across all watcher instances
+    /// (outgoing and incoming) for the channel, so they coordinate relay
+    /// emission without duplicate-sending the same tmux range.
+    pub(super) fn tmux_relay_coord(&self, channel_id: ChannelId) -> Arc<TmuxRelayCoord> {
+        self.tmux_relay_coords
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(TmuxRelayCoord::new()))
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +611,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(Vec::new()),
         tmux_watchers: dashmap::DashMap::new(),
+        tmux_relay_coords: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
