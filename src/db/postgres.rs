@@ -334,6 +334,8 @@ fn database_url_override() -> Option<String> {
 
 #[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const TEST_POSTGRES_POOL_MAX: u32 = 2;
 
 #[cfg(test)]
 async fn run_test_postgres_sqlx_op_with_timeout<T, F>(
@@ -365,7 +367,9 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
     run_test_postgres_sqlx_op(
         &format!("{label} connect postgres"),
         PgPoolOptions::new()
-            .max_connections(4)
+            // CI runs many PostgreSQL-backed tests in parallel; keeping the
+            // per-test pool lean prevents transient pool starvation.
+            .max_connections(TEST_POSTGRES_POOL_MAX)
             .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
             .connect_with(options),
     )
