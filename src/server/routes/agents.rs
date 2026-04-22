@@ -95,6 +95,36 @@ fn agent_exists(conn: &libsql_rusqlite::Connection, id: &str) -> bool {
     .unwrap_or(false)
 }
 
+fn resolve_channel_identifier(value: &str) -> Option<u64> {
+    super::dispatches::resolve_channel_alias_pub(value).or_else(|| value.trim().parse::<u64>().ok())
+}
+
+fn channel_identifier_matches(left: &str, right: &str) -> bool {
+    let left_trimmed = left.trim();
+    let right_trimmed = right.trim();
+    if left_trimmed.eq_ignore_ascii_case(right_trimmed) {
+        return true;
+    }
+
+    match (
+        resolve_channel_identifier(left_trimmed),
+        resolve_channel_identifier(right_trimmed),
+    ) {
+        (Some(left_id), Some(right_id)) => left_id == right_id,
+        _ => false,
+    }
+}
+
+fn channel_override_is_allowed(
+    override_channel: &str,
+    bindings: &crate::db::agents::AgentChannelBindings,
+) -> bool {
+    bindings
+        .all_channels()
+        .into_iter()
+        .any(|channel| channel_identifier_matches(&channel, override_channel))
+}
+
 fn extract_tmux_name(session_key: &str) -> Option<String> {
     session_key
         .split_once(':')
@@ -942,6 +972,22 @@ pub async fn start_agent_turn(
                 Json(json!({"ok": false, "error": "agent channel binding not found"})),
             );
         };
+
+        if let Some(channel_override) = channel_override.as_deref()
+            && !channel_override_is_allowed(channel_override, &bindings)
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "error": format!(
+                        "channel override {} is not allowed for agent {}",
+                        channel_override,
+                        id
+                    ),
+                })),
+            );
+        }
 
         let provider = match provider_override.as_deref() {
             Some(raw) => match ProviderKind::from_str(raw) {

@@ -4089,8 +4089,8 @@ async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadSessionCleanupPlan, OffsetAdvanceDecision, WatcherToolState,
-        build_bg_trigger_session_key, dead_session_cleanup_plan,
+        DeadSessionCleanupPlan, OffsetAdvanceDecision, TmuxWatcherHandle, WatcherToolState,
+        build_bg_trigger_session_key, claim_or_replace_watcher, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox, load_restored_provider_session_id,
         notify_path_offset_advance_decision, parse_bg_trigger_offset_from_session_key,
         process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
@@ -4102,6 +4102,18 @@ mod tests {
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
     use poise::serenity_prelude::ChannelId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    fn test_watcher_handle() -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            paused: Arc::new(AtomicBool::new(true)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+        }
+    }
 
     #[test]
     fn restored_live_tmux_session_loads_namespaced_provider_session_id() {
@@ -4187,6 +4199,31 @@ mod tests {
             )
             .unwrap();
         assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
+    }
+
+    #[test]
+    fn claim_or_replace_watcher_keeps_one_entry_per_channel() {
+        let watchers = dashmap::DashMap::new();
+        let channel_id = ChannelId::new(1485506232256168123);
+
+        assert!(super::try_claim_watcher(
+            &watchers,
+            channel_id,
+            test_watcher_handle()
+        ));
+        assert_eq!(watchers.len(), 1);
+
+        assert!(!claim_or_replace_watcher(
+            &watchers,
+            channel_id,
+            test_watcher_handle(),
+            &ProviderKind::Codex,
+            "unit-test"
+        ));
+        assert_eq!(watchers.len(), 1);
+
+        let watcher = watchers.get(&channel_id).expect("watcher should exist");
+        assert!(watcher.paused.load(Ordering::Relaxed));
     }
 
     #[test]

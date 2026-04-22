@@ -750,6 +750,8 @@ pub(in crate::services::discord) async fn start_headless_turn(
             (None, None, None, 0u64)
         }
     };
+    let watcher_tmux_name = inflight_tmux_name.clone();
+    let watcher_output_path = inflight_output_path.clone();
 
     let mut inflight_state = InflightTurnState::new(
         provider.clone(),
@@ -770,6 +772,49 @@ pub(in crate::services::discord) async fn start_headless_turn(
     if let Err(error) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
+    }
+
+    #[cfg(unix)]
+    if let (Some(tmux_session_name), Some(output_path)) = (watcher_tmux_name, watcher_output_path) {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = TmuxWatcherHandle {
+            paused: paused.clone(),
+            resume_offset: resume_offset.clone(),
+            cancel: cancel.clone(),
+            pause_epoch: pause_epoch.clone(),
+            turn_delivered: turn_delivered.clone(),
+        };
+        let fresh = super::super::tmux::claim_or_replace_watcher(
+            &shared.tmux_watchers,
+            channel_id,
+            handle,
+            &provider,
+            "turn_start_headless",
+        );
+        if fresh {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Attaching tmux watcher for headless turn on channel {}",
+                channel_id
+            );
+        }
+        tokio::spawn(super::super::tmux::tmux_output_watcher(
+            channel_id,
+            ctx.http.clone(),
+            shared.clone(),
+            output_path,
+            tmux_session_name,
+            inflight_offset,
+            cancel,
+            paused,
+            resume_offset,
+            pause_epoch,
+            turn_delivered,
+        ));
     }
 
     let (tx, rx) = mpsc::channel();
