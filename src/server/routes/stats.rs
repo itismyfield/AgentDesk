@@ -18,6 +18,11 @@ pub struct StatsQuery {
     pub office_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MementoStatsQuery {
+    pub hours: Option<usize>,
+}
+
 #[derive(Clone)]
 struct AgentStatsRow {
     id: String,
@@ -907,5 +912,18 @@ pub async fn get_stats(
             "kanban": kanban,
             "github_closed_today": github_closed_today,
         })),
+    )
+}
+
+/// GET /api/stats/memento
+pub async fn get_memento_stats(
+    Query(params): Query<MementoStatsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let hours = params.hours.unwrap_or(24).clamp(1, 24 * 7);
+    (
+        StatusCode::OK,
+        Json(crate::services::memory::memento_call_metrics_snapshot(
+            hours,
+        )),
     )
 }

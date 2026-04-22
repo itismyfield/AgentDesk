@@ -1248,6 +1248,17 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/stats", "stats", "Get system stats"),
         ep(
             "GET",
+            "/api/stats/memento",
+            "stats",
+            "Get hourly Memento logical call counts and dedup hit rates",
+        )
+        .with_params([(
+            "hours",
+            query_param("integer", false, "Trailing window size in hours (1-168)")
+                .with_default(24),
+        )]),
+        ep(
+            "GET",
             "/api/settings",
             "settings",
             "Get the canonical company settings JSON stored in `kv_meta['settings']`",

@@ -765,6 +765,48 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
 }
 
 #[tokio::test]
+async fn stats_memento_endpoint_reports_hourly_counts_and_dedup_hits() {
+    crate::services::memory::reset_memento_throttle_for_tests();
+    crate::services::memory::note_memento_tool_request("recall");
+    crate::services::memory::note_memento_remote_call("recall");
+    crate::services::memory::note_memento_tool_request("recall");
+    crate::services::memory::note_memento_dedup_hit("recall");
+    crate::services::memory::note_memento_tool_request("remember");
+    crate::services::memory::note_memento_remote_call("remember");
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/stats/memento?hours=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["timezone"], "Asia/Seoul");
+    assert_eq!(json["window_hours"], 1);
+    assert_eq!(json["summary"]["request_count"], 3);
+    assert_eq!(json["summary"]["remote_call_count"], 2);
+    assert_eq!(json["summary"]["dedup_hit_count"], 1);
+    assert_eq!(json["tools"]["recall"]["request_count"], 2);
+    assert_eq!(json["tools"]["recall"]["dedup_hit_count"], 1);
+    assert_eq!(json["tools"]["remember"]["remote_call_count"], 1);
+    assert_eq!(json["hours"][0]["counts"]["request_count"], 3);
+
+    crate::services::memory::reset_memento_throttle_for_tests();
+}
+
+#[tokio::test]
 async fn health_api_includes_latest_config_audit_report() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -5544,6 +5586,7 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/help",
         "/api/docs/{category}",
         "/api/issues",
+        "/api/stats/memento",
     ] {
         assert!(
             endpoints.iter().any(|ep| ep["path"] == path),

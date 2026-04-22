@@ -1,5 +1,6 @@
 mod local;
 mod memento;
+mod memento_throttle;
 mod runtime_state;
 
 use std::future::Future;
@@ -15,6 +16,12 @@ pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
     resolve_memento_workspace, sanitize_memento_workspace_segment,
+};
+pub(crate) use memento_throttle::memento_call_metrics_snapshot;
+#[cfg(test)]
+pub(crate) use memento_throttle::{
+    note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_request,
+    reset_memento_throttle_for_tests,
 };
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 #[cfg(test)]

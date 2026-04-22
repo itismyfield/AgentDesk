@@ -8,6 +8,11 @@ use serde_json::{Map, Value, json};
 use super::{
     CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
     RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
+    memento_throttle::{
+        cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
+        note_memento_tool_request, should_dedup_remember, store_recall_response,
+        store_remember_fingerprint,
+    },
 };
 use crate::runtime_layout;
 use crate::services::discord::DispatchProfile;
@@ -42,11 +47,12 @@ struct ContextFetchResult {
     token_usage: TokenUsage,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct MementoRememberRequest {
     pub content: String,
     pub topic: String,
     pub kind: String,
+    pub importance: Option<f64>,
     pub keywords: Vec<String>,
     pub source: Option<String>,
     pub workspace: Option<String>,
@@ -356,6 +362,8 @@ impl MementoBackend {
         if !workspace.trim().is_empty() {
             args.insert("workspace".to_string(), json!(workspace));
         }
+        note_memento_tool_request("reflect");
+        note_memento_remote_call("reflect");
         self.call_tool(config, "reflect", Value::Object(args))
             .await
             .map(|result| result.token_usage)
@@ -376,13 +384,50 @@ impl MementoBackend {
         }
 
         let config = self.runtime_config()?;
-        let mut args = Map::new();
-        args.insert("content".to_string(), json!(request.content.trim()));
-        args.insert("topic".to_string(), json!(request.topic.trim()));
-        args.insert("type".to_string(), json!(request.kind.trim()));
+        let MementoRememberRequest {
+            content,
+            topic,
+            kind,
+            importance,
+            keywords,
+            source,
+            workspace,
+            agent_id,
+            case_id,
+            goal,
+            outcome,
+            phase,
+            resolution_status,
+            assertion_status,
+            context_summary,
+        } = request;
+        let normalized_content = normalize_whitespace(&content);
+        let normalized_topic = normalize_whitespace(&topic);
+        let normalized_kind = normalize_whitespace(&kind);
+        let resolved_workspace = workspace.or_else(|| config.workspace_override.clone());
+        let dedup_key = build_remember_dedup_key(
+            &normalized_content,
+            &normalized_topic,
+            &normalized_kind,
+            resolved_workspace.as_deref(),
+            agent_id.as_deref(),
+            case_id.as_deref(),
+        );
+        note_memento_tool_request("remember");
+        if should_dedup_remember(&dedup_key, importance) {
+            note_memento_dedup_hit("remember");
+            return Ok(TokenUsage::default());
+        }
 
-        let keywords = request
-            .keywords
+        let mut args = Map::new();
+        args.insert("content".to_string(), json!(normalized_content));
+        args.insert("topic".to_string(), json!(normalized_topic));
+        args.insert("type".to_string(), json!(normalized_kind));
+        if let Some(importance) = importance {
+            args.insert("importance".to_string(), json!(importance));
+        }
+
+        let keywords = keywords
             .into_iter()
             .map(|value| normalize_whitespace(&value))
             .filter(|value| !value.is_empty())
@@ -391,26 +436,24 @@ impl MementoBackend {
             args.insert("keywords".to_string(), json!(keywords));
         }
 
-        insert_optional_arg(&mut args, "source", request.source);
-        insert_optional_arg(
-            &mut args,
-            "workspace",
-            request
-                .workspace
-                .or_else(|| config.workspace_override.clone()),
-        );
-        insert_optional_arg(&mut args, "agentId", request.agent_id);
-        insert_optional_arg(&mut args, "caseId", request.case_id);
-        insert_optional_arg(&mut args, "goal", request.goal);
-        insert_optional_arg(&mut args, "outcome", request.outcome);
-        insert_optional_arg(&mut args, "phase", request.phase);
-        insert_optional_arg(&mut args, "resolutionStatus", request.resolution_status);
-        insert_optional_arg(&mut args, "assertionStatus", request.assertion_status);
-        insert_optional_arg(&mut args, "contextSummary", request.context_summary);
+        insert_optional_arg(&mut args, "source", source);
+        insert_optional_arg(&mut args, "workspace", resolved_workspace);
+        insert_optional_arg(&mut args, "agentId", agent_id);
+        insert_optional_arg(&mut args, "caseId", case_id);
+        insert_optional_arg(&mut args, "goal", goal);
+        insert_optional_arg(&mut args, "outcome", outcome);
+        insert_optional_arg(&mut args, "phase", phase);
+        insert_optional_arg(&mut args, "resolutionStatus", resolution_status);
+        insert_optional_arg(&mut args, "assertionStatus", assertion_status);
+        insert_optional_arg(&mut args, "contextSummary", context_summary);
 
+        note_memento_remote_call("remember");
         self.call_tool(&config, "remember", Value::Object(args))
             .await
-            .map(|result| result.token_usage)
+            .map(|result| {
+                store_remember_fingerprint(dedup_key, importance);
+                result.token_usage
+            })
     }
 
     pub(crate) async fn tool_feedback(
@@ -444,6 +487,8 @@ impl MementoBackend {
         insert_optional_arg(&mut args, "context", request.context);
         insert_optional_arg(&mut args, "triggerType", request.trigger_type);
 
+        note_memento_tool_request("tool_feedback");
+        note_memento_remote_call("tool_feedback");
         self.call_tool(&config, "tool_feedback", Value::Object(args))
             .await
             .map(|result| result.token_usage)
@@ -471,6 +516,40 @@ fn mcp_url(endpoint: &str) -> String {
         normalize_memento_endpoint(endpoint),
         MEMENTO_MCP_PATH
     )
+}
+
+fn build_recall_dedup_key(
+    workspace: &str,
+    agent_id: &str,
+    session_id: &str,
+    user_text: &str,
+) -> String {
+    [
+        workspace.trim(),
+        agent_id.trim(),
+        session_id.trim(),
+        user_text.trim(),
+    ]
+    .join("\u{1f}")
+}
+
+fn build_remember_dedup_key(
+    content: &str,
+    topic: &str,
+    kind: &str,
+    workspace: Option<&str>,
+    agent_id: Option<&str>,
+    case_id: Option<&str>,
+) -> String {
+    [
+        content.trim(),
+        topic.trim(),
+        kind.trim(),
+        workspace.unwrap_or("").trim(),
+        agent_id.unwrap_or("").trim(),
+        case_id.unwrap_or("").trim(),
+    ]
+    .join("\u{1f}")
 }
 
 fn render_rpc_error(error: &Value) -> String {
@@ -1052,6 +1131,22 @@ impl MemoryBackend for MementoBackend {
                 }
             };
             let workspace = self.resolve_workspace(&request.role_id, request.channel_id, &config);
+            let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
+            let dedup_key = build_recall_dedup_key(
+                &workspace,
+                &agent_id,
+                &request.session_id,
+                &normalize_whitespace(&request.user_text),
+            );
+            note_memento_tool_request("recall");
+            if let Some(external_recall) = cached_recall_response(&dedup_key) {
+                note_memento_dedup_hit("recall");
+                return RecallResponse {
+                    external_recall,
+                    ..RecallResponse::default()
+                };
+            }
+            note_memento_remote_call("recall");
 
             match tokio::time::timeout(
                 Duration::from_millis(self.settings.recall_timeout_ms),
@@ -1059,11 +1154,14 @@ impl MemoryBackend for MementoBackend {
             )
             .await
             {
-                Ok(Ok(result)) => RecallResponse {
-                    external_recall: result.external_recall,
-                    token_usage: result.token_usage,
-                    ..RecallResponse::default()
-                },
+                Ok(Ok(result)) => {
+                    store_recall_response(dedup_key, result.external_recall.clone());
+                    RecallResponse {
+                        external_recall: result.external_recall,
+                        token_usage: result.token_usage,
+                        ..RecallResponse::default()
+                    }
+                }
                 Ok(Err(err)) => {
                     let mut fallback = self.local.recall(request.clone()).await;
                     fallback.warnings.push(err);
@@ -1170,6 +1268,7 @@ mod tests {
         let guard = crate::services::discord::runtime_store::test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        super::super::memento_throttle::reset_memento_throttle_for_tests();
         let temp = tempfile::tempdir().unwrap();
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_key = std::env::var_os("MEMENTO_TEST_KEY");
@@ -1416,6 +1515,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memento_recall_dedups_identical_query_within_window() {
+        let context_content = serde_json::to_string(&json!({
+            "success": true,
+            "structured": true,
+            "rankedInjection": {
+                "items": [
+                    {
+                        "content": "Reuse cached memento recall result",
+                        "type": "procedure",
+                        "score": 0.81
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "usage": {
+                    "input_tokens": 55,
+                    "output_tokens": 7
+                },
+                "content": [
+                    {
+                        "type": "text",
+                        "text": context_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-123")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-123")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
+        let backend = MementoBackend::new(memento_settings());
+        let request = RecallRequest {
+            provider: ProviderKind::Codex,
+            role_id: "project-agentdesk".to_string(),
+            channel_id: 42,
+            session_id: "session-1".to_string(),
+            dispatch_profile: DispatchProfile::Full,
+            user_text: "What do we know about #344?".to_string(),
+        };
+
+        let first = backend.recall(request.clone()).await;
+        let second = backend.recall(request).await;
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(first.external_recall, second.external_recall);
+        assert_eq!(
+            first.token_usage,
+            crate::services::memory::TokenUsage {
+                input_tokens: 55,
+                output_tokens: 7,
+            }
+        );
+        assert_eq!(
+            second.token_usage,
+            crate::services::memory::TokenUsage::default()
+        );
+    }
+
+    #[tokio::test]
     async fn test_memento_recall_timeout_warns_and_falls_back_to_local() {
         let (base_url, handle) = spawn_hanging_http_server().await;
         let (_guard, _temp, previous_root, previous_key, previous_workspace) =
@@ -1611,6 +1799,7 @@ mod tests {
                 content: "Issue #418 retrospective".to_string(),
                 topic: "issue-418".to_string(),
                 kind: "episode".to_string(),
+                importance: Some(0.7),
                 keywords: vec!["issue-418".to_string(), "success".to_string()],
                 source: Some("card:card-418/dispatch:dispatch-418".to_string()),
                 workspace: Some("agentdesk".to_string()),
@@ -1639,6 +1828,7 @@ mod tests {
         assert!(requests[1].contains("\"content\":\"Issue #418 retrospective\""));
         assert!(requests[1].contains("\"topic\":\"issue-418\""));
         assert!(requests[1].contains("\"type\":\"episode\""));
+        assert!(requests[1].contains("\"importance\":0.7"));
         assert!(requests[1].contains("\"workspace\":\"agentdesk\""));
         assert!(requests[1].contains("\"agentId\":\"default\""));
         assert!(requests[1].contains("\"caseId\":\"issue-418\""));
@@ -1654,6 +1844,97 @@ mod tests {
                 output_tokens: 3,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_memento_remember_dedups_same_fact_when_importance_is_lower() {
+        let remember_content = serde_json::to_string(&json!({
+            "success": true,
+            "id": "memory-fact-1",
+            "usage": {
+                "inputTokens": 11,
+                "outputTokens": 2
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": remember_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-789")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-789")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
+        let backend = MementoBackend::new(memento_settings());
+        let request = MementoRememberRequest {
+            content: "ADK API release port is 8791".to_string(),
+            topic: "agentdesk-config".to_string(),
+            kind: "fact".to_string(),
+            importance: Some(0.6),
+            keywords: vec!["agentdesk".to_string(), "port".to_string()],
+            source: Some("config".to_string()),
+            workspace: Some("agentdesk".to_string()),
+            agent_id: Some("default".to_string()),
+            case_id: Some("issue-927".to_string()),
+            goal: None,
+            outcome: None,
+            phase: Some("verification".to_string()),
+            resolution_status: None,
+            assertion_status: Some("verified".to_string()),
+            context_summary: Some("Port confirmation".to_string()),
+        };
+
+        let first = backend.remember(request.clone()).await.unwrap();
+        let second = backend
+            .remember(MementoRememberRequest {
+                importance: Some(0.5),
+                ..request
+            })
+            .await
+            .unwrap();
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            first,
+            crate::services::memory::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 2,
+            }
+        );
+        assert_eq!(second, crate::services::memory::TokenUsage::default());
     }
 
     #[tokio::test]

@@ -894,6 +894,7 @@ fn build_memento_request(
         content,
         topic: "api-friction".to_string(),
         kind: "error".to_string(),
+        importance: None,
         keywords: report.keywords.clone(),
         source: (!source.is_empty()).then_some(source),
         workspace: Some(repo_workspace),
