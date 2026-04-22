@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, messages,
-    pipeline, protected_api_domain, queue_api, skills_api, termination_events,
+    ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, hooks,
+    messages, pipeline, protected_api_domain, queue_api, skills_api, termination_events,
 };
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
@@ -79,6 +79,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/hook/session",
                 post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
+            )
+            .route("/hook/reset-status", post(hooks::reset_status))
+            .route("/hook/skill-usage", post(hooks::skill_usage))
+            .route(
+                "/hook/session/{sessionKey}",
+                delete(hooks::disconnect_session),
             )
             .route(
                 "/dispatched-sessions/claude-session-id",

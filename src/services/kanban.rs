@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::PgPool;
 
 use crate::db::{
     Db,
@@ -10,6 +11,7 @@ use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 #[derive(Clone)]
 pub struct KanbanService {
     db: Db,
+    pg_pool: Option<PgPool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,11 +66,41 @@ pub struct KanbanCardView {
 }
 
 impl KanbanService {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, pg_pool: Option<PgPool>) -> Self {
+        Self { db, pg_pool }
     }
 
-    pub fn list_cards(&self, input: ListCardsInput) -> ServiceResult<ListCardsResponse> {
+    pub async fn list_cards(&self, input: ListCardsInput) -> ServiceResult<ListCardsResponse> {
+        if let Some(pool) = self.pg_pool.as_ref() {
+            let registered_repo_ids =
+                kanban::list_registered_repo_ids_pg(pool)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::internal(error)
+                            .with_code(ErrorCode::Database)
+                            .with_operation("list_cards.list_registered_repo_ids_pg")
+                    })?;
+            let records = kanban::list_cards_pg(
+                pool,
+                &ListCardsFilter {
+                    status: input.status,
+                    repo_id: input.repo_id,
+                    assigned_agent_id: input.assigned_agent_id,
+                },
+                &registered_repo_ids,
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::internal(error)
+                    .with_code(ErrorCode::Database)
+                    .with_operation("list_cards.query_pg")
+            })?;
+
+            return Ok(ListCardsResponse {
+                cards: records.into_iter().map(KanbanCardView::from).collect(),
+            });
+        }
+
         let conn = self.db.read_conn().map_err(|error| {
             ServiceError::internal(format!("{error}"))
                 .with_code(ErrorCode::Database)

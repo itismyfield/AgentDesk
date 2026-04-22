@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use libsql_rusqlite::OptionalExtension;
 use serde_json::{Value, json};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
@@ -13,18 +14,23 @@ use poise::serenity_prelude::ChannelId;
 #[derive(Clone)]
 pub struct QueueService {
     db: Db,
-    health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<PgPool>,
 }
 
 impl QueueService {
-    pub fn new(db: Db, health_registry: Option<Arc<HealthRegistry>>) -> Self {
-        Self {
-            db,
-            health_registry,
-        }
+    pub fn new(db: Db, pg_pool: Option<PgPool>) -> Self {
+        Self { db, pg_pool }
     }
 
-    pub fn cancel_dispatch(&self, dispatch_id: &str) -> ServiceResult<Value> {
+    pub async fn cancel_dispatch(&self, dispatch_id: &str) -> ServiceResult<Value> {
+        if let Some(pool) = self.pg_pool.as_ref() {
+            return self.cancel_dispatch_pg(pool, dispatch_id).await;
+        }
+
+        self.cancel_dispatch_sqlite(dispatch_id)
+    }
+
+    fn cancel_dispatch_sqlite(&self, dispatch_id: &str) -> ServiceResult<Value> {
         let conn = self.db.lock().map_err(|e| {
             ServiceError::internal(format!("{e}"))
                 .with_code(ErrorCode::Database)
@@ -77,7 +83,79 @@ impl QueueService {
         }
     }
 
-    pub fn cancel_all_dispatches(
+    async fn cancel_dispatch_pg(&self, pool: &PgPool, dispatch_id: &str) -> ServiceResult<Value> {
+        let current_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| {
+                    ServiceError::internal(format!("load postgres dispatch status: {error}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("cancel_dispatch.query_status_pg")
+                        .with_context("dispatch_id", dispatch_id)
+                })?;
+
+        match current_status.as_deref() {
+            None => Err(ServiceError::not_found("dispatch not found")
+                .with_code(ErrorCode::Dispatch)
+                .with_context("dispatch_id", dispatch_id)),
+            Some("completed") | Some("cancelled") | Some("failed") => {
+                Err(ServiceError::conflict(format!(
+                    "dispatch already in terminal state: {}",
+                    current_status.unwrap_or_default()
+                ))
+                .with_code(ErrorCode::Dispatch)
+                .with_context("dispatch_id", dispatch_id))
+            }
+            Some(_) => {
+                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                    pool,
+                    dispatch_id,
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    ServiceError::internal(format!("cancel postgres dispatch: {error}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("cancel_dispatch.cancel_pg")
+                        .with_context("dispatch_id", dispatch_id)
+                })?;
+
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(format!("dispatch_notified:{dispatch_id}"))
+                    .execute(pool)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::internal(format!(
+                            "clear postgres dispatch notify guard: {error}"
+                        ))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("cancel_dispatch.clear_guard_pg")
+                        .with_context("dispatch_id", dispatch_id)
+                    })?;
+
+                tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
+                Ok(json!({"ok": true, "dispatch_id": dispatch_id}))
+            }
+        }
+    }
+
+    pub async fn cancel_all_dispatches(
+        &self,
+        kanban_card_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> ServiceResult<Value> {
+        if let Some(pool) = self.pg_pool.as_ref() {
+            return self
+                .cancel_all_dispatches_pg(pool, kanban_card_id, agent_id)
+                .await;
+        }
+
+        self.cancel_all_dispatches_sqlite(kanban_card_id, agent_id)
+    }
+
+    fn cancel_all_dispatches_sqlite(
         &self,
         kanban_card_id: Option<&str>,
         agent_id: Option<&str>,
@@ -144,12 +222,92 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
+    async fn cancel_all_dispatches_pg(
+        &self,
+        pool: &PgPool,
+        kanban_card_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> ServiceResult<Value> {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "SELECT id FROM task_dispatches WHERE status IN ('pending', 'dispatched')",
+        );
+
+        if let Some(card_id) = kanban_card_id {
+            query.push(" AND kanban_card_id = ");
+            query.push_bind(card_id);
+        }
+        if let Some(agent_id) = agent_id {
+            query.push(" AND to_agent_id = ");
+            query.push_bind(agent_id);
+        }
+
+        let dispatch_ids = query
+            .build_query_scalar::<String>()
+            .fetch_all(pool)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("query postgres cancel-all dispatches: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_all_dispatches.query_pg")
+            })?;
+
+        let mut count = 0usize;
+        for dispatch_id in &dispatch_ids {
+            count += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                pool,
+                dispatch_id,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("cancel postgres dispatch {dispatch_id}: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_all_dispatches.cancel_pg")
+                    .with_context("dispatch_id", dispatch_id)
+            })?;
+        }
+
+        tracing::info!(
+            "[queue-api] Cancelled {count} dispatches (card={:?}, agent={:?})",
+            kanban_card_id,
+            agent_id
+        );
+        Ok(json!({"ok": true, "cancelled": count}))
+    }
+
     pub async fn cancel_turn(
         &self,
         health_registry: Option<&Arc<HealthRegistry>>,
         channel_id: &str,
     ) -> ServiceResult<Value> {
-        let session_info: Option<(String, Option<String>, Option<String>)> = {
+        let session_info = if let Some(pool) = self.pg_pool.as_ref() {
+            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT session_key, active_dispatch_id, provider
+                 FROM sessions
+                 WHERE status = 'working'
+                   AND (
+                     session_key LIKE '%' || $1 || '%'
+                     OR agent_id IN (
+                       SELECT id FROM agents
+                       WHERE discord_channel_id = $1
+                          OR discord_channel_alt = $1
+                          OR discord_channel_cc = $1
+                          OR discord_channel_cdx = $1
+                     )
+                   )
+                 ORDER BY last_heartbeat DESC
+                 LIMIT 1",
+            )
+            .bind(channel_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                ServiceError::internal(format!("load postgres active turn: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.query_active_session_pg")
+                    .with_context("channel_id", channel_id)
+            })?
+        } else {
             let conn = self.db.lock().map_err(|error| {
                 ServiceError::internal(format!("{error}"))
                     .with_code(ErrorCode::Database)
@@ -203,24 +361,62 @@ impl QueueService {
         .await;
 
         if let Some(dispatch_id) = dispatch_id.as_ref() {
-            if let Ok(conn) = self.db.lock() {
-                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                    &conn,
+            if let Some(pool) = self.pg_pool.as_ref() {
+                if let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                    pool,
                     dispatch_id,
                     None,
                 )
-                .ok();
+                .await
+                {
+                    tracing::warn!(
+                        dispatch_id,
+                        "failed to cancel postgres dispatch while cancelling turn: {error}"
+                    );
+                }
+            } else if let Ok(conn) = self.db.lock() {
+                if let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                    &conn,
+                    dispatch_id,
+                    None,
+                ) {
+                    tracing::warn!(
+                        dispatch_id,
+                        "failed to cancel sqlite dispatch while cancelling turn: {error}"
+                    );
+                }
             }
         }
 
-        if let Ok(conn) = self.db.lock() {
-            conn.execute(
+        if let Some(pool) = self.pg_pool.as_ref() {
+            if let Err(error) = sqlx::query(
+                "UPDATE sessions
+                 SET status = 'disconnected',
+                     active_dispatch_id = NULL,
+                     claude_session_id = NULL
+                 WHERE session_key = $1",
+            )
+            .bind(&session_key)
+            .execute(pool)
+            .await
+            {
+                tracing::warn!(
+                    session_key,
+                    "failed to mark postgres session disconnected during cancel_turn: {error}"
+                );
+            }
+        } else if let Ok(conn) = self.db.lock() {
+            if let Err(error) = conn.execute(
                 "UPDATE sessions
                  SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
                  WHERE session_key = ?1",
                 [&session_key],
-            )
-            .ok();
+            ) {
+                tracing::warn!(
+                    session_key,
+                    "failed to mark sqlite session disconnected during cancel_turn: {error}"
+                );
+            }
         }
 
         tracing::info!(

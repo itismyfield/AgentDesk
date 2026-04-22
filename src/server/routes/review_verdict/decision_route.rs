@@ -162,6 +162,93 @@ async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option
     current_card_status(&state.db, card_id)
 }
 
+#[derive(Debug, Default)]
+struct ReviewDecisionCardContext {
+    status: Option<String>,
+    repo_id: Option<String>,
+    agent_id: Option<String>,
+    title: Option<String>,
+}
+
+async fn load_review_decision_card_context_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> ReviewDecisionCardContext {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        if let Ok(row) = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT status, repo_id, assigned_agent_id, title
+             FROM kanban_cards
+             WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            if let Some((status, repo_id, agent_id, title)) = row {
+                return ReviewDecisionCardContext {
+                    status,
+                    repo_id,
+                    agent_id,
+                    title,
+                };
+            }
+        }
+    }
+
+    state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT status, repo_id, assigned_agent_id, title
+                 FROM kanban_cards
+                 WHERE id = ?1",
+                [card_id],
+                |row| {
+                    Ok(ReviewDecisionCardContext {
+                        status: row.get(0)?,
+                        repo_id: row.get(1)?,
+                        agent_id: row.get(2)?,
+                        title: row.get(3)?,
+                    })
+                },
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+}
+
+async fn resolve_effective_pipeline_pg_first(
+    state: &AppState,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> crate::pipeline::PipelineConfig {
+    crate::pipeline::ensure_loaded();
+
+    if let Some(pool) = state.pg_pool.as_ref() {
+        return crate::pipeline::resolve_for_card_pg(pool, repo_id, agent_id).await;
+    }
+
+    match state.db.lock() {
+        Ok(conn) => crate::pipeline::resolve_for_card(&conn, repo_id, agent_id),
+        Err(error) => {
+            tracing::warn!(
+                "[review-decision] failed to lock sqlite while resolving pipeline fallback: {error}"
+            );
+            crate::pipeline::resolve(None, None)
+        }
+    }
+}
+
 async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
     if let Some(pool) = state.pg_pool.as_ref() {
         if let Ok(exists) =
@@ -957,41 +1044,17 @@ pub async fn submit_review_decision(
             // #195: Agent accepts review feedback — create a rework dispatch so the
             // agent can address the findings. When the rework dispatch completes,
             // OnDispatchCompleted (kanban-rules.js) transitions to review for re-review.
-            let (card_status_now, card_repo_id, card_agent_id, card_title): (
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ) = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|c| {
-                    c.query_row(
-                        "SELECT status, repo_id, assigned_agent_id, title FROM kanban_cards WHERE id = ?1",
-                        [&body.card_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
-                    .ok()
-                })
-                .unwrap_or_default();
-            crate::pipeline::ensure_loaded();
-            let effective_pipeline = {
-                let conn = match state.db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("database lock poisoned: {e}")})),
-                        );
-                    }
-                };
-                crate::pipeline::resolve_for_card(
-                    &conn,
-                    card_repo_id.as_deref(),
-                    card_agent_id.as_deref(),
-                )
-            };
+            let card_ctx = load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+            let card_status_now = card_ctx.status.clone().unwrap_or_default();
+            let card_repo_id = card_ctx.repo_id.clone();
+            let card_agent_id = card_ctx.agent_id.clone();
+            let card_title = card_ctx.title.clone();
+            let effective_pipeline = resolve_effective_pipeline_pg_first(
+                &state,
+                card_repo_id.as_deref(),
+                card_agent_id.as_deref(),
+            )
+            .await;
 
             // Guard: terminal card
             if effective_pipeline.is_terminal(&card_status_now) {
@@ -1548,31 +1611,50 @@ pub async fn submit_review_decision(
             // pending review dispatch exists (OnReviewEnter hook may have failed
             // due to lock contention or JS error), re-fire with blocking lock.
             {
-                crate::pipeline::ensure_loaded();
-                let needs_review = state.db.lock().ok().map(|conn| {
-                    let (card_status, repo_id, agent_id): (Option<String>, Option<String>, Option<String>) = conn
-                        .query_row(
-                            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                            [&body.card_id],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
-                        .unwrap_or((None, None, None));
-                    let has_review_dispatch: bool = conn
-                        .query_row(
-                            "SELECT COUNT(*) > 0 FROM task_dispatches \
-                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
-                             AND status IN ('pending', 'dispatched')",
-                            [&body.card_id],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(false);
-                    let is_review_state = card_status.as_deref().map_or(false, |s| {
-                        let eff = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
-                        eff.hooks_for_state(s)
-                            .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"))
-                    });
-                    is_review_state && !has_review_dispatch
-                }).unwrap_or(false);
+                let card_ctx =
+                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+                let has_review_dispatch = if let Some(pool) = state.pg_pool.as_ref() {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT COUNT(*) > 0
+                         FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type IN ('review', 'review-decision')
+                           AND status IN ('pending', 'dispatched')",
+                    )
+                    .bind(&body.card_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or(false)
+                } else {
+                    state
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|conn| {
+                            conn.query_row(
+                                "SELECT COUNT(*) > 0 FROM task_dispatches \
+                                 WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
+                                 AND status IN ('pending', 'dispatched')",
+                                [&body.card_id],
+                                |row| row.get(0),
+                            )
+                            .ok()
+                        })
+                        .unwrap_or(false)
+                };
+                let effective_pipeline = resolve_effective_pipeline_pg_first(
+                    &state,
+                    card_ctx.repo_id.as_deref(),
+                    card_ctx.agent_id.as_deref(),
+                )
+                .await;
+                let needs_review = card_ctx.status.as_deref().is_some_and(|status| {
+                    effective_pipeline
+                        .hooks_for_state(status)
+                        .is_some_and(|hooks| {
+                            hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
+                        })
+                }) && !has_review_dispatch;
 
                 if needs_review {
                     tracing::warn!(
@@ -1715,35 +1797,19 @@ pub async fn submit_review_decision(
             // Agent dismisses review → transition to terminal state, then clean up stale state.
             // Order matters: transition_status requires an active dispatch, so we must
             // transition BEFORE cancelling pending dispatches.
-            crate::pipeline::ensure_loaded();
-            let terminal_state = {
-                let conn_lock = match state.db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("database lock poisoned: {e}")})),
-                        );
-                    }
-                };
-                let (repo_id, agent_id): (Option<String>, Option<String>) = conn_lock
-                    .query_row(
-                        "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                        [&body.card_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .unwrap_or((None, None));
-                let eff = crate::pipeline::resolve_for_card(
-                    &conn_lock,
-                    repo_id.as_deref(),
-                    agent_id.as_deref(),
-                );
-                eff.states
-                    .iter()
-                    .find(|s| s.terminal)
-                    .map(|s| s.id.clone())
-                    .unwrap_or_else(|| "done".to_string())
-            };
+            let card_ctx = load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+            let effective_pipeline = resolve_effective_pipeline_pg_first(
+                &state,
+                card_ctx.repo_id.as_deref(),
+                card_ctx.agent_id.as_deref(),
+            )
+            .await;
+            let terminal_state = effective_pipeline
+                .states
+                .iter()
+                .find(|state| state.terminal)
+                .map(|state| state.id.clone())
+                .unwrap_or_else(|| "done".to_string());
             let _ = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,

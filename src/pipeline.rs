@@ -152,9 +152,26 @@ impl PipelineOverrideHealthReport {
     }
 }
 
-pub fn load_persisted_override_health_report(
+pub async fn load_persisted_override_health_report(
     db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
 ) -> Option<PipelineOverrideHealthReport> {
+    if let Some(pool) = pg_pool {
+        match sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+            .bind(PIPELINE_OVERRIDE_HEALTH_KV_KEY)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(raw)) => return serde_json::from_str(&raw).ok(),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "[pipeline] failed to load persisted postgres override health report: {error}; falling back to sqlite"
+                );
+            }
+        }
+    }
+
     let conn = db.read_conn().ok()?;
     let raw: String = conn
         .query_row(
@@ -193,8 +210,8 @@ pub async fn refresh_override_health_report(
         tracing::warn!("[pipeline] {warning}");
     }
 
-    persist_override_health_report(db, &report);
-    record_override_audit_logs(db, &report);
+    persist_override_health_report(db, pg_pool, &report).await;
+    record_override_audit_logs(db, pg_pool, &report).await;
     report
 }
 
@@ -474,10 +491,36 @@ fn format_replace_warning(warning: &PipelineOverrideReplaceWarning) -> String {
     )
 }
 
-fn persist_override_health_report(db: &crate::db::Db, report: &PipelineOverrideHealthReport) {
+async fn persist_override_health_report(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    report: &PipelineOverrideHealthReport,
+) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
+
+    if let Some(pool) = pg_pool {
+        match sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value",
+        )
+        .bind(PIPELINE_OVERRIDE_HEALTH_KV_KEY)
+        .bind(&rendered)
+        .execute(pool)
+        .await
+        {
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(
+                    "[pipeline] failed to persist postgres override health report: {error}; falling back to sqlite"
+                );
+            }
+        }
+    }
+
     let Ok(conn) = db.lock() else {
         tracing::warn!("[pipeline] failed to lock db to persist override health report");
         return;
@@ -490,7 +533,81 @@ fn persist_override_health_report(db: &crate::db::Db, report: &PipelineOverrideH
     }
 }
 
-fn record_override_audit_logs(db: &crate::db::Db, report: &PipelineOverrideHealthReport) {
+async fn record_override_audit_logs(
+    db: &crate::db::Db,
+    pg_pool: Option<&PgPool>,
+    report: &PipelineOverrideHealthReport,
+) {
+    if let Some(pool) = pg_pool {
+        match pool.begin().await {
+            Ok(mut tx) => {
+                let mut failed = None;
+
+                for failure in &report.parse_failures {
+                    let entity_id = format!("{}:{}", failure.layer, failure.target_id);
+                    let action = format!("pipeline_override_parse_failed: {}", failure.error);
+                    if let Err(error) = sqlx::query(
+                        "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+                         VALUES ('pipeline_override', $1, $2, $3)",
+                    )
+                    .bind(&entity_id)
+                    .bind(&action)
+                    .bind(PIPELINE_OVERRIDE_AUDIT_ACTOR)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+
+                if failed.is_none() {
+                    for warning in &report.replace_warnings {
+                        let entity_id = format!("{}:{}", warning.layer, warning.target_id);
+                        let action = format!(
+                            "pipeline_override_section_replace_warning:{} dropped {}",
+                            warning.section, warning.dropped_count
+                        );
+                        if let Err(error) = sqlx::query(
+                            "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+                             VALUES ('pipeline_override', $1, $2, $3)",
+                        )
+                        .bind(&entity_id)
+                        .bind(&action)
+                        .bind(PIPELINE_OVERRIDE_AUDIT_ACTOR)
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            failed = Some(error);
+                            break;
+                        }
+                    }
+                }
+
+                match failed {
+                    None => match tx.commit().await {
+                        Ok(_) => return,
+                        Err(error) => {
+                            tracing::warn!(
+                                "[pipeline] failed to commit postgres override audit logs: {error}; falling back to sqlite"
+                            );
+                        }
+                    },
+                    Some(error) => {
+                        tracing::warn!(
+                            "[pipeline] failed to record postgres override audit logs: {error}; falling back to sqlite"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[pipeline] failed to open postgres override audit log transaction: {error}; falling back to sqlite"
+                );
+            }
+        }
+    }
+
     let Ok(conn) = db.lock() else {
         tracing::warn!("[pipeline] failed to lock db for override audit logging");
         return;
@@ -1549,7 +1666,9 @@ mod tests {
         assert_eq!(report.parse_failures[0].layer, "repo");
         assert_eq!(report.parse_failures[0].target_id, "repo-bad-json");
 
-        let persisted = load_persisted_override_health_report(&db).expect("persisted report");
+        let persisted = load_persisted_override_health_report(&db, None)
+            .await
+            .expect("persisted report");
         assert_eq!(persisted.parse_failures, report.parse_failures);
         assert_eq!(persisted.warnings_count, report.warnings_count);
 
@@ -1588,7 +1707,9 @@ mod tests {
         assert_eq!(warning.dropped_count, base.transitions.len());
         assert_eq!(warning.dropped_items.len(), base.transitions.len());
 
-        let persisted = load_persisted_override_health_report(&db).expect("persisted report");
+        let persisted = load_persisted_override_health_report(&db, None)
+            .await
+            .expect("persisted report");
         assert!(persisted.warnings.iter().any(|entry| {
             entry.contains("repo-empty-transitions") && entry.contains("transitions")
         }));

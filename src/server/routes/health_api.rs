@@ -79,7 +79,8 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     )
     .and_then(|report| serde_json::to_value(report).ok());
     let pipeline_override_report =
-        crate::pipeline::load_persisted_override_health_report(&state.db)
+        crate::pipeline::load_persisted_override_health_report(&state.db, state.pg_pool.as_ref())
+            .await
             .and_then(|report| serde_json::to_value(report).ok());
 
     if let Some(ref registry) = state.health_registry {

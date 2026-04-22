@@ -15,6 +15,7 @@ pub mod escalation;
 pub mod github;
 pub mod github_dashboard;
 pub mod health_api;
+pub mod hooks;
 pub mod kanban;
 pub mod kanban_repos;
 pub mod meetings;
@@ -73,11 +74,11 @@ impl AppState {
     }
 
     pub fn kanban_service(&self) -> crate::services::kanban::KanbanService {
-        crate::services::kanban::KanbanService::new(self.db.clone())
+        crate::services::kanban::KanbanService::new(self.db.clone(), self.pg_pool.clone())
     }
 
     pub fn queue_service(&self) -> crate::services::queue::QueueService {
-        crate::services::queue::QueueService::new(self.db.clone(), self.health_registry.clone())
+        crate::services::queue::QueueService::new(self.db.clone(), self.pg_pool.clone())
     }
 
     pub fn settings_service(&self) -> crate::services::settings::SettingsService {

@@ -2403,6 +2403,1073 @@ async fn kanban_list_cards_with_filter() {
     assert_eq!(cards[0]["id"], "c2");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kanban_list_cards_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, NOW(), NOW()
+         )",
+    )
+    .bind("c-pg-list")
+    .bind("Card PG List")
+    .bind("ready")
+    .bind("high")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/kanban-cards?status=ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "kanban_list_cards_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cards = json["cards"].as_array().unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["id"], "c-pg-list");
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM kanban_cards WHERE id = 'c-pg-list'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_list_pending_dispatches_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+         VALUES ($1, $2, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-queue-list")
+    .bind("Agent PG Queue List")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, NOW(), NOW()
+         )",
+    )
+    .bind("card-pg-queue-list")
+    .bind("Queue PG List")
+    .bind("ready")
+    .bind("medium")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, retry_count, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-pg-queue-list")
+    .bind("card-pg-queue-list")
+    .bind("agent-pg-queue-list")
+    .bind("implementation")
+    .bind("pending")
+    .bind("PG queue list dispatch")
+    .bind(0_i32)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/dispatches/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "queue_list_pending_dispatches_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["dispatches"][0]["id"], "dispatch-pg-queue-list");
+    assert_eq!(
+        json["dispatches"][0]["kanban_card_id"],
+        "card-pg-queue-list"
+    );
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE id = 'dispatch-pg-queue-list'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_cancel_dispatch_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+         VALUES ($1, $2, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-queue-cancel")
+    .bind("Agent PG Queue Cancel")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, NOW(), NOW()
+         )",
+    )
+    .bind("card-pg-queue-cancel")
+    .bind("Queue PG Cancel")
+    .bind("in_progress")
+    .bind("high")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-pg-queue-cancel")
+    .bind("card-pg-queue-cancel")
+    .bind("agent-pg-queue-cancel")
+    .bind("implementation")
+    .bind("pending")
+    .bind("PG queue cancel dispatch")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+        .bind("dispatch_notified:dispatch-pg-queue-cancel")
+        .bind("1")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatches/dispatch-pg-queue-cancel/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "queue_cancel_dispatch_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["dispatch_id"], "dispatch-pg-queue-cancel");
+
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-pg-queue-cancel")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let kv_guard_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM kv_meta WHERE key = $1")
+            .bind("dispatch_notified:dispatch-pg-queue-cancel")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        kv_guard_count, 0,
+        "dispatch_notified guard should be cleared"
+    );
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE id = 'dispatch-pg-queue-cancel'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn messages_list_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, name_ko, avatar_emoji, discord_channel_id)
+         VALUES ($1, $2, $3, $4, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-message-sender")
+    .bind("Sender PG")
+    .bind("보내는 에이전트")
+    .bind("🤖")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, name_ko, avatar_emoji, discord_channel_id)
+         VALUES ($1, $2, $3, $4, '222')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-message-receiver")
+    .bind("Receiver PG")
+    .bind("받는 에이전트")
+    .bind("🛰️")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO messages (
+            sender_type, sender_id, receiver_type, receiver_id, content, message_type, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW()
+         )",
+    )
+    .bind("agent")
+    .bind("agent-pg-message-sender")
+    .bind("agent")
+    .bind("agent-pg-message-receiver")
+    .bind("PG only message")
+    .bind("chat")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/messages?receiverId=agent-pg-message-receiver")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "messages_list_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(json["messages"][0]["content"], json!("PG only message"));
+    assert_eq!(
+        json["messages"][0]["sender_name_ko"],
+        json!("보내는 에이전트")
+    );
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn messages_create_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, name_ko, avatar_emoji, discord_channel_id)
+         VALUES ($1, $2, $3, $4, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-message-create-sender")
+    .bind("Sender Create PG")
+    .bind("생성 발신자")
+    .bind("🤖")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, name_ko, avatar_emoji, discord_channel_id)
+         VALUES ($1, $2, $3, $4, '222')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-message-create-receiver")
+    .bind("Receiver Create PG")
+    .bind("생성 수신자")
+    .bind("🛰️")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "sender_type":"agent",
+                        "sender_id":"agent-pg-message-create-sender",
+                        "receiver_type":"agent",
+                        "receiver_id":"agent-pg-message-create-receiver",
+                        "content":"created through pg path",
+                        "message_type":"chat"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "messages_create_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["content"], json!("created through pg path"));
+    assert_eq!(json["receiver_name_ko"], json!("생성 수신자"));
+
+    let pg_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM messages WHERE content = $1")
+            .bind("created through pg path")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_count, 1);
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE content = 'created through pg path'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn hooks_skill_usage_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+         VALUES ($1, $2, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-hook-skill")
+    .bind("Hook Skill Agent")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skills (id, name, description, source_path, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("skill-pg-hook")
+    .bind("PG Hook Skill")
+    .bind("PG hook skill")
+    .bind("/tmp/skill-pg-hook")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hook/skill-usage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "skill_id":"skill-pg-hook",
+                        "role_id":"agent-pg-hook-skill",
+                        "session_key":"session-pg-hook"
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hooks_skill_usage_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], json!(true));
+
+    let skill_usage_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM skill_usage WHERE skill_id = $1 AND agent_id = $2 AND session_key = $3",
+    )
+    .bind("skill-pg-hook")
+    .bind("agent-pg-hook-skill")
+    .bind("session-pg-hook")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(skill_usage_count, 1);
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM skill_usage", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn hooks_disconnect_session_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+         VALUES ($1, $2, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-hook-session")
+    .bind("Hook Session Agent")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, created_at
+         ) VALUES (
+            $1, $2, $3, $4, NOW()
+         )",
+    )
+    .bind("session-pg-hook-disconnect")
+    .bind("agent-pg-hook-session")
+    .bind("claude")
+    .bind("working")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/hook/session/session-pg-hook-disconnect")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hooks_disconnect_session_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        body_text
+    );
+
+    let session_status: String =
+        sqlx::query_scalar("SELECT status FROM sessions WHERE session_key = $1")
+            .bind("session-pg-hook-disconnect")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(session_status, "disconnected");
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE session_key = 'session-pg-hook-disconnect'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn departments_roundtrip_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO offices (id, name, sort_order, created_at)
+         VALUES ($1, $2, 0, NOW())",
+    )
+    .bind("office-pg-dept")
+    .bind("PG Office")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/departments")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"PG Department","office_id":"office-pg-dept"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let department_id = create_json["department"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pg_created_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM departments WHERE id = $1")
+            .bind(&department_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_created_count, 1);
+
+    let sqlite_created_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM departments WHERE id = ?1",
+            [&department_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_created_count, 0, "sqlite mirror should stay empty");
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/departments/{department_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"PG Department Updated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_json: serde_json::Value = serde_json::from_slice(&update_body).unwrap();
+    assert_eq!(
+        update_json["department"]["name"],
+        json!("PG Department Updated")
+    );
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/departments?officeId=office-pg-dept")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let departments = list_json["departments"].as_array().unwrap();
+    assert_eq!(departments.len(), 1);
+    assert_eq!(departments[0]["id"], json!(department_id.clone()));
+    assert_eq!(departments[0]["name"], json!("PG Department Updated"));
+    assert_eq!(departments[0]["office_id"], json!("office-pg-dept"));
+
+    let reorder_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/departments/reorder")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"order":[{{"id":"{department_id}","sort_order":7}}]}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reorder_response.status(), StatusCode::OK);
+
+    let pg_sort_order: i64 =
+        sqlx::query_scalar("SELECT sort_order::BIGINT FROM departments WHERE id = $1")
+            .bind(&department_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_sort_order, 7);
+
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/departments/{department_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    let pg_remaining_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM departments WHERE id = $1")
+            .bind(&department_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_remaining_count, 0);
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn offices_roundtrip_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/offices")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"PG Office","layout":"grid"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let office_id = create_json["office"]["id"].as_str().unwrap().to_string();
+
+    let sqlite_office_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM offices WHERE id = ?1",
+            [&office_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_office_count, 0, "sqlite mirror should stay empty");
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/offices/{office_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"PG Office Updated","layout":"stack"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    let add_agent_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/offices/{office_id}/agents"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"pg-office-agent-1","department_id":"dept-alpha"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_agent_response.status(), StatusCode::OK);
+
+    let update_agent_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/offices/{office_id}/agents/pg-office-agent-1"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"department_id":"dept-beta"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_agent_response.status(), StatusCode::OK);
+
+    let batch_add_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/offices/{office_id}/agents/batch"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_ids":["pg-office-agent-2","pg-office-agent-3"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch_add_response.status(), StatusCode::OK);
+
+    let pg_agent_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM office_agents WHERE office_id = $1")
+            .bind(&office_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_agent_count, 3);
+
+    let pg_department_id: Option<String> = sqlx::query_scalar(
+        "SELECT department_id FROM office_agents WHERE office_id = $1 AND agent_id = $2",
+    )
+    .bind(&office_id)
+    .bind("pg-office-agent-1")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(pg_department_id.as_deref(), Some("dept-beta"));
+
+    let sqlite_office_agent_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM office_agents WHERE office_id = ?1",
+            [&office_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        sqlite_office_agent_count, 0,
+        "sqlite office_agents mirror should stay empty"
+    );
+
+    let reorder_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/offices/reorder")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"[{{"id":"{office_id}","sort_order":4}}]"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reorder_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/offices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let offices = list_json["offices"].as_array().unwrap();
+    assert_eq!(offices.len(), 1);
+    assert_eq!(offices[0]["id"], json!(office_id.clone()));
+    assert_eq!(offices[0]["name"], json!("PG Office Updated"));
+    assert_eq!(offices[0]["agent_count"], json!(3));
+    assert_eq!(offices[0]["sort_order"], json!(4));
+
+    let remove_agent_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/offices/{office_id}/agents/pg-office-agent-2"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove_agent_response.status(), StatusCode::OK);
+
+    let pg_agent_count_after_remove: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM office_agents WHERE office_id = $1")
+            .bind(&office_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_agent_count_after_remove, 2);
+
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/offices/{office_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    let pg_remaining_offices: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM offices WHERE id = $1")
+            .bind(&office_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_remaining_offices, 0);
+
+    let pg_remaining_links: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM office_agents WHERE office_id = $1")
+            .bind(&office_id)
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_remaining_links, 0);
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn kanban_list_cards_filters_to_registered_repos_unless_repo_id_is_explicit() {
     let db = test_db();
@@ -6172,6 +7239,547 @@ async fn pipeline_config_repo_broken_merge_rejected() {
     );
 }
 
+#[tokio::test]
+async fn pipeline_stages_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name)
+         VALUES ($1, $2)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("owner/pg-pipeline-stages")
+    .bind("PG Pipeline Stages")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/stages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "repo":"owner/pg-pipeline-stages",
+                        "stages":[
+                            {"stage_name":"Build","stage_order":1,"entry_skill":"build","timeout_minutes":30},
+                            {"stage_name":"Review","stage_order":2,"entry_skill":"review","parallel_with":"lint"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let put_status = put_response.status();
+    let put_body = axum::body::to_bytes(put_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "pipeline stages PUT body={}",
+        String::from_utf8_lossy(&put_body)
+    );
+    let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
+    assert_eq!(put_json["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(put_json["stages"][0]["stage_name"], "Build");
+    assert_eq!(put_json["stages"][1]["parallel_with"], "lint");
+
+    let pg_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
+            .bind("owner/pg-pipeline-stages")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_count, 2);
+
+    let sqlite_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = 'owner/pg-pipeline-stages'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/stages?repo=owner/pg-pipeline-stages")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(get_json["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(get_json["stages"][1]["stage_name"], "Review");
+
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/pipeline/stages?repo=owner/pg-pipeline-stages")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    let delete_body = axum::body::to_bytes(delete_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let delete_json: serde_json::Value = serde_json::from_slice(&delete_body).unwrap();
+    assert_eq!(delete_json["count"], json!(2));
+
+    let pg_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
+            .bind("owner/pg-pipeline-stages")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(pg_remaining, 0);
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn pipeline_card_views_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name)
+         VALUES ($1, $2)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("owner/pg-pipeline-card")
+    .bind("PG Pipeline Card")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, repo_id, title, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())",
+    )
+    .bind("card-pg-pipeline")
+    .bind("owner/pg-pipeline-card")
+    .bind("PG Pipeline Card")
+    .bind("in_progress")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, entry_skill)
+         VALUES ($1, $2, $3, $4), ($1, $5, $6, $7)",
+    )
+    .bind("owner/pg-pipeline-card")
+    .bind("Triage")
+    .bind(1_i64)
+    .bind("triage")
+    .bind("Implementation")
+    .bind(2_i64)
+    .bind("implementation")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES
+            ($1, $2, $3, $4, $5, NOW() - INTERVAL '2 seconds', NOW() - INTERVAL '2 seconds'),
+            ($6, $2, $7, $8, $9, NOW() - INTERVAL '1 seconds', NOW() - INTERVAL '1 seconds')",
+    )
+    .bind("dispatch-pg-pipeline-triage")
+    .bind("card-pg-pipeline")
+    .bind("triage")
+    .bind("completed")
+    .bind("Triage")
+    .bind("dispatch-pg-pipeline-impl")
+    .bind("implementation")
+    .bind("running")
+    .bind("Implementation")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let pipeline_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/cards/card-pg-pipeline")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pipeline_status = pipeline_response.status();
+    let pipeline_body = axum::body::to_bytes(pipeline_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        pipeline_status,
+        StatusCode::OK,
+        "pipeline card body={}",
+        String::from_utf8_lossy(&pipeline_body)
+    );
+    let pipeline_json: serde_json::Value = serde_json::from_slice(&pipeline_body).unwrap();
+    assert_eq!(pipeline_json["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(pipeline_json["history"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        pipeline_json["current_stage"]["stage_name"],
+        "Implementation"
+    );
+
+    let history_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/cards/card-pg-pipeline/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history_response.status(), StatusCode::OK);
+    let history_body = axum::body::to_bytes(history_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let history_json: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+    assert_eq!(history_json["history"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        history_json["history"][1]["dispatch_type"],
+        "implementation"
+    );
+
+    let sqlite_dispatch_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-pg-pipeline'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_dispatch_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn pipeline_config_pg_only_without_sqlite_mirror() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name)
+         VALUES ($1, $2)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("owner/pg-pipeline-config")
+    .bind("PG Pipeline Config")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+         VALUES ($1, $2, '111')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind("agent-pg-pipeline-config")
+    .bind("PG Pipeline Agent")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let repo_get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/config/repo/owner/pg-pipeline-config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo_get_response.status(), StatusCode::OK);
+    let repo_get_body = axum::body::to_bytes(repo_get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repo_get_json: serde_json::Value = serde_json::from_slice(&repo_get_body).unwrap();
+    assert!(repo_get_json["pipeline_config"].is_null());
+
+    let repo_put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/config/repo/owner/pg-pipeline-config")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"config":{"hooks":{"review":{"on_enter":["PgReviewHook"],"on_exit":[]}}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo_put_response.status(), StatusCode::OK);
+
+    let agent_put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/config/agent/agent-pg-pipeline-config")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"config":{"timeouts":{"in_progress":{"duration":"4h","clock":"started_at"}}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agent_put_response.status(), StatusCode::OK);
+
+    let repo_after_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/config/repo/owner/pg-pipeline-config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let repo_after_body = axum::body::to_bytes(repo_after_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repo_after_json: serde_json::Value = serde_json::from_slice(&repo_after_body).unwrap();
+    assert_eq!(
+        repo_after_json["pipeline_config"]["hooks"]["review"]["on_enter"][0],
+        "PgReviewHook"
+    );
+
+    let agent_after_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/config/agent/agent-pg-pipeline-config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let agent_after_body = axum::body::to_bytes(agent_after_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let agent_after_json: serde_json::Value = serde_json::from_slice(&agent_after_body).unwrap();
+    assert_eq!(
+        agent_after_json["pipeline_config"]["timeouts"]["in_progress"]["duration"],
+        "4h"
+    );
+
+    let effective_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/config/effective?repo=owner/pg-pipeline-config&agent_id=agent-pg-pipeline-config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(effective_response.status(), StatusCode::OK);
+    let effective_body = axum::body::to_bytes(effective_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let effective_json: serde_json::Value = serde_json::from_slice(&effective_body).unwrap();
+    assert_eq!(effective_json["layers"]["repo"], true);
+    assert_eq!(effective_json["layers"]["agent"], true);
+    assert_eq!(
+        effective_json["pipeline"]["hooks"]["review"]["on_enter"][0],
+        "PgReviewHook"
+    );
+
+    let graph_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/pipeline/config/graph?repo=owner/pg-pipeline-config&agent_id=agent-pg-pipeline-config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph_body = axum::body::to_bytes(graph_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let graph_json: serde_json::Value = serde_json::from_slice(&graph_body).unwrap();
+    assert!(!graph_json["nodes"].as_array().unwrap().is_empty());
+    assert!(!graph_json["edges"].as_array().unwrap().is_empty());
+
+    let pg_report_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM kv_meta WHERE key = 'pipeline_override_health_report'",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(pg_report_count, 1);
+
+    let sqlite_repo_override_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM github_repos WHERE pipeline_config IS NOT NULL AND id = 'owner/pg-pipeline-config'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        sqlite_repo_override_count, 0,
+        "sqlite mirror should stay empty"
+    );
+
+    let sqlite_report_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM kv_meta WHERE key = 'pipeline_override_health_report'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_report_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn health_api_includes_pipeline_override_report_from_postgres_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pg_pool.clone(),
+        ),
+    );
+
+    let report = crate::pipeline::PipelineOverrideHealthReport {
+        generated_at: "2026-04-22T00:00:00Z".to_string(),
+        status: "warn".to_string(),
+        warnings_count: 1,
+        warnings: vec!["repo override pg warns".to_string()],
+        parse_failures: Vec::new(),
+        replace_warnings: vec![crate::pipeline::PipelineOverrideReplaceWarning {
+            layer: "repo".to_string(),
+            target_id: "owner/pg-pipeline-config".to_string(),
+            section: "hooks".to_string(),
+            dropped_count: 1,
+            dropped_items: vec!["review".to_string()],
+        }],
+    };
+
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value",
+    )
+    .bind("pipeline_override_health_report")
+    .bind(serde_json::to_string(&report).unwrap())
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let sqlite_report_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM kv_meta WHERE key = 'pipeline_override_health_report'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_report_count, 0, "sqlite mirror should stay empty");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["pipeline_overrides"]["status"], "warn");
+    assert_eq!(json["pipeline_overrides"]["warnings_count"], 1);
+    assert_eq!(
+        json["pipeline_overrides"]["replace_warnings"][0]["target_id"],
+        "owner/pg-pipeline-config"
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 // ── force-transition auth tests ──
 
 fn seed_card_with_status(db: &Db, card_id: &str, status: &str) {
@@ -7089,6 +8697,237 @@ async fn stalled_cards_and_stats_use_latest_activity_timestamp() {
         serde_json::json!(1),
         "stats stale_in_progress count must match latest-activity stalled detection"
     );
+}
+
+#[tokio::test]
+async fn stats_pg_only_without_sqlite_mirror() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    sqlx::query(
+        "INSERT INTO offices (id, name, sort_order, created_at)
+         VALUES ($1, $2, 0, NOW())",
+    )
+    .bind("office-pg-stats")
+    .bind("PG Stats Office")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO departments (id, name, office_id, sort_order, created_at)
+         VALUES ($1, $2, $3, 0, NOW())",
+    )
+    .bind("dept-pg-stats")
+    .bind("PG Stats Department")
+    .bind("office-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, name_ko, department, avatar_emoji, status, xp, sprite_number, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())",
+    )
+    .bind("agent-pg-stats")
+    .bind("PG Stats Agent")
+    .bind("피지 통계 에이전트")
+    .bind("dept-pg-stats")
+    .bind("🤖")
+    .bind("idle")
+    .bind(42_i32)
+    .bind(7_i32)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO office_agents (office_id, agent_id, department_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind("office-pg-stats")
+    .bind("agent-pg-stats")
+    .bind("dept-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, status, active_dispatch_id, tokens, last_heartbeat
+         ) VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind("session-pg-stats")
+    .bind("agent-pg-stats")
+    .bind("working")
+    .bind("dispatch-working-pg-stats")
+    .bind(123_i32)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, assigned_agent_id, github_issue_url, created_at, updated_at, completed_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())",
+    )
+    .bind("card-pg-done")
+    .bind("owner/pg-stats-repo")
+    .bind("Done Card")
+    .bind("done")
+    .bind("agent-pg-stats")
+    .bind("https://github.com/owner/pg-stats-repo/issues/1")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, assigned_agent_id, started_at, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, 'in_progress', $4,
+            NOW() - INTERVAL '3 hours',
+            NOW() - INTERVAL '3 hours',
+            NOW() - INTERVAL '3 hours'
+         )",
+    )
+    .bind("card-pg-stale")
+    .bind("owner/pg-stats-repo")
+    .bind("Stale Card")
+    .bind("agent-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, 'work', 'pending', 'Dispatch',
+            NOW() - INTERVAL '3 hours',
+            NOW() - INTERVAL '3 hours'
+         )",
+    )
+    .bind("dispatch-pg-stale")
+    .bind("card-pg-stale")
+    .bind("agent-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+        .bind("dispatch-pg-stale")
+        .bind("card-pg-stale")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, assigned_agent_id, created_at, updated_at
+         ) VALUES ($1, $2, $3, 'review', $4, NOW(), NOW())",
+    )
+    .bind("card-pg-review")
+    .bind("owner/pg-stats-repo")
+    .bind("Review Card")
+    .bind("agent-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, assigned_agent_id, created_at, updated_at
+         ) VALUES ($1, $2, $3, 'requested', $4, NOW(), NOW())",
+    )
+    .bind("card-pg-requested")
+    .bind("owner/pg-stats-repo")
+    .bind("Requested Card")
+    .bind("agent-pg-stats")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, assigned_agent_id, review_status, blocked_reason, created_at, updated_at
+         ) VALUES ($1, $2, $3, 'failed', $4, $5, $6, NOW(), NOW())",
+    )
+    .bind("card-pg-failed")
+    .bind("owner/pg-stats-repo")
+    .bind("Failed Card")
+    .bind("agent-pg-stats")
+    .bind("changes_requested")
+    .bind("manual-intervention-required")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/stats?officeId=office-pg-stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "stats_pg_only_without_sqlite_mirror status={} body={}",
+        status,
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["agents"]["total"], json!(1));
+    assert_eq!(json["agents"]["working"], json!(1));
+    assert_eq!(json["dispatched_count"], json!(1));
+    assert_eq!(json["top_agents"][0]["id"], json!("agent-pg-stats"));
+    assert_eq!(json["top_agents"][0]["stats_tasks_done"], json!(1));
+    assert_eq!(json["top_agents"][0]["stats_tokens"], json!(123));
+    assert_eq!(json["departments"][0]["id"], json!("dept-pg-stats"));
+    assert_eq!(json["departments"][0]["working_agents"], json!(1));
+    assert_eq!(json["kanban"]["review_queue"], json!(1));
+    assert_eq!(json["kanban"]["waiting_acceptance"], json!(1));
+    assert_eq!(json["kanban"]["failed"], json!(1));
+    assert_eq!(json["kanban"]["blocked"], json!(1));
+    assert_eq!(json["kanban"]["stale_in_progress"], json!(1));
+    assert_eq!(
+        json["kanban"]["top_repos"][0]["github_repo"],
+        json!("owner/pg-stats-repo")
+    );
+    assert_eq!(json["github_closed_today"], json!(1));
+
+    let sqlite_agent_count: i64 = db
+        .read_conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = 'agent-pg-stats'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sqlite_agent_count, 0, "sqlite mirror should stay empty");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]

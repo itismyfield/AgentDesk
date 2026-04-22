@@ -356,7 +356,9 @@ pub async fn list_cards(
             status: params.status,
             repo_id: params.repo_id,
             assigned_agent_id: params.assigned_agent_id,
-        }) {
+        })
+        .await
+    {
         Ok(response) => (StatusCode::OK, Json(json!({"cards": response.cards}))),
         Err(error) => error.into_json_response(),
     }

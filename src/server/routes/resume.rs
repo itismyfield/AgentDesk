@@ -3,11 +3,212 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use libsql_rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
 use super::kanban::{CARD_SELECT, card_row_to_json};
+
+#[derive(Debug)]
+struct ResumeCardSnapshot {
+    status: String,
+    review_status: Option<String>,
+    latest_dispatch_id: Option<String>,
+    assigned_agent_id: Option<String>,
+    title: String,
+    blocked_reason: Option<String>,
+    repo_id: Option<String>,
+}
+
+fn resolve_resume_card_id_pg_first(
+    state: &AppState,
+    raw_id: &str,
+) -> Result<Option<String>, String> {
+    if !raw_id.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(Some(raw_id.to_string()));
+    }
+
+    let issue_num: i64 = raw_id.parse().unwrap_or(0);
+    if let Some(pool) = state.engine.pg_pool() {
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id
+                     FROM kanban_cards
+                     WHERE github_issue_number = $1
+                     ORDER BY updated_at DESC
+                     LIMIT 1",
+                )
+                .bind(issue_num)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| format!("lookup postgres card for issue #{issue_num}: {error}"))
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    conn.query_row(
+        "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 \
+         ORDER BY updated_at DESC LIMIT 1",
+        [issue_num],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("lookup sqlite card for issue #{issue_num}: {error}"))
+}
+
+fn load_resume_card_snapshot_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Result<Option<ResumeCardSnapshot>, String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let row = sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                    ),
+                >(
+                    "SELECT
+                        status,
+                        review_status,
+                        latest_dispatch_id,
+                        assigned_agent_id,
+                        title,
+                        blocked_reason,
+                        repo_id
+                     FROM kanban_cards
+                     WHERE id = $1",
+                )
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| format!("load postgres resume card {card_id_owned}: {error}"))?;
+
+                Ok(row.map(
+                    |(
+                        status,
+                        review_status,
+                        latest_dispatch_id,
+                        assigned_agent_id,
+                        title,
+                        blocked_reason,
+                        repo_id,
+                    )| ResumeCardSnapshot {
+                        status,
+                        review_status,
+                        latest_dispatch_id,
+                        assigned_agent_id,
+                        title,
+                        blocked_reason,
+                        repo_id,
+                    },
+                ))
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    conn.query_row(
+        "SELECT status, review_status, latest_dispatch_id, \
+         assigned_agent_id, title, blocked_reason, repo_id \
+         FROM kanban_cards WHERE id = ?1",
+        [card_id],
+        |row| {
+            Ok(ResumeCardSnapshot {
+                status: row.get(0)?,
+                review_status: row.get(1)?,
+                latest_dispatch_id: row.get(2)?,
+                assigned_agent_id: row.get(3)?,
+                title: row.get(4)?,
+                blocked_reason: row.get(5)?,
+                repo_id: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("load sqlite resume card {card_id}: {error}"))
+}
+
+fn resolve_effective_pipeline_pg_first(
+    state: &AppState,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<crate::pipeline::PipelineConfig, String> {
+    crate::pipeline::ensure_loaded();
+
+    if let Some(pool) = state.engine.pg_pool() {
+        let repo_id_owned = repo_id.map(ToString::to_string);
+        let agent_id_owned = agent_id.map(ToString::to_string);
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                Ok(crate::pipeline::resolve_for_card_pg(
+                    &bridge_pool,
+                    repo_id_owned.as_deref(),
+                    agent_id_owned.as_deref(),
+                )
+                .await)
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    Ok(crate::pipeline::resolve_for_card(&conn, repo_id, agent_id))
+}
+
+fn load_active_dispatch_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT id, status
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')
+                     LIMIT 1",
+                )
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres active dispatch for {card_id_owned}: {error}")
+                })
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    conn.query_row(
+        "SELECT id, status FROM task_dispatches \
+         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+         LIMIT 1",
+        [card_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|error| format!("load sqlite active dispatch for {card_id}: {error}"))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ResumeCardBody {
@@ -31,126 +232,78 @@ pub async fn resume_card(
     let reason = body.reason.unwrap_or_else(|| "manual resume".to_string());
 
     // Resolve issue number to card ID if input is numeric
-    let id = if id.chars().all(|c| c.is_ascii_digit()) {
-        let issue_num: i64 = id.parse().unwrap_or(0);
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        match conn.query_row(
-            "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 \
-             ORDER BY updated_at DESC LIMIT 1",
-            [issue_num],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(card_id) => card_id,
-            Err(_) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("no card found for issue #{id}")})),
-                );
-            }
+    let requested_id = id.clone();
+    let id = match resolve_resume_card_id_pg_first(&state, &id) {
+        Ok(Some(card_id)) => card_id,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("no card found for issue #{requested_id}")})),
+            );
         }
-    } else {
-        id
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
     };
 
     // 1. Load card state
-    let card_info = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        conn.query_row(
-            "SELECT status, review_status, latest_dispatch_id, \
-             COALESCE(assigned_agent_id, ''), title, blocked_reason \
-             FROM kanban_cards WHERE id = ?1",
-            [&id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            },
-        )
-        .ok()
-    };
-
-    let (status, review_status, latest_dispatch_id, agent_id, card_title, blocked_reason) =
-        match card_info {
-            Some(info) => info,
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
-            }
-        };
-
-    // 2. Terminal guard
-    {
-        crate::pipeline::ensure_loaded();
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        let (repo_id, agent): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap_or((None, None));
-        let effective =
-            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent.as_deref());
-        if effective.is_terminal(&status) {
+    let card = match load_resume_card_snapshot_pg_first(&state, &id) {
+        Ok(Some(card)) => card,
+        Ok(None) => {
             return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "cannot resume terminal card", "status": status})),
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "card not found"})),
             );
         }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    let status = card.status.clone();
+    let review_status = card.review_status.clone();
+    let latest_dispatch_id = card.latest_dispatch_id.clone();
+    let agent_id = card.assigned_agent_id.clone().unwrap_or_default();
+    let card_title = card.title.clone();
+    let blocked_reason = card.blocked_reason.clone();
+
+    // 2. Terminal guard
+    let effective = match resolve_effective_pipeline_pg_first(
+        &state,
+        card.repo_id.as_deref(),
+        card.assigned_agent_id.as_deref(),
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    if effective.is_terminal(&status) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "cannot resume terminal card", "status": status})),
+        );
     }
 
     // 3. Check if there's already an active dispatch (card-wide, matching kanban.rs guard)
     if !force {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
+        let active_dispatch = match load_active_dispatch_pg_first(&state, &id) {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
+                    Json(json!({"error": error})),
                 );
             }
         };
-        let active_dispatch: Option<(String, String)> = conn
-            .query_row(
-                "SELECT id, status FROM task_dispatches \
-                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
-                 LIMIT 1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-        drop(conn);
         if let Some((active_id, active_status)) = active_dispatch {
             return (
                 StatusCode::OK,
@@ -190,6 +343,34 @@ pub async fn resume_card(
     match resume_result {
         Ok(action) => {
             // Return updated card + action taken
+            if let Some(pool) = state.engine.pg_pool() {
+                match super::kanban::load_card_json_pg(pool, &id).await {
+                    Ok(Some(card)) => {
+                        crate::server::ws::emit_event(
+                            &state.broadcast_tx,
+                            "kanban_card_updated",
+                            card.clone(),
+                        );
+                        return (
+                            StatusCode::OK,
+                            Json(json!({"card": card, "action": action})),
+                        );
+                    }
+                    Ok(None) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"error": "card not found after resume"})),
+                        );
+                    }
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                }
+            }
+
             let conn = match state.db.lock() {
                 Ok(c) => c,
                 Err(e) => {
@@ -240,7 +421,7 @@ async fn determine_and_execute_resume(
     reason: &str,
 ) -> Result<serde_json::Value, String> {
     // Write audit log
-    write_audit_log(&state.db, card_id, status, reason);
+    write_audit_log(state, card_id, status, reason);
 
     match status {
         "requested" => {
@@ -333,9 +514,7 @@ fn resume_from_requested_manual_intervention(
     }
 
     cancel_and_clear(state, card_id)?;
-    let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-    clear_manual_intervention_markers(&conn, card_id)?;
-    drop(conn);
+    clear_manual_intervention_markers(state, card_id)?;
 
     let dispatch = create_and_notify(
         state,
@@ -360,7 +539,7 @@ fn resume_from_in_progress(
     latest_dispatch_id: &Option<String>,
 ) -> Result<serde_json::Value, String> {
     // Check if latest dispatch is actually completed/failed
-    let dispatch_status = get_dispatch_status(&state.db, latest_dispatch_id);
+    let dispatch_status = get_dispatch_status(state, latest_dispatch_id);
     match dispatch_status.as_deref() {
         Some("completed") | Some("failed") | Some("cancelled") | None => {
             // Transition to review via kanban transition
@@ -399,10 +578,7 @@ fn resume_from_in_progress_manual_intervention(
     }
 
     cancel_and_clear(state, card_id)?;
-    {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        clear_manual_intervention_markers(&conn, card_id)?;
-    }
+    clear_manual_intervention_markers(state, card_id)?;
 
     crate::kanban::transition_status_with_opts(
         &state.db,
@@ -448,25 +624,7 @@ fn resume_from_review(
 
             // Use same agent_id for review dispatch — Rust routing layer
             // handles counter-model via discord_channel_alt (matching OnReviewEnter)
-            let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-            execute_intent_on_conn(
-                &conn,
-                &TransitionIntent::SetReviewStatus {
-                    card_id: card_id.to_string(),
-                    review_status: Some("reviewing".to_string()),
-                },
-            )
-            .map_err(|e| format!("{e}"))?;
-            execute_intent_on_conn(
-                &conn,
-                &TransitionIntent::SyncReviewState {
-                    card_id: card_id.to_string(),
-                    state: "reviewing".to_string(),
-                },
-            )
-            .map_err(|e| format!("{e}"))?;
-            drop(conn);
+            sync_review_state(state, card_id, Some("reviewing"), "reviewing")?;
 
             let dispatch = create_and_notify(
                 state,
@@ -489,30 +647,19 @@ fn resume_from_review(
 
             // Get the rework target state from pipeline (same logic as review_verdict.rs)
             let rework_target = {
-                let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-                let (repo_id, card_agent, card_status_now): (
-                    Option<String>,
-                    Option<String>,
-                    String,
-                ) = conn
-                    .query_row(
-                        "SELECT repo_id, assigned_agent_id, status FROM kanban_cards WHERE id = ?1",
-                        [card_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .map_err(|e| format!("{e}"))?;
-                crate::pipeline::ensure_loaded();
-                let effective = crate::pipeline::resolve_for_card(
-                    &conn,
-                    repo_id.as_deref(),
-                    card_agent.as_deref(),
-                );
+                let card = load_resume_card_snapshot_pg_first(state, card_id)?
+                    .ok_or_else(|| format!("card not found: {card_id}"))?;
+                let effective = resolve_effective_pipeline_pg_first(
+                    state,
+                    card.repo_id.as_deref(),
+                    card.assigned_agent_id.as_deref(),
+                )?;
                 // Find rework target via review_rework gate
                 effective
                     .transitions
                     .iter()
                     .find(|t| {
-                        t.from == card_status_now
+                        t.from == card.status
                             && t.transition_type == crate::pipeline::TransitionType::Gated
                             && t.gates.iter().any(|g| g == "review_rework")
                     })
@@ -538,26 +685,7 @@ fn resume_from_review(
             .map_err(|e| format!("transition to rework target failed: {e}"))?;
 
             // Update review status
-            {
-                let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                execute_intent_on_conn(
-                    &conn,
-                    &TransitionIntent::SetReviewStatus {
-                        card_id: card_id.to_string(),
-                        review_status: Some("rework_pending".to_string()),
-                    },
-                )
-                .map_err(|e| format!("{e}"))?;
-                execute_intent_on_conn(
-                    &conn,
-                    &TransitionIntent::SyncReviewState {
-                        card_id: card_id.to_string(),
-                        state: "rework_pending".to_string(),
-                    },
-                )
-                .map_err(|e| format!("{e}"))?;
-            }
+            sync_review_state(state, card_id, Some("rework_pending"), "rework_pending")?;
 
             let dispatch = create_and_notify(
                 state,
@@ -577,7 +705,7 @@ fn resume_from_review(
 
         // rework_pending with failed/orphan dispatch → new rework dispatch
         Some("rework_pending") => {
-            let dispatch_status = get_dispatch_status(&state.db, latest_dispatch_id);
+            let dispatch_status = get_dispatch_status(state, latest_dispatch_id);
             let is_active = matches!(
                 dispatch_status.as_deref(),
                 Some("pending") | Some("dispatched")
@@ -628,22 +756,15 @@ fn resume_from_review_dilemma_pending(
         return Err("review dilemma_pending requires force=true to resume".to_string());
     }
 
-    let last_dispatch_type = get_last_terminal_dispatch_type(&state.db, card_id);
+    let last_dispatch_type = get_last_terminal_dispatch_type(state, card_id);
 
     cancel_and_clear(state, card_id)?;
-    {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        clear_manual_intervention_markers(&conn, card_id)?;
-    }
+    clear_manual_intervention_markers(state, card_id)?;
 
     match last_dispatch_type.as_deref() {
         Some("rework") => {
-            let rework_target = resolve_rework_resume_target(
-                &state.db,
-                card_id,
-                "review",
-                Some("pending_decision"),
-            )?;
+            let rework_target =
+                resolve_rework_resume_target(state, card_id, "review", Some("pending_decision"))?;
             crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
@@ -675,9 +796,7 @@ fn resume_from_review_dilemma_pending(
             }))
         }
         Some("review") | Some("review-decision") => {
-            let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-            sync_review_state(&conn, card_id, Some("reviewing"), "reviewing")?;
-            drop(conn);
+            sync_review_state(state, card_id, Some("reviewing"), "reviewing")?;
 
             let dispatch = create_and_notify(
                 state,
@@ -743,27 +862,20 @@ fn resume_from_pending_decision_legacy(
         return Err("pending_decision requires force=true to resume".to_string());
     }
 
-    let last_dispatch_type = get_last_terminal_dispatch_type(&state.db, card_id);
+    let last_dispatch_type = get_last_terminal_dispatch_type(state, card_id);
 
     // Cancel all active dispatches for this card
     cancel_and_clear(state, card_id)?;
 
     // Clear pending_decision state
-    {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        clear_manual_intervention_markers(&conn, card_id)?;
-    }
+    clear_manual_intervention_markers(state, card_id)?;
 
     // Route based on last dispatch type
     match last_dispatch_type.as_deref() {
         // Rework was stuck → compute rework target from pipeline, create rework dispatch
         Some("rework") => {
-            let rework_target = resolve_rework_resume_target(
-                &state.db,
-                card_id,
-                "review",
-                Some("pending_decision"),
-            )?;
+            let rework_target =
+                resolve_rework_resume_target(state, card_id, "review", Some("pending_decision"))?;
 
             crate::kanban::transition_status_with_opts(
                 &state.db,
@@ -867,10 +979,7 @@ fn resume_from_blocked_legacy(
     cancel_and_clear(state, card_id)?;
 
     // Clear blocked state
-    {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        clear_manual_intervention_markers(&conn, card_id)?;
-    }
+    clear_manual_intervention_markers(state, card_id)?;
 
     crate::kanban::transition_status_with_opts(
         &state.db,
@@ -926,6 +1035,55 @@ fn resume_from_pre_dispatch(
 /// Cancel ALL active dispatches for the card and clear latest_dispatch_id.
 /// Matches the card-wide guard in kanban.rs:101-108.
 fn cancel_and_clear(state: &AppState, card_id: &str) -> Result<(), String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let mut tx = bridge_pool.begin().await.map_err(|error| {
+                    format!("begin postgres resume cleanup tx for {card_id_owned}: {error}")
+                })?;
+
+                let active_ids: Vec<String> = sqlx::query_scalar(
+                    "SELECT id
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&card_id_owned)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("load postgres active dispatches for {card_id_owned}: {error}")
+                })?;
+
+                for dispatch_id in &active_ids {
+                    crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                        &mut tx,
+                        dispatch_id,
+                        Some("resume"),
+                    )
+                    .await?;
+                }
+
+                crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                    &mut tx,
+                    &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+                        card_id: card_id_owned.clone(),
+                        dispatch_id: None,
+                    },
+                )
+                .await?;
+
+                tx.commit().await.map_err(|error| {
+                    format!("commit postgres resume cleanup for {card_id_owned}: {error}")
+                })?;
+                Ok(())
+            },
+            |error| error,
+        );
+    }
+
     let conn = state.db.lock().map_err(|e| format!("{e}"))?;
 
     // Collect all active dispatch IDs for proper cancellation + auto-queue reset
@@ -996,8 +1154,34 @@ fn create_and_notify(
     Ok(dispatch)
 }
 
-fn get_last_terminal_dispatch_type(db: &crate::db::Db, card_id: &str) -> Option<String> {
-    let conn = db.lock().ok()?;
+fn get_last_terminal_dispatch_type(state: &AppState, card_id: &str) -> Option<String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        if let Ok(value) = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT dispatch_type
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND status IN ('completed', 'failed', 'cancelled')
+                     ORDER BY updated_at DESC
+                     LIMIT 1",
+                )
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres last terminal dispatch for {card_id_owned}: {error}")
+                })
+            },
+            |error| error,
+        ) {
+            return value;
+        }
+    }
+
+    let conn = state.db.lock().ok()?;
     conn.query_row(
         "SELECT dispatch_type FROM task_dispatches \
          WHERE kanban_card_id = ?1 AND status IN ('completed', 'failed', 'cancelled') \
@@ -1009,9 +1193,28 @@ fn get_last_terminal_dispatch_type(db: &crate::db::Db, card_id: &str) -> Option<
 }
 
 /// Get dispatch status by ID
-fn get_dispatch_status(db: &crate::db::Db, dispatch_id: &Option<String>) -> Option<String> {
+fn get_dispatch_status(state: &AppState, dispatch_id: &Option<String>) -> Option<String> {
     let did = dispatch_id.as_ref()?;
-    let conn = db.lock().ok()?;
+    if let Some(pool) = state.engine.pg_pool() {
+        let did_owned = did.to_string();
+        if let Ok(value) = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                    .bind(&did_owned)
+                    .fetch_optional(&bridge_pool)
+                    .await
+                    .map_err(|error| {
+                        format!("load postgres dispatch status for {did_owned}: {error}")
+                    })
+            },
+            |error| error,
+        ) {
+            return value;
+        }
+    }
+
+    let conn = state.db.lock().ok()?;
     conn.query_row(
         "SELECT status FROM task_dispatches WHERE id = ?1",
         [did.as_str()],
@@ -1021,12 +1224,82 @@ fn get_dispatch_status(db: &crate::db::Db, dispatch_id: &Option<String>) -> Opti
 }
 
 fn resolve_rework_resume_target(
-    db: &crate::db::Db,
+    state: &AppState,
     card_id: &str,
     fallback_status: &str,
     legacy_to_status: Option<&str>,
 ) -> Result<String, String> {
-    let conn = db.lock().map_err(|e| format!("{e}"))?;
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        let fallback_status_owned = fallback_status.to_string();
+        let legacy_to_status_owned = legacy_to_status.map(ToString::to_string);
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let (repo_id, card_agent): (Option<String>, Option<String>) = sqlx::query_as(
+                    "SELECT repo_id, assigned_agent_id
+                         FROM kanban_cards
+                         WHERE id = $1",
+                )
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres resume card context for {card_id_owned}: {error}")
+                })?
+                .unwrap_or((None, None));
+
+                let prior_status = if let Some(to_status) = legacy_to_status_owned.as_deref() {
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT from_status
+                         FROM kanban_audit_logs
+                         WHERE card_id = $1 AND to_status = $2
+                         ORDER BY created_at DESC, id DESC
+                         LIMIT 1",
+                    )
+                    .bind(&card_id_owned)
+                    .bind(to_status)
+                    .fetch_optional(&bridge_pool)
+                    .await
+                    .map_err(|error| {
+                        format!("load postgres prior resume status for {card_id_owned}: {error}")
+                    })?
+                } else {
+                    None
+                }
+                .filter(|status| !status.trim().is_empty())
+                .unwrap_or_else(|| fallback_status_owned.clone());
+
+                crate::pipeline::ensure_loaded();
+                let effective = crate::pipeline::resolve_for_card_pg(
+                    &bridge_pool,
+                    repo_id.as_deref(),
+                    card_agent.as_deref(),
+                )
+                .await;
+
+                Ok(effective
+                    .transitions
+                    .iter()
+                    .find(|transition| {
+                        transition.from == prior_status
+                            && transition.transition_type == crate::pipeline::TransitionType::Gated
+                            && transition.gates.iter().any(|gate| gate == "review_rework")
+                    })
+                    .map(|transition| transition.to.clone())
+                    .unwrap_or_else(|| {
+                        effective
+                            .dispatchable_states()
+                            .first()
+                            .map(|state| state.to_string())
+                            .unwrap_or_else(|| "in_progress".to_string())
+                    }))
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|e| format!("{e}"))?;
     let (repo_id, card_agent): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
@@ -1070,28 +1343,87 @@ fn resolve_rework_resume_target(
         }))
 }
 
-fn clear_manual_intervention_markers(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) -> Result<(), String> {
+fn clear_manual_intervention_markers(state: &AppState, card_id: &str) -> Result<(), String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query(
+                    "UPDATE kanban_cards
+                     SET blocked_reason = NULL, updated_at = NOW()
+                     WHERE id = $1",
+                )
+                .bind(&card_id_owned)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("clear postgres blocked_reason for {card_id_owned}: {error}")
+                })?;
+                Ok(())
+            },
+            |error| error,
+        )?;
+        return sync_review_state(state, card_id, None, "idle");
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
     conn.execute(
         "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
         [card_id],
     )
     .map_err(|e| format!("{e}"))?;
-    sync_review_state(conn, card_id, None, "idle")
+    sync_review_state(state, card_id, None, "idle")
 }
 
 fn sync_review_state(
-    conn: &libsql_rusqlite::Connection,
+    state: &AppState,
     card_id: &str,
     review_status: Option<&str>,
-    state: &str,
+    review_state: &str,
 ) -> Result<(), String> {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        let review_status_owned = review_status.map(ToString::to_string);
+        let review_state_owned = review_state.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let mut tx = bridge_pool.begin().await.map_err(|error| {
+                    format!("begin postgres review state sync for {card_id_owned}: {error}")
+                })?;
+
+                crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                    &mut tx,
+                    &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                        card_id: card_id_owned.clone(),
+                        review_status: review_status_owned.clone(),
+                    },
+                )
+                .await?;
+                crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                    &mut tx,
+                    &crate::engine::transition::TransitionIntent::SyncReviewState {
+                        card_id: card_id_owned.clone(),
+                        state: review_state_owned.clone(),
+                    },
+                )
+                .await?;
+
+                tx.commit().await.map_err(|error| {
+                    format!("commit postgres review state sync for {card_id_owned}: {error}")
+                })?;
+                Ok(())
+            },
+            |error| error,
+        );
+    }
+
+    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
     use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
 
     execute_intent_on_conn(
-        conn,
+        &conn,
         &TransitionIntent::SetReviewStatus {
             card_id: card_id.to_string(),
             review_status: review_status.map(ToString::to_string),
@@ -1099,10 +1431,10 @@ fn sync_review_state(
     )
     .map_err(|e| format!("{e}"))?;
     execute_intent_on_conn(
-        conn,
+        &conn,
         &TransitionIntent::SyncReviewState {
             card_id: card_id.to_string(),
-            state: state.to_string(),
+            state: review_state.to_string(),
         },
     )
     .map_err(|e| format!("{e}"))?;
@@ -1110,8 +1442,35 @@ fn sync_review_state(
 }
 
 /// Write audit log entry for resume action
-fn write_audit_log(db: &crate::db::Db, card_id: &str, from_status: &str, reason: &str) {
-    if let Ok(conn) = db.lock() {
+fn write_audit_log(state: &AppState, card_id: &str, from_status: &str, reason: &str) {
+    if let Some(pool) = state.engine.pg_pool() {
+        let card_id_owned = card_id.to_string();
+        let from_status_owned = from_status.to_string();
+        let reason_owned = reason.to_string();
+        let _ = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query(
+                    "INSERT INTO kanban_audit_logs (
+                        card_id, from_status, to_status, source, result
+                     ) VALUES ($1, $2, $2, 'resume', $3)",
+                )
+                .bind(&card_id_owned)
+                .bind(&from_status_owned)
+                .bind(&reason_owned)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("insert postgres resume audit for {card_id_owned}: {error}")
+                })?;
+                Ok(())
+            },
+            |error| error,
+        );
+        return;
+    }
+
+    if let Ok(conn) = state.db.lock() {
         conn.execute(
             "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) \
              VALUES (?1, ?2, ?2, 'resume', ?3)",

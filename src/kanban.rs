@@ -1480,12 +1480,67 @@ pub fn fire_event_hooks_with_backends(
 /// (audit log, GitHub sync, terminal-state sync, dispatch notifications).
 /// Use this when callers already handle those concerns separately
 /// (e.g. dispatch creation, route handlers).
-pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
-    if from == to {
-        return;
-    }
+fn resolve_effective_pipeline_for_hooks(
+    db: &Db,
+    pg_pool: Option<&sqlx::PgPool>,
+    card_id: &str,
+) -> Option<crate::pipeline::PipelineConfig> {
     crate::pipeline::ensure_loaded();
-    let effective = db.lock().ok().map(|conn| {
+
+    if let Some(pg_pool) = pg_pool {
+        let card_id_owned = card_id.to_string();
+        return match crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |bridge_pool| async move {
+                let row = sqlx::query(
+                    "SELECT repo_id, assigned_agent_id
+                     FROM kanban_cards
+                     WHERE id = $1",
+                )
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres hook card context {card_id_owned}: {error}")
+                })?;
+
+                let (repo_id, agent_id) = if let Some(row) = row {
+                    (
+                        row.try_get::<Option<String>, _>("repo_id")
+                            .map_err(|error| {
+                                format!("decode postgres repo_id for {card_id_owned}: {error}")
+                            })?,
+                        row.try_get::<Option<String>, _>("assigned_agent_id")
+                            .map_err(|error| {
+                                format!(
+                                    "decode postgres assigned_agent_id for {card_id_owned}: {error}"
+                                )
+                            })?,
+                    )
+                } else {
+                    (None, None)
+                };
+
+                Ok(Some(
+                    crate::pipeline::resolve_for_card_pg(
+                        &bridge_pool,
+                        repo_id.as_deref(),
+                        agent_id.as_deref(),
+                    )
+                    .await,
+                ))
+            },
+            |error| error,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("failed to resolve postgres hook pipeline for {card_id}: {error}");
+                None
+            }
+        };
+    }
+
+    db.lock().ok().map(|conn| {
         let repo_id: Option<String> = conn
             .query_row(
                 "SELECT repo_id FROM kanban_cards WHERE id = ?1",
@@ -1503,7 +1558,14 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
             .ok()
             .flatten();
         crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    });
+    })
+}
+
+pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    let effective = resolve_effective_pipeline_for_hooks(db, engine.pg_pool(), card_id);
     if let Some(ref pipeline) = effective {
         fire_dynamic_hooks(engine, pipeline, card_id, from, to, None);
     }
@@ -1515,26 +1577,7 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
 /// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
 /// where `fire_state_hooks` would no-op because from == to.
 pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
-    crate::pipeline::ensure_loaded();
-    let effective = db.lock().ok().map(|conn| {
-        let repo_id: Option<String> = conn
-            .query_row(
-                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    });
+    let effective = resolve_effective_pipeline_for_hooks(db, engine.pg_pool(), card_id);
     if let Some(ref pipeline) = effective {
         if let Some(bindings) = pipeline.hooks_for_state(state) {
             let payload = json!({
