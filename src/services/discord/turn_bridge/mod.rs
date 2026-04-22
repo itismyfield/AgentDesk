@@ -391,6 +391,18 @@ pub(super) fn spawn_turn_bridge(
     rx: mpsc::Receiver<StreamMessage>,
     bridge: TurnBridgeContext,
 ) {
+    use tracing::Instrument;
+    // Attach the span via `.instrument(..)` on the async block instead of
+    // holding a sync `Span::enter()` guard across `.await`. The sync-guard
+    // pattern leaks the span into unrelated tasks scheduled on the same
+    // thread (tokio + tracing task propagation), which caused logs to be
+    // attributed to the wrong channel_id (see retired issue #901).
+    let bridge_span = tracing::info_span!(
+        "discord_turn_bridge",
+        channel_id = bridge.channel_id.get(),
+        provider = bridge.provider.as_str(),
+        dispatch_id = tracing::field::debug(bridge.dispatch_id.as_deref()),
+    );
     tokio::spawn(async move {
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let channel_id = bridge.channel_id;
@@ -405,13 +417,6 @@ pub(super) fn spawn_turn_bridge(
         let adk_session_info = bridge.adk_session_info.clone();
         let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
-        let bridge_span = tracing::info_span!(
-            "discord_turn_bridge",
-            channel_id = channel_id.get(),
-            provider = provider.as_str(),
-            dispatch_id = tracing::field::debug(dispatch_id.as_deref()),
-        );
-        let _bridge_guard = bridge_span.enter();
 
         let mut full_response = bridge.full_response.clone();
         let mut last_edit_text = String::new();
@@ -2138,5 +2143,5 @@ pub(super) fn spawn_turn_bridge(
         }
 
         // completion_tx is sent automatically by CompletionGuard on drop
-    });
+    }.instrument(bridge_span));
 }
