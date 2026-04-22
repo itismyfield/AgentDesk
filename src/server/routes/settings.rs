@@ -936,6 +936,11 @@ mod tests {
         config.runtime.requested_timeout_min = Some(55);
         config.runtime.dispatch_poll_sec = Some(45);
         config.runtime.max_entry_retries = Some(6);
+        config.runtime.stale_dispatched_grace_min = Some(4);
+        config.runtime.stale_dispatched_terminal_statuses =
+            Some("cancelled,failed,expired".to_string());
+        config.runtime.stale_dispatched_recover_null_dispatch = Some(false);
+        config.runtime.stale_dispatched_recover_missing_dispatch = Some(true);
 
         seed_config_defaults(&conn, &config);
 
@@ -978,6 +983,19 @@ mod tests {
         assert_eq!(runtime_config["dispatchPollSec"], json!(45));
         assert_eq!(runtime_config["maxRetries"], json!(7));
         assert_eq!(runtime_config["maxEntryRetries"], json!(6));
+        assert_eq!(runtime_config["staleDispatchedGraceMin"], json!(4));
+        assert_eq!(
+            runtime_config["staleDispatchedTerminalStatuses"],
+            json!("cancelled,failed,expired")
+        );
+        assert_eq!(
+            runtime_config["staleDispatchedRecoverNullDispatch"],
+            json!(false)
+        );
+        assert_eq!(
+            runtime_config["staleDispatchedRecoverMissingDispatch"],
+            json!(true)
+        );
     }
 
     #[test]
@@ -1033,6 +1051,19 @@ mod tests {
         assert_eq!(runtime_config["dispatchPollSec"], json!(30));
         assert_eq!(runtime_config["maxRetries"], json!(3));
         assert_eq!(runtime_config["maxEntryRetries"], json!(3));
+        assert_eq!(runtime_config["staleDispatchedGraceMin"], json!(2));
+        assert_eq!(
+            runtime_config["staleDispatchedTerminalStatuses"],
+            json!("cancelled,failed")
+        );
+        assert_eq!(
+            runtime_config["staleDispatchedRecoverNullDispatch"],
+            json!(true)
+        );
+        assert_eq!(
+            runtime_config["staleDispatchedRecoverMissingDispatch"],
+            json!(true)
+        );
     }
 
     #[tokio::test]
@@ -1042,6 +1073,11 @@ mod tests {
         config.runtime.dispatch_poll_sec = Some(45);
         config.runtime.max_retries = Some(5);
         config.runtime.max_entry_retries = Some(4);
+        config.runtime.stale_dispatched_grace_min = Some(6);
+        config.runtime.stale_dispatched_terminal_statuses =
+            Some("cancelled,failed,expired".to_string());
+        config.runtime.stale_dispatched_recover_null_dispatch = Some(false);
+        config.runtime.stale_dispatched_recover_missing_dispatch = Some(false);
         let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
@@ -1052,6 +1088,24 @@ mod tests {
         assert_eq!(body["defaults"]["maxRetries"], json!(5));
         assert_eq!(body["current"]["maxEntryRetries"], json!(4));
         assert_eq!(body["defaults"]["maxEntryRetries"], json!(4));
+        assert_eq!(body["current"]["staleDispatchedGraceMin"], json!(6));
+        assert_eq!(body["defaults"]["staleDispatchedGraceMin"], json!(6));
+        assert_eq!(
+            body["current"]["staleDispatchedTerminalStatuses"],
+            json!("cancelled,failed,expired")
+        );
+        assert_eq!(
+            body["defaults"]["staleDispatchedTerminalStatuses"],
+            json!("cancelled,failed,expired")
+        );
+        assert_eq!(
+            body["current"]["staleDispatchedRecoverNullDispatch"],
+            json!(false)
+        );
+        assert_eq!(
+            body["current"]["staleDispatchedRecoverMissingDispatch"],
+            json!(false)
+        );
     }
 
     #[tokio::test]
@@ -1065,6 +1119,9 @@ mod tests {
                 "dispatchPollSec": 15,
                 "maxRetries": 7,
                 "maxEntryRetries": 4,
+                "staleDispatchedGraceMin": 5,
+                "staleDispatchedTerminalStatuses": "cancelled,failed,expired",
+                "staleDispatchedRecoverNullDispatch": false,
                 "rateLimitStaleSec": 900
             })),
         )
@@ -1088,6 +1145,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(max_entry_retries, "4");
+        let stale_grace_min: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedGraceMin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_grace_min, "5");
+        let stale_terminal_statuses: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedTerminalStatuses'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_terminal_statuses, "cancelled,failed,expired");
+        let stale_recover_null_dispatch: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedRecoverNullDispatch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_recover_null_dispatch, "false");
     }
 
     #[tokio::test]

@@ -346,7 +346,7 @@ fn rollback_cancelled_run_cards(
     rolled_back
 }
 
-fn delete_phase_gate_rows_for_runs(
+pub(crate) fn delete_phase_gate_rows_for_runs(
     conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
 ) -> usize {
@@ -404,6 +404,12 @@ pub(crate) struct SlotCleanupResult {
     pub(crate) released_slots: usize,
     pub(crate) cleared_slot_sessions: usize,
     pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LiveRunCleanupResult {
+    pub(crate) cancelled_dispatches: usize,
+    pub(crate) slot_cleanup: SlotCleanupResult,
 }
 
 pub(crate) fn clear_and_release_slots_for_runs(
@@ -479,6 +485,129 @@ pub(crate) fn clear_and_release_slots_for_runs(
 
 pub(crate) fn slot_cleanup_warning(warnings: &[String]) -> Option<String> {
     (!warnings.is_empty()).then(|| warnings.join("; "))
+}
+
+fn self_heal_orphan_dispatched_entries_without_slot(
+    conn: &libsql_rusqlite::Connection,
+    run_ids: &[String],
+    trigger_source: &str,
+) -> libsql_rusqlite::Result<usize> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let select_sql = format!(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE run_id IN ({placeholders})
+           AND status = 'dispatched'
+           AND dispatch_id IS NULL
+           AND slot_index IS NULL
+         ORDER BY id ASC"
+    );
+    let entry_ids = conn
+        .prepare(&select_sql)?
+        .query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut healed = 0usize;
+    for entry_id in entry_ids {
+        let changed = conn.execute(
+            "UPDATE auto_queue_entries
+             SET status = 'pending',
+                 dispatched_at = NULL
+             WHERE id = ?1
+               AND status = 'dispatched'
+               AND dispatch_id IS NULL
+               AND slot_index IS NULL",
+            libsql_rusqlite::params![entry_id],
+        )?;
+        if changed == 0 {
+            continue;
+        }
+        healed += 1;
+        let _ = conn.execute(
+            "INSERT INTO auto_queue_entry_transitions (
+                entry_id,
+                from_status,
+                to_status,
+                trigger_source
+            ) VALUES (?1, 'dispatched', 'pending', ?2)",
+            libsql_rusqlite::params![entry_id, trigger_source],
+        );
+    }
+
+    Ok(healed)
+}
+
+pub(crate) fn clear_sessions_for_dispatches(
+    conn: &libsql_rusqlite::Connection,
+    dispatch_ids: &[String],
+) -> libsql_rusqlite::Result<usize> {
+    let mut cleared_sessions = 0usize;
+    for dispatch_id in dispatch_ids {
+        cleared_sessions += conn.execute(
+            "UPDATE sessions
+             SET status = 'idle',
+                 active_dispatch_id = NULL,
+                 session_info = 'Dispatch cancelled',
+                 claude_session_id = NULL,
+                 tokens = 0,
+                 last_heartbeat = datetime('now')
+             WHERE active_dispatch_id = ?1
+               AND status IN ('working', 'idle')",
+            [dispatch_id],
+        )?;
+    }
+    Ok(cleared_sessions)
+}
+
+pub(crate) fn cancel_and_release_runs_with_conn(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    conn: &libsql_rusqlite::Connection,
+    run_ids: &[String],
+    reason: &str,
+    orphan_trigger_source: Option<&str>,
+) -> LiveRunCleanupResult {
+    let live_dispatch_ids = load_live_dispatch_ids_for_runs(conn, run_ids).unwrap_or_default();
+    let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, run_ids, reason);
+    let _self_healed_orphan_entries = orphan_trigger_source
+        .and_then(|trigger_source| {
+            self_heal_orphan_dispatched_entries_without_slot(conn, run_ids, trigger_source).ok()
+        })
+        .unwrap_or(0);
+    let mut slot_cleanup = clear_and_release_slots_for_runs(health_registry, conn, run_ids);
+    match clear_sessions_for_dispatches(conn, &live_dispatch_ids) {
+        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "run_cleanup_dispatch_session_clear_failed",
+                run_ids
+                    .first()
+                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
+                    .unwrap_or_default(),
+                "[auto-queue] failed to clear sessions for run cleanup dispatches {:?}: {}",
+                live_dispatch_ids,
+                error
+            );
+            slot_cleanup.warnings.push(format!(
+                "failed to clear sessions for run cleanup dispatches {:?}: {}",
+                live_dispatch_ids, error
+            ));
+        }
+    }
+
+    LiveRunCleanupResult {
+        cancelled_dispatches,
+        slot_cleanup,
+    }
 }
 
 pub(crate) async fn load_run_ids_with_status_pg(
@@ -615,7 +744,7 @@ async fn load_dispatched_card_ids_for_runs_pg(
     })
 }
 
-async fn delete_phase_gate_rows_for_runs_pg(
+pub(crate) async fn delete_phase_gate_rows_for_runs_pg(
     pool: &PgPool,
     run_ids: &[String],
 ) -> Result<usize, String> {
@@ -693,6 +822,125 @@ pub(crate) async fn clear_sessions_for_dispatches_pg(
         cleared_sessions += result.rows_affected() as usize;
     }
     Ok(cleared_sessions)
+}
+
+async fn self_heal_orphan_dispatched_entries_without_slot_pg(
+    pool: &PgPool,
+    run_ids: &[String],
+    trigger_source: &str,
+) -> Result<usize, String> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let entry_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE run_id = ANY($1)
+           AND status = 'dispatched'
+           AND dispatch_id IS NULL
+           AND slot_index IS NULL
+         ORDER BY id ASC",
+    )
+    .bind(run_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "load postgres orphan dispatched entry ids {:?}: {error}",
+            run_ids
+        )
+    })?;
+
+    let mut healed = 0usize;
+    for entry_id in entry_ids {
+        let mut tx = pool.begin().await.map_err(|error| {
+            format!("begin postgres orphan dispatched repair transaction {entry_id}: {error}")
+        })?;
+        let changed = sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'pending',
+                 dispatched_at = NULL
+             WHERE id = $1
+               AND status = 'dispatched'
+               AND dispatch_id IS NULL
+               AND slot_index IS NULL",
+        )
+        .bind(&entry_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("repair postgres orphan dispatched entry {entry_id}: {error}"))?
+        .rows_affected() as usize;
+        if changed == 0 {
+            tx.rollback().await.map_err(|error| {
+                format!("rollback unchanged postgres orphan dispatched entry {entry_id}: {error}")
+            })?;
+            continue;
+        }
+        let _ = sqlx::query(
+            "INSERT INTO auto_queue_entry_transitions (
+                entry_id,
+                from_status,
+                to_status,
+                trigger_source
+            ) VALUES ($1, 'dispatched', 'pending', $2)",
+        )
+        .bind(&entry_id)
+        .bind(trigger_source)
+        .execute(&mut *tx)
+        .await;
+        tx.commit().await.map_err(|error| {
+            format!("commit postgres orphan dispatched repair {entry_id}: {error}")
+        })?;
+        healed += 1;
+    }
+
+    Ok(healed)
+}
+
+pub(crate) async fn cancel_and_release_runs_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &PgPool,
+    run_ids: &[String],
+    reason: &str,
+    orphan_trigger_source: Option<&str>,
+) -> Result<LiveRunCleanupResult, String> {
+    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, run_ids).await?;
+    let cancelled_dispatches = cancel_live_dispatches_for_runs_pg(pool, run_ids, reason).await?;
+    let _self_healed_orphan_entries = match orphan_trigger_source {
+        Some(trigger_source) => {
+            self_heal_orphan_dispatched_entries_without_slot_pg(pool, run_ids, trigger_source)
+                .await?
+        }
+        None => 0,
+    };
+    let mut slot_cleanup =
+        clear_and_release_slots_for_runs_pg(health_registry, pool, run_ids).await;
+    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
+        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "run_cleanup_dispatch_session_clear_pg_failed",
+                run_ids
+                    .first()
+                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
+                    .unwrap_or_default(),
+                "[auto-queue] failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
+                live_dispatch_ids,
+                error
+            );
+            slot_cleanup.warnings.push(format!(
+                "failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
+                live_dispatch_ids, error
+            ));
+        }
+    }
+
+    Ok(LiveRunCleanupResult {
+        cancelled_dispatches,
+        slot_cleanup,
+    })
 }
 
 async fn transition_entry_to_skipped_pg(
@@ -1084,32 +1332,15 @@ pub(crate) async fn cancel_selected_runs_with_pg(
 ) -> Result<Value, String> {
     let rollback_candidate_card_ids =
         load_dispatched_card_ids_for_runs_pg(pool, target_run_ids).await?;
-    let live_dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, target_run_ids).await?;
-    let cancelled_dispatches =
-        cancel_live_dispatches_for_runs_pg(pool, target_run_ids, reason).await?;
+    let cleanup = cancel_and_release_runs_with_pg(
+        health_registry,
+        pool,
+        target_run_ids,
+        reason,
+        Some("run_cancel_orphan_self_heal"),
+    )
+    .await?;
     let deleted_phase_gates = delete_phase_gate_rows_for_runs_pg(pool, target_run_ids).await?;
-    let mut slot_cleanup =
-        clear_and_release_slots_for_runs_pg(health_registry, pool, target_run_ids).await;
-    match clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await {
-        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
-        Err(error) => {
-            crate::auto_queue_log!(
-                warn,
-                "run_cancel_dispatch_session_clear_pg_failed",
-                target_run_ids
-                    .first()
-                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
-                    .unwrap_or_default(),
-                "[auto-queue] failed to clear postgres sessions for cancelled dispatches {:?}: {}",
-                live_dispatch_ids,
-                error
-            );
-            slot_cleanup.warnings.push(format!(
-                "failed to clear sessions for cancelled dispatches {:?}: {}",
-                live_dispatch_ids, error
-            ));
-        }
-    }
 
     let cancelled_runs = if target_run_ids.is_empty() {
         0
@@ -1200,14 +1431,14 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         "ok": true,
         "cancelled_entries": cancelled_entries,
         "cancelled_runs": cancelled_runs,
-        "cancelled_dispatches": cancelled_dispatches,
+        "cancelled_dispatches": cleanup.cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
         "rolled_back_cards": rolled_back_cards,
         "remaining_live_dispatches": remaining_live_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+        "released_slots": cleanup.slot_cleanup.released_slots,
+        "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+    if let Some(warning) = slot_cleanup_warning(&cleanup.slot_cleanup.warnings) {
         response["warning"] = json!(warning);
     }
     Ok(response)
@@ -1230,9 +1461,14 @@ pub(crate) fn cancel_selected_runs_with_conn(
 ) -> Value {
     let rollback_candidate_card_ids =
         load_dispatched_card_ids_for_runs(conn, target_run_ids).unwrap_or_default();
-    let cancelled_dispatches = cancel_live_dispatches_for_runs(conn, target_run_ids, reason);
+    let cleanup = cancel_and_release_runs_with_conn(
+        health_registry,
+        conn,
+        target_run_ids,
+        reason,
+        Some("run_cancel_orphan_self_heal"),
+    );
     let deleted_phase_gates = delete_phase_gate_rows_for_runs(conn, target_run_ids);
-    let slot_cleanup = clear_and_release_slots_for_runs(health_registry, conn, target_run_ids);
     let cancelled_runs = if target_run_ids.is_empty() {
         0
     } else {
@@ -1316,14 +1552,14 @@ pub(crate) fn cancel_selected_runs_with_conn(
         "ok": true,
         "cancelled_entries": cancelled_entries,
         "cancelled_runs": cancelled_runs,
-        "cancelled_dispatches": cancelled_dispatches,
+        "cancelled_dispatches": cleanup.cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
         "rolled_back_cards": rolled_back_cards,
         "remaining_live_dispatches": remaining_live_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+        "released_slots": cleanup.slot_cleanup.released_slots,
+        "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) = slot_cleanup_warning(&slot_cleanup.warnings) {
+    if let Some(warning) = slot_cleanup_warning(&cleanup.slot_cleanup.warnings) {
         response["warning"] = json!(warning);
     }
     response

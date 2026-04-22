@@ -1770,51 +1770,20 @@ async fn force_pause_with_pg(
     let active_run_ids =
         crate::services::auto_queue::cancel_run::load_run_ids_with_status_pg(pool, &["active"])
             .await?;
-    let live_dispatch_ids =
-        crate::services::auto_queue::cancel_run::load_live_dispatch_ids_for_runs_pg(
-            pool,
-            &active_run_ids,
-        )
-        .await?;
-    let cancelled_dispatches =
-        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs_pg(
-            pool,
-            &active_run_ids,
-            "auto_queue_pause",
-        )
-        .await?;
-    let mut slot_cleanup =
-        crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs_pg(
-            health_registry,
-            pool,
-            &active_run_ids,
-        )
-        .await;
-    match crate::services::auto_queue::cancel_run::clear_sessions_for_dispatches_pg(
+    let cleanup = crate::services::auto_queue::cancel_run::cancel_and_release_runs_with_pg(
+        health_registry,
         pool,
-        &live_dispatch_ids,
+        &active_run_ids,
+        "auto_queue_pause",
+        Some("run_pause_orphan_self_heal"),
     )
-    .await
-    {
-        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
-        Err(error) => {
-            crate::auto_queue_log!(
-                warn,
-                "run_pause_dispatch_session_clear_pg_failed",
-                active_run_ids
-                    .first()
-                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
-                    .unwrap_or_default(),
-                "[auto-queue] failed to clear postgres sessions for paused dispatches {:?}: {}",
-                live_dispatch_ids,
-                error
-            );
-            slot_cleanup.warnings.push(format!(
-                "failed to clear sessions for paused dispatches {:?}: {}",
-                live_dispatch_ids, error
-            ));
-        }
-    }
+    .await?;
+    let _deleted_phase_gates =
+        crate::services::auto_queue::cancel_run::delete_phase_gate_rows_for_runs_pg(
+            pool,
+            &active_run_ids,
+        )
+        .await?;
     let paused = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'paused',
@@ -1829,13 +1798,13 @@ async fn force_pause_with_pg(
     let mut response = json!({
         "ok": true,
         "paused_runs": paused,
-        "cancelled_dispatches": cancelled_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+        "cancelled_dispatches": cleanup.cancelled_dispatches,
+        "released_slots": cleanup.slot_cleanup.released_slots,
+        "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) =
-        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
-    {
+    if let Some(warning) = crate::services::auto_queue::cancel_run::slot_cleanup_warning(
+        &cleanup.slot_cleanup.warnings,
+    ) {
         response["warning"] = json!(warning);
     }
     Ok(response)
@@ -1848,17 +1817,18 @@ fn force_pause_with_conn(
     let active_run_ids =
         crate::services::auto_queue::cancel_run::load_run_ids_with_status(conn, &["active"])
             .unwrap_or_default();
-    let cancelled_dispatches =
-        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs(
-            conn,
-            &active_run_ids,
-            "auto_queue_pause",
-        );
-    let slot_cleanup = crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs(
+    let cleanup = crate::services::auto_queue::cancel_run::cancel_and_release_runs_with_conn(
         health_registry,
         conn,
         &active_run_ids,
+        "auto_queue_pause",
+        Some("run_pause_orphan_self_heal"),
     );
+    let _deleted_phase_gates =
+        crate::services::auto_queue::cancel_run::delete_phase_gate_rows_for_runs(
+            conn,
+            &active_run_ids,
+        );
     let paused = conn
         .execute(
             "UPDATE auto_queue_runs
@@ -1871,13 +1841,13 @@ fn force_pause_with_conn(
     let mut response = json!({
         "ok": true,
         "paused_runs": paused,
-        "cancelled_dispatches": cancelled_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+        "cancelled_dispatches": cleanup.cancelled_dispatches,
+        "released_slots": cleanup.slot_cleanup.released_slots,
+        "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
     });
-    if let Some(warning) =
-        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
-    {
+    if let Some(warning) = crate::services::auto_queue::cancel_run::slot_cleanup_warning(
+        &cleanup.slot_cleanup.warnings,
+    ) {
         response["warning"] = json!(warning);
     }
     response

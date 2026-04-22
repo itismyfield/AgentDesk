@@ -630,6 +630,14 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_entry_retries: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_dispatched_grace_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_dispatched_terminal_statuses: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_dispatched_recover_null_dispatch: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_dispatched_recover_missing_dispatch: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_reminder_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_warning_pct: Option<u64>,
@@ -659,6 +667,10 @@ impl RuntimeSettingsConfig {
             && self.ceo_warn_depth.is_none()
             && self.max_retries.is_none()
             && self.max_entry_retries.is_none()
+            && self.stale_dispatched_grace_min.is_none()
+            && self.stale_dispatched_terminal_statuses.is_none()
+            && self.stale_dispatched_recover_null_dispatch.is_none()
+            && self.stale_dispatched_recover_missing_dispatch.is_none()
             && self.review_reminder_min.is_none()
             && self.rate_limit_warning_pct.is_none()
             && self.rate_limit_danger_pct.is_none()
@@ -1438,6 +1450,10 @@ mod tests {
             ceo_warn_depth: Some(4),
             max_retries: Some(5),
             max_entry_retries: Some(6),
+            stale_dispatched_grace_min: Some(4),
+            stale_dispatched_terminal_statuses: Some("cancelled,failed".to_string()),
+            stale_dispatched_recover_null_dispatch: Some(false),
+            stale_dispatched_recover_missing_dispatch: Some(true),
             review_reminder_min: Some(25),
             rate_limit_warning_pct: Some(78),
             rate_limit_danger_pct: Some(93),
@@ -1591,6 +1607,19 @@ mod tests {
         assert_eq!(loaded.runtime.ceo_warn_depth, Some(4));
         assert_eq!(loaded.runtime.max_retries, Some(5));
         assert_eq!(loaded.runtime.max_entry_retries, Some(6));
+        assert_eq!(loaded.runtime.stale_dispatched_grace_min, Some(4));
+        assert_eq!(
+            loaded.runtime.stale_dispatched_terminal_statuses.as_deref(),
+            Some("cancelled,failed")
+        );
+        assert_eq!(
+            loaded.runtime.stale_dispatched_recover_null_dispatch,
+            Some(false)
+        );
+        assert_eq!(
+            loaded.runtime.stale_dispatched_recover_missing_dispatch,
+            Some(true)
+        );
         assert_eq!(loaded.runtime.review_reminder_min, Some(25));
         assert_eq!(loaded.runtime.rate_limit_warning_pct, Some(78));
         assert_eq!(loaded.runtime.rate_limit_danger_pct, Some(93));

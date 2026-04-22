@@ -62,6 +62,87 @@ test("auto-queue finds a free path from backlog to the nearest dispatchable stat
   assert.deepEqual(toPlain(path), ["requested"]);
 });
 
+test("auto-queue onTick1min honors stale dispatched runtime config", () => {
+  const recordedFailures = [];
+  const { policy } = loadPolicy("policies/auto-queue.js", {
+    config: {
+      maxEntryRetries: 7,
+      staleDispatchedGraceMin: 5,
+      staleDispatchedTerminalStatuses: "failed,expired",
+      staleDispatchedRecoverNullDispatch: false,
+      staleDispatchedRecoverMissingDispatch: true
+    },
+    recordDispatchFailure(entryId, retryLimit, source) {
+      recordedFailures.push({ entryId, retryLimit, source });
+      return { retryCount: 2, retryLimit, to: "pending", changed: true };
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM auto_queue_entries e JOIN auto_queue_runs r ON e.run_id = r.id JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match: "FROM auto_queue_runs r WHERE r.status IN ('active', 'paused')",
+        result: []
+      },
+      {
+        match: "FROM auto_queue_runs r JOIN auto_queue_entries e ON e.run_id = r.id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("FROM auto_queue_entries e") &&
+            sql.includes("e.status = 'dispatched'") &&
+            sql.includes("td.status IN ('failed', 'expired')");
+        },
+        result(sql) {
+          assert.match(sql, /datetime\('now', '-5 minutes'\)/);
+          assert.doesNotMatch(sql, /e\.dispatch_id IS NULL/);
+          assert.match(sql, /NOT EXISTS \(/);
+          return [{
+            id: "entry-stale-1",
+            agent_id: "agent-1",
+            dispatch_id: "dispatch-stale-1",
+            kanban_card_id: "card-stale-1"
+          }];
+        }
+      },
+      {
+        match: "SELECT run_id, id as entry_id, kanban_card_id as card_id, dispatch_id, agent_id,",
+        result: [{
+          run_id: "run-stale-1",
+          entry_id: "entry-stale-1",
+          card_id: "card-stale-1",
+          dispatch_id: "dispatch-stale-1",
+          agent_id: "agent-1",
+          thread_group: 0,
+          batch_phase: 0,
+          slot_index: null
+        }]
+      },
+      {
+        match: "SELECT COALESCE(e.run_id, json_extract(COALESCE(td.context, '{}'), '$.run_id')",
+        result: [{
+          run_id: "run-stale-1",
+          entry_id: "entry-stale-1",
+          card_id: "card-stale-1",
+          dispatch_id: "dispatch-stale-1",
+          thread_group: 0,
+          batch_phase: 0,
+          slot_index: null,
+          agent_id: "agent-1"
+        }]
+      }
+    ])
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(recordedFailures, [
+    { entryId: "entry-stale-1", retryLimit: 7, source: "tick_recovery" }
+  ]);
+});
+
 test("auto-queue marks pending entries skipped when a card progresses externally into a dispatchable state", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([

@@ -15,6 +15,10 @@ const RUNTIME_CONFIG_KEYS: &[&str] = &[
     "ceoWarnDepth",
     "maxRetries",
     "maxEntryRetries",
+    "staleDispatchedGraceMin",
+    "staleDispatchedTerminalStatuses",
+    "staleDispatchedRecoverNullDispatch",
+    "staleDispatchedRecoverMissingDispatch",
     "reviewReminderMin",
     "rateLimitWarningPct",
     "rateLimitDangerPct",
@@ -173,6 +177,18 @@ fn insert_runtime_number(map: &mut Map<String, Value>, key: &str, value: Option<
     }
 }
 
+fn insert_runtime_bool(map: &mut Map<String, Value>, key: &str, value: Option<bool>) {
+    if let Some(flag) = value {
+        map.insert(key.to_string(), json!(flag));
+    }
+}
+
+fn insert_runtime_string(map: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) {
+        map.insert(key.to_string(), json!(text));
+    }
+}
+
 fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, Value> {
     let mut overrides = Map::new();
     insert_runtime_number(
@@ -218,6 +234,26 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
     );
     insert_runtime_number(
         &mut overrides,
+        "staleDispatchedGraceMin",
+        config.runtime.stale_dispatched_grace_min,
+    );
+    insert_runtime_string(
+        &mut overrides,
+        "staleDispatchedTerminalStatuses",
+        config.runtime.stale_dispatched_terminal_statuses.as_deref(),
+    );
+    insert_runtime_bool(
+        &mut overrides,
+        "staleDispatchedRecoverNullDispatch",
+        config.runtime.stale_dispatched_recover_null_dispatch,
+    );
+    insert_runtime_bool(
+        &mut overrides,
+        "staleDispatchedRecoverMissingDispatch",
+        config.runtime.stale_dispatched_recover_missing_dispatch,
+    );
+    insert_runtime_number(
+        &mut overrides,
         "reviewReminderMin",
         config.runtime.review_reminder_min,
     );
@@ -255,6 +291,10 @@ fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Va
         "ceoWarnDepth": 3,
         "maxRetries": 3,
         "maxEntryRetries": 3,
+        "staleDispatchedGraceMin": 2,
+        "staleDispatchedTerminalStatuses": "cancelled,failed",
+        "staleDispatchedRecoverNullDispatch": true,
+        "staleDispatchedRecoverMissingDispatch": true,
         "reviewReminderMin": 30,
         "rateLimitWarningPct": 80,
         "rateLimitDangerPct": 95,
