@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+regen_needed=0
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_ref:-}" ] || continue
+
+  if [[ "${local_sha:-}" =~ ^0+$ ]]; then
+    continue
+  fi
+
+  if [[ "${remote_sha:-}" =~ ^0+$ ]]; then
+    diff_base="$EMPTY_TREE"
+  else
+    diff_base="$remote_sha"
+  fi
+
+  if git diff --name-only "$diff_base" "$local_sha" -- src scripts/generate_inventory_docs.py | grep -q .; then
+    regen_needed=1
+    break
+  fi
+done
+
+[ "$regen_needed" -eq 1 ] || exit 0
+
+if ! regen_output=$(python3 scripts/generate_inventory_docs.py 2>&1); then
+  printf '%s\n' "$regen_output" >&2
+  exit 1
+fi
+printf '%s\n' "$regen_output"
+
+if git diff --quiet -- ARCHITECTURE.md docs/generated; then
+  exit 0
+fi
+
+cat <<'EOF'
+docs regen이 필요합니다. 자동 amend 하시겠습니까?
+  GIT_AUTO_REGEN_DOCS=1 git push
+EOF
+git status --short -- ARCHITECTURE.md docs/generated
+
+if [ "${GIT_AUTO_REGEN_DOCS:-0}" != "1" ]; then
+  exit 1
+fi
+
+git add ARCHITECTURE.md docs/generated
+git -c user.name="${GIT_AUTO_REGEN_DOCS_NAME:-AgentDesk Auto Regen}" \
+  -c user.email="${GIT_AUTO_REGEN_DOCS_EMAIL:-agentdesk@users.noreply.github.com}" \
+  commit --amend --no-edit --no-verify

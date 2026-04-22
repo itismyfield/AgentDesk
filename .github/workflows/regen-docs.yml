@@ -1,0 +1,64 @@
+name: Regen inventory docs
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+concurrency:
+  group: regen-docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regen:
+    name: Regen inventory docs
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.fork == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for bot regen commit
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --pretty=%s)
+          author=$(git log -1 --pretty=%an)
+          if [[ "$subject" == *"[skip regen]"* || "$author" == "github-actions[bot]" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping inventory regen for bot commit: $subject"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate inventory docs
+        if: steps.guard.outputs.skip != 'true'
+        run: python3 scripts/generate_inventory_docs.py
+
+      - name: Commit regenerated docs
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- ARCHITECTURE.md docs/generated; then
+            echo "No inventory docs drift detected."
+            exit 0
+          fi
+
+          git add ARCHITECTURE.md docs/generated
+          git commit -m "chore: regenerate inventory docs [skip regen]"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
