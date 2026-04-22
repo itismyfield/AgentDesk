@@ -365,7 +365,7 @@ fn review_entry_context_raw_pg(pool: &PgPool, card_id: &str) -> String {
                               AND td.dispatch_type = 'review'
                               AND td.status = 'completed'
                         ) AS latest_review_completed_at,
-                        kc.metadata
+                        kc.metadata::text AS metadata
                  FROM kanban_cards kc
                  WHERE kc.id = $1",
             )

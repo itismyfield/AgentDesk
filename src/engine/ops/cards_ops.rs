@@ -299,7 +299,7 @@ fn card_select_sql() -> &'static str {
     "SELECT \
         kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
         kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, \
-        kc.metadata, kc.created_at, kc.updated_at, kc.description, kc.blocked_reason, \
+        CAST(kc.metadata AS TEXT) AS metadata, kc.created_at, kc.updated_at, kc.description, kc.blocked_reason, \
         kc.pipeline_stage_id, kc.review_notes, kc.review_status, kc.requested_at, \
         kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.depth, kc.sort_order, \
         kc.active_thread_id, kc.channel_thread_map, kc.suggestion_pending_at, kc.review_entered_at, \

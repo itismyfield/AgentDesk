@@ -637,7 +637,7 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             .map_err(|error| format!("open postgres kanban status transaction: {error}"))?;
 
         let row = sqlx::query(
-            "SELECT status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round
+            "SELECT status, title, metadata::text AS metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round
              FROM kanban_cards
              WHERE id = $1",
         )

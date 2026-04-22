@@ -54,7 +54,7 @@ const CARD_SELECT_SQL: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
 const CARD_SELECT_SQL_PG: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
-    kc.github_issue_url, kc.github_issue_number::bigint AS github_issue_number, kc.latest_dispatch_id, kc.review_round::bigint AS review_round, kc.metadata, \
+    kc.github_issue_url, kc.github_issue_number::bigint AS github_issue_number, kc.latest_dispatch_id, kc.review_round::bigint AS review_round, kc.metadata::text AS metadata, \
     kc.created_at::text AS created_at, kc.updated_at::text AS updated_at, \
     td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth::bigint AS d_depth, \
     td.result AS d_result, td.context AS d_context, \

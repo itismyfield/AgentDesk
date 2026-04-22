@@ -2234,7 +2234,7 @@ pub async fn list_generate_candidates_pg(
                 kc.assigned_agent_id,
                 kc.priority,
                 kc.description,
-                kc.metadata,
+                kc.metadata::TEXT AS metadata,
                 kc.github_issue_number::BIGINT AS github_issue_number
          FROM kanban_cards kc
          WHERE kc.status = ANY($1::TEXT[])
