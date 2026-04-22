@@ -16,7 +16,7 @@ use crate::services::session_backend::{
 };
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
-    tmux_session_exists, tmux_session_has_live_pane,
+    tmux_exit_reason_is_normal_completion, tmux_session_exists, tmux_session_has_live_pane,
 };
 
 use super::formatting::{
@@ -56,7 +56,9 @@ pub(super) struct WatcherLineOutcome {
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     let lower = reason.to_ascii_lowercase();
-    if lower.contains("force-kill")
+    if tmux_exit_reason_is_normal_completion(reason) {
+        "lifecycle.normal_completion"
+    } else if lower.contains("force-kill")
         || lower.contains("deadlock")
         || lower.contains("prompt too long")
         || lower.contains("auth")
@@ -67,6 +69,11 @@ fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     } else {
         "lifecycle.tmux_terminated"
     }
+}
+
+fn tmux_death_is_normal_completion(reason: Option<&str>, diagnostic: Option<&str>) -> bool {
+    reason.is_some_and(tmux_exit_reason_is_normal_completion)
+        || diagnostic.is_some_and(|diag| diag.contains("recent_output=completed_result_present"))
 }
 
 fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsage> {
@@ -1376,8 +1383,8 @@ pub(super) async fn tmux_output_watcher(
                 break;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            if let Some(diag) = build_tmux_death_diagnostic(&tmux_session_name, Some(&output_path))
-            {
+            let diagnostic = build_tmux_death_diagnostic(&tmux_session_name, Some(&output_path));
+            if let Some(diag) = diagnostic.as_deref() {
                 tracing::info!(
                     "  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping ({diag})"
                 );
@@ -1386,17 +1393,19 @@ pub(super) async fn tmux_output_watcher(
                     "  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping"
                 );
             }
+            let reason_short = read_tmux_exit_reason(&tmux_session_name);
+            let is_normal_completion =
+                tmux_death_is_normal_completion(reason_short.as_deref(), diagnostic.as_deref());
             // Notify: tmux session termination with reason
-            {
-                let reason_short = read_tmux_exit_reason(&tmux_session_name)
-                    .unwrap_or_else(|| "unknown".to_string());
-                let is_force_kill = reason_short.contains("force-kill");
+            if !is_normal_completion {
+                let reason_short_text = reason_short.as_deref().unwrap_or("unknown");
+                let is_force_kill = reason_short_text.contains("force-kill");
                 if !is_force_kill {
                     // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
-                    let reason_text = reason_short
+                    let reason_text = reason_short_text
                         .strip_prefix('[')
                         .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-                        .unwrap_or(&reason_short);
+                        .unwrap_or(reason_short_text);
                     let reason_truncated: String = reason_text.chars().take(100).collect();
                     let session_key = super::adk_session::build_adk_session_key(
                         &shared,
@@ -1420,13 +1429,18 @@ pub(super) async fn tmux_output_watcher(
                         &format!("🔴 세션 종료: {reason_truncated}"),
                     );
                 }
+            } else {
+                tracing::info!(
+                    "  [{ts}] 👁 tmux session {tmux_session_name} ended after normal completion, skipping lifecycle notification"
+                );
             }
             if !prompt_too_long_killed && !turn_result_relayed {
                 // Suppress warning for normal dispatch completion — not an error
-                let is_normal_completion = read_tmux_exit_reason(&tmux_session_name)
-                    .map(|r| r.contains("dispatch turn completed"))
-                    .unwrap_or(false);
-                if !is_normal_completion {
+                let suppress_restart = is_normal_completion
+                    || reason_short
+                        .as_deref()
+                        .is_some_and(tmux_exit_reason_is_normal_completion);
+                if !suppress_restart {
                     let _ = resume_aborted_restart_turn(
                         channel_id,
                         &http,
@@ -4091,17 +4105,43 @@ mod tests {
     use super::{
         DeadSessionCleanupPlan, OffsetAdvanceDecision, WatcherToolState,
         build_bg_trigger_session_key, dead_session_cleanup_plan,
-        enqueue_background_trigger_response_to_notify_outbox, load_restored_provider_session_id,
-        notify_path_offset_advance_decision, parse_bg_trigger_offset_from_session_key,
-        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
+        enqueue_background_trigger_response_to_notify_outbox, lifecycle_reason_code_for_tmux_exit,
+        load_restored_provider_session_id, notify_path_offset_advance_decision,
+        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
+        refresh_session_heartbeat_from_tmux_output,
         rollback_enqueued_offset_for_reconciled_failures, terminal_relay_decision,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        tmux_death_is_normal_completion, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
     use poise::serenity_prelude::ChannelId;
+
+    #[test]
+    fn normal_completion_exit_reason_maps_to_dedicated_lifecycle_code() {
+        assert_eq!(
+            lifecycle_reason_code_for_tmux_exit("turn completed (code 0)"),
+            "lifecycle.normal_completion"
+        );
+        assert_eq!(
+            lifecycle_reason_code_for_tmux_exit("dispatch turn completed"),
+            "lifecycle.normal_completion"
+        );
+    }
+
+    #[test]
+    fn normal_completion_detection_accepts_completion_diagnostic_without_exit_reason() {
+        assert!(tmux_death_is_normal_completion(
+            None,
+            Some("recent_output=completed_result_present")
+        ));
+        assert!(!tmux_death_is_normal_completion(
+            None,
+            Some("recent_output=result_error_present")
+        ));
+    }
 
     #[test]
     fn restored_live_tmux_session_loads_namespaced_provider_session_id() {

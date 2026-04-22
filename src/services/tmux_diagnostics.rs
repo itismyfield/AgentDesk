@@ -7,6 +7,8 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
     crate::services::tmux_common::session_temp_path(tmux_session_name, "exit_reason")
 }
 
+pub const TMUX_NORMAL_COMPLETION_REASON: &str = "turn completed (code 0)";
+
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_session(tmux_session_name)
 }
@@ -26,6 +28,17 @@ pub fn record_tmux_exit_reason(tmux_session_name: &str, reason: &str) {
         reason.trim()
     );
     let _ = std::fs::write(tmux_exit_reason_path(tmux_session_name), stamped);
+}
+
+pub fn record_normal_tmux_exit_reason(tmux_session_name: &str) {
+    record_tmux_exit_reason(tmux_session_name, TMUX_NORMAL_COMPLETION_REASON);
+}
+
+pub fn tmux_exit_reason_is_normal_completion(reason: &str) -> bool {
+    let lower = reason.trim().to_ascii_lowercase();
+    lower.contains("turn completed")
+        || lower.contains("dispatch turn completed")
+        || lower == "exit:0"
 }
 
 pub fn read_tmux_exit_reason(tmux_session_name: &str) -> Option<String> {
@@ -199,20 +212,50 @@ pub fn build_tmux_death_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::{
-        build_tmux_death_diagnostic, clear_tmux_exit_reason, pane_list_has_live_pane,
-        read_recent_output_hint, record_tmux_exit_reason,
-        should_recreate_session_after_followup_fifo_error,
-        should_recreate_session_after_stdin_error,
+        TMUX_NORMAL_COMPLETION_REASON, build_tmux_death_diagnostic, clear_tmux_exit_reason,
+        pane_list_has_live_pane, read_recent_output_hint, record_normal_tmux_exit_reason,
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+        should_recreate_session_after_stdin_error, tmux_exit_reason_is_normal_completion,
     };
+
+    fn unique_test_session_name() -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "AgentDesk-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
 
     #[test]
     fn test_tmux_exit_reason_round_trip() {
-        let session = format!("AgentDesk-test-{}", std::process::id());
+        let session = unique_test_session_name();
         clear_tmux_exit_reason(&session);
         record_tmux_exit_reason(&session, "explicit cleanup: /stop");
         let diag = build_tmux_death_diagnostic(&session, None).unwrap();
         assert!(diag.contains("explicit cleanup: /stop"));
+        clear_tmux_exit_reason(&session);
+    }
+
+    #[test]
+    fn test_tmux_exit_reason_identifies_normal_completion() {
+        assert!(tmux_exit_reason_is_normal_completion(
+            "turn completed (code 0)"
+        ));
+        assert!(tmux_exit_reason_is_normal_completion("exit:0"));
+        assert!(!tmux_exit_reason_is_normal_completion("signal:9"));
+    }
+
+    #[test]
+    fn test_record_normal_tmux_exit_reason_round_trip() {
+        let session = unique_test_session_name();
+        clear_tmux_exit_reason(&session);
+        record_normal_tmux_exit_reason(&session);
+        let diag = build_tmux_death_diagnostic(&session, None).unwrap();
+        assert!(diag.contains(TMUX_NORMAL_COMPLETION_REASON));
         clear_tmux_exit_reason(&session);
     }
 

@@ -13,7 +13,7 @@ use crate::services::discord::restart_report::{
 };
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
-    CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     fold_read_output_result, is_readonly_tool_policy, register_child_pid,
     tmux_followup_fallback_after_read_error,
 };
@@ -25,8 +25,9 @@ use crate::services::session_backend::{
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    tmux_session_exists, tmux_session_has_live_pane,
+    record_normal_tmux_exit_reason, record_tmux_exit_reason,
+    should_recreate_session_after_followup_fifo_error, tmux_session_exists,
+    tmux_session_has_live_pane,
 };
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
@@ -651,6 +652,7 @@ fn execute_streaming_local_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
+    record_normal_tmux_exit_reason_if_completed(&read_result, tmux_session_name);
     fold_read_output_result(
         read_result,
         |offset| {
@@ -782,6 +784,8 @@ fn send_followup_to_tmux(
             return Err(failure.error);
         }
     };
+
+    record_normal_tmux_exit_reason_if_completed(&read_result, tmux_session_name);
 
     Ok(fold_read_output_result(
         read_result,
@@ -962,6 +966,15 @@ fn execute_streaming_local_process_codex(
     );
 
     Ok(())
+}
+
+fn record_normal_tmux_exit_reason_if_completed(
+    read_result: &ReadOutputResult,
+    tmux_session_name: &str,
+) {
+    if matches!(read_result, ReadOutputResult::Completed { .. }) {
+        record_normal_tmux_exit_reason(tmux_session_name);
+    }
 }
 
 fn base_exec_args(
@@ -1255,20 +1268,35 @@ fn handle_codex_json_line(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    };
 
     use super::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
         TMUX_PROMPT_B64_PREFIX, base_exec_args, build_tmux_launch_env_lines, compose_codex_prompt,
-        handle_codex_json_line,
+        handle_codex_json_line, record_normal_tmux_exit_reason_if_completed,
     };
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::discord::restart_report::{
         RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
     };
     use crate::services::provider::ProviderKind;
+    use crate::services::tmux_diagnostics::{
+        TMUX_NORMAL_COMPLETION_REASON, clear_tmux_exit_reason, read_tmux_exit_reason,
+    };
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use serde_json::Value;
+
+    fn unique_test_session_name() -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "AgentDesk-codex-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
 
     #[test]
     fn test_tmux_launch_env_lines_include_exec_path_and_report_envs() {
@@ -1547,6 +1575,26 @@ mod tests {
             }
             other => panic!("Expected ToolUse, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_record_normal_tmux_exit_reason_if_completed_only_records_completed_reads() {
+        let session = unique_test_session_name();
+        clear_tmux_exit_reason(&session);
+
+        record_normal_tmux_exit_reason_if_completed(
+            &crate::services::provider::ReadOutputResult::Completed { offset: 7 },
+            &session,
+        );
+        let recorded = read_tmux_exit_reason(&session).unwrap();
+        assert!(recorded.contains(TMUX_NORMAL_COMPLETION_REASON));
+
+        clear_tmux_exit_reason(&session);
+        record_normal_tmux_exit_reason_if_completed(
+            &crate::services::provider::ReadOutputResult::Cancelled { offset: 7 },
+            &session,
+        );
+        assert!(read_tmux_exit_reason(&session).is_none());
     }
 
     #[test]
