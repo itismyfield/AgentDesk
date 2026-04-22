@@ -42,8 +42,13 @@ use crate::services::tmux_diagnostics::{
 
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
-pub(crate) const QWEN_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY: u32 = 2;
+pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+// Allow up to 60 s for the first token: covers cold start, model loading, and upstream rate-limit
+// backoffs that happen before the session produces any meaningful output.
+pub(crate) const QWEN_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
+// Allow up to 120 s of silence after progress has been seen: covers long-running tool calls
+// (e.g. cargo build, test suites) where the model is waiting for a tool result between turns.
+pub(crate) const QWEN_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
 pub(crate) const QWEN_MAX_SESSION_RETRIES: usize = 1;
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const QWEN_CODE_SYSTEM_SETTINGS_ENV: &str = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
@@ -69,6 +74,84 @@ pub(crate) const QWEN_SUPPORTED_ALLOWED_TOOLS: &[&str] = &[
     "EnterPlanMode",
     "ExitPlanMode",
 ];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QwenStreamWatchdog {
+    poll_timeout: Duration,
+    startup_watchdog: Duration,
+    idle_watchdog: Duration,
+    startup_silent_for: Duration,
+    idle_silent_for: Duration,
+}
+
+impl Default for QwenStreamWatchdog {
+    fn default() -> Self {
+        Self::new(
+            QWEN_STREAM_POLL_TIMEOUT,
+            QWEN_STREAM_STARTUP_WATCHDOG,
+            QWEN_STREAM_IDLE_WATCHDOG,
+        )
+    }
+}
+
+impl QwenStreamWatchdog {
+    pub(crate) const fn new(
+        poll_timeout: Duration,
+        startup_watchdog: Duration,
+        idle_watchdog: Duration,
+    ) -> Self {
+        Self {
+            poll_timeout,
+            startup_watchdog,
+            idle_watchdog,
+            startup_silent_for: Duration::ZERO,
+            idle_silent_for: Duration::ZERO,
+        }
+    }
+
+    pub(crate) const fn poll_timeout(&self) -> Duration {
+        self.poll_timeout
+    }
+
+    // Called on every received line, not just meaningful ones.  Any stream activity resets both
+    // accumulators so a session that is producing non-content output (init handshake, system
+    // events) does not get prematurely retried.  The startup-vs-idle threshold selection is made
+    // by `on_timeout` based on `meaningful_progress_seen`, not here.
+    pub(crate) fn observe_line(&mut self) {
+        self.startup_silent_for = Duration::ZERO;
+        self.idle_silent_for = Duration::ZERO;
+    }
+
+    pub(crate) fn on_timeout(&mut self, meaningful_progress_seen: bool) -> Option<String> {
+        if !meaningful_progress_seen {
+            self.startup_silent_for += self.poll_timeout;
+            if self.startup_silent_for >= self.startup_watchdog {
+                return Some(self.startup_retry_message());
+            }
+            return None;
+        }
+
+        self.idle_silent_for += self.poll_timeout;
+        if self.idle_silent_for >= self.idle_watchdog {
+            return Some(self.idle_retry_message());
+        }
+        None
+    }
+
+    pub(crate) fn startup_retry_message(&self) -> String {
+        format!(
+            "Qwen stream produced no output for {} seconds before first progress",
+            self.startup_watchdog.as_secs()
+        )
+    }
+
+    pub(crate) fn idle_retry_message(&self) -> String {
+        format!(
+            "Qwen stream produced no output for {} seconds after progress",
+            self.idle_watchdog.as_secs()
+        )
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct QwenSystemSettingsOverride {
@@ -163,6 +246,7 @@ struct QwenAttemptState {
     current_model: Option<String>,
     last_error_message: Option<String>,
     terminal_result_seen: bool,
+    meaningful_progress_seen: bool,
     terminal_result_text: Option<String>,
     partial_stream_seen: bool,
     buffered_messages: Vec<StreamMessage>,
@@ -405,8 +489,7 @@ fn execute_qwen_streaming_attempt(
         &stdout_events,
         cancel_token.as_deref(),
         &mut state,
-        QWEN_STREAM_IDLE_TIMEOUT,
-        QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY,
+        QwenStreamWatchdog::default(),
     ) {
         QwenStreamLoopResult::Cancelled => {
             kill_child_tree(&mut child);
@@ -476,19 +559,16 @@ fn collect_qwen_stream_events(
     stdout_events: &mpsc::Receiver<QwenStreamEvent>,
     cancel_token: Option<&CancelToken>,
     state: &mut QwenAttemptState,
-    idle_timeout: Duration,
-    idle_ticks_before_retry: u32,
+    mut watchdog: QwenStreamWatchdog,
 ) -> QwenStreamLoopResult {
-    let mut idle_ticks = 0;
-
     loop {
         if is_cancelled(cancel_token) {
             return QwenStreamLoopResult::Cancelled;
         }
 
-        match stdout_events.recv_timeout(idle_timeout) {
+        match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(QwenStreamEvent::Line(line)) => {
-                idle_ticks = 0;
+                watchdog.observe_line();
                 process_qwen_stream_line(&line, state);
             }
             Ok(QwenStreamEvent::ReadError(message)) => {
@@ -504,14 +584,8 @@ fn collect_qwen_stream_events(
                 if state.terminal_result_seen {
                     return QwenStreamLoopResult::Eof;
                 }
-                idle_ticks += 1;
-                if idle_ticks >= idle_ticks_before_retry {
-                    return QwenStreamLoopResult::RetrySession {
-                        message: format!(
-                            "Qwen stream produced no output for {} seconds",
-                            idle_timeout.as_secs() * idle_ticks_before_retry as u64
-                        ),
-                    };
+                if let Some(message) = watchdog.on_timeout(state.meaningful_progress_seen) {
+                    return QwenStreamLoopResult::RetrySession { message };
                 }
             }
         }
@@ -642,6 +716,7 @@ fn process_qwen_partial_event(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if !text.is_empty() {
+                        mark_meaningful_progress(state);
                         state.final_text.push_str(text);
                         state.buffered_messages.push(StreamMessage::Text {
                             content: text.to_string(),
@@ -659,10 +734,12 @@ fn process_qwen_partial_event(
                             .thinking_signature
                             .clone()
                             .or_else(|| Some("thinking".to_string()));
+                        block_state.thinking_emitted = true;
+                        let _ = block_state;
+                        mark_meaningful_progress(state);
                         state
                             .buffered_messages
                             .push(StreamMessage::Thinking { summary });
-                        block_state.thinking_emitted = true;
                     }
                 }
                 Some("signature_delta") => {
@@ -695,11 +772,13 @@ fn process_qwen_partial_event(
             let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             if let Some(block_state) = state.partial_blocks.remove(&index) {
                 if block_state.kind == "tool_use" {
+                    mark_meaningful_progress(state);
                     state.buffered_messages.push(StreamMessage::ToolUse {
                         name: block_state.tool_name.unwrap_or_else(|| "tool".to_string()),
                         input: normalize_tool_input(block_state.input_json),
                     });
                 } else if block_state.kind == "thinking" && !block_state.thinking_emitted {
+                    mark_meaningful_progress(state);
                     state.buffered_messages.push(StreamMessage::Thinking {
                         summary: block_state.thinking_signature,
                     });
@@ -740,6 +819,7 @@ fn process_qwen_assistant_message(json: &Value, state: &mut QwenAttemptState) {
                 if text.is_empty() {
                     continue;
                 }
+                mark_meaningful_progress(state);
                 if !state.partial_stream_seen {
                     state.final_text.push_str(text);
                     state.buffered_messages.push(StreamMessage::Text {
@@ -750,6 +830,7 @@ fn process_qwen_assistant_message(json: &Value, state: &mut QwenAttemptState) {
                 }
             }
             Some("thinking") if !state.partial_stream_seen => {
+                mark_meaningful_progress(state);
                 let summary = block
                     .get("signature")
                     .and_then(|v| v.as_str())
@@ -767,6 +848,7 @@ fn process_qwen_assistant_message(json: &Value, state: &mut QwenAttemptState) {
                     .push(StreamMessage::Thinking { summary });
             }
             Some("tool_use") if !state.partial_stream_seen => {
+                mark_meaningful_progress(state);
                 let name = block
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -808,6 +890,7 @@ fn process_qwen_user_message(json: &Value, state: &mut QwenAttemptState) {
             .get("is_error")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        mark_meaningful_progress(state);
         state
             .buffered_messages
             .push(StreamMessage::ToolResult { content, is_error });
@@ -1744,6 +1827,10 @@ fn track_session_id(state: &mut QwenAttemptState, session_id: Option<&str>) {
     }
 }
 
+fn mark_meaningful_progress(state: &mut QwenAttemptState) {
+    state.meaningful_progress_seen = true;
+}
+
 fn update_status_from_usage(
     state: &mut QwenAttemptState,
     usage: Option<&Value>,
@@ -1788,19 +1875,28 @@ fn update_status_from_usage(
 }
 
 fn maybe_emit_partial_thinking(index: usize, state: &mut QwenAttemptState) {
-    let Some(block_state) = state.partial_blocks.get_mut(&index) else {
+    let Some(summary) = state
+        .partial_blocks
+        .get_mut(&index)
+        .and_then(|block_state| {
+            if block_state.kind != "thinking" || block_state.thinking_emitted {
+                return None;
+            }
+            block_state.thinking_emitted = true;
+            Some(
+                block_state
+                    .thinking_signature
+                    .clone()
+                    .or_else(|| Some("thinking".to_string())),
+            )
+        })
+    else {
         return;
     };
-    if block_state.kind != "thinking" || block_state.thinking_emitted {
-        return;
-    }
-    state.buffered_messages.push(StreamMessage::Thinking {
-        summary: block_state
-            .thinking_signature
-            .clone()
-            .or_else(|| Some("thinking".to_string())),
-    });
-    block_state.thinking_emitted = true;
+    mark_meaningful_progress(state);
+    state
+        .buffered_messages
+        .push(StreamMessage::Thinking { summary });
 }
 
 fn normalize_tool_input(raw: String) -> String {
@@ -1910,7 +2006,7 @@ fn render_qwen_value(value: &Value) -> String {
 mod tests {
     use super::{
         QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy, QwenStreamEvent,
-        QwenStreamLoopResult, build_simple_exec_args, build_stream_exec_args,
+        QwenStreamLoopResult, QwenStreamWatchdog, build_simple_exec_args, build_stream_exec_args,
         collect_qwen_stream_events, compose_qwen_prompt, create_system_settings_override,
         extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
         qwen_project_cache_key, resolve_allowed_core_tools,
@@ -2082,13 +2178,130 @@ mod tests {
             &rx,
             Some(token.as_ref()),
             &mut state,
-            Duration::from_millis(100),
-            2,
+            QwenStreamWatchdog::new(
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
         );
 
         assert_eq!(result, QwenStreamLoopResult::Cancelled);
         assert_eq!(state.final_text, "partial");
         assert!(!state.raw_stdout.is_empty());
+    }
+
+    #[test]
+    fn qwen_stream_watchdog_startup_timeout_fires_before_first_progress() {
+        let (_tx, rx) = mpsc::channel();
+        let mut state = QwenAttemptState::default();
+
+        let watchdog = QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let expected_message = watchdog.startup_retry_message();
+
+        let result = collect_qwen_stream_events(&rx, None, &mut state, watchdog);
+
+        assert_eq!(
+            result,
+            QwenStreamLoopResult::RetrySession {
+                message: expected_message,
+            }
+        );
+        assert!(!state.meaningful_progress_seen);
+    }
+
+    #[test]
+    fn qwen_stream_watchdog_idle_timeout_fires_after_progress() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = QwenAttemptState::default();
+        tx.send(QwenStreamEvent::Line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}"#
+                .to_string(),
+        ))
+        .unwrap();
+
+        let watchdog = QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let expected_message = watchdog.idle_retry_message();
+
+        let result = collect_qwen_stream_events(&rx, None, &mut state, watchdog);
+
+        assert_eq!(
+            result,
+            QwenStreamLoopResult::RetrySession {
+                message: expected_message,
+            }
+        );
+        assert!(state.meaningful_progress_seen);
+        assert_eq!(state.final_text, "partial");
+    }
+
+    #[test]
+    fn qwen_stream_watchdog_eof_after_terminal_result() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = QwenAttemptState::default();
+        tx.send(QwenStreamEvent::Line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}"#
+                .to_string(),
+        ))
+        .unwrap();
+        tx.send(QwenStreamEvent::Line(
+            r#"{"type":"result","is_error":false,"result":"final"}"#.to_string(),
+        ))
+        .unwrap();
+
+        let result = collect_qwen_stream_events(
+            &rx,
+            None,
+            &mut state,
+            QwenStreamWatchdog::new(
+                Duration::from_millis(200),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+        );
+
+        assert_eq!(result, QwenStreamLoopResult::Eof);
+        assert!(state.terminal_result_seen);
+        assert!(state.meaningful_progress_seen);
+    }
+
+    #[test]
+    fn qwen_stream_watchdog_non_meaningful_line_resets_timer_but_not_progress() {
+        // A system/session_start event resets idle timers (observe_line) but must not set
+        // meaningful_progress_seen, so the startup watchdog fires rather than the idle one.
+        let (tx, rx) = mpsc::channel();
+        let mut state = QwenAttemptState::default();
+        tx.send(QwenStreamEvent::Line(
+            r#"{"type":"system","subtype":"session_start","session_id":"s1"}"#.to_string(),
+        ))
+        .unwrap();
+
+        let watchdog = QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let expected_message = watchdog.startup_retry_message();
+
+        let result = collect_qwen_stream_events(&rx, None, &mut state, watchdog);
+
+        assert_eq!(
+            result,
+            QwenStreamLoopResult::RetrySession {
+                message: expected_message,
+            }
+        );
+        assert!(
+            !state.meaningful_progress_seen,
+            "system event must not mark progress"
+        );
     }
 
     #[test]

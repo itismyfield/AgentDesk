@@ -64,7 +64,7 @@
 | `db::auto_queue` | `src/db/auto_queue.rs` | 6147 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::postgres` | `src/db/postgres.rs` | 844 |  |
+| `db::postgres` | `src/db/postgres.rs` | 852 |  |
 | `db::schema` | `src/db/schema.rs` | 2892 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1246 | giant-file |
@@ -99,7 +99,7 @@
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 260 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
 | `engine::transition` | `src/engine/transition.rs` | 1618 | giant-file |
-| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 662 |  |
+| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 690 |  |
 | `error` | `src/error.rs` | 188 |  |
 | `github` | `src/github/mod.rs` | 833 |  |
 | `github::dod` | `src/github/dod.rs` | 395 |  |
@@ -136,7 +136,7 @@
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 102 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5433 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2478 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2481 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1235 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 2259 | giant-file |
@@ -169,7 +169,7 @@
 | `server::routes::review_verdict::review_state_repo` | `src/server/routes/review_verdict/review_state_repo.rs` | 22 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 893 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 577 |  |
-| `server::routes::reviews` | `src/server/routes/reviews.rs` | 645 |  |
+| `server::routes::reviews` | `src/server/routes/reviews.rs` | 648 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 371 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 1126 | giant-file |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 512 |  |
@@ -280,8 +280,8 @@
 | `services::provider_exec` | `src/services/provider_exec.rs` | 357 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 247 |  |
-| `services::qwen` | `src/services/qwen.rs` | 2233 | giant-file |
-| `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1047 | giant-file |
+| `services::qwen` | `src/services/qwen.rs` | 2446 | giant-file |
+| `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1176 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 1160 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |

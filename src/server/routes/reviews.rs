@@ -366,6 +366,7 @@ mod tests {
     }
 
     struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
         database_url: String,
@@ -373,6 +374,7 @@ mod tests {
 
     impl TestPostgresDb {
         async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
             let admin_url = postgres_admin_database_url();
             let database_name = format!("agentdesk_reviews_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
@@ -380,6 +382,7 @@ mod tests {
                 .await
                 .unwrap();
             Self {
+                _lock: lock,
                 admin_url,
                 database_name,
                 database_url,

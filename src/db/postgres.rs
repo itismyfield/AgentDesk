@@ -1,19 +1,11 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
-#[cfg(test)]
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-#[cfg(test)]
-use sqlx::{Connection, PgConnection};
 use sqlx::{PgPool, Postgres, Row};
-#[cfg(test)]
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{AgentChannel, AgentDef, Config};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
@@ -343,31 +335,42 @@ fn database_url_override() -> Option<String> {
 #[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
-const TEST_POSTGRES_POOL_MAX: u32 = 2;
+const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
-const TEST_POSTGRES_SETUP_CONCURRENCY: usize = 4;
+const TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS: u32 = 1;
+#[cfg(test)]
+static POSTGRES_TEST_SETUP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static POSTGRES_TEST_LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn test_postgres_setup_semaphore() -> &'static Arc<Semaphore> {
-    static TEST_POSTGRES_SETUP_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    TEST_POSTGRES_SETUP_SEMAPHORE
-        .get_or_init(|| Arc::new(Semaphore::new(TEST_POSTGRES_SETUP_CONCURRENCY)))
+fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
+    let mutex = POSTGRES_TEST_SETUP_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
-async fn acquire_test_postgres_setup_slot(label: &str) -> Result<OwnedSemaphorePermit, String> {
-    tokio::time::timeout(
-        TEST_POSTGRES_OP_TIMEOUT,
-        test_postgres_setup_semaphore().clone().acquire_owned(),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "{label} wait for postgres test setup slot timed out after {}s",
-            TEST_POSTGRES_OP_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|error| format!("{label} acquire postgres test setup slot: {error}"))
+fn lock_test_lifecycle_raw() -> std::sync::MutexGuard<'static, ()> {
+    let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(crate) struct PostgresTestLifecycleGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
+    PostgresTestLifecycleGuard {
+        _guard: lock_test_lifecycle_raw(),
+    }
 }
 
 #[cfg(test)]
@@ -394,28 +397,30 @@ where
 }
 
 #[cfg(test)]
-async fn connect_test_connection(database_url: &str, label: &str) -> Result<PgConnection, String> {
+async fn connect_test_pool_with_max_connections(
+    database_url: &str,
+    label: &str,
+    max_connections: u32,
+) -> Result<PgPool, String> {
+    let options = PgConnectOptions::from_str(database_url)
+        .map_err(|error| format!("{label} parse postgres url: {error}"))?;
     run_test_postgres_sqlx_op(
         &format!("{label} connect postgres"),
-        PgConnection::connect(database_url),
+        PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
+            .connect_with(options),
     )
     .await
 }
 
 #[cfg(test)]
 pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
-    let options = PgConnectOptions::from_str(database_url)
-        .map_err(|error| format!("{label} parse postgres url: {error}"))?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} connect postgres"),
-        PgPoolOptions::new()
-            // CI runs many PostgreSQL-backed tests in parallel; keeping the
-            // per-test pool lean prevents transient pool starvation.
-            .max_connections(TEST_POSTGRES_POOL_MAX)
-            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
-            .connect_with(options),
-    )
-    .await
+    // Test helpers frequently create many isolated pools in parallel on CI.
+    // Keep the default test pool lean so PG-backed route tests do not exhaust
+    // the shared runner database just by setting up fixtures.
+    connect_test_pool_with_max_connections(database_url, label, TEST_POSTGRES_POOL_MAX_CONNECTIONS)
+        .await
 }
 
 #[cfg(test)]
@@ -424,18 +429,22 @@ pub(crate) async fn create_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
-    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
-    let mut admin_conn = connect_test_connection(admin_url, &format!("{label} admin")).await?;
+    // CI failures were caused by many PG-backed tests racing to create/drop
+    // isolated databases at the same time. Serialize setup/teardown at the
+    // shared helper boundary so every test module benefits from the guard.
+    let _guard = lock_test_setup();
+    let admin_pool = connect_test_pool_with_max_connections(
+        admin_url,
+        &format!("{label} admin"),
+        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
+    )
+    .await?;
     run_test_postgres_sqlx_op(
         &format!("{label} create postgres test db {database_name}"),
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&mut admin_conn),
+        sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
     )
     .await?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} admin close postgres connection"),
-        admin_conn.close(),
-    )
-    .await?;
+    close_test_pool(admin_pool, &format!("{label} admin")).await?;
     Ok(())
 }
 
@@ -444,7 +453,6 @@ pub(crate) async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
-    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
     let pool = connect_test_pool(database_url, label).await?;
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
         .await
@@ -463,8 +471,13 @@ pub(crate) async fn drop_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
-    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
-    let mut admin_conn = connect_test_connection(admin_url, &format!("{label} admin")).await?;
+    let _guard = lock_test_setup();
+    let admin_pool = connect_test_pool_with_max_connections(
+        admin_url,
+        &format!("{label} admin"),
+        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
+    )
+    .await?;
     run_test_postgres_sqlx_op(
         &format!("{label} terminate postgres test db sessions {database_name}"),
         sqlx::query(
@@ -474,20 +487,15 @@ pub(crate) async fn drop_test_database(
                AND pid <> pg_backend_pid()",
         )
         .bind(database_name)
-        .execute(&mut admin_conn),
+        .execute(&admin_pool),
     )
     .await?;
     run_test_postgres_sqlx_op(
         &format!("{label} drop postgres test db {database_name}"),
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\""))
-            .execute(&mut admin_conn),
+        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\"")).execute(&admin_pool),
     )
     .await?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} admin close postgres connection"),
-        admin_conn.close(),
-    )
-    .await?;
+    close_test_pool(admin_pool, &format!("{label} admin")).await?;
     Ok(())
 }
 

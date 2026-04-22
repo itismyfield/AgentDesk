@@ -20,6 +20,7 @@ struct PartialBlockState {
 #[derive(Debug, Default)]
 struct TurnNormalizationState {
     partial_stream_seen: bool,
+    meaningful_progress_seen: bool,
     current_model: Option<String>,
     last_session_id: Option<String>,
     init_emitted_for_session: Option<String>,
@@ -37,6 +38,13 @@ enum TurnReadEvent {
 struct TurnFailure {
     message: String,
     retryable: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TurnWatchdogOutcome {
+    Continue,
+    Break,
+    Retry { message: String },
 }
 
 pub fn run(
@@ -323,13 +331,16 @@ fn run_turn_once(
         ..TurnNormalizationState::default()
     };
     let mut saw_result = false;
-    let mut idle_ticks = 0;
+    let mut watchdog = crate::services::qwen::QwenStreamWatchdog::default();
 
     loop {
-        match stdout_events.recv_timeout(crate::services::qwen::QWEN_STREAM_IDLE_TIMEOUT) {
+        match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(TurnReadEvent::Line(line)) => {
-                idle_ticks = 0;
+                watchdog.observe_line();
                 for normalized in normalize_qwen_line(&line, &mut state) {
+                    if is_meaningful_progress_event(&normalized) {
+                        state.meaningful_progress_seen = true;
+                    }
                     if let Some(id) = extract_init_session_id(&normalized) {
                         *session_id = Some(id);
                     }
@@ -353,22 +364,18 @@ fn run_turn_once(
             }
             Ok(TurnReadEvent::Eof) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
-                if saw_result {
-                    break;
-                }
-                idle_ticks += 1;
-                if idle_ticks >= crate::services::qwen::QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY {
-                    crate::services::process::kill_pid_tree(child_pid);
-                    let _ = child.wait();
-                    let _ = stderr_handle.join().unwrap_or_default();
-                    return Err(TurnFailure {
-                        message: format!(
-                            "Qwen stream produced no output for {} seconds",
-                            crate::services::qwen::QWEN_STREAM_IDLE_TIMEOUT.as_secs()
-                                * crate::services::qwen::QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY as u64
-                        ),
-                        retryable: true,
-                    });
+                match next_turn_watchdog_outcome(saw_result, &state, &mut watchdog) {
+                    TurnWatchdogOutcome::Continue => {}
+                    TurnWatchdogOutcome::Break => break,
+                    TurnWatchdogOutcome::Retry { message } => {
+                        crate::services::process::kill_pid_tree(child_pid);
+                        let _ = child.wait();
+                        let _ = stderr_handle.join().unwrap_or_default();
+                        return Err(TurnFailure {
+                            message,
+                            retryable: true,
+                        });
+                    }
                 }
             }
         }
@@ -472,6 +479,32 @@ fn normalize_qwen_line(line: &str, state: &mut TurnNormalizationState) -> Vec<Va
     }
 }
 
+// After normalize_qwen_line expansion, LLM text/thinking/tool-use arrives as "assistant" events
+// and tool results arrive as "user" events.  "system" (session bookkeeping) and "result" (terminal
+// signal) represent protocol framing, not LLM progress, so they intentionally do not qualify.
+// This is consistent with qwen.rs where mark_meaningful_progress is called only on content events.
+fn is_meaningful_progress_event(event: &Value) -> bool {
+    matches!(
+        event.get("type").and_then(|value| value.as_str()),
+        Some("assistant") | Some("user")
+    )
+}
+
+fn next_turn_watchdog_outcome(
+    saw_result: bool,
+    state: &TurnNormalizationState,
+    watchdog: &mut crate::services::qwen::QwenStreamWatchdog,
+) -> TurnWatchdogOutcome {
+    if saw_result {
+        return TurnWatchdogOutcome::Break;
+    }
+
+    match watchdog.on_timeout(state.meaningful_progress_seen) {
+        Some(message) => TurnWatchdogOutcome::Retry { message },
+        None => TurnWatchdogOutcome::Continue,
+    }
+}
+
 fn normalize_system_event(json: &Value, state: &mut TurnNormalizationState) -> Vec<Value> {
     if json.get("subtype").and_then(|v| v.as_str()) != Some("session_start") {
         return Vec::new();
@@ -535,7 +568,7 @@ fn normalize_stream_event(json: &Value, state: &mut TurnNormalizationState) -> V
             state.partial_blocks.insert(
                 index,
                 PartialBlockState {
-                    kind: block_type,
+                    kind: block_type.clone(),
                     tool_name: block
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -548,6 +581,11 @@ fn normalize_stream_event(json: &Value, state: &mut TurnNormalizationState) -> V
                     thinking_emitted: false,
                 },
             );
+            if block_type == "thinking" {
+                // Thinking-start is meaningful progress even though this wrapper does not emit
+                // a normalized output event until a later delta or stop arrives.
+                state.meaningful_progress_seen = true;
+            }
             Vec::new()
         }
         Some("content_block_delta") => {
@@ -897,10 +935,14 @@ fn emit_json_line(output: &mut std::fs::File, value: Value) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{build_turn_args, decode_external_prompt, normalize_qwen_line};
+    use super::{
+        TurnNormalizationState, TurnWatchdogOutcome, build_turn_args, decode_external_prompt,
+        next_turn_watchdog_outcome, normalize_qwen_line,
+    };
     use crate::services::qwen::qwen_project_cache_key;
     use std::fs;
     use std::io::Write;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn with_temp_qwen_home<F>(f: F)
@@ -1043,5 +1085,92 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{\"type\":\"assistant\",\"message\":\"keep\"}\n"
         );
+    }
+
+    #[test]
+    fn qwen_tmux_watchdog_uses_startup_timeout_before_first_progress() {
+        let state = TurnNormalizationState::default();
+        let mut watchdog = crate::services::qwen::QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let expected_message = watchdog.startup_retry_message();
+
+        loop {
+            match next_turn_watchdog_outcome(false, &state, &mut watchdog) {
+                TurnWatchdogOutcome::Continue => {}
+                TurnWatchdogOutcome::Retry { message } => {
+                    assert_eq!(message, expected_message);
+                    break;
+                }
+                TurnWatchdogOutcome::Break => panic!("startup watchdog should not break"),
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_tmux_watchdog_uses_idle_timeout_after_progress() {
+        let mut state = TurnNormalizationState::default();
+        let assistant_line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}"#;
+        let normalized = normalize_qwen_line(assistant_line, &mut state);
+        for event in normalized {
+            if super::is_meaningful_progress_event(&event) {
+                state.meaningful_progress_seen = true;
+            }
+        }
+        assert!(state.meaningful_progress_seen);
+
+        let mut watchdog = crate::services::qwen::QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        watchdog.observe_line();
+        let expected_message = watchdog.idle_retry_message();
+
+        loop {
+            match next_turn_watchdog_outcome(false, &state, &mut watchdog) {
+                TurnWatchdogOutcome::Continue => {}
+                TurnWatchdogOutcome::Retry { message } => {
+                    assert_eq!(message, expected_message);
+                    break;
+                }
+                TurnWatchdogOutcome::Break => panic!("idle watchdog should not break"),
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_tmux_watchdog_treats_thinking_start_as_progress() {
+        let mut state = TurnNormalizationState::default();
+        let thinking_start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","signature":"pondering"}}}"#;
+
+        let normalized = normalize_qwen_line(thinking_start, &mut state);
+
+        assert!(normalized.is_empty());
+        assert!(
+            state.meaningful_progress_seen,
+            "thinking start should count as progress even without a normalized output event"
+        );
+
+        let mut watchdog = crate::services::qwen::QwenStreamWatchdog::new(
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        watchdog.observe_line();
+        let expected_message = watchdog.idle_retry_message();
+
+        loop {
+            match next_turn_watchdog_outcome(false, &state, &mut watchdog) {
+                TurnWatchdogOutcome::Continue => {}
+                TurnWatchdogOutcome::Retry { message } => {
+                    assert_eq!(message, expected_message);
+                    break;
+                }
+                TurnWatchdogOutcome::Break => panic!("idle watchdog should not break"),
+            }
+        }
     }
 }
