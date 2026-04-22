@@ -143,7 +143,7 @@ async fn enqueue_headless_delivery(
 
     if crate::services::message_outbox::enqueue_outbox_best_effort(
         shared.pg_pool.as_ref(),
-        shared.db.as_ref(),
+        shared.sqlite.as_ref(),
         crate::services::message_outbox::OutboxMessage {
             target: &target,
             content,
@@ -256,7 +256,7 @@ fn resolve_output_analytics_snapshot(
 }
 
 pub(super) fn persist_turn_analytics_row(
-    db: &crate::db::Db,
+    sqlite: &crate::db::Db,
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_msg_id: MessageId,
@@ -269,7 +269,7 @@ pub(super) fn persist_turn_analytics_row(
     duration_ms: i64,
 ) {
     persist_turn_analytics_row_with_handles(
-        Some(db),
+        Some(sqlite),
         None,
         provider,
         channel_id,
@@ -342,8 +342,8 @@ pub(super) fn persist_turn_analytics_row_with_handles(
     };
     let db = db.cloned();
     let pg_pool = pg_pool.cloned();
-    let persist_sqlite = move |db: crate::db::Db, entry: PersistTurnOwned| {
-        if let Err(error) = upsert_turn_owned_on_separate_conn(&db, &entry) {
+    let persist_sqlite = move |sqlite: crate::db::Db, entry: PersistTurnOwned| {
+        if let Err(error) = upsert_turn_owned_on_separate_conn(&sqlite, &entry) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
         }
@@ -612,9 +612,9 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
-                            if shared_owned.db.is_some() || shared_owned.pg_pool.is_some() {
+                            if shared_owned.sqlite.is_some() || shared_owned.pg_pool.is_some() {
                                 match record_skill_usage_from_tool_use(
-                                    shared_owned.db.as_ref(),
+                                    shared_owned.sqlite.as_ref(),
                                     shared_owned.pg_pool.as_ref(),
                                     &name,
                                     &input,
@@ -1292,7 +1292,7 @@ pub(super) fn spawn_turn_bridge(
                             error
                         );
                     }
-                } else if let Some(db) = shared_owned.db.as_ref() {
+                } else if let Some(db) = shared_owned.sqlite.as_ref() {
                     if let Ok(conn) = db.lock() {
                         if let Err(error) =
                             crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
@@ -1730,7 +1730,7 @@ pub(super) fn spawn_turn_bridge(
 
         if let Some(retry_context) = retry_context_to_store.as_deref()
             && let Err(err) = store_session_retry_context(
-                shared_owned.db.as_ref(),
+                shared_owned.sqlite.as_ref(),
                 shared_owned.pg_pool.as_ref(),
                 channel_id.get(),
                 retry_context,
@@ -1752,7 +1752,7 @@ pub(super) fn spawn_turn_bridge(
                     .await;
                 if session_end_reason == Some(SessionEndReason::TurnCapReached) {
                     crate::services::termination_audit::record_termination_with_handles(
-                        shared_owned.db.as_ref(),
+                        shared_owned.sqlite.as_ref(),
                         shared_owned.pg_pool.as_ref(),
                         session_key,
                         dispatch_id.as_deref(),
@@ -1795,11 +1795,11 @@ pub(super) fn spawn_turn_bridge(
         };
 
         if should_persist_transcript
-            && (shared_owned.db.is_some() || shared_owned.pg_pool.is_some())
+            && (shared_owned.sqlite.is_some() || shared_owned.pg_pool.is_some())
         {
             let channel_id_text = channel_id.get().to_string();
             if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                shared_owned.db.as_ref(),
+                shared_owned.sqlite.as_ref(),
                 shared_owned.pg_pool.as_ref(),
                 crate::db::session_transcripts::PersistSessionTranscript {
                     turn_id: turn_id.as_str(),
@@ -1823,11 +1823,11 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        if (shared_owned.db.is_some() || shared_owned.pg_pool.is_some())
+        if (shared_owned.sqlite.is_some() || shared_owned.pg_pool.is_some())
             && !api_friction_reports.is_empty()
         {
             match crate::services::api_friction::record_api_friction_reports(
-                shared_owned.db.as_ref(),
+                shared_owned.sqlite.as_ref(),
                 shared_owned.pg_pool.as_ref(),
                 &capture_memory_settings,
                 crate::services::api_friction::ApiFrictionRecordContext {
@@ -1857,9 +1857,9 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        if shared_owned.db.is_some() || shared_owned.pg_pool.is_some() {
+        if shared_owned.sqlite.is_some() || shared_owned.pg_pool.is_some() {
             persist_turn_analytics_row_with_handles(
-                shared_owned.db.as_ref(),
+                shared_owned.sqlite.as_ref(),
                 shared_owned.pg_pool.as_ref(),
                 &provider,
                 channel_id,
@@ -1912,7 +1912,7 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if let (Some(db), Some(analysis)) =
-            (shared_owned.db.as_ref(), recall_feedback_analysis.as_ref())
+            (shared_owned.sqlite.as_ref(), recall_feedback_analysis.as_ref())
             && analysis.recall_count > 0
         {
             let stat = crate::db::memento_feedback_stats::MementoFeedbackTurnStat {

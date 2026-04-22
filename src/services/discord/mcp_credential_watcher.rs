@@ -234,7 +234,7 @@ async fn broadcast_credential_change(
     window: Duration,
     notify_message: &str,
 ) {
-    if shared.db.is_none() && shared.pg_pool.is_none() {
+    if shared.sqlite.is_none() && shared.pg_pool.is_none() {
         tracing::debug!("MCP credential watcher: no DB or PG handle, skipping broadcast");
         return;
     }
@@ -256,7 +256,7 @@ async fn broadcast_credential_change(
         let sqlite_runtime_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.db.as_ref()
+            shared.sqlite.as_ref()
         };
         crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
             sqlite_runtime_db,

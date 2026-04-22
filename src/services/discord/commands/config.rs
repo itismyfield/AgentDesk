@@ -327,7 +327,7 @@ pub(in crate::services::discord) async fn current_working_dir(
     let sqlite_settings_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.db.as_ref()
+        shared.sqlite.as_ref()
     };
     load_last_session_path(
         sqlite_settings_db,

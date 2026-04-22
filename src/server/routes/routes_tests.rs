@@ -784,7 +784,7 @@ async fn health_api_includes_latest_config_audit_report() {
                 bot_settings_path: Some("/tmp/bot_settings.json".to_string()),
                 bot_settings_present: false,
             },
-            db: crate::services::discord::config_audit::ConfigAuditDbSummary {
+            storage: crate::services::discord::config_audit::ConfigAuditDbSummary {
                 missing_agents: Vec::new(),
                 extra_agents: Vec::new(),
                 mismatched_agents: vec!["alpha".to_string()],

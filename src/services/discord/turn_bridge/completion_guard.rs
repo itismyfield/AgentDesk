@@ -299,10 +299,10 @@ fn transition_source_uses_live_command_bot(transition_source: &str) -> bool {
 }
 
 fn reset_linked_auto_queue_entries_on_db(
-    db: &crate::db::Db,
+    sqlite: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<usize, String> {
-    let conn = db
+    let conn = sqlite
         .separate_conn()
         .map_err(|error| format!("open sqlite auto_queue_entries connection: {error}"))?;
     conn.execute(
@@ -1210,7 +1210,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
 
         // Extract commit SHA directly from agent output (most reliable method)
         let mut hints = lookup_dispatch_completion_hints(
-            shared.db.as_ref(),
+            shared.sqlite.as_ref(),
             shared.pg_pool.as_ref(),
             dispatch_id,
         );
@@ -1264,7 +1264,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch_with_backends(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 engine,
                 dispatch_id,
                 completion_source,
@@ -1273,7 +1273,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch");
                     let _ = queue_dispatch_followup_with_handles(
-                        shared.db.as_ref(),
+                        shared.sqlite.as_ref(),
                         shared.pg_pool.as_ref(),
                         dispatch_id,
                         "turn_bridge_explicit",
@@ -1305,7 +1305,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
             };
             let changed = crate::dispatch::set_dispatch_status_with_backends(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "completed",
@@ -1317,7 +1317,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             .unwrap_or(0);
             if changed > 0 {
                 let _ = store_reconcile_marker_with_handles(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     dispatch_id,
                     "turn_bridge_db_fallback",
@@ -1328,7 +1328,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         if fallback_ok {
             let _ = queue_dispatch_followup_with_handles(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "turn_bridge_db_fallback",
@@ -1354,7 +1354,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             let ok = runtime_db_fallback_complete_with_result(dispatch_id, &fallback_result);
             if ok {
                 let _ = queue_dispatch_followup_with_handles(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     dispatch_id,
                     "turn_bridge_runtime_db_fallback",
@@ -1403,7 +1403,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch via API");
                     let _ = queue_dispatch_followup_with_handles(
-                        shared.db.as_ref(),
+                        shared.sqlite.as_ref(),
                         shared.pg_pool.as_ref(),
                         dispatch_id,
                         "turn_bridge_explicit_api",
@@ -1438,7 +1438,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         if runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
             let _ = queue_dispatch_followup_with_handles(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "turn_bridge_runtime_db_fallback",

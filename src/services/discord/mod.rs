@@ -556,7 +556,7 @@ pub(super) struct SharedData {
     /// HTTP API port for self-referencing requests (from config server.port).
     pub(super) api_port: u16,
     /// Shared DB handle for direct dispatch finalization (avoids HTTP round-trip).
-    pub(super) db: Option<crate::db::Db>,
+    pub(super) sqlite: Option<crate::db::Db>,
     /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
     pub(super) pg_pool: Option<sqlx::PgPool>,
     /// Shared policy engine for direct dispatch finalization.
@@ -598,7 +598,7 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
 
 #[cfg(test)]
 pub(super) fn make_shared_data_for_tests_with_storage(
-    db: Option<crate::db::Db>,
+    sqlite: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
     Arc::new(SharedData {
@@ -642,7 +642,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: "test-token-hash".to_string(),
         api_port: 9,
-        db,
+        sqlite,
         pg_pool,
         engine: None,
         health_registry: std::sync::Weak::new(),
@@ -1798,7 +1798,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(shared.db.as_ref(), shared.pg_pool.as_ref(), wt);
+                    cleanup_git_worktree(shared.sqlite.as_ref(), shared.pg_pool.as_ref(), wt);
                 }
             }
             data.sessions.remove(&ch);
@@ -1832,7 +1832,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     for expired_session in &expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
             let should_record = mark_session_disconnected_for_idle_cleanup(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 session_key,
             )
@@ -1842,7 +1842,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             }
 
             crate::services::termination_audit::record_termination_with_handles(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 session_key,
                 None,

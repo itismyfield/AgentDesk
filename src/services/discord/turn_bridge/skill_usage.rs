@@ -19,13 +19,13 @@ pub(super) fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<
 }
 
 fn resolve_skill_usage_agent_id(
-    db: &Db,
+    sqlite: &Db,
     session_key: Option<&str>,
     role_binding: Option<&RoleBinding>,
 ) -> Option<String> {
     session_key
         .and_then(|key| {
-            let conn = db.read_conn().ok()?;
+            let conn = sqlite.read_conn().ok()?;
             conn.query_row(
                 "SELECT agent_id FROM sessions WHERE session_key = ?1",
                 [key],
@@ -67,13 +67,13 @@ async fn resolve_skill_usage_agent_id_pg(
 }
 
 fn record_skill_usage_sqlite(
-    db: &Db,
+    sqlite: &Db,
     skill_id: &str,
     session_key: Option<&str>,
     role_binding: Option<&RoleBinding>,
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
-    let agent_id = resolve_skill_usage_agent_id(db, session_key, role_binding);
+    let conn = sqlite.lock().map_err(|e| format!("db lock failed: {e}"))?;
+    let agent_id = resolve_skill_usage_agent_id(sqlite, session_key, role_binding);
     match (agent_id.as_deref(), session_key) {
         (Some(agent_id), Some(session_key)) => conn
             .execute(

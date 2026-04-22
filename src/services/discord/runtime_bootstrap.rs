@@ -7,7 +7,7 @@ pub(crate) struct RunBotContext {
     pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) health_registry: Arc<health::HealthRegistry>,
     pub(crate) api_port: u16,
-    pub(crate) db: Option<crate::db::Db>,
+    pub(crate) sqlite: Option<crate::db::Db>,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
 }
@@ -191,7 +191,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         return;
     }
 
-    let db = shared.db.as_ref();
+    let sqlite = shared.sqlite.as_ref();
     let pg_pool = shared.pg_pool.as_ref();
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
@@ -270,7 +270,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             }
         }
     } else {
-        let Some(db) = db else {
+        let Some(db) = sqlite else {
             return;
         };
         let conn = match db.lock() {
@@ -337,7 +337,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                         .await
                         .ok();
                 } else {
-                    let Some(db) = db else {
+                    let Some(db) = sqlite else {
                         continue;
                     };
                     let conn = match db.lock() {
@@ -375,7 +375,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                     queued
                 })
         } else {
-            let Some(db) = db else {
+            let Some(db) = sqlite else {
                 continue;
             };
             crate::server::routes::dispatches::send_dispatch_to_discord(
@@ -436,7 +436,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         shutdown_remaining,
         health_registry,
         api_port,
-        db,
+        sqlite,
         pg_pool,
         engine,
     } = context;
@@ -485,12 +485,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         None => None,
     };
 
-    super::internal_api::init(
-        db.clone(),
-        pg_pool.clone(),
-        engine.clone(),
-        health_registry.clone(),
-    );
+    super::internal_api::init(api_port, pg_pool.clone());
 
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
@@ -609,7 +604,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: token_hash.clone(),
         api_port,
-        db,
+        sqlite,
         pg_pool,
         engine,
         health_registry: Arc::downgrade(&health_registry),
@@ -1053,11 +1048,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     // Thread-map validation is best-effort hygiene and can spend
                     // multiple REST round-trips on startup. Do not block intake
                     // reopening or queued-turn kickoff on it.
-                    if shared_for_tmux2.db.is_some() || shared_for_tmux2.pg_pool.is_some() {
+                    if shared_for_tmux2.sqlite.is_some() || shared_for_tmux2.pg_pool.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
                         spawn_startup_thread_map_validation(
-                            shared_for_tmux2.db.clone(),
+                            shared_for_tmux2.sqlite.clone(),
                             shared_for_tmux2.pg_pool.clone(),
                             token_for_kickoff.clone(),
                         );
@@ -1371,7 +1366,7 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
         crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool)
             .await
     } else {
-        let Some(db) = &shared.db else {
+        let Some(db) = &shared.sqlite else {
             return;
         };
 

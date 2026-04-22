@@ -82,11 +82,11 @@ pub(super) fn resolve_restart_handoff_scope(
 }
 
 fn resolve_dispatched_thread_dispatch(
-    db: &crate::db::Db,
+    sqlite: &crate::db::Db,
     thread_channel_id: u64,
 ) -> Option<String> {
     let thread_channel_id = thread_channel_id.to_string();
-    let conn = db.read_conn().ok()?;
+    let conn = sqlite.read_conn().ok()?;
 
     conn.query_row(
         "SELECT id FROM task_dispatches

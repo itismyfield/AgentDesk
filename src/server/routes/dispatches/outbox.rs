@@ -147,7 +147,7 @@ impl OutboxNotifier for RealOutboxNotifier {
 /// Backoff delays for outbox retries: 1m → 5m → 15m → 1h
 const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 /// Maximum number of retries before marking as permanent failure.
-const MAX_RETRY_COUNT: i32 = 4;
+const MAX_RETRY_COUNT: i64 = 4;
 
 fn dispatch_notify_delivery_suppressed(
     conn: &libsql_rusqlite::Connection,
@@ -188,7 +188,7 @@ type DispatchOutboxRow = (
     Option<String>,
     Option<String>,
     Option<String>,
-    i32,
+    i64,
 );
 
 async fn claim_pending_dispatch_outbox_batch_pg(pool: &PgPool) -> Vec<DispatchOutboxRow> {
@@ -228,7 +228,7 @@ async fn claim_pending_dispatch_outbox_batch_pg(pool: &PgPool) -> Vec<DispatchOu
                 row.try_get::<Option<String>, _>("agent_id").ok()?,
                 row.try_get::<Option<String>, _>("card_id").ok()?,
                 row.try_get::<Option<String>, _>("title").ok()?,
-                row.try_get::<i32, _>("retry_count").ok()?,
+                row.try_get::<i64, _>("retry_count").ok()?,
             ))
         })
         .collect::<Vec<_>>();
@@ -2453,7 +2453,7 @@ mod tests {
             String,
             String,
             String,
-            i32,
+            i64,
             Option<String>,
             Option<String>,
             Option<String>,

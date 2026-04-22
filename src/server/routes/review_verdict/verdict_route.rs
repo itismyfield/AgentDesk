@@ -1,5 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::super::AppState;
@@ -213,13 +213,13 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct VerdictItem {
     pub category: Option<String>,
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SubmitVerdictBody {
     pub dispatch_id: String,
     pub overall: String,

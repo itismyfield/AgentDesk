@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::server::routes::AppState;
@@ -26,7 +26,7 @@ pub struct CreateDispatchBody {
     pub skip_outbox: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpdateDispatchBody {
     pub status: Option<String>,
     pub result: Option<serde_json::Value>,

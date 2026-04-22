@@ -1243,7 +1243,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                     outcome.report.warnings_count
                                 );
                             }
-                            if let Some(synced_agents) = outcome.report.db.synced_agents {
+                            if let Some(synced_agents) = outcome.report.storage.synced_agents {
                                 println!("  ▸ Agents : {synced_agents} synced from config");
                             }
                             ad_config = outcome.config;
@@ -1358,7 +1358,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         shutdown_remaining,
                         health_registry,
                         api_port,
-                        db: discord_db,
+                        sqlite: discord_db,
                         pg_pool: discord_pg_pool,
                         engine: discord_engine,
                     },
@@ -1439,7 +1439,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 shutdown_remaining: sr,
                                 health_registry: hr,
                                 api_port: port,
-                                db: db_clone,
+                                sqlite: db_clone,
                                 pg_pool: pg_pool_clone,
                                 engine: engine_clone,
                             },

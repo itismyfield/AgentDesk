@@ -64,7 +64,7 @@ impl MockDispatchTransport {
 impl DispatchTransport for MockDispatchTransport {
     fn send_dispatch(
         &self,
-        _db: Db,
+        _db: Option<Db>,
         _agent_id: String,
         _title: String,
         _card_id: String,
@@ -83,7 +83,7 @@ impl DispatchTransport for MockDispatchTransport {
 
     fn send_review_followup(
         &self,
-        _db: Db,
+        _db: Option<Db>,
         _card_id: String,
         _channel_id_num: u64,
         message: String,
@@ -691,7 +691,7 @@ async fn unknown_review_verdict_followup_includes_target_and_submission_hints() 
     }
 
     super::discord_delivery::send_review_result_to_primary_with_transport(
-        &db,
+        Some(&db),
         "card-unknown",
         "dispatch-review",
         "unknown",

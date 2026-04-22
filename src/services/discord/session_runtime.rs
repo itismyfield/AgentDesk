@@ -704,7 +704,7 @@ pub(super) async fn auto_restore_session_with_dm_hint(
         let sqlite_settings_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.db.as_ref()
+            shared.sqlite.as_ref()
         };
         let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
             .or_else(|| {
@@ -757,7 +757,7 @@ pub(super) async fn auto_restore_session_with_dm_hint(
                 .flatten();
             }
 
-            shared.db.as_ref().and_then(|db| {
+            shared.sqlite.as_ref().and_then(|db| {
                 db.lock().ok().and_then(|conn| {
                     session_keys.iter().find_map(|session_key| {
                         conn.query_row(

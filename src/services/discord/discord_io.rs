@@ -75,7 +75,7 @@ pub(super) async fn try_handle_pending_dm_reply(
 
             // Notify the source agent's Discord channel (inline, not fire-and-forget)
             if let Err(e) = notify_source_agent(
-                info.db.as_ref(),
+                info.sqlite.as_ref(),
                 pg_pool,
                 &info.source_agent,
                 info.id,
@@ -88,11 +88,11 @@ pub(super) async fn try_handle_pending_dm_reply(
             {
                 tracing::warn!("  [dm-reply] notify source agent failed: {e}");
                 // Record failure in context so readConsumed can detect it
-                let db3 = info.db.clone();
+                let sqlite3 = info.sqlite.clone();
                 let reply_id = info.id;
                 let err_msg = format!("{e}");
                 let _ = crate::services::discord::dm_reply_store::mark_pending_dm_reply_notify_failed_db(
-                    db3.as_ref(),
+                    sqlite3.as_ref(),
                     pg_pool,
                     reply_id,
                     &err_msg,
@@ -260,7 +260,7 @@ struct ConsumedDmReply {
     answer: String,
     context: serde_json::Value,
     channel_id: Option<String>,
-    db: Option<crate::db::Db>,
+    sqlite: Option<crate::db::Db>,
 }
 
 async fn consume_pending_dm_reply(
@@ -301,7 +301,7 @@ async fn consume_pending_dm_reply(
         answer: answer.to_string(),
         context: notification_context,
         channel_id: row.channel_id,
-        db: db.cloned(),
+        sqlite: db.cloned(),
     })
 }
 

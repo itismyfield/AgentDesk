@@ -134,7 +134,7 @@ fn merge_reply_contexts(primary: Option<String>, secondary: Option<String>) -> O
 }
 
 fn take_session_retry_context(shared: &Arc<SharedData>, channel_id: ChannelId) -> Option<String> {
-    super::super::turn_bridge::take_session_retry_context(shared.db.as_ref(), channel_id.get())
+    super::super::turn_bridge::take_session_retry_context(shared.sqlite.as_ref(), channel_id.get())
         .and_then(|raw| format_session_retry_context(&raw))
 }
 
@@ -218,7 +218,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                 session.recent_history_context(super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
             {
                 let _ = super::super::turn_bridge::store_session_retry_context(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     channel_id.get(),
                     &retry_context,
@@ -1225,7 +1225,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 session.recent_history_context(super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
             {
                 let _ = super::super::turn_bridge::store_session_retry_context(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     channel_id.get(),
                     &retry_context,

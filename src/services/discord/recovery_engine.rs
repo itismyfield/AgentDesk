@@ -411,9 +411,10 @@ pub(super) async fn restore_inflight_turns(
                 let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
                 let duration_ms =
                     recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-                let has_completion_evidence = if shared.db.is_some() || shared.pg_pool.is_some() {
+                let has_completion_evidence = if shared.sqlite.is_some() || shared.pg_pool.is_some()
+                {
                     super::turn_bridge::persist_turn_analytics_row_with_handles(
-                        shared.db.as_ref(),
+                        shared.sqlite.as_ref(),
                         shared.pg_pool.as_ref(),
                         provider,
                         channel_id,
@@ -431,7 +432,7 @@ pub(super) async fn restore_inflight_turns(
                         duration_ms,
                     );
                     persist_recovered_transcript(
-                        shared.db.as_ref(),
+                        shared.sqlite.as_ref(),
                         shared.pg_pool.as_ref(),
                         provider,
                         &state,
@@ -478,7 +479,7 @@ pub(super) async fn restore_inflight_turns(
                         // #143: Use finalize_dispatch directly with retry.
                         for attempt in 1..=3u8 {
                             match crate::dispatch::finalize_dispatch_with_backends(
-                                shared.db.as_ref(),
+                                shared.sqlite.as_ref(),
                                 engine,
                                 did,
                                 "recovery_completed_during_downtime",
@@ -491,7 +492,7 @@ pub(super) async fn restore_inflight_turns(
                                     );
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            shared.db.as_ref(),
+                                            shared.sqlite.as_ref(),
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "recovery_completed_during_downtime",
@@ -521,7 +522,7 @@ pub(super) async fn restore_inflight_turns(
                                 );
                             if dispatch_completed {
                                 let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                    shared.db.as_ref(),
+                                    shared.sqlite.as_ref(),
                                     shared.pg_pool.as_ref(),
                                     did,
                                     "recovery_completed_during_downtime_fallback",
@@ -956,9 +957,9 @@ pub(super) async fn restore_inflight_turns(
             let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-            let has_completion_evidence = if shared.db.is_some() || shared.pg_pool.is_some() {
+            let has_completion_evidence = if shared.sqlite.is_some() || shared.pg_pool.is_some() {
                 super::turn_bridge::persist_turn_analytics_row_with_handles(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     provider,
                     channel_id,
@@ -976,7 +977,7 @@ pub(super) async fn restore_inflight_turns(
                     duration_ms,
                 );
                 persist_recovered_transcript(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     provider,
                     &state,
@@ -1026,7 +1027,7 @@ pub(super) async fn restore_inflight_turns(
                         } else if let Some(engine) = &shared.engine {
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch_with_backends(
-                                    shared.db.as_ref(),
+                                    shared.sqlite.as_ref(),
                                     engine,
                                     did,
                                     "recovery_output_completed",
@@ -1039,7 +1040,7 @@ pub(super) async fn restore_inflight_turns(
                                         );
                                         let _ =
                                             super::turn_bridge::queue_dispatch_followup_with_handles(
-                                                shared.db.as_ref(),
+                                                shared.sqlite.as_ref(),
                                                 shared.pg_pool.as_ref(),
                                                 did,
                                                 "recovery_output_completed",
@@ -1069,7 +1070,7 @@ pub(super) async fn restore_inflight_turns(
                                 if dispatch_completed {
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            shared.db.as_ref(),
+                                            shared.sqlite.as_ref(),
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "recovery_output_completed_fallback",
@@ -1085,7 +1086,7 @@ pub(super) async fn restore_inflight_turns(
                                 );
                             if dispatch_completed {
                                 let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                    shared.db.as_ref(),
+                                    shared.sqlite.as_ref(),
                                     shared.pg_pool.as_ref(),
                                     did,
                                     "recovery_output_completed_runtime_fallback",
@@ -1203,7 +1204,7 @@ pub(super) async fn restore_inflight_turns(
             .await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     sk,
                     state.dispatch_id.as_deref(),
@@ -1271,7 +1272,7 @@ pub(super) async fn restore_inflight_turns(
                 let sqlite_settings_db = if shared.pg_pool.is_some() {
                     None
                 } else {
-                    shared.db.as_ref()
+                    shared.sqlite.as_ref()
                 };
                 let last_path = load_last_session_path(
                     sqlite_settings_db,
@@ -1392,7 +1393,7 @@ pub(super) async fn restore_inflight_turns(
         let sqlite_settings_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.db.as_ref()
+            shared.sqlite.as_ref()
         };
         let last_path = load_last_session_path(
             sqlite_settings_db,

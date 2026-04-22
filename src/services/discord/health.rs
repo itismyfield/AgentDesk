@@ -893,7 +893,7 @@ impl TestHealthHarness {
             cached_bot_token: tokio::sync::OnceCell::new(),
             token_hash: super::settings::discord_token_hash("test-token"),
             api_port: 8791,
-            db: None,
+            sqlite: None,
             pg_pool: None,
             engine: None,
             health_registry: Arc::downgrade(&registry),
@@ -1488,10 +1488,10 @@ fn parse_agent_target(target: &str) -> Result<Option<&str>, SendTargetResolution
 }
 
 fn resolve_agent_target_channel_id_sqlite(
-    db: &Db,
+    sqlite: &Db,
     agent_id: &str,
 ) -> Result<u64, SendTargetResolutionError> {
-    let conn = db.lock().map_err(|e| {
+    let conn = sqlite.lock().map_err(|e| {
         SendTargetResolutionError::Internal(format!("db lock failed during agent lookup: {e}"))
     })?;
     let bindings = crate::db::agents::load_agent_channel_bindings(&conn, agent_id)
@@ -1546,9 +1546,12 @@ fn resolve_channel_target(target: &str) -> Result<u64, SendTargetResolutionError
     ))
 }
 
-fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTargetResolutionError> {
+fn resolve_send_target_channel_id(
+    sqlite: &Db,
+    target: &str,
+) -> Result<u64, SendTargetResolutionError> {
     match parse_agent_target(target)? {
-        Some(agent_id) => resolve_agent_target_channel_id_sqlite(db, agent_id),
+        Some(agent_id) => resolve_agent_target_channel_id_sqlite(sqlite, agent_id),
         None => resolve_channel_target(target),
     }
 }
@@ -1771,7 +1774,7 @@ pub(crate) async fn send_message_with_backends(
 
 pub async fn send_message(
     registry: &HealthRegistry,
-    db: &Db,
+    sqlite: &Db,
     target: &str,
     content: &str,
     source: &str,
@@ -1780,7 +1783,7 @@ pub async fn send_message(
 ) -> (&'static str, String) {
     send_message_with_backends(
         registry,
-        Some(db),
+        Some(sqlite),
         None,
         target,
         content,
@@ -1791,7 +1794,11 @@ pub async fn send_message(
     .await
 }
 
-pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
+pub async fn handle_send<'a>(
+    registry: &HealthRegistry,
+    sqlite: &Db,
+    body: &str,
+) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
         return (
             "400 Bad Request",
@@ -1811,7 +1818,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
         .unwrap_or("announce");
     let summary = json.get("summary").and_then(|v| v.as_str());
 
-    send_message(registry, db, target, content, source, bot, summary).await
+    send_message(registry, sqlite, target, content, source, bot, summary).await
 }
 
 /// #896: Parsed `/api/inflight/rebind` body, extracted for unit-test
@@ -2004,7 +2011,7 @@ fn parse_send_to_agent_body(body: &str) -> Result<ParsedSendToAgentRequest, &'st
 
 pub async fn handle_send_to_agent(
     registry: &HealthRegistry,
-    db: &Db,
+    sqlite: &Db,
     body: &str,
 ) -> (&'static str, String) {
     let request = match parse_send_to_agent_body(body) {
@@ -2020,7 +2027,7 @@ pub async fn handle_send_to_agent(
     let target = format!("agent:{}", request.role_id);
     send_message(
         registry,
-        db,
+        sqlite,
         &target,
         &request.message,
         "system",

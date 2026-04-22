@@ -33,7 +33,7 @@ pub(in crate::services::discord) async fn cmd_receipt(
             let window_start = if let Some(pg_pool) = ctx.data().shared.pg_pool.as_ref() {
                 receipt::ratelimit_window_start_pg(pg_pool).await
             } else {
-                ctx.data().shared.db.as_ref().and_then(|db| {
+                ctx.data().shared.sqlite.as_ref().and_then(|db| {
                     db.lock()
                         .ok()
                         .and_then(|conn| receipt::ratelimit_window_start(&conn))

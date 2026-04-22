@@ -65,7 +65,8 @@ pub(crate) struct ConfigAuditReport {
     pub warnings: Vec<String>,
     pub actions: Vec<String>,
     pub sources: ConfigAuditSources,
-    pub db: ConfigAuditDbSummary,
+    #[serde(rename = "db")]
+    pub storage: ConfigAuditDbSummary,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -174,7 +175,7 @@ pub(crate) fn audit_and_reconcile(
     mut config: Config,
     yaml_path: PathBuf,
     yaml_present: bool,
-    db: &Db,
+    sqlite: &Db,
     legacy_scan: &LegacySourceScan,
     dry_run: bool,
 ) -> Result<AuditRunOutcome, String> {
@@ -205,7 +206,7 @@ pub(crate) fn audit_and_reconcile(
         write_runtime_config(root, &config)?;
     }
 
-    audit_db_agents(&config, yaml_present, db, dry_run, &mut report)?;
+    audit_db_agents(&config, yaml_present, sqlite, dry_run, &mut report)?;
     report.finalize();
 
     for warning in &report.warnings {
@@ -216,7 +217,7 @@ pub(crate) fn audit_and_reconcile(
     }
 
     if !dry_run {
-        persist_report(&config, db, &report);
+        persist_report(&config, sqlite, &report);
     }
 
     Ok(AuditRunOutcome { config, report })
@@ -226,8 +227,8 @@ fn direct_api_context_unavailable(error: &str) -> bool {
     error.contains("direct runtime API context is unavailable")
 }
 
-fn load_persisted_report_sqlite(db: &Db) -> Option<String> {
-    let conn = db.read_conn().ok()?;
+fn load_persisted_report_sqlite(sqlite: &Db) -> Option<String> {
+    let conn = sqlite.read_conn().ok()?;
     conn.query_row(
         "SELECT value FROM kv_meta WHERE key = ?1",
         [CONFIG_AUDIT_KV_KEY],
@@ -280,7 +281,7 @@ fn persist_report_pg(config: &Config, rendered: &str) -> bool {
 }
 
 pub(crate) fn load_persisted_report(
-    db: &Db,
+    sqlite: &Db,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> Option<ConfigAuditReport> {
     match super::internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
@@ -293,13 +294,13 @@ pub(crate) fn load_persisted_report(
     let raw = if pg_pool.is_some() {
         load_persisted_report_pg(pg_pool)
     } else {
-        load_persisted_report_sqlite(db)
+        load_persisted_report_sqlite(sqlite)
     }?;
     serde_json::from_str(&raw).ok()
 }
 
-fn persist_report_sqlite(db: &Db, rendered: &str) {
-    let Ok(conn) = db.lock() else {
+fn persist_report_sqlite(sqlite: &Db, rendered: &str) {
+    let Ok(conn) = sqlite.lock() else {
         return;
     };
     let _ = conn.execute(
@@ -308,7 +309,7 @@ fn persist_report_sqlite(db: &Db, rendered: &str) {
     );
 }
 
-fn persist_report(config: &Config, db: &Db, report: &ConfigAuditReport) {
+fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
@@ -323,7 +324,7 @@ fn persist_report(config: &Config, db: &Db, report: &ConfigAuditReport) {
         return;
     }
 
-    persist_report_sqlite(db, &rendered);
+    persist_report_sqlite(sqlite, &rendered);
 }
 
 fn audit_role_map(
@@ -594,18 +595,18 @@ fn audit_bot_settings(
 fn audit_db_agents(
     config: &Config,
     yaml_present: bool,
-    db: &Db,
+    sqlite: &Db,
     dry_run: bool,
     report: &mut ConfigAuditReport,
 ) -> Result<(), String> {
     let db_agents = match load_db_agents_pg(config) {
         Ok(Some(agents)) => agents,
-        Ok(None) => load_db_agents_sqlite(db)?,
+        Ok(None) => load_db_agents_sqlite(sqlite)?,
         Err(error) => {
             report.warnings.push(format!(
                 "Failed to load agents from PostgreSQL during config audit: {error}; falling back to sqlite"
             ));
-            load_db_agents_sqlite(db)?
+            load_db_agents_sqlite(sqlite)?
         }
     };
     let yaml_agents = config
@@ -617,7 +618,7 @@ fn audit_db_agents(
     for (agent_id, yaml_agent) in &yaml_agents {
         match db_agents.get(agent_id) {
             None => {
-                report.db.missing_agents.push(agent_id.clone());
+                report.storage.missing_agents.push(agent_id.clone());
                 if yaml_present {
                     report.warnings.push(format!(
                         "DB is missing agent '{}' from agentdesk.yaml; agentdesk.yaml will restore it",
@@ -628,7 +629,7 @@ fn audit_db_agents(
             Some(db_agent) => {
                 let differing_fields = compare_comparable_agents(yaml_agent, db_agent);
                 if !differing_fields.is_empty() {
-                    report.db.mismatched_agents.push(agent_id.clone());
+                    report.storage.mismatched_agents.push(agent_id.clone());
                     report.warnings.push(format!(
                         "DB agent '{}' differs from agentdesk.yaml on {}; agentdesk.yaml wins",
                         agent_id,
@@ -644,7 +645,7 @@ fn audit_db_agents(
             continue;
         }
         if yaml_present {
-            report.db.extra_agents.push(agent_id.clone());
+            report.storage.extra_agents.push(agent_id.clone());
             report.warnings.push(format!(
                 "DB contains extra agent '{}' not present in agentdesk.yaml; agentdesk.yaml will remove it",
                 agent_id
@@ -652,9 +653,9 @@ fn audit_db_agents(
         }
     }
 
-    report.db.missing_agents.sort();
-    report.db.extra_agents.sort();
-    report.db.mismatched_agents.sort();
+    report.storage.missing_agents.sort();
+    report.storage.extra_agents.sort();
+    report.storage.mismatched_agents.sort();
 
     if dry_run || !yaml_present {
         return Ok(());
@@ -662,7 +663,7 @@ fn audit_db_agents(
 
     match sync_db_agents_pg(config, &config.agents) {
         Ok(Some(count)) => {
-            report.db.synced_agents = Some(count);
+            report.storage.synced_agents = Some(count);
             report.actions.push(format!(
                 "synced {} agent definitions from agentdesk.yaml into the PostgreSQL agents table",
                 count
@@ -675,9 +676,9 @@ fn audit_db_agents(
         )),
     }
 
-    match crate::db::agents::sync_agents_from_config(db, &config.agents) {
+    match crate::db::agents::sync_agents_from_config(sqlite, &config.agents) {
         Ok(count) => {
-            report.db.synced_agents = Some(count);
+            report.storage.synced_agents = Some(count);
             report.actions.push(format!(
                 "synced {} agent definitions from agentdesk.yaml into the sqlite agents table",
                 count
@@ -750,8 +751,8 @@ fn load_db_agents_pg(config: &Config) -> Result<Option<BTreeMap<String, Comparab
     )
 }
 
-fn load_db_agents_sqlite(db: &Db) -> Result<BTreeMap<String, ComparableAgent>, String> {
-    let conn = db
+fn load_db_agents_sqlite(sqlite: &Db) -> Result<BTreeMap<String, ComparableAgent>, String> {
+    let conn = sqlite
         .lock()
         .map_err(|err| format!("DB lock error while auditing config: {err}"))?;
     let mut stmt = conn

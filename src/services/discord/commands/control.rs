@@ -248,7 +248,7 @@ pub(in crate::services::discord) async fn notify_turn_stop(
     let sqlite_runtime_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.db.as_ref()
+        shared.sqlite.as_ref()
     };
     crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         sqlite_runtime_db,
@@ -406,7 +406,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     let sqlite_runtime_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.db.as_ref()
+        shared.sqlite.as_ref()
     };
     crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         sqlite_runtime_db,

@@ -420,7 +420,7 @@ mod outbox_boundary {
     impl OutboxNotifier for MockNotifier {
         async fn notify_dispatch(
             &self,
-            _db: crate::db::Db,
+            _db: Option<crate::db::Db>,
             agent_id: String,
             _title: String,
             _card_id: String,
@@ -435,7 +435,7 @@ mod outbox_boundary {
 
         async fn handle_followup(
             &self,
-            _db: crate::db::Db,
+            _db: Option<crate::db::Db>,
             dispatch_id: String,
         ) -> Result<(), String> {
             self.calls
@@ -447,7 +447,7 @@ mod outbox_boundary {
 
         async fn sync_status_reaction(
             &self,
-            _db: crate::db::Db,
+            _db: Option<crate::db::Db>,
             dispatch_id: String,
         ) -> Result<(), String> {
             self.calls

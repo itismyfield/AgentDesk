@@ -775,7 +775,7 @@ fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
     if shared.pg_pool.is_some() {
         None
     } else {
-        shared.db.as_ref()
+        shared.sqlite.as_ref()
     }
 }
 
@@ -809,7 +809,7 @@ pub(super) fn recovery_handled_channel_exists(shared: &SharedData, channel_id: u
     }
 
     shared
-        .db
+        .sqlite
         .as_ref()
         .and_then(|db| {
             db.lock().ok().and_then(|conn| {
@@ -879,7 +879,7 @@ pub(super) async fn store_recovery_handled_channels(shared: &SharedData, channel
         return;
     }
 
-    if let Some(db) = shared.db.as_ref()
+    if let Some(db) = shared.sqlite.as_ref()
         && let Ok(conn) = db.lock()
     {
         for channel_id in channel_ids {
@@ -913,7 +913,7 @@ pub(super) async fn clear_recovery_handled_channels(shared: &SharedData) {
         return;
     }
 
-    if let Some(db) = shared.db.as_ref()
+    if let Some(db) = shared.sqlite.as_ref()
         && let Ok(conn) = db.lock()
     {
         conn.execute(
@@ -1092,7 +1092,7 @@ async fn resolve_watcher_dispatch_id(
         .await)
         .or_else(|| {
             resolve_dispatched_thread_dispatch_from_db(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 channel_id.get(),
             )
@@ -1286,7 +1286,7 @@ pub(super) async fn tmux_output_watcher(
         if rotation_tick % BG_FAILURE_RECONCILE_EVERY == 0 {
             if let Some(min_failed_offset) = reconcile_failed_bg_trigger_enqueues_for_channel(
                 shared.pg_pool.as_ref(),
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 channel_id,
             )
             .await
@@ -1474,7 +1474,7 @@ pub(super) async fn tmux_output_watcher(
         let data_start_offset = current_offset; // offset where this read batch started
         current_offset = new_offset;
         maybe_refresh_watcher_activity_heartbeat(
-            shared.db.as_ref(),
+            shared.sqlite.as_ref(),
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             &watcher_provider,
@@ -1564,7 +1564,7 @@ pub(super) async fn tmux_output_watcher(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         maybe_refresh_watcher_activity_heartbeat(
-                            shared.db.as_ref(),
+                            shared.sqlite.as_ref(),
                             shared.pg_pool.as_ref(),
                             &shared.token_hash,
                             &watcher_provider,
@@ -2422,7 +2422,7 @@ pub(super) async fn tmux_output_watcher(
                 let enqueued = if has_current_response {
                     enqueue_background_trigger_response_to_notify_outbox(
                         shared.pg_pool.as_ref(),
-                        shared.db.as_ref(),
+                        shared.sqlite.as_ref(),
                         channel_id,
                         &prefixed,
                         data_start_offset,
@@ -2632,7 +2632,7 @@ pub(super) async fn tmux_output_watcher(
             super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
 
-            if has_assistant_response && (shared.db.is_some() || shared.pg_pool.is_some()) {
+            if has_assistant_response && (shared.sqlite.is_some() || shared.pg_pool.is_some()) {
                 let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
                 let channel_id_text = channel_id.get().to_string();
                 let resolved_did = inflight_state
@@ -2646,13 +2646,13 @@ pub(super) async fn tmux_output_watcher(
                     .await)
                     .or_else(|| {
                         resolve_dispatched_thread_dispatch_from_db(
-                            shared.db.as_ref(),
+                            shared.sqlite.as_ref(),
                             shared.pg_pool.as_ref(),
                             channel_id.get(),
                         )
                     });
                 if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     crate::db::session_transcripts::PersistSessionTranscript {
                         turn_id: &turn_id,
@@ -2676,7 +2676,7 @@ pub(super) async fn tmux_output_watcher(
                 }
 
                 super::turn_bridge::persist_turn_analytics_row_with_handles(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     &provider_kind,
                     channel_id,
@@ -2709,7 +2709,7 @@ pub(super) async fn tmux_output_watcher(
             .await)
             .or_else(|| {
                 resolve_dispatched_thread_dispatch_from_db(
-                    shared.db.as_ref(),
+                    shared.sqlite.as_ref(),
                     shared.pg_pool.as_ref(),
                     channel_id.get(),
                 )
@@ -2743,10 +2743,10 @@ pub(super) async fn tmux_output_watcher(
                             "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
                         );
                         false
-                    } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                    } else if let (Some(db), Some(engine)) = (&shared.sqlite, &shared.engine) {
                         let mut work_completion_context =
                             super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
+                                shared.sqlite.as_ref(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_completed",
@@ -2788,7 +2788,7 @@ pub(super) async fn tmux_output_watcher(
                                 );
                                 let mut fallback_result =
                                     super::turn_bridge::build_work_dispatch_completion_result(
-                                        shared.db.as_ref(),
+                                        shared.sqlite.as_ref(),
                                         shared.pg_pool.as_ref(),
                                         did,
                                         "watcher_db_fallback",
@@ -2810,7 +2810,7 @@ pub(super) async fn tmux_output_watcher(
                                 if completed {
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            shared.db.as_ref(),
+                                            shared.sqlite.as_ref(),
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "watcher_completed_fallback",
@@ -2823,7 +2823,7 @@ pub(super) async fn tmux_output_watcher(
                     } else {
                         let mut fallback_result =
                             super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.db.as_ref(),
+                                shared.sqlite.as_ref(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_db_fallback",
@@ -2844,7 +2844,7 @@ pub(super) async fn tmux_output_watcher(
                             );
                         if completed {
                             let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                shared.db.as_ref(),
+                                shared.sqlite.as_ref(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_completed_runtime_fallback",
@@ -3078,7 +3078,7 @@ pub(super) async fn tmux_output_watcher(
             .and_then(|s| s.channel_name.clone())
     };
     let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-        shared.db.as_ref(),
+        shared.sqlite.as_ref(),
         shared.pg_pool.as_ref(),
         &shared.token_hash,
         &provider,
@@ -3836,7 +3836,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let sqlite_settings_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.db.as_ref()
+            shared.sqlite.as_ref()
         };
         for (channel_id, channel_name) in &owned_sessions {
             let persisted_path = load_last_session_path(
@@ -3867,7 +3867,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 &tmux_name,
             );
             let db_cwd = load_restored_session_cwd(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 &session_keys,
             );
@@ -3998,7 +3998,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
             let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                shared.db.as_ref(),
+                shared.sqlite.as_ref(),
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,

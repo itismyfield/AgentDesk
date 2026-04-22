@@ -29,7 +29,7 @@ fn normalize_register_args(
 }
 
 pub(crate) fn register_pending_dm_reply(
-    db: &Db,
+    sqlite: &Db,
     source_agent: &str,
     user_id: &str,
     channel_id: Option<&str>,
@@ -39,7 +39,7 @@ pub(crate) fn register_pending_dm_reply(
     let (source_agent, user_id, channel_id) =
         normalize_register_args(source_agent, user_id, channel_id)?;
 
-    let conn = db
+    let conn = sqlite
         .separate_conn()
         .map_err(|e| format!("db connection: {e}"))?;
     let expires_at = if ttl_seconds > 0 {
@@ -59,8 +59,8 @@ pub(crate) fn register_pending_dm_reply(
     Ok(conn.last_insert_rowid())
 }
 
-pub(crate) fn delete_pending_dm_reply(db: &Db, reply_id: i64) -> Result<(), String> {
-    let conn = db
+pub(crate) fn delete_pending_dm_reply(sqlite: &Db, reply_id: i64) -> Result<(), String> {
+    let conn = sqlite
         .separate_conn()
         .map_err(|e| format!("db connection: {e}"))?;
     conn.execute(
@@ -72,7 +72,7 @@ pub(crate) fn delete_pending_dm_reply(db: &Db, reply_id: i64) -> Result<(), Stri
 }
 
 pub(crate) async fn register_pending_dm_reply_db(
-    db: &Db,
+    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     source_agent: &str,
     user_id: &str,
@@ -85,7 +85,7 @@ pub(crate) async fn register_pending_dm_reply_db(
 
     let Some(pool) = pg_pool else {
         return register_pending_dm_reply(
-            db,
+            sqlite,
             &source_agent,
             &user_id,
             channel_id.as_deref(),
@@ -131,12 +131,12 @@ pub(crate) async fn register_pending_dm_reply_db(
 }
 
 pub(crate) async fn delete_pending_dm_reply_db(
-    db: &Db,
+    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     reply_id: i64,
 ) -> Result<(), String> {
     let Some(pool) = pg_pool else {
-        return delete_pending_dm_reply(db, reply_id);
+        return delete_pending_dm_reply(sqlite, reply_id);
     };
 
     sqlx::query("DELETE FROM pending_dm_replies WHERE id = $1")
@@ -200,7 +200,7 @@ pub(crate) async fn load_oldest_pending_dm_reply_db(
 }
 
 pub(crate) async fn load_most_recent_consumed_dm_reply_db(
-    db: &Db,
+    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<Option<PendingDmReplyRecord>, String> {
@@ -225,7 +225,7 @@ pub(crate) async fn load_most_recent_consumed_dm_reply_db(
         }));
     }
 
-    let conn = db
+    let conn = sqlite
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     match conn.query_row(

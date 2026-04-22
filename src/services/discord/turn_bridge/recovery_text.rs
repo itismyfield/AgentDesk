@@ -17,11 +17,13 @@ fn direct_api_context_unavailable(error: &str) -> bool {
 }
 
 fn store_session_retry_context_sqlite(
-    db: &crate::db::Db,
+    sqlite: &crate::db::Db,
     key: &str,
     history: &str,
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|err| format!("db lock failed: {err}"))?;
+    let conn = sqlite
+        .lock()
+        .map_err(|err| format!("db lock failed: {err}"))?;
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
         [key, history],
@@ -57,8 +59,8 @@ fn store_session_retry_context_pg(
     )
 }
 
-fn take_session_retry_context_sqlite(db: &crate::db::Db, key: &str) -> Option<String> {
-    let conn = db.lock().ok()?;
+fn take_session_retry_context_sqlite(sqlite: &crate::db::Db, key: &str) -> Option<String> {
+    let conn = sqlite.lock().ok()?;
     let history = conn
         .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
             row.get::<_, String>(0)
@@ -292,7 +294,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
         let _ = store_session_retry_context_with_notify(
-            shared.db.as_ref(),
+            shared.sqlite.as_ref(),
             shared.pg_pool.as_ref(),
             channel_id.get(),
             hist,

@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -907,7 +907,7 @@ pub struct UpdateDispatchedSessionBody {
     pub session_info: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct HookSessionBody {
     pub session_key: String,
@@ -925,7 +925,7 @@ pub struct HookSessionBody {
     pub session_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DeleteSessionQuery {
     pub session_key: String,
     pub provider: Option<String>,

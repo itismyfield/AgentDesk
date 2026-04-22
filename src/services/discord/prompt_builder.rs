@@ -513,7 +513,7 @@ fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
     (profile == DispatchProfile::Full).then_some(
         "\n\n[ADK API Usage]\n\
          - ADK API 작업 전에는 먼저 `GET /api/docs` 또는 `GET /api/docs/{category}`로 관련 엔드포인트를 확인한다.\n\
-         - API 호출이 실패하면 `sqlite3`나 `agentdesk.db.query`로 우회하지 말고 `/api/docs`에서 대안 엔드포인트를 다시 찾는다.\n\
+         - API 호출이 실패하면 `sqlite3`나 legacy SQL 우회로로 돌아가지 말고 `/api/docs`에서 대안 엔드포인트를 다시 찾는다.\n\
          - 같은 엔드포인트 재시도, DB 직접 우회, 과도한 다단계 API 호출, `/api/docs` 없이 시행착오 탐색은 `API friction`으로 본다.\n\
          - API friction이 발생하면 응답 마지막 줄에 단일 행 JSON marker를 남긴다: `API_FRICTION: {\"endpoint\":\"/api/docs/kanban\",\"friction_type\":\"docs-bypass\",\"summary\":\"...\",\"workaround\":\"sqlite3\",\"suggested_fix\":\"...\",\"docs_category\":\"kanban\",\"keywords\":[\"/api/docs/kanban\",\"sqlite3\"]}`\n\
          - 서버가 이 marker를 사용자 응답에서 제거하고 `topic=api-friction`, `type=error`로 구조화 저장한다."

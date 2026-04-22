@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use poise::serenity_prelude::ChannelId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -28,7 +28,7 @@ pub struct StartMeetingBody {
     pub fixed_participants: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MeetingEntryBody {
     pub seq: Option<i64>,
     pub round: Option<i64>,
@@ -38,7 +38,7 @@ pub struct MeetingEntryBody {
     pub is_summary: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UpsertMeetingBody {
     pub id: String,
     pub channel_id: Option<String>,

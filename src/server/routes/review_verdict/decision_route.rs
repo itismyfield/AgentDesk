@@ -1,6 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode};
 use libsql_rusqlite::OptionalExtension;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::super::AppState;
@@ -970,7 +970,7 @@ async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Res
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct ReviewDecisionBody {
     pub card_id: String,
