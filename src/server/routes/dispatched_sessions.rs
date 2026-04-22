@@ -585,7 +585,7 @@ async fn load_agent_status_payload_pg(
             a.name_ko,
             s.status,
             s.session_info,
-            a.cli_provider,
+            a.provider AS cli_provider,
             a.avatar_emoji,
             a.department,
             a.discord_channel_id,
