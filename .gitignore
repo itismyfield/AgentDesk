@@ -27,3 +27,6 @@ __pycache__/
 
 # Claude Code Agent tool isolated worktrees
 /.claude/worktrees/
+
+# Transient ops playbooks (campaign prompts, incident runbooks)
+/docs/ops/
