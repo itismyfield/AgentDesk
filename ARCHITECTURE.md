@@ -212,9 +212,7 @@ src/
 │   │   │   └── tmux_runtime.rs
 │   │   ├── adk_session.rs
 │   │   ├── agentdesk_config.rs
-│   │   ├── config_audit.rs
 │   │   ├── discord_io.rs
-│   │   ├── dm_reply_store.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── handoff.rs
@@ -241,7 +239,6 @@ src/
 │   │   ├── session_runtime.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
-│   │   ├── shared_state.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_lifecycle.rs
@@ -251,6 +248,7 @@ src/
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
+│   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
 │   ├── platform/
@@ -265,12 +263,15 @@ src/
 │   ├── claude.rs
 │   ├── codex.rs
 │   ├── codex_tmux_wrapper.rs
+│   ├── discord_config_audit.rs
+│   ├── discord_dm_reply_store.rs
 │   ├── dispatches.rs
 │   ├── gemini.rs
 │   ├── kanban.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── observability.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs
