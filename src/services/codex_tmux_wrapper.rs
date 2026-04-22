@@ -481,6 +481,7 @@ mod tests {
                 "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
                 "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
                 "summary": "CI green",
+                "task_notification_kind": "background",
             })
         );
     }
@@ -589,6 +590,7 @@ fn handle_background_event(
             "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
             "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
             "summary": summary,
+            "task_notification_kind": "background",
         }),
     )
 }

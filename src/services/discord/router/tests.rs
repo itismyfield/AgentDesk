@@ -92,6 +92,20 @@ fn allowed_bot_turn_text_requires_dispatch_prefix() {
 }
 
 #[test]
+fn allowed_bot_turn_text_accepts_monitor_auto_turn_origin_marker() {
+    let relayed = super::super::prepend_monitor_auto_turn_origin("monitor completed");
+
+    assert!(should_process_allowed_bot_turn_text(&relayed));
+
+    let (sanitized, has_monitor_origin) = super::super::strip_monitor_auto_turn_origin(&relayed);
+    assert!(
+        has_monitor_origin,
+        "monitor auto-turn marker must be detectable"
+    );
+    assert_eq!(sanitized.as_ref(), "monitor completed");
+}
+
+#[test]
 fn explicit_user_mention_detects_only_real_mention_tokens() {
     let bot_id = UserId::new(42);
 

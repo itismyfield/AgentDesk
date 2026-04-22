@@ -1173,6 +1173,7 @@ fn handle_codex_json_line(
                     task_id: CODEX_BACKGROUND_TASK_NOTIFICATION_ID.to_string(),
                     status: CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS.to_string(),
                     summary: summary.to_string(),
+                    kind: crate::services::agent_protocol::TaskNotificationKind::Background,
                 });
             }
         }
@@ -1350,10 +1351,15 @@ mod tests {
                 task_id,
                 status,
                 summary,
+                kind,
             } => {
                 assert_eq!(task_id, CODEX_BACKGROUND_TASK_NOTIFICATION_ID);
                 assert_eq!(status, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS);
                 assert_eq!(summary, "CI green");
+                assert_eq!(
+                    *kind,
+                    crate::services::agent_protocol::TaskNotificationKind::Background
+                );
             }
             other => panic!("Expected TaskNotification, got {:?}", other),
         }
