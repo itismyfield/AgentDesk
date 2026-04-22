@@ -33,6 +33,16 @@ pub struct StartAgentTurnBody {
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Optional provider override: "claude" or "codex".
+    /// When set, the turn runs on that provider's channel binding instead
+    /// of the agent's primary channel — lets external babysitters drive
+    /// either side without going through the command bot.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional explicit channel override (Discord channel id or alias).
+    /// Takes precedence over `provider` when both are set.
+    #[serde(default)]
+    pub channel_id: Option<String>,
 }
 
 const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
@@ -891,6 +901,19 @@ pub async fn start_agent_turn(
         );
     }
 
+    let provider_override = body
+        .provider
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let channel_override = body
+        .channel_id
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     let (provider, primary_channel) = {
         let conn = match state.db.lock() {
             Ok(conn) => conn,
@@ -920,18 +943,58 @@ pub async fn start_agent_turn(
             );
         };
 
-        let Some(provider) = bindings.resolved_primary_provider_kind() else {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"ok": false, "error": "agent primary provider is not configured"})),
-            );
+        let provider = match provider_override.as_deref() {
+            Some(raw) => match ProviderKind::from_str(raw) {
+                Some(kind) => kind,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "ok": false,
+                            "error": format!("unsupported provider override: {raw}"),
+                        })),
+                    );
+                }
+            },
+            None => {
+                let Some(kind) = bindings.resolved_primary_provider_kind() else {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(
+                            json!({"ok": false, "error": "agent primary provider is not configured"}),
+                        ),
+                    );
+                };
+                kind
+            }
         };
-        let Some(primary_channel) = bindings.primary_channel() else {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"ok": false, "error": "agent primary channel is not configured"})),
-            );
+
+        let primary_channel = if let Some(chan) = channel_override.clone() {
+            chan
+        } else if provider_override.is_some() {
+            let Some(chan) = bindings.channel_for_provider(provider_override.as_deref()) else {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "ok": false,
+                        "error": format!(
+                            "agent has no channel bound for provider {}",
+                            provider_override.as_deref().unwrap_or("")
+                        ),
+                    })),
+                );
+            };
+            chan
+        } else {
+            let Some(chan) = bindings.primary_channel() else {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"ok": false, "error": "agent primary channel is not configured"})),
+                );
+            };
+            chan
         };
+
         (provider, primary_channel)
     };
 
