@@ -265,12 +265,13 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
+    fast_mode_channel_id: serenity::ChannelId,
 ) {
     let fast_mode_reset_pending =
-        fast_mode_reset_pending_for_provider(shared, channel_id, provider);
+        fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
     let model_reset_pending = shared.model_session_reset_pending.contains(&channel_id);
     let legacy_session_reset_pending = shared.session_reset_pending.contains(&channel_id)
-        && !any_fast_mode_reset_pending(shared, channel_id)
+        && !any_fast_mode_reset_pending(shared, fast_mode_channel_id)
         && !model_reset_pending;
 
     let Some(plan) = pending_session_reset_plan(
@@ -280,6 +281,9 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         legacy_session_reset_pending,
     ) else {
         sync_session_reset_pending(shared, channel_id);
+        if fast_mode_channel_id != channel_id {
+            sync_session_reset_pending(shared, fast_mode_channel_id);
+        }
         return;
     };
 
@@ -296,8 +300,8 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     .await;
 
     if fast_mode_reset_pending {
-        clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider);
-        persist_fast_mode_reset_marker(shared, channel_id, provider, false).await;
+        clear_fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
+        persist_fast_mode_reset_marker(shared, fast_mode_channel_id, provider, false).await;
     }
     if model_reset_pending {
         shared.model_session_reset_pending.remove(&channel_id);
@@ -306,6 +310,9 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         shared.session_reset_pending.remove(&channel_id);
     }
     sync_session_reset_pending(shared, channel_id);
+    if fast_mode_channel_id != channel_id {
+        sync_session_reset_pending(shared, fast_mode_channel_id);
+    }
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(

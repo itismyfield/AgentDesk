@@ -91,6 +91,15 @@ fn native_fast_mode_override_for_turn(
     }
 }
 
+fn effective_fast_mode_channel_id(
+    channel_id: ChannelId,
+    thread_parent: Option<(ChannelId, Option<String>)>,
+) -> ChannelId {
+    thread_parent
+        .map(|(parent_channel_id, _)| parent_channel_id)
+        .unwrap_or(channel_id)
+}
+
 fn session_reset_reason_for_turn(
     session: &DiscordSession,
     now: tokio::time::Instant,
@@ -315,8 +324,16 @@ pub(in crate::services::discord) async fn start_headless_turn(
         .unwrap_or(settings_provider);
     let dispatch_profile = DispatchProfile::Full;
 
+    let fast_mode_channel_id = effective_fast_mode_channel_id(
+        channel_id,
+        super::super::resolve_thread_parent(&ctx.http, channel_id).await,
+    );
     super::super::commands::reset_provider_session_if_pending(
-        &ctx.http, shared, &provider, channel_id,
+        &ctx.http,
+        shared,
+        &provider,
+        channel_id,
+        fast_mode_channel_id,
     )
     .await;
 
@@ -766,7 +783,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
         super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let native_fast_mode_override = native_fast_mode_override_for_turn(
         &provider,
-        super::super::commands::channel_fast_mode_setting(shared, channel_id).await,
+        super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id).await,
     );
     let ctx_thresholds = super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);
@@ -1799,8 +1816,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
 
+    let thread_parent = super::super::resolve_thread_parent(&ctx.http, channel_id).await;
+    let fast_mode_channel_id = effective_fast_mode_channel_id(channel_id, thread_parent.clone());
     super::super::commands::reset_provider_session_if_pending(
-        &ctx.http, shared, &provider, channel_id,
+        &ctx.http,
+        shared,
+        &provider,
+        channel_id,
+        fast_mode_channel_id,
     )
     .await;
     let prompt_prep_started = std::time::Instant::now();
@@ -2352,7 +2375,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
 
     let (logical_channel_id, thread_id, thread_title) = if let Some((parent_id, _parent_name)) =
-        super::super::resolve_thread_parent(&ctx.http, channel_id).await
+        thread_parent
     {
         let (live_thread_title, _) = super::super::resolve_channel_category(ctx, channel_id).await;
         (parent_id.get(), Some(channel_id.get()), live_thread_title)
@@ -2442,7 +2465,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
     let native_fast_mode_override = native_fast_mode_override_for_turn(
         &provider,
-        super::super::commands::channel_fast_mode_setting(shared, channel_id).await,
+        super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id).await,
     );
 
     // Fetch context compact percent from ADK settings (provider-specific)
@@ -4327,6 +4350,25 @@ mod tests {
         assert_eq!(
             session_reset_reason_for_turn(&session, tokio::time::Instant::now()),
             Some(SessionResetReason::AssistantTurnCap)
+        );
+    }
+
+    #[test]
+    fn effective_fast_mode_channel_id_prefers_thread_parent() {
+        assert_eq!(
+            effective_fast_mode_channel_id(
+                ChannelId::new(222),
+                Some((ChannelId::new(111), Some("adk-cdx".to_string())))
+            ),
+            ChannelId::new(111)
+        );
+    }
+
+    #[test]
+    fn effective_fast_mode_channel_id_keeps_non_thread_channel() {
+        assert_eq!(
+            effective_fast_mode_channel_id(ChannelId::new(222), None),
+            ChannelId::new(222)
         );
     }
 
