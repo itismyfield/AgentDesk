@@ -827,7 +827,7 @@ fn lookup_dispatch_completion_hints(
                 move |bridge_pool| async move {
                     let row = sqlx::query(
                         "SELECT kc.github_issue_number,
-                                td.created_at,
+                                td.created_at::text AS created_at,
                                 td.context,
                                 kc.repo_id
                          FROM task_dispatches td

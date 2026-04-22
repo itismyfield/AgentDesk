@@ -307,12 +307,37 @@ fn card_select_sql() -> &'static str {
      FROM kanban_cards kc"
 }
 
+/// PostgreSQL-specific SELECT with ::text casts on TIMESTAMPTZ columns and
+/// JSONB columns that the row decoder reads as `Option<String>`. Keeping a
+/// separate function avoids breaking the SQLite path (still routed through
+/// `card_select_sql`), which expects the bare native columns.
+fn card_select_sql_pg() -> &'static str {
+    "SELECT \
+        kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
+        kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, \
+        kc.metadata::text AS metadata, \
+        kc.created_at::text AS created_at, kc.updated_at::text AS updated_at, \
+        kc.description, kc.blocked_reason, \
+        kc.pipeline_stage_id, kc.review_notes, kc.review_status, \
+        kc.requested_at::text AS requested_at, \
+        kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.depth, kc.sort_order, \
+        kc.active_thread_id, \
+        kc.channel_thread_map::text AS channel_thread_map, \
+        kc.suggestion_pending_at::text AS suggestion_pending_at, \
+        kc.review_entered_at::text AS review_entered_at, \
+        kc.awaiting_dod_at::text AS awaiting_dod_at, \
+        kc.deferred_dod_json::text AS deferred_dod_json, \
+        kc.started_at::text AS started_at, \
+        kc.completed_at::text AS completed_at \
+     FROM kanban_cards kc"
+}
+
 fn card_get_raw_pg(pool: &PgPool, card_id: &str) -> String {
     let card_id = card_id.to_string();
     let result = crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            let sql = format!("{} WHERE kc.id = $1", card_select_sql());
+            let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
             let card = sqlx::query(&sql)
                 .bind(&card_id)
                 .fetch_optional(&bridge_pool)
@@ -347,7 +372,7 @@ fn card_list_raw_pg(pool: &PgPool, filter_json: &str) -> String {
     let result = crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            let mut query = QueryBuilder::<Postgres>::new(card_select_sql());
+            let mut query = QueryBuilder::<Postgres>::new(card_select_sql_pg());
             query.push(" WHERE 1 = 1");
 
             if let Some(status) = filter.status.as_deref() {
@@ -460,7 +485,7 @@ fn card_assign_raw_pg(pool: &PgPool, card_id: &str, agent_id: &str) -> String {
                 return Err(format!("unknown card: {card_id}"));
             }
 
-            let sql = format!("{} WHERE kc.id = $1", card_select_sql());
+            let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
             let card = sqlx::query(&sql)
                 .bind(&card_id)
                 .fetch_one(&bridge_pool)
@@ -514,7 +539,7 @@ fn card_set_priority_raw_pg(pool: &PgPool, card_id: &str, priority: &str) -> Str
                 return Err(format!("unknown card: {card_id}"));
             }
 
-            let sql = format!("{} WHERE kc.id = $1", card_select_sql());
+            let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
             let card = sqlx::query(&sql)
                 .bind(&card_id)
                 .fetch_one(&bridge_pool)

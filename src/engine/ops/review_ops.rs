@@ -278,9 +278,9 @@ fn review_get_verdict_raw_pg(pool: &PgPool, card_id: &str) -> String {
                         rs.last_verdict,
                         rs.last_decision,
                         rs.decided_by,
-                        rs.decided_at,
-                        rs.review_entered_at,
-                        rs.updated_at,
+                        rs.decided_at::text AS decided_at,
+                        rs.review_entered_at::text AS review_entered_at,
+                        rs.updated_at::text AS updated_at,
                         (
                             SELECT td.result ->> 'verdict'
                             FROM task_dispatches td
