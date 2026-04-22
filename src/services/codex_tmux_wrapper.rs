@@ -1,8 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
+use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
@@ -123,11 +124,7 @@ pub fn run(
         });
     }
 
-    let mut output = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(output_file)
-    {
+    let mut output = match RotatingJsonlWriter::open(output_file) {
         Ok(file) => file,
         Err(e) => {
             eprintln!("\x1b[31mFailed to open output file: {}\x1b[0m", e);
@@ -215,7 +212,7 @@ fn cleanup(output_file: &str, input_fifo: &str) {
 }
 
 fn run_turn(
-    output: &mut std::fs::File,
+    output: &mut RotatingJsonlWriter,
     codex_bin: &str,
     codex_model: Option<&str>,
     reasoning_effort: Option<&str>,
@@ -401,7 +398,9 @@ fn run_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_external_prompt, normalize_resume_session_id};
+    use super::{decode_external_prompt, emit_json_line, normalize_resume_session_id};
+    use crate::services::tmux_common::RotatingJsonlWriter;
+    use serde_json::json;
 
     #[test]
     fn test_decode_external_prompt_keeps_plain_line() {
@@ -423,9 +422,35 @@ mod tests {
         assert_eq!(normalize_resume_session_id(Some("   ")), None);
         assert_eq!(normalize_resume_session_id(None), None);
     }
+
+    #[test]
+    fn emit_json_line_reopens_after_rotation_replacement() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+
+        emit_json_line(&mut output, json!({"type":"assistant","message":"before"})).unwrap();
+
+        let replacement = path.with_extension("jsonl.truncate.tmp");
+        std::fs::write(
+            &replacement,
+            "{\"type\":\"assistant\",\"message\":\"kept\"}\n",
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        emit_json_line(&mut output, json!({"type":"assistant","message":"after"})).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"{"type":"assistant","message":"kept"}"#));
+        assert!(content.contains(r#"{"type":"assistant","message":"after"}"#));
+    }
 }
 
-fn handle_item_started(output: &mut std::fs::File, item: &serde_json::Value) -> Result<(), String> {
+fn handle_item_started(
+    output: &mut RotatingJsonlWriter,
+    item: &serde_json::Value,
+) -> Result<(), String> {
     if item.get("type").and_then(|v| v.as_str()) != Some("command_execution") {
         return Ok(());
     }
@@ -453,7 +478,7 @@ fn handle_item_started(output: &mut std::fs::File, item: &serde_json::Value) -> 
 }
 
 fn handle_item_completed(
-    output: &mut std::fs::File,
+    output: &mut RotatingJsonlWriter,
     item: &serde_json::Value,
     final_text: &mut String,
 ) -> Result<(), String> {
@@ -513,7 +538,7 @@ fn emit_status(message: &str) {
     eprintln!("\x1b[90m{}\x1b[0m", message);
 }
 
-fn emit_result_error(output: &mut std::fs::File, message: &str) {
+fn emit_result_error(output: &mut RotatingJsonlWriter, message: &str) {
     let _ = emit_json_line(
         output,
         serde_json::json!({
@@ -525,13 +550,15 @@ fn emit_result_error(output: &mut std::fs::File, message: &str) {
     );
 }
 
-fn emit_json_line(output: &mut std::fs::File, value: serde_json::Value) -> Result<(), String> {
+fn emit_json_line(
+    output: &mut RotatingJsonlWriter,
+    value: serde_json::Value,
+) -> Result<(), String> {
     let line =
         serde_json::to_string(&value).map_err(|e| format!("serialize output line: {}", e))?;
-    writeln!(output, "{}", line).map_err(|e| format!("write output line: {}", e))?;
     output
-        .flush()
-        .map_err(|e| format!("flush output line: {}", e))?;
+        .write_line(&line)
+        .map_err(|e| format!("write output line: {}", e))?;
     render_for_terminal(&line);
     Ok(())
 }

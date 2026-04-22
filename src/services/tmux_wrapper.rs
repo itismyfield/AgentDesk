@@ -157,17 +157,14 @@ pub fn run(
     let exited_t1 = claude_exited.clone();
     let ready_t1 = ready_for_input.clone();
     let output_thread = std::thread::spawn(move || {
-        let mut out_file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output_file_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("\x1b[31mFailed to open output file: {}\x1b[0m", e);
-                return;
-            }
-        };
+        let mut out_file =
+            match crate::services::tmux_common::RotatingJsonlWriter::open(&output_file_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("\x1b[31mFailed to open output file: {}\x1b[0m", e);
+                    return;
+                }
+            };
 
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -181,10 +178,9 @@ pub fn run(
             }
 
             // Append to output file
-            if writeln!(out_file, "{}", line).is_err() {
+            if append_output_line(&mut out_file, &line).is_err() {
                 break;
             }
-            let _ = out_file.flush();
 
             // Check if this is a "result" event (turn complete)
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -626,9 +622,16 @@ pub(crate) fn render_for_terminal(json_line: &str) {
     }
 }
 
+fn append_output_line(
+    output: &mut crate::services::tmux_common::RotatingJsonlWriter,
+    line: &str,
+) -> std::io::Result<()> {
+    output.write_line(line)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_tool_detail;
+    use super::{append_output_line, format_tool_detail};
     use crate::utils::format::safe_prefix;
     use serde_json::json;
 
@@ -661,5 +664,28 @@ mod tests {
         let expected = safe_prefix(item["input"]["command"].as_str().unwrap(), 150);
 
         assert_eq!(detail, format!("`{}`", expected));
+    }
+
+    #[test]
+    fn append_output_line_reopens_after_rotation_replacement() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("claude.jsonl");
+        let mut writer = crate::services::tmux_common::RotatingJsonlWriter::open(&path).unwrap();
+
+        append_output_line(&mut writer, r#"{"type":"assistant","message":"before"}"#).unwrap();
+
+        let replacement = path.with_extension("jsonl.truncate.tmp");
+        std::fs::write(
+            &replacement,
+            "{\"type\":\"assistant\",\"message\":\"kept\"}\n",
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        append_output_line(&mut writer, r#"{"type":"assistant","message":"after"}"#).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"{"type":"assistant","message":"kept"}"#));
+        assert!(content.contains(r#"{"type":"assistant","message":"after"}"#));
     }
 }

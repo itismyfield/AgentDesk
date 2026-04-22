@@ -1,5 +1,7 @@
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
@@ -180,6 +182,57 @@ pub fn write_tmux_owner_marker(tmux_session_name: &str) -> Result<(), String> {
     let owner_path = tmux_owner_path(tmux_session_name);
     std::fs::write(&owner_path, current_tmux_owner_marker())
         .map_err(|e| format!("Failed to write tmux owner marker: {}", e))
+}
+
+/// Append-only JSONL writer that reopens the path when external rotation
+/// replaces the file behind the path with a different inode.
+#[derive(Debug)]
+pub struct RotatingJsonlWriter {
+    path: PathBuf,
+    file: File,
+}
+
+impl RotatingJsonlWriter {
+    pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        let file = open_jsonl_append_file(&path)?;
+        Ok(Self { path, file })
+    }
+
+    pub fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.reopen_if_path_replaced()?;
+        writeln!(self.file, "{}", line)?;
+        self.file.flush()
+    }
+
+    fn reopen_if_path_replaced(&mut self) -> std::io::Result<()> {
+        if path_points_to_different_file(&self.file, &self.path)? {
+            self.file = open_jsonl_append_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+fn open_jsonl_append_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+#[cfg(unix)]
+fn path_points_to_different_file(file: &File, path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file_meta = file.metadata()?;
+    let path_meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(file_meta.dev() != path_meta.dev() || file_meta.ino() != path_meta.ino())
+}
+
+#[cfg(not(unix))]
+fn path_points_to_different_file(_file: &File, _path: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 // ── Rolling head-truncate for session jsonl ─────────────────────────────
@@ -508,5 +561,42 @@ mod tests {
             truncate_jsonl_head_safe("/tmp/issue-892-does-not-exist-xyz.jsonl", 1_000, 500)
                 .expect("missing file should be ok");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn rotating_jsonl_writer_reopens_after_path_replacement() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("session.jsonl");
+        let mut writer = RotatingJsonlWriter::open(&path).expect("open writer");
+
+        writer
+            .write_line(r#"{"type":"assistant","message":"before"}"#)
+            .unwrap();
+
+        let replacement = path.with_extension("jsonl.truncate.tmp");
+        std::fs::write(
+            &replacement,
+            "{\"type\":\"assistant\",\"message\":\"kept\"}\n",
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        writer
+            .write_line(r#"{"type":"assistant","message":"after"}"#)
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(r#"{"type":"assistant","message":"kept"}"#),
+            "replacement content must survive rotation: {content}"
+        );
+        assert!(
+            content.contains(r#"{"type":"assistant","message":"after"}"#),
+            "writer must reopen and append to the replacement path: {content}"
+        );
+        assert!(
+            !content.contains(r#"{"type":"assistant","message":"before"}"#),
+            "replaced path should not retain pre-rotation content in this fixture: {content}"
+        );
     }
 }
