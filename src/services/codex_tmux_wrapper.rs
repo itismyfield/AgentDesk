@@ -3,6 +3,10 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
+use crate::services::codex::{
+    CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+    codex_background_event_summary,
+};
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
@@ -324,6 +328,9 @@ fn run_turn(
                     handle_item_completed(output, item, &mut final_text)?;
                 }
             }
+            "background_event" => {
+                handle_background_event(output, &json)?;
+            }
             "turn.completed" => {
                 let usage = json.get("usage").cloned().unwrap_or_default();
                 let input_tokens = usage
@@ -398,7 +405,13 @@ fn run_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_external_prompt, emit_json_line, normalize_resume_session_id};
+    use super::{
+        decode_external_prompt, emit_json_line, handle_background_event,
+        normalize_resume_session_id,
+    };
+    use crate::services::codex::{
+        CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+    };
     use crate::services::tmux_common::RotatingJsonlWriter;
     use serde_json::json;
 
@@ -444,6 +457,32 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains(r#"{"type":"assistant","message":"kept"}"#));
         assert!(content.contains(r#"{"type":"assistant","message":"after"}"#));
+    }
+
+    #[test]
+    fn handle_background_event_emits_task_notification_marker() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+
+        handle_background_event(
+            &mut output,
+            &json!({"type":"background_event","message":"CI green"}),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
+                "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+                "summary": "CI green",
+            })
+        );
     }
 }
 
@@ -532,6 +571,26 @@ fn handle_item_completed(
     }
 
     Ok(())
+}
+
+fn handle_background_event(
+    output: &mut RotatingJsonlWriter,
+    json: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(summary) = codex_background_event_summary(json) else {
+        return Ok(());
+    };
+
+    emit_json_line(
+        output,
+        serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
+            "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
+            "summary": summary,
+        }),
+    )
 }
 
 fn emit_status(message: &str) {

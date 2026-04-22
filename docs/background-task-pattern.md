@@ -24,6 +24,11 @@ completions.
 
 - Background-task completions and other info-only updates are delivered via
   the **notify bot**, never via the command bot.
+- Provider streams are normalized onto the same marker before watcher routing:
+  Claude emits `system/task_notification` directly, while Codex emits
+  `background_event` and `src/services/codex_tmux_wrapper.rs` rewrites it to
+  `system/task_notification`. The watcher only keys off that canonical JSONL
+  event.
 - Agents call the existing `/api/send` endpoint with `bot: "notify"`:
 
   ```bash
@@ -75,6 +80,8 @@ chain so the user can intervene before steps fire.
 - `TurnKind::{Foreground, BackgroundTrigger}` and
   `classify_turn_kind_from_author` —
   `src/services/discord/router/message_handler.rs`
+- Codex `background_event` normalization to
+  `system/task_notification` — `src/services/codex_tmux_wrapper.rs`
 - Race-handler delete branch (preserves placeholder for `BackgroundTrigger`) —
   same file, around the `mailbox_try_start_turn` call site.
 - Notify bot id resolution — `resolve_notify_bot_user_id` in
